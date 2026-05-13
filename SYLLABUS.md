@@ -107,7 +107,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 - 密碼協議形式化：~15 篇（Noise、TLS 1.3 證明、ProVerif/Tamarin 案例）
 - 高效能網路：~15 篇（DPDK、XDP、io_uring）
 
-### 0.5 工具鏈與環境準備
+### 0.5 工具鏈與環境準備 ✅
 - macOS 開發機 + 兩台 Linux VPS（一台「中國境外」一台「模擬境內」）
 - 必裝：Go、Rust、Python（uv）、Wireshark、tcpdump、tshark、nDPI、Zeek、ProVerif、TLA+、bpftrace
 - 開實驗筆記的格式（每個實驗一個 ipynb 或 .md，含假設、方法、結果、結論）
