@@ -36,19 +36,19 @@
 </tr>
 <tr>
   <td align="center" valign="top">
-    起於封包<br/>
-    歷數論之野<br/>
-    窮&nbsp;kernel&nbsp;之變
+    自封包起步<br/>
+    入數論幽谷<br/>
+    窮核心之變
   </td>
   <td align="center" valign="top">
-    拆&nbsp;SOTA&nbsp;之骨<br/>
+    拆名作之骨<br/>
     讀四部原典<br/>
     築一方敵境
   </td>
   <td align="center" valign="top">
-    以威脅為圖<br/>
-    以證明為斧<br/>
-    鑿一條新渠
+    繪威脅之圖<br/>
+    鑄證明之斧<br/>
+    鑿新路之渠
   </td>
 </tr>
 </table>
