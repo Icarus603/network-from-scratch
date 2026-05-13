@@ -59,6 +59,12 @@ wg*.conf
 !assets/captures/*.redacted.pcap
 !assets/captures/*.redacted.pcapng
 
+# 論文 PDF 本機暫存——版權問題不上 git，重新下載即可；筆記留在 notes/papers/
+assets/papers/*
+!assets/papers/README.md
+*.pdf
+!notes/**/*.pdf
+
 # Cloudflare / VPS 工具殘留
 .cloudflared/
 .warp/

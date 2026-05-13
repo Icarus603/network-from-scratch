@@ -73,6 +73,8 @@ When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of t
 
 ### Lesson file template
 
+Every lesson MUST follow this structure. The 「研究級補遺」 section is non-negotiable — see "Research-grade bar" below for why.
+
 ```markdown
 # 課堂 X.Y — 標題
 
@@ -86,7 +88,7 @@ When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of t
 為什麼要學這個？對「設計新 SOTA 協議」的研究目標有何貢獻？
 
 ## 核心概念
-（主體內容，配 ASCII / Mermaid 圖、必要時用 code block 展示 RFC 引文或原始碼片段）
+（主體內容，Mermaid 圖、markdown 表格、必要時用 code block 展示 RFC 引文或原始碼片段）
 
 ## 與我們協議設計的關聯
 這一節學到的東西會在 Part 11/12 怎麼用？
@@ -99,7 +101,51 @@ When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of t
 
 ## 延伸閱讀
 延伸的論文、blog、原始碼。
+
+---
+
+## 研究級補遺
+
+> 主體保持友善基調，這節把「友善版」升級成「研究級」入口。新手可跳過，研究員必讀。
+
+（按 lesson 性質從以下面向選 3~6 個寫——不必全選，但「學界詞彙」與「我們協議的座標」幾乎每堂都該有）
+
+### 1. 學界詞彙
+本堂概念在學術文獻裡的標準術語、慣用縮寫。讓使用者之後 google / 翻論文時用對詞。
+
+### 2. 對手分類學 / 威脅模型精化
+（如本堂涉及安全或對抗）口語描述升級成 on-path/off-path × passive/active × adaptive 級別的精確分類。引 Dolev-Yao 等標準模型。
+
+### 3. 形式化定義
+口語版概念對應的 formal definition（密碼學定義、計算複雜度、安全屬性 game-based definition 等）。
+
+### 4. 領域的關鍵論文 / 規格 / 原始碼
+3~10 個必追的 primary source。每個用一行說「為什麼追」+ 「之後在哪一堂精讀」。
+
+### 5. 我們協議的座標 / 設計取捨
+本堂內容在 G6 設計空間中的位置：哪些選擇仍 open、哪些已被本堂內容收窄、Part 11 設計時哪一節會回頭引用。
+
+### 6. 必追資源 / 社群入口
+GFW.report、IETF working group、IACR ePrint subscription、相關 GitHub issue tracker、領域內研究者的個人 blog 等。新手不必立刻讀，建立 awareness 即可。
+
+### 7. 開放問題（research-level open problems）
+本堂內容**還沒被解決**的問題，將來如果我們想推到頂會（USENIX Security / NDSS / CCS）的方向。
+
 ```
+
+### Research-grade bar
+
+This course is not a tutorial series. The user's commitment is **PhD-track**: 1.5–3 years, original SOTA contribution as the deliverable. Every lesson must therefore meet a research-grade bar — not just a "well-written blog post" bar. Concretely:
+
+- **Every lesson ships with a 研究級補遺 section** at the end. No exceptions, even for orientation lessons. Do not ask the user whether to add it. Pick at minimum 3 of the 7 sub-sections from the lesson template (學界詞彙 + 我們協議的座標 are nearly always present).
+- **Every concept name has a citation.** Even in body text. If you introduce 「BBR」, cite *Cardwell et al., CACM 2017*. If you introduce 「Dolev-Yao」, cite *Dolev & Yao, IEEE TIT 1983*. If a citation can't be produced from your own training, fetch it via `WebFetch` / context7 before writing — do not bluff.
+- **Every claim about an attack / defense / measurement has a primary source.** "GFW does X" must be backed by a GFW.report / IMC / USENIX Security paper, never a blog or hearsay.
+- **Forward references are concrete.** Not 「Part 11 詳講」 but 「Part 11.10 ProVerif 驗證」 — pinpoint the lesson number that will deepen this point.
+- **Source-code citations are line-precise.** Not 「somewhere in Xray-core」 but `transport/internet/reality/reality.go:123-178`.
+- **Failure framing is built in.** Research is mostly failure. Lessons should set expectations that hypotheses get killed, designs get rewritten — never present knowledge as if the field's path was inevitable.
+- **No advisor-student deference.** Push back on the user's misconceptions; flag where their existing Clash mental model is incomplete or misleading; tell them when a question is malformed.
+
+If a lesson cannot be written to this bar (e.g. the topic is genuinely tutorial-only), say so explicitly in the 學前知道 section and explain why — don't silently downgrade.
 
 ### Style rules for lessons
 
@@ -108,29 +154,90 @@ When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of t
 - **Anchor to the user's existing experience** (Clash settings, ccb panels, real subscription field meanings) when it helps comprehension.
 - **macOS-aware but Linux-first for kernel/perf topics.** The user develops on macOS but most kernel/eBPF/XDP topics will require Linux experiments (VPS or VM). Mention both, default to Linux for perf-critical material.
 - **Source-code references are concrete.** Quote `path/to/file.go:LINE` style, not "somewhere in xray".
-- **Diagrams in ASCII or Mermaid only** unless the user explicitly asks for raster.
+
+### Diagrams: Mermaid only, never ASCII art
+
+**Hard rule**: every flowchart, dependency graph, family tree, decision tree, sequence diagram, state machine, packet layout, or any other figure that has structure beyond a flat list — use **Mermaid**, not ASCII box-drawing characters.
+
+**Why this rule exists**: ASCII art assumes monospace alignment, which breaks for CJK characters. East-Asian glyphs render at non-deterministic widths (~1.7x to ~2.0x of an ASCII char depending on font/browser), so any 「box」 or 「arrow」 made of `┌─┐ │ ▼` shifts and tears apart the moment Chinese is inside. We learned this the hard way in lessons 0.1 and 0.2 v1 — both had to be rewritten.
+
+**Practical guidance**:
+
+- **Use Mermaid for**: family trees, dependency DAGs, decision trees, sequence diagrams (`sequenceDiagram`), state machines (`stateDiagram-v2`), packet/frame layouts (use `classDiagram` or `flowchart` with grouped nodes), Phase/Part overviews.
+- **Use Markdown tables for**: comparison matrices, parameter lists, threat-model rows.
+- **Use ordered/unordered lists for**: any flat enumeration.
+- **Plain triple-backtick code fences are fine for**: actual code, RFC excerpts, terminal output. These should never be used to draw diagrams.
+
+**Mermaid conventions for this repo**:
+
+- Default to `flowchart TD` (top-down) for hierarchies, `flowchart LR` (left-right) for pipelines/timelines.
+- Highlight 「我們的協議 / 研究產出」nodes with a `classDef ours fill:#fde,stroke:#c39` so they stand out across all lessons.
+- Use `subgraph` for Phase boundaries (`Phase I` / `Phase II` / `Phase III`).
+- Use dotted edges (`-. label .->`) for 「回路 / forward reference」relationships, solid edges for hard dependency.
+- Keep node labels short. Long Chinese strings should be wrapped with `<br/>` or split into multiple lines via `["第一行<br/>第二行"]`.
+- For packet/byte layouts where Mermaid is awkward, prefer a Markdown table with one byte/field per row instead of attempting ASCII art.
+
+**Reader environment note**: The user's VS Code now has Mermaid preview enabled (Markdown Preview Mermaid Support extension). GitHub renders Mermaid natively. Both render fine — assume Mermaid will be visible.
 
 ## Off-syllabus questions
 
 When the user asks something not covered by the current lesson plan, save the Q&A to `qa/YYYY-MM-DD-short-topic.md` using the template in `qa/README.md`. Cross-link to the relevant Part/lesson in the syllabus, both backward (where this question relates to past learning) and forward (where it will be deepened).
 
-## Paper reading notes
+## Paper acquisition: fetch proactively, never wait to be asked
 
-Whenever a lesson cites a paper, ensure `notes/papers/<short-id>.md` exists. Format:
+Treat paper acquisition as part of writing a lesson, not a separate request. **Do not** finish a lesson, mention "Foo et al. 2024", and stop there waiting for the user to download the PDF. Decide which of the three categories below the paper falls into, then act.
+
+### Three paper categories
+
+| Type | Example | Action |
+|---|---|---|
+| **A. Foundational, in training data** | TLS 1.3 (RFC 8446), Curve25519 (Bernstein 2006), Noise framework | Cite confidently. Fetch only if a lesson does a *deep* read (Keshav second/third pass). |
+| **B. Field-defining, post-cutoff or semi-rare** | GFW.report papers, FlowPrint NDSS 2020, FEP USENIX Security 2023 | **Fetch on first cite.** Verify venue/year/authors against the actual PDF metadata. Write a precis in `notes/papers/`. |
+| **C. Cutoff-after / draft / preprint** | IETF drafts in flight, arXiv-only preprints, IACR ePrint, GFW.report posts after model cutoff | **Always fetch.** Never quote details from memory — risk of hallucination is too high. |
+
+### Triggers that obligate a fetch (do not wait to be asked)
+
+1. A lesson uses the paper as **primary evidence** for a claim — fetch + precis.
+2. The lesson's 研究級補遺 lists the paper as 必追 — fetch + verify metadata at minimum.
+3. **Author / title / venue is not 100% certain** from your training — must fetch before writing the citation.
+4. The paper is a **direct design influence** on our protocol — fetch + Keshav third-pass precis.
+5. The user asks about a specific paper's details — fetch immediately, never answer from memory alone for paper-specific facts.
+
+### Fetch tooling, in priority order
+
+1. **`WebFetch`** for direct PDF / HTML mirrors (USENIX open access, ACM Authorizer, arXiv, IACR ePrint, GFW.report).
+2. **`WebSearch`** to locate the right URL when not directly known: `"{exact title}" filetype:pdf` is the most reliable query shape.
+3. **context7 MCP** for RFCs and well-documented library docs.
+4. **Google Scholar / DBLP** for citation metadata when the PDF host is uncertain.
+
+### Where to put the file
+
+- **PDF (local-only, not committed)**: `assets/papers/{venue}-{year}-{shortid}.pdf` — covered by `.gitignore`. Reason: copyright. We can re-download anytime; the precis is what we keep.
+- **Precis (committed)**: `notes/papers/{shortid}.md` — see template below.
+- **Cross-reference**: every lesson that cites the paper links to `notes/papers/{shortid}.md`; every precis links back to the lesson(s) that reference it.
+
+### Honesty rule
+
+If a fetch fails (paywall, dead link, can't find PDF) — **say so explicitly in the precis** (`Status: PDF unavailable, citing only from abstract / blog summary`). Never silently downgrade a missing-PDF cite into a confident from-memory cite.
+
+### Precis template (`notes/papers/<short-id>.md`)
 
 ```markdown
 # <Paper title>
 **Venue / Year**: ...
 **Authors**: ...
 **Read on**: YYYY-MM-DD (in lesson X.Y)
+**Status**: full PDF / abstract-only / unavailable
 **One-line**: ...
 
 ## Problem
 ## Contribution
 ## Method (just enough to reproduce mentally)
+## Results
 ## Limitations / what they don't solve
 ## How it informs our protocol design
 ## Open questions
+## References worth following
 ```
 
 ## Project commands
