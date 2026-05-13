@@ -93,8 +93,9 @@ Thumbs.db
 Desktop.ini
 
 # 編輯器
-.vscode/
-!.vscode/settings.example.json
+.vscode/*
+!.vscode/settings.json
+!.vscode/preview.css
 .idea/
 *.swp
 *.swo

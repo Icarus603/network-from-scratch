@@ -1,0 +1,28 @@
+/* ============================================================
+   VS Code Markdown Preview — 自訂樣式
+   套用方式：在 settings.json 加
+     "markdown.styles": ["/Users/liuzetfung/.config/vscode-markdown/preview.css"]
+   ============================================================ */
+
+/* 行內 code (`...`)：縮小一檔，柔和背景 */
+code {
+  font-size: 0.85em;          /* 0.85x 本文，比預設的 1em 小 */
+  padding: 0.15em 0.4em;
+  border-radius: 4px;
+}
+
+/* 區塊 code（```...```）：等寬 + 縮小 + 行高緊一點 */
+pre code {
+  font-size: 0.82em;
+  line-height: 1.55;
+}
+
+/* 表格內的 code 再縮一檔，避免撐高列高 */
+td code, th code {
+  font-size: 0.78em;
+}
+
+/* 確保程式碼用真正的等寬字 */
+code, pre, kbd, samp {
+  font-family: "SF Mono", "Maple Mono", "Menlo", "Consolas", monospace;
+}

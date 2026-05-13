@@ -1,0 +1,8 @@
+{
+    // 只對這個 repo 生效。`markdown.styles` 不能放全局——VS Code webview
+    // 不接受絕對路徑（安全限制），workspace 又找不到檔案會跳警告。
+    // 想在其他 repo 用同樣樣式：複製這份 settings.json + .vscode/preview.css。
+    "markdown.styles": [
+        ".vscode/preview.css"
+    ]
+}

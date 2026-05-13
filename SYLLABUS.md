@@ -92,7 +92,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 ### 0.2 整門課的學習地圖 ✅
 12 個 Part 的依賴圖、為什麼這個順序、什麼時候可以並行讀。
 
-### 0.3 研究級學習方法論
+### 0.3 研究級學習方法論 ✅
 - 怎麼讀論文（三遍法：skim → 結構 → 細節）。
 - 怎麼追溯一個概念到原始出處（CCS、USENIX Security、NDSS、IEEE S&P、SIGCOMM、IMC、PoPETs 是哪些會議）。
 - 怎麼用 Google Scholar / DBLP / arXiv / Cryptology ePrint 建文獻網。

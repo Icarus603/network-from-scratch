@@ -68,8 +68,60 @@ When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of t
    - Phase III (Parts 10–12): variable, may span multiple sessions per "lesson".
 3. Use 繁體中文 prose. Code identifiers, RFC names, paper titles, and technical terms stay in English.
 4. Add any new terms to `glossary.md` (don't redefine terms that already exist there — link to them).
-5. If the lesson references a paper, create or update `notes/papers/<short-id>.md` with a precis (problem / contribution / method / limitation / how it informs our protocol design).
+5. **Run the closing checklist** below — *every* lesson, no exception.
 6. Tick the lesson off in `SYLLABUS.md` by appending ✅ to the corresponding bullet, e.g. `### 0.1 「VPN」這個詞被誤用了 30 年 ✅`.
+
+### Closing checklist (mandatory, run after every lesson)
+
+This is the single mechanism that enforces all the discipline rules elsewhere in this file. **Do not skip.** If you finish writing a lesson and have not done the following audit, the lesson is incomplete.
+
+Walk through the lesson you just wrote and answer each question explicitly (in your own thinking, not in the lesson file). For each "yes", take the action.
+
+```
+[ ] 1. Did I cite any paper, RFC, or whitepaper in this lesson?
+       → For each: classify A/B/C per "Paper acquisition" rules.
+       → For each B/C: fetch PDF, write precis, check it in.
+       → For each A: confirm I'm certain about title/venue/year; fetch if not.
+
+[ ] 2. Did I cite source code (`path/to/file.go:LINE`)?
+       → Verify the file exists and the line range still matches in the
+         project's HEAD or specific tag I cited.
+
+[ ] 3. Did I introduce any new term?
+       → Add to `glossary.md` with type, layer, first-appearance link.
+
+[ ] 4. Did I make any forward reference (「Part X.Y 詳講」)?
+       → Verify Part X.Y exists in SYLLABUS.md and the topic actually
+         belongs there. If misplaced, fix the reference or the syllabus.
+
+[ ] 5. Does the lesson have a 研究級補遺 section?
+       → If no: write it now (≥3 of the 7 sub-sections).
+       → 學界詞彙 + 我們協議的座標 are nearly always required.
+
+[ ] 6. Are diagrams in Mermaid (not ASCII box-drawing)?
+       → If any ASCII art with CJK, rewrite as Mermaid or markdown table.
+
+[ ] 7. Backfill audit: am I writing this lesson AFTER a workflow rule
+       was added? Did earlier lessons (0.1, 0.2, ...) ship without
+       compliance to the now-current rules?
+       → If yes: list the gaps to the user, propose a backfill plan.
+       → DO NOT silently ignore historical lessons because the rule
+         is "newer than them" — rules apply retroactively unless the
+         user says otherwise.
+
+[ ] 8. .gitkeep cleanup: did I add real content to any directory that
+       previously held only a .gitkeep placeholder?
+       → Delete the .gitkeep — its only job was to keep the empty
+         directory tracked by git, and now real files do that job.
+       → Quick check: `find lessons notes assets projects qa -name .gitkeep`
+         and remove any whose parent directory has other files.
+
+[ ] 9. Tell the user what was produced this round, including any
+       fetched papers / written precis / glossary additions, so the
+       user can verify nothing was missed.
+```
+
+The point of writing this as a checklist (not prose) is that it's **mechanically auditable**. Future-you (or another Claude session) should be able to read the lesson and run the checklist independently.
 
 ### Lesson file template
 
@@ -202,6 +254,18 @@ Treat paper acquisition as part of writing a lesson, not a separate request. **D
 3. **Author / title / venue is not 100% certain** from your training — must fetch before writing the citation.
 4. The paper is a **direct design influence** on our protocol — fetch + Keshav third-pass precis.
 5. The user asks about a specific paper's details — fetch immediately, never answer from memory alone for paper-specific facts.
+
+### Default: fetch ALL cited papers, do not ask
+
+When a lesson cites multiple papers and any of them satisfy the triggers above, **fetch all of them in one go**. Do **not** present the user with a prioritised list and ask "should I fetch these N papers?" — that is exactly the "wait to be asked" anti-pattern this section forbids.
+
+The acceptable defaults:
+
+- **Default action**: fetch every cited paper that's not category A (foundational, in training data, certain). Write precis for each.
+- **Only ask the user when**:
+  - A fetch genuinely fails after retries with multiple mirrors (paywall, dead link, geographic restriction). Tell the user *which* paper failed and what mirrors you tried — let them help locate it.
+  - The list is enormous (>20 papers in one lesson, e.g. literature-map lessons like 0.4) — then propose a batching schedule, not a "should I do this?" question.
+- **Never ask** "do you want me to fetch all 6?" / "should I also grab the optional ones?" — the answer is always yes for any cited paper above category A. The user has explicitly said they don't want to be the gatekeeper for fetch decisions.
 
 ### Fetch tooling, in priority order
 
