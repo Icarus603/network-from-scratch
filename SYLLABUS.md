@@ -98,7 +98,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 - 怎麼用 Google Scholar / DBLP / arXiv / Cryptology ePrint 建文獻網。
 - 怎麼用 git blame + commit message 讀大型專案歷史。
 
-### 0.4 文獻地圖：你接下來要面對的 100 篇論文
+### 0.4 文獻地圖：你接下來要面對的 100 篇論文 ✅
 按主題列出整門課的核心論文清單（會在對應 Part 精讀）：
 - GFW 研究：~25 篇（GFW.report、Censored Planet、ICLab）
 - 流量分析：~20 篇（Beauty、FlowPrint、Walkie-Talkie 等）
