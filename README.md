@@ -23,7 +23,7 @@
 ## 目錄結構
 
 ```
-learn/
+.
 ├── README.md           ← 你正在看的這份
 ├── CLAUDE.md           ← Claude 的工作指引
 ├── SYLLABUS.md         ← ⭐ 完整課程大綱
@@ -43,12 +43,4 @@ learn/
 ├── qa/                 ← 隨堂答疑（不在主課程內的問題）
 ├── assets/             ← 圖、抓包樣本、配置範例
 └── projects/           ← Part 10 開始的動手實作
-```
-
-## 平行的其他資料夾（不在這個 repo 內）
-
-```
-~/code/vpn/
-├── confidential/   ← VPS 機密；Claude 永不讀取（CLAUDE.md 強制）
-└── learn/          ← 這個 repo
 ```
