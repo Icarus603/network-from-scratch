@@ -82,3 +82,45 @@
 **所屬層**：router architecture
 **首次出現**：[1.1](lessons/part-1-networking/1.1-layering-truth.md)
 **一句話**：Kohler 2000 提出——把 router 拆成 ~120 行 C++ 的可組合處理單位，用 directed graph 連起來；sing-box 的 inbound/outbound/route 三段式架構繼承這思想。
+
+### DMA (Direct Memory Access)
+**中文**：直接記憶體存取
+**所屬層**：hardware / PCIe
+**首次出現**：[1.2 — 物理層：你不需要懂電壓，但要懂 PHY/MAC 介面](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：NIC 不透過 CPU 就能直接把 packet 寫進 host RAM（透過 PCIe）；是 zero-copy / kernel bypass 等技術的基石。
+
+### NIC Ring Buffer
+**中文**：NIC 環狀緩衝區
+**所屬層**：driver / NIC interface
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：NIC 跟 driver 共享的環狀資料結構，描述哪些 buffer 可以 DMA、寫到哪、讀到哪；ring 滿了 = packet 被丟，是 throughput 上限的物理體現。
+
+### Receive Livelock
+**中文**：接收活鎖
+**所屬層**：kernel / interrupt
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：Mogul 1997——pure interrupt-driven kernel 在高 packet rate 下吞吐量崩潰到 0；Linux NAPI / DPDK / netmap / XDP / io_uring 都是其解法的後代。
+
+### NIC Offload (TSO/GSO/GRO/LRO/RSS)
+**中文**：網卡卸載
+**所屬層**：NIC hardware
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：TSO 切大封包成 MTU、GSO/LRO 合併小封包、RSS 用 5-tuple hash 分到多 core；影響 anti-fingerprinting（wire 上 packet size 跟 app 看到的不同）。
+
+### Zero-copy / Kernel Bypass
+**中文**：零拷貝 / 內核旁路
+**所屬層**：跨層 IO 設計
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：netmap (2012) / DPDK / AF_XDP 等技術讓 user app 直接讀 NIC ring，跳過 kernel memcpy；單 core 可達 10G+ line rate。
+
+### NAPI (New API)
+**中文**：Linux 新網路 API
+**所屬層**：Linux kernel
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：2003+ Linux 將 Mogul 1997 polling-after-interrupt 思想 productize；現代所有 Linux NIC driver 用 NAPI 避免 livelock。
+
+### PCIe / DMA Cost Model
+**中文**：PCIe / DMA 成本模型
+**所屬層**：hardware interconnect
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)
+**一句話**：Neugebauer 2018——40+ Gbps NIC 時代 PCIe 本身是新瓶頸；Gen3 x8 64B packet 只剩 ~10 Gbps 可用頻寬（vs 物理層 62.96 Gbps）。

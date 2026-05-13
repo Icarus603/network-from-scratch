@@ -121,10 +121,10 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 ### 1.1 分層的真實意義（不是教科書版） ✅
 為什麼分層、什麼時候**該打破**分層（cross-layer optimization 是研究熱點）。
 
-### 1.2 物理層：你不需要懂電壓，但要懂 PHY/MAC 介面
+### 1.2 物理層：你不需要懂電壓，但要懂 PHY/MAC 介面 ✅
 - 為什麼這影響零拷貝（zero-copy）設計
 - DMA、ring buffer、NIC offload（TSO/GSO/GRO/LRO）
-- **論文**：The Click Modular Router (TOCS 2000)
+- **論文**：Mogul 1997 (Receive Livelock) / Rizzo 2012 (netmap) / Han 2012 (MegaPipe) / Neugebauer 2018 (PCIe)
 
 ### 1.3 乙太網路與 L2：交換器內部
 - MAC 學習、CAM 表、VLAN、STP 為什麼存在
