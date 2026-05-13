@@ -15,17 +15,12 @@
 
 </div>
 
----
+<br/>
 
 <div align="center">
 
-> *起點 ──*
-> 能搭一座機場，
-> 卻不識封包為何物。
->
-> *終點 ──*
-> 親手鑿一條新路，
-> 隱於牆，疾如光。
+*起點* ─ 能搭一座機場，卻不識封包為何物<br/>
+*終點* ─ 親手鑿一條新路，隱於牆，疾如光
 
 </div>
 
@@ -43,10 +38,10 @@
   <td align="center" valign="top">
     起於封包<br/>
     歷數論之野<br/>
-    窮 kernel 之變
+    窮&nbsp;kernel&nbsp;之變
   </td>
   <td align="center" valign="top">
-    拆 SOTA 之骨<br/>
+    拆&nbsp;SOTA&nbsp;之骨<br/>
     讀四部原典<br/>
     築一方敵境
   </td>
@@ -94,30 +89,14 @@
 
 <table>
 <tr>
-  <td width="50%" valign="top">
-
-**問道** ── 看課程之全貌<br/>
-&emsp;&emsp;[SYLLABUS.md](./SYLLABUS.md)
-
-**入課** ── 拾級而讀<br/>
-&emsp;&emsp;[lessons/](./lessons/)
-
-**查辭** ── 解一字之惑<br/>
-&emsp;&emsp;[glossary.md](./glossary.md)
-
-  </td>
-  <td width="50%" valign="top">
-
-**閱札** ── 與論文對坐<br/>
-&emsp;&emsp;[notes/papers/](./notes/papers/)
-
-**答疑** ── 收沿途之問<br/>
-&emsp;&emsp;[qa/](./qa/)
-
-**鑿器** ── 親手立物<br/>
-&emsp;&emsp;[projects/](./projects/)
-
-  </td>
+  <td align="center"><strong>問道</strong><br/><sub>觀全貌</sub><br/><br/>[SYLLABUS](./SYLLABUS.md)</td>
+  <td align="center"><strong>入課</strong><br/><sub>拾級讀</sub><br/><br/>[lessons](./lessons/)</td>
+  <td align="center"><strong>查辭</strong><br/><sub>解字惑</sub><br/><br/>[glossary](./glossary.md)</td>
+</tr>
+<tr>
+  <td align="center"><strong>閱札</strong><br/><sub>對論文</sub><br/><br/>[notes/papers](./notes/papers/)</td>
+  <td align="center"><strong>答疑</strong><br/><sub>收沿問</sub><br/><br/>[qa](./qa/)</td>
+  <td align="center"><strong>鑿器</strong><br/><sub>親立物</sub><br/><br/>[projects](./projects/)</td>
 </tr>
 </table>
 
