@@ -31,50 +31,40 @@
 
 <br/>
 
-## 三段路
+## 三渡
 
 <table>
 <tr>
-  <th width="33%" align="center">其　一</th>
-  <th width="33%" align="center">其　二</th>
-  <th width="33%" align="center">其　三</th>
+  <th width="33%" align="center">初渡　<strong>築基</strong></th>
+  <th width="33%" align="center">再渡　<strong>解牆</strong></th>
+  <th width="33%" align="center">終渡　<strong>立路</strong></th>
 </tr>
 <tr>
-  <td align="center"><strong>築基</strong></td>
-  <td align="center"><strong>解牆</strong></td>
-  <td align="center"><strong>立路</strong></td>
-</tr>
-<tr>
-  <td align="center"><sub>6 章 · 50 堂</sub></td>
-  <td align="center"><sub>4 章 · 50 堂</sub></td>
-  <td align="center"><sub>3 章 · 50 堂</sub></td>
-</tr>
-<tr>
-  <td valign="top">
-    自封包至 kernel，<br/>
-    自數論至後量子，<br/>
-    自 <code>epoll</code> 至 <code>XDP</code>。
+  <td align="center" valign="top">
+    起於封包<br/>
+    歷數論之野<br/>
+    窮 kernel 之變
   </td>
-  <td valign="top">
-    拆 SOTA 至逐行可釋，<br/>
-    讀四部開源原典，<br/>
-    自建 GFW 對抗之地。
+  <td align="center" valign="top">
+    拆 SOTA 之骨<br/>
+    讀四部原典<br/>
+    築一方敵境
   </td>
-  <td valign="top">
-    自威脅模型至規格，<br/>
-    自形式化證明至實作，<br/>
-    自評測至論文。
+  <td align="center" valign="top">
+    以威脅為圖<br/>
+    以證明為斧<br/>
+    鑿一條新渠
   </td>
 </tr>
 </table>
 
 <br/>
 
-## 十二章
+## 十二卷
 
 <table>
 <thead>
-<tr><th align="center">　</th><th>章</th><th>題</th><th align="center">堂</th></tr>
+<tr><th align="center">　</th><th>卷</th><th>題</th><th align="center">堂</th></tr>
 </thead>
 <tbody>
 <tr><td rowspan="6" align="center"><strong>築<br/>基</strong></td>
@@ -100,20 +90,40 @@
 
 <br/>
 
-## 行路指南
+## 問津
 
-| | |
-|---|---|
-| **大綱** | [`SYLLABUS.md`](./SYLLABUS.md) |
-| **正課** | [`lessons/`](./lessons/) |
-| **辭典** | [`glossary.md`](./glossary.md) |
-| **論文札記** | [`notes/papers/`](./notes/papers/) |
-| **隨堂答疑** | [`qa/`](./qa/) |
-| **協議實作** | [`projects/`](./projects/) |
+<table>
+<tr>
+  <td width="50%" valign="top">
+
+**問道** ── 看課程之全貌<br/>
+&emsp;&emsp;[SYLLABUS.md](./SYLLABUS.md)
+
+**入課** ── 拾級而讀<br/>
+&emsp;&emsp;[lessons/](./lessons/)
+
+**查辭** ── 解一字之惑<br/>
+&emsp;&emsp;[glossary.md](./glossary.md)
+
+  </td>
+  <td width="50%" valign="top">
+
+**閱札** ── 與論文對坐<br/>
+&emsp;&emsp;[notes/papers/](./notes/papers/)
+
+**答疑** ── 收沿途之問<br/>
+&emsp;&emsp;[qa/](./qa/)
+
+**鑿器** ── 親手立物<br/>
+&emsp;&emsp;[projects/](./projects/)
+
+  </td>
+</tr>
+</table>
 
 <br/>
 
-## 屋宇
+## 舟楫
 
 ```text
 .
