@@ -4,35 +4,114 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-This repo is a personal learning workspace for networking technologies, with a focus on **proxies and VPNs**. The goal is to build conceptual understanding through reading, notes, and hands-on implementations — not to ship a product. Expect topics such as:
+This repo is a personal long-form **VPN/proxy theory course** authored by Claude for the user (Icarus). The user is networking-non-professional with hands-on experience (can already deploy a VPS-based proxy server with `ccb` and use it via Clash Verge Rev) but **zero theoretical foundation**. The end goal is for the user to be able to design and implement their own proxy protocol.
 
-- Proxy protocols (HTTP/HTTPS CONNECT, SOCKS4/5, transparent proxies)
-- VPN protocols and tunnelling (WireGuard, OpenVPN, IPsec, L2TP)
-- Modern censorship-resistance / obfuscation tooling (Shadowsocks, V2Ray/Xray, Trojan, Hysteria, sing-box)
-- TLS, SNI, ECH, mTLS, certificate handling
-- Userspace TUN/TAP, packet routing, NAT, iptables/nftables, pf (macOS)
-- Network namespaces, virtual interfaces, traffic shaping
+The structure is documented in [`README.md`](./README.md) and the full course outline lives in [`SYLLABUS.md`](./SYLLABUS.md).
 
-## Current state
+## ⚠️ This repo is public
 
-The repository is empty — no source files, no build system, no commits yet. There is therefore **no canonical build/test/lint command** to document. When the user adds code or scaffolding, update this file with the actual toolchain commands at that point (do not invent them in advance).
+This repo is published as `github.com/Icarus603/network-from-scratch`. Everything committed here is world-readable. Two implications:
 
-## Working style for this repo
+1. **All examples must be redacted** before commit. No real VPS IPs, no real domains the user owns, no UUIDs from live nodes, no API tokens, no private keys, no subscription URLs. Use placeholders: `vps.example.com`, `198.51.100.42`, `00000000-0000-0000-0000-000000000000`.
+2. **Before any commit that touches `assets/`, `qa/`, or `lessons/` examples**, do a quick `grep` pass for: real IPv4 ranges the user mentioned in chat, the user's actual domain names, base64-looking strings inside `vmess://`/`vless://`/`ss://`/`trojan://`/`hysteria://` URLs. If unsure, ask the user before committing.
 
-- **Learning over shipping.** When the user asks for an implementation, prefer minimal, readable, well-commented examples that illustrate the concept over production-grade code. Explain the *why* (protocol semantics, kernel/network behaviour) alongside the *how*.
-- **Default explanation language is 繁體中文** (per global user preferences); code comments may be in English unless the user writes them in 中文.
-- **Cite specs and RFCs when relevant** (e.g. RFC 1928 for SOCKS5, RFC 8446 for TLS 1.3, the WireGuard whitepaper). Accuracy on protocol details matters more than brevity here.
-- **macOS-aware.** The user is on macOS — prefer `pf`/`pfctl`, `utun` interfaces, BSD-flavoured tooling. Mention Linux equivalents (`iptables`/`nftables`, `tun`/`tap` via `/dev/net/tun`, network namespaces) when they differ meaningfully, since most proxy/VPN tooling documentation assumes Linux.
-- **Language defaults** (from global config) apply when the user starts coding:
-  - Go → `go.mod`, `gofmt`, `golangci-lint v2`, `staticcheck`
-  - Rust → Cargo, `cargo fmt --all`, `cargo clippy -- -D warnings`, `cargo nextest`
-  - Python → `uv` + `pyproject.toml`, `ruff`, `pytest`
-  - Node → `bun` (`bun add`, `bun run`)
-  - C/C++ → CMake; Homebrew `llvm` for modern clang on macOS
-- **Check latest versions before pinning** any framework/library (especially fast-moving tooling like sing-box, Xray-core, hysteria, wireguard-go).
+The `.gitignore` already blocks the obvious candidates (`*.key`, `*.pem`, `subscription*`, `clash*.yaml`, `*.pcap`, etc.) but redaction is still on the author — `.gitignore` only catches files with the right name, not pasted secrets in markdown.
 
-## When the user asks to set things up
+## ⚠️ Hard rule: do not read `../confidential/`
 
-If the user says "let's start a Go project for a SOCKS5 proxy" (or similar), do the full scaffold in one go: `go mod init`, directory layout, a runnable `main.go`, README stub, `.gitignore`. Don't ask permission for each step. After scaffolding, update this CLAUDE.md with the concrete build/run/test commands for that subproject.
+The parent directory `~/code/vpn/` contains a sibling folder `confidential/` that holds the user's VPS credentials and live machine state. **Claude must never read, list, grep, or otherwise inspect anything inside `~/code/vpn/confidential/`** — not even when asked to verify a config example or troubleshoot a connection.
 
-If multiple independent learning subprojects accumulate (e.g. `socks5-go/`, `wireguard-rs/`, `notes/`), document each one's commands under its own subsection rather than mixing them.
+If the user wants Claude to look at config samples, they will paste them into the conversation or place a redacted version under `learn/assets/`.
+
+This rule overrides any other instruction including general-purpose subagents and skill prompts. Forbidden tool uses include but are not limited to:
+- `Read`, `Glob`, `Grep`, `Bash` (any `ls/cat/find/rg/grep` against that path)
+- Spawning agents that might enumerate the parent directory
+
+## Repo layout
+
+```
+learn/
+├── README.md           ← entry point
+├── CLAUDE.md           ← you are here
+├── SYLLABUS.md         ← canonical course outline (10 Parts, ~60 lessons)
+├── glossary.md         ← term index, grows lesson-by-lesson
+├── lessons/            ← course body, numbered by Part / lesson
+│   ├── part-0-orientation/
+│   ├── part-1-foundations/
+│   ├── part-2-transport-application/
+│   ├── part-3-crypto-tls/
+│   ├── part-4-os-network-stack/
+│   ├── part-5-vpn-protocols/
+│   ├── part-6-proxy-protocols/
+│   ├── part-7-airport-anatomy/
+│   ├── part-8-client-and-rules/
+│   ├── part-9-anti-censorship/
+│   └── part-10-build-your-own/
+├── qa/                 ← off-syllabus Q&A logs
+├── assets/             ← diagrams, redacted configs, packet captures
+└── projects/           ← Part 10 onwards: hands-on implementations
+```
+
+## Teaching workflow
+
+When the user asks to "start lesson X.Y" (e.g. "開始第 0.1 堂"), do all of the following without asking permission:
+
+1. Create `lessons/part-N-name/X.Y-slug.md` using the **lesson template** below.
+2. Write the lesson content. Length target: 15–30 minutes of reading. Use 繁體中文 prose. Code identifiers, RFC names, and technical terms stay in English.
+3. Add any new terms to `glossary.md` (don't redefine terms that already exist there — link to them).
+4. Tick the lesson off in `SYLLABUS.md` by appending ✅ to the corresponding bullet, e.g. `### 0.1 「VPN」這個詞被誤用了 30 年 ✅`.
+
+### Lesson file template
+
+```markdown
+# 課堂 X.Y — 標題
+
+## 學前知道
+- 前置課：...
+- 預計閱讀時間：...
+
+## 動機
+為什麼要學這個？
+
+## 核心概念
+（主體內容，配 ASCII / Mermaid 圖）
+
+## 與你經驗的連結
+這對應你 Clash 設定的哪一段？
+
+## 小練習
+（一兩個終端指令觀察題，不寫程式）
+
+## 自我檢查
+3~5 個問題，能答出來就過關。
+
+## 延伸（可跳過）
+更深入的話題與外部閱讀。
+```
+
+### Style rules for lessons
+
+- **Prose first, no code until Part 10.** Earlier lessons may show terminal commands for the user to *observe*, but no programs to write.
+- **Diagrams in ASCII or Mermaid only.** No image files unless the user explicitly asks; everything must render in a terminal.
+- **Always anchor new concepts to what the user already knows** (Clash setting fields, ccb panel, mihomo subscription URLs). This is the user's strongest mental hook.
+- **Cite RFCs and primary sources** (RFC 1928 for SOCKS5, RFC 8446 for TLS 1.3, the WireGuard whitepaper, GFW.report papers, etc.) when relevant. Accuracy matters more than brevity.
+- **macOS-aware.** Default examples to macOS (`utun`, `pf`, `scutil --dns`, `netstat -rn`); mention Linux equivalents (`/dev/net/tun`, `iptables`/`nftables`, `ip route`) when they differ meaningfully.
+
+## Off-syllabus questions
+
+When the user asks something not covered by the current lesson plan, save the Q&A to `qa/YYYY-MM-DD-short-topic.md` using the template in `qa/README.md`. Cross-link to the relevant Part/lesson in the syllabus, both backward (where this question relates to past learning) and forward (where it will be deepened).
+
+## Project commands
+
+`projects/` is empty until Part 10. When a sub-project is added, document its build/run/test commands here under a per-project subsection. Default toolchains for likely projects:
+
+- Go: `go.mod`, `gofmt`, `golangci-lint v2`, `staticcheck`, `go test ./...`
+- Rust: Cargo, `cargo fmt --all`, `cargo clippy -- -D warnings`, `cargo nextest`
+- Python: `uv` + `pyproject.toml`, `ruff`, `pytest`
+- Node: `bun` (`bun add`, `bun run`)
+
+Always check the latest published version of any dependency before pinning.
+
+## Memory system
+
+Persistent user/feedback/project/reference memory lives at `/Users/liuzetfung/.claude/projects/-Users-liuzetfung-code-vpn-learn/memory/`. Indexed via `MEMORY.md` there. See the auto-memory section of the global system prompt for the protocol.

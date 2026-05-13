@@ -1,0 +1,157 @@
+# ============================================================
+# .gitignore for network-from-scratch
+# 這個 repo 是公開學習筆記，凡是「可能含真實機場/VPS 資訊」的檔案
+# 都應該在離開硬碟前被擋下。下面分成三組：
+#   1. 機密與配置（最重要，永遠不要 commit）
+#   2. 系統與編輯器垃圾
+#   3. 各語言子專案的 build 產物（projects/ 開始用到才會發揮作用）
+# ============================================================
+
+# -----------------------------------------------------------
+# 1. 機密 / 配置 / 個人資料 —— 絕對不要外洩
+# -----------------------------------------------------------
+
+# 環境變數與密碼檔
+.env
+.env.*
+!.env.example
+secrets/
+credentials/
+
+# 私鑰、證書（任何形式）
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.kdbx
+id_rsa
+id_ed25519
+id_ecdsa
+*.ppk
+
+# 機場 / VPN 訂閱、配置
+subscription*
+sub*.txt
+sub*.yaml
+*.subscription
+clash*.yaml
+clash*.yml
+mihomo*.yaml
+sing-box*.json
+xray*.json
+v2ray*.json
+config.json
+config.yaml
+!**/config.example.*
+!**/config.template.*
+
+# WireGuard / OpenVPN 配置
+*.conf.private
+wg*.conf
+*.ovpn
+
+# 抓包檔（很可能含真實 IP / cookie / token）
+*.pcap
+*.pcapng
+*.har
+!assets/captures/*.redacted.pcap
+!assets/captures/*.redacted.pcapng
+
+# Cloudflare / VPS 工具殘留
+.cloudflared/
+.warp/
+
+# 任何手滑放進來的 confidential/ 子目錄
+**/confidential/
+**/private/
+**/.private/
+
+# -----------------------------------------------------------
+# 2. 系統 / 編輯器垃圾
+# -----------------------------------------------------------
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# Linux
+*~
+.directory
+
+# Windows
+Thumbs.db
+Desktop.ini
+
+# 編輯器
+.vscode/
+!.vscode/settings.example.json
+.idea/
+*.swp
+*.swo
+*.swn
+.netrwhist
+.history/
+
+# Claude Code 本地快取
+.claude/
+!.claude/settings.json
+!.claude/commands/
+
+# -----------------------------------------------------------
+# 3. 子專案 build 產物（Part 10 開始才會用到）
+# -----------------------------------------------------------
+
+# Go
+*.exe
+*.test
+*.out
+/bin/
+/dist/
+vendor/
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock        # 對 binary 該保留、對 library 該擋；學習用統一擋掉
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node
+node_modules/
+.pnp
+.pnp.js
+bun.lockb        # 學習 repo，先擋；真要鎖版本再個別解開
+dist/
+build/
+
+# C/C++
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+build/
+cmake-build-*/
+
+# -----------------------------------------------------------
+# 4. 雜項
+# -----------------------------------------------------------
+
+# 暫存筆記（學習過程中放東西的草稿區）
+scratch/
+TODO.local.md
+NOTES.local.md
+*.local.md
