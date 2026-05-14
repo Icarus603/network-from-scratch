@@ -729,3 +729,391 @@
 **首次出現**：[4.11](lessons/part-4-tls-quic/4.11-quic-go-source-walk.md)
 **一句話**：Marten Seemann 主導；~70K LOC；caddy/sing-box/xray-core 部署；目錄結構 (connection.go / packet_packer.go / internal/{handshake,ackhandler,congestion,flowcontrol,wire}) 對應 RFC 9000-9002 各 section；單 goroutine state machine + sub-goroutines for I/O。
 
+
+---
+
+## Part 2 — 高效能 I/O 與 kernel 網路
+
+### epoll
+**中文**：Linux scalable I/O readiness 機制
+**所屬層**：kernel syscall
+**首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)
+**一句話**：紅黑樹維護 interest set + 雙向 ready list + per-fd wait queue callback；ET/LT 兩 mode，ET 必須 drain 到 EAGAIN；C10K 後 server 標配；G6 server fallback path。
+
+### kqueue
+**中文**：BSD/macOS 的 scalable event notification
+**所屬層**：kernel syscall
+**首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)、[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
+**一句話**：Lemon ATC 2001；filter (READ/WRITE/SIGNAL/TIMER/VNODE/PROC/USER) + udata 統一各種 event source；EV_CLEAR = ET；G6 macOS client 核心。
+
+### Edge-Triggered (ET) / Level-Triggered (LT)
+**中文**：邊緣觸發 / 電平觸發
+**所屬層**：epoll/kqueue 語意
+**首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)
+**一句話**：ET 只在狀態變化瞬間通知，必須 drain 到 EAGAIN；LT 反覆通知；G6 server worker 預期用 ET。
+
+### EPOLLEXCLUSIVE
+**中文**：epoll 排他喚醒 flag
+**所屬層**：epoll
+**首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)
+**一句話**：Linux 4.5 引入；解決多 process epoll_wait 同 listen fd 時 thundering herd；只喚醒 1 個。
+
+### SO_REUSEPORT
+**中文**：socket bind port 共用 flag
+**所屬層**：socket option
+**首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)、[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：Linux 3.9；多 socket 可 bind 同 (addr,port)，kernel 用 5-tuple hash 分配 incoming；G6 server N worker 標配。
+
+### SO_ATTACH_REUSEPORT_EBPF
+**中文**：可程式化 reuseport 分配
+**所屬層**：socket option + eBPF
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：用 BPF program 自訂 reuseport hash 策略；G6 用 per-client-IP affinity + CPU load balance。
+
+### io_uring
+**中文**：Linux 共享 ring 異步 I/O
+**所屬層**：kernel syscall
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：Axboe 2019；SQ + CQ + SQE/CQE mmap 共享 ring；SQPOLL 模式 0 syscall fast path；registered files/buffers 移除 fdget/page pin cost；G6 server 主路徑。
+
+### SQE / CQE
+**中文**：Submission/Completion Queue Entry
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：io_uring 提交與完成事件 entry；SQE 64B / CQE 16B (或 CQE32)；user_data 是 user-kernel 不解讀欄位，常塞 ctx pointer。
+
+### IORING_SETUP_SQPOLL / DEFER_TASKRUN / SINGLE_ISSUER
+**中文**：io_uring 三個關鍵 setup flag
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：SQPOLL = kernel thread poll SQ 達 0 syscall；DEFER_TASKRUN + SINGLE_ISSUER = async work 在 issuer task context 跑（6.1+），避開 io-wq thread pool 的 credential 安全 surface。
+
+### IORING_OP_*
+**中文**：io_uring opcode
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：~50 個 op 涵蓋 read/write/recv/send/recvmsg/sendmsg/accept/connect/openat/timeout/poll_add/splice 等；multishot accept/recv 一個 SQE 持續產生 CQE。
+
+### IO_LINK
+**中文**：io_uring 鏈式提交
+**所屬層**：io_uring flag
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：IOSQE_IO_LINK 把多個 SQE 串成 chain；前一個成功才執行下一個；失敗則整鏈 -ECANCELED。
+
+### Multishot Accept / Recv
+**中文**：io_uring 多發提交
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：5.19+/6.0+；一個 SQE 持續產生 CQE（IORING_CQE_F_MORE），listen socket accept loop 用 1 個 SQE 解決。
+
+### Registered Files / Buffers / Buf Ring
+**中文**：io_uring 預註冊資源
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)、[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：register_files 移除 fdget atomic；register_buffers 預先 pin user page；register_buf_ring (5.19+) ring-based buffer supply；G6 server 配 hugepage 必開。
+
+### SEND_ZC / SENDMSG_ZC
+**中文**：io_uring 零拷貝送出
+**所屬層**：io_uring
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
+**一句話**：底層走 MSG_ZEROCOPY page pinning，產生兩個 CQE（kernel 收到 + 實際送完 page ref 釋放）；小 msg 反而慢，threshold ~16KB；G6 大 msg 用。
+
+### Zero-Copy I/O
+**中文**：零拷貝
+**所屬層**：跨 OS 概念
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：byte 在 kernel/user 路徑上完整 copy 次數降到 0 或 1；對加密協議下界 = 1（除非 NIC offload）；G6 in-place AEAD + io_uring SEND_ZC 達 user 1 touch。
+
+### splice / sendfile / vmsplice / tee
+**中文**：Linux 零拷貝 syscall 家族
+**所屬層**：kernel syscall
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：sendfile = in-kernel file→socket pass-through；splice = 任一端 pipe 的 byte stream forward；vmsplice = user buffer page-move 進 pipe；tee = pipe→pipe page-clone；G6 加密斷鏈，不適用。
+
+### MSG_ZEROCOPY / SO_ZEROCOPY
+**中文**：socket-level 零拷貝 send
+**所屬層**：socket option + send flag
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：Dumazet Linux 4.14；kernel 不 copy buffer，page pin 進 skb；completion 透過 recvmsg(MSG_ERRQUEUE) 拿；break-even ~10-16KB。
+
+### TCP_ZEROCOPY_RECEIVE
+**中文**：TCP 接收端零拷貝
+**所屬層**：socket option
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：getsockopt mmap user buffer 收 packet；alignment 限制嚴，only Google scale 用；G6 不採用。
+
+### MAP_HUGETLB / Hugepage
+**中文**：大頁面
+**所屬層**：mm
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)、[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
+**一句話**：2MB / 1GB page；大幅減 TLB pressure；DPDK 必用，io_uring buf_ring + G6 server 應用；sysctl vm.nr_hugepages 預配。
+
+### In-place AEAD
+**中文**：原地加密
+**所屬層**：crypto + memory layout
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：ChaCha20-Poly1305 / AES-GCM 支援 plaintext / ciphertext 同 buffer；省一次 copy；G6 user-space crypto 必用此 pattern。
+
+### kTLS
+**中文**：kernel TLS
+**所屬層**：socket ULP
+**首次出現**：[2.4](lessons/part-2-high-perf-io/2.4-ktls.md)
+**一句話**：Linux 4.13；setsockopt(TCP_ULP="tls") 把 TLS record 加解密放 kernel；支援 sendfile + TLS；nginx/Netflix 用；G6 不適用（framing 非 TLS record）。
+
+### NIC TLS Offload
+**中文**：硬體 TLS 加解密
+**所屬層**：NIC firmware
+**首次出現**：[2.4](lessons/part-2-high-perf-io/2.4-ktls.md)
+**一句話**：Mellanox ConnectX-5+/Chelsio T6+ 內建 AES-GCM inline；host CPU 0 touch；廠商鎖；VPS 級硬體沒。
+
+### eBPF
+**中文**：extended Berkeley Packet Filter
+**所屬層**：kernel programmability framework
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：64-bit register VM + verifier + JIT + map + helper + CO-RE；可程式化 kernel 30+ hook point；G6 用於 observability、self-fingerprint、DDoS filter、worker dispatch。
+
+### BPF Verifier
+**中文**：BPF 靜態驗證器
+**所屬層**：kernel/bpf/verifier.c
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：abstract interpretation 確保程式有界、無 OOB、無 UAF；sound but incomplete；Gershuni PLDI 2019 形式化；G6 寫 BPF 要 verifier-friendly。
+
+### CO-RE (Compile Once Run Everywhere)
+**中文**：BPF 跨 kernel 版本可攜
+**所屬層**：libbpf + BTF
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：Nakryiko 2019；clang 編譯記錄 BTF relocation hint，libbpf load 時依 host kernel BTF 修正欄位 offset；production deploy 標配。
+
+### BTF (BPF Type Format)
+**中文**：BPF type 結構描述
+**所屬層**：debug info subset
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：kernel 自己 /sys/kernel/btf/vmlinux；用 bpftool btf dump 產生 vmlinux.h 供 BPF 程式 include。
+
+### BPF Map
+**中文**：BPF kv store
+**所屬層**：eBPF
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：~30 種 type (hash/array/lru_hash/percpu/sockmap/devmap/cpumap/xskmap/ringbuf/...)；user / BPF program 共享狀態的橋樑。
+
+### BPF Ring Buffer (BPF_MAP_TYPE_RINGBUF)
+**中文**：BPF 新一代環形緩衝
+**所屬層**：BPF map
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：Linux 5.8+；取代 PERF_EVENT_ARRAY；single-producer multi-consumer；bpf_ringbuf_reserve/submit；G6 telemetry 用。
+
+### bpftrace / BCC / libbpf
+**中文**：BPF 三大開發工具鏈
+**所屬層**：user-space tooling
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
+**一句話**：bpftrace = DTrace-like one-liner；BCC = Python 中型 tracer；libbpf = production-grade C/Rust loader 配 CO-RE。
+
+### TC eBPF (cls_bpf)
+**中文**：traffic control 上 BPF classifier
+**所屬層**：Linux QoS subsystem
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：Borkmann NetDev 2016；packet 進 / 出 stack 時跑 BPF；含 ingress / egress；G6 server 用於 egress 抗指紋檢驗。
+
+### Sockmap / sk_msg / sk_skb
+**中文**：BPF socket-to-socket redirect 框架
+**所屬層**：BPF + socket
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：kernel 內 socket pointer map + sk_redirect helper；user-space 0 touch proxy；plaintext only；G6 baseline mode 可考慮，加密主流量不適用。
+
+### cgroup-bpf
+**中文**：cgroup 級 BPF program attach
+**所屬層**：cgroup + BPF
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：connect4/6、sendmsg4/6、sock_create、sockops、setsockopt 等 attach type；G6 client transparent proxy 用 connect4 redirect。
+
+### SK_LOOKUP
+**中文**：BPF 動態 socket 派發
+**所屬層**：BPF program type
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：Linux 5.9+；packet 進來時 BPF 決定派給哪個 listen socket；可實作單 port 多服務（REALITY-style 共用 443）。
+
+### sockops + bpf_setsockopt
+**中文**：BPF 動態 TCP 調參
+**所屬層**：cgroup-bpf
+**首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
+**一句話**：sockops hook 在 TCP state change 時觸發；BPF 內呼 bpf_setsockopt 改 TCP_CONGESTION、TCP_NOTSENT_LOWAT 等；G6 動態切 BBR/CUBIC。
+
+### XDP (eXpress Data Path)
+**中文**：driver-level eBPF packet 處理
+**所屬層**：NIC driver hook
+**首次出現**：[2.7](lessons/part-2-high-perf-io/2.7-xdp.md)
+**一句話**：Høiland-Jørgensen CoNEXT 2018；packet 還沒 alloc skb 前跑 BPF；XDP_DROP/PASS/TX/REDIRECT 四 verdict；單核 24 Mpps；G6 server DDoS 防線。
+
+### XDP_REDIRECT + devmap/cpumap/xskmap
+**中文**：XDP redirect 三種 map
+**所屬層**：XDP
+**首次出現**：[2.7](lessons/part-2-high-perf-io/2.7-xdp.md)
+**一句話**：devmap = 送到另一 netdev；cpumap = 送到指定 CPU；xskmap = 送到 AF_XDP socket；分別對應 router-style / load-balance / user-space-zero-copy。
+
+### AF_XDP
+**中文**：XDP-fed user-space zero-copy socket
+**所屬層**：socket family
+**首次出現**：[2.7](lessons/part-2-high-perf-io/2.7-xdp.md)
+**一句話**：UMEM (mmap user buffer) + FILL/COMPLETION/RX/TX 4 ring；NIC DMA 直接寫進 user page；DPDK-like 性能但不獨佔 NIC；G6 極致 mode 候選。
+
+### DPDK (Data Plane Development Kit)
+**中文**：用戶態 packet I/O 框架
+**所屬層**：user-space
+**首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
+**一句話**：Intel 主導；PMD + UIO/VFIO + hugepage + mempool + ring + lcore；完全 bypass kernel；NFV/5G UPF/HFT 標配；G6 不採用（太重，無 stack）。
+
+### PMD (Poll-Mode Driver)
+**中文**：用戶態輪詢驅動
+**所屬層**：DPDK
+**首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
+**一句話**：NIC 從 kernel 拔掉，由 user-space DPDK 直接 mmap PCI BAR + busy-poll；無 IRQ；latency variance 極低；DPU 設計思想直系。
+
+### UIO / VFIO
+**中文**：Linux 暴露 PCI 給 user-space 兩條路
+**所屬層**：kernel
+**首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
+**一句話**：UIO 古老無 IOMMU 隔離；VFIO 用 IOMMU 安全模型，現代必選；dpdk-devbind.py 切換。
+
+### mTCP / F-Stack / Seastar / smoltcp / netstack3
+**中文**：user-space TCP stack 家族
+**所屬層**：user-space transport
+**首次出現**：[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)
+**一句話**：mTCP NSDI 2014 學術；F-Stack = FreeBSD TCP + DPDK 工業；Seastar = C++ TPC runtime；smoltcp = Rust no_std 嵌入式；netstack3 = Fuchsia Rust；G6 不採用 server，client TUN path 用 smoltcp。
+
+### Share-Nothing Thread-Per-Core (TPC)
+**中文**：共享一無的執行緒模型
+**所屬層**：runtime architecture
+**首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)、[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)
+**一句話**：每 core 獨立 state、無 cross-core lock、靠 lock-free ring 通訊；DPDK lcore / Seastar / monoio 都這設計；G6 server runtime 採用。
+
+### Network Extension (NE) framework
+**中文**：macOS/iOS 系統網路擴展
+**所屬層**：macOS userspace + system process
+**首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
+**一句話**：Apple 強制 VPN/firewall/DNS 走 NE 不可 kext；NEPacketTunnelProvider / NETransparentProxyProvider / NEFilter / NEDNSProxyProvider 等子類；需 entitlement + notarization；G6 macOS client 必經之路。
+
+### NEPacketTunnelProvider
+**中文**：macOS 全隧道 VPN 提供者
+**所屬層**：NE
+**首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
+**一句話**：接管整個 device 流量；NEPacketTunnelFlow.readPackets/writePackets API；iOS only support 此種；G6 跨 macOS/iOS 必有。
+
+### NETransparentProxyProvider
+**中文**：macOS 11+ 透明流量代理提供者
+**所屬層**：NE
+**首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
+**一句話**：socket flow level (NEAppProxyFlow)；只攔截條件命中的 flow（per-app/per-host）；iOS 不支援；G6 macOS client 預期主路徑。
+
+### utun
+**中文**：macOS L3 虛擬介面
+**所屬層**：macOS BSD layer
+**首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)、[2.11](lessons/part-2-high-perf-io/2.11-tun-tap.md)
+**一句話**：socket(AF_SYSTEM, SOCK_DGRAM, SYSPROTO_CONTROL) + UTUN_CONTROL_NAME；強制 4-byte AF prefix；無 multi-queue/NAPI/GSO；無 IFF_NO_PI 對等。
+
+### DTrace
+**中文**：macOS/Solaris 動態追蹤
+**所屬層**：tracing
+**首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
+**一句話**：Sun 2003 起源，Apple 移植；macOS 的「半個 eBPF」；M1+ SIP 限制；G6 macOS observability 替代方案。
+
+### TUN / IFF_TUN / IFF_NO_PI / IFF_MULTI_QUEUE
+**中文**：Linux TUN device + 關鍵 flag
+**所屬層**：drivers/net/tun.c
+**首次出現**：[2.11](lessons/part-2-high-perf-io/2.11-tun-tap.md)
+**一句話**：open(/dev/net/tun) + ioctl(TUNSETIFF)；IFF_NO_PI 移除 4-byte packet info prefix（必開）；IFF_MULTI_QUEUE 多 fd 對一 interface；IFF_NAPI 5.5+ batch；IFF_VNET_HDR + GSO 大段 segment。
+
+### wireguard-go `Device` interface
+**中文**：跨平台 TUN abstraction trait
+**所屬層**：user-space lib
+**首次出現**：[2.11](lessons/part-2-high-perf-io/2.11-tun-tap.md)
+**一句話**：File/Read/Write/Flush/MTU/Name/Events/Close/BatchSize；wireguard-go tun/ 子目錄；Linux/macOS/Windows/iOS/BSD/netstack 各實作；G6 client TUN trait 直接抄。
+
+### Network Namespace (netns)
+**中文**：Linux 網路命名空間
+**所屬層**：kernel isolation
+**首次出現**：[2.12](lessons/part-2-high-perf-io/2.12-netns.md)
+**一句話**：Biederman 2007；隔離 netdev/routing/netfilter/conntrack/BPF/sysctl 一整套 stack；ip netns add 用 bind mount pin；G6 整合測試骨架。
+
+### veth pair
+**中文**：虛擬乙太網對
+**所屬層**：drivers/net/veth.c
+**首次出現**：[2.12](lessons/part-2-high-perf-io/2.12-netns.md)
+**一句話**：point-to-point virtual ethernet；ip link add ... type veth peer name ... 一邊送另一邊收；container 網路骨架；支援 XDP。
+
+### containerlab / mininet
+**中文**：netns 拓樸自動化工具
+**所屬層**：testing tooling
+**首次出現**：[2.12](lessons/part-2-high-perf-io/2.12-netns.md)
+**一句話**：用 YAML 描述網路拓樸自動拉起 netns + veth + 各節點 container；G6 整合測試直接用。
+
+### tc / qdisc
+**中文**：Linux traffic control / queueing discipline
+**所屬層**：net/sched
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：每 NIC root qdisc + child class 樹狀；classful (HTB/HFSC/PRIO) vs classless (pfifo/fq/fq_codel/cake/netem)；G6 server 預設 fq_codel。
+
+### fq / fq_codel
+**中文**：Fair Queue 與 fq_codel
+**所屬層**：qdisc
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：fq = per-flow FIFO + pacing（配 BBR 必要）；fq_codel = per-flow + CoDel AQM（RFC 8290）；Linux 5.x default；G6 server fq + BBR。
+
+### CAKE
+**中文**：Common Applications Kept Enhanced qdisc
+**所屬層**：qdisc
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：Høiland-Jørgensen 2018 / arXiv:1804.07617；fq_codel 後繼，內建 shaping + ISP overhead 補償 + per-host fairness + DiffServ；OpenWrt SQM 預設；G6 文件建議家用 router 開。
+
+### CoDel (Controlled Delay)
+**中文**：受控延遲 AQM 演算法
+**所屬層**：AQM
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：Nichols-Jacobson CACM 2012；用 packet sojourn time 而非 queue 長度當 drop 訊號；5ms/100ms 兩個常數；解決 bufferbloat。
+
+### Bufferbloat
+**中文**：緩衝臃腫
+**所屬層**：networking 病灶
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：Gettys 2010 命名；大 buffer + tail drop → 高 latency under load；fq_codel/cake/BBR 是 cure；G6 client 在 user router 後易受影響。
+
+### BBR (Bottleneck Bandwidth and Round-trip propagation)
+**中文**：Google 的 model-based congestion control
+**所屬層**：TCP CC
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：Cardwell CACM 2017；持續 estimate BtlBw + RTprop，pacing 不 fill buffer，對 loss 不過度反應；lossy 鏈路下比 CUBIC 強 10-80×；G6 server 必開（配 fq pacing）。
+
+### netem
+**中文**：Linux 網路模擬器 qdisc
+**所屬層**：qdisc
+**首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
+**一句話**：tc qdisc add ... netem delay/loss/reorder/duplicate/corrupt/rate；4-state Gilbert loss model；G6 對抗測試模擬「中美鏈路 50Mbps + 100ms RTT + 5% loss」canonical scenario。
+
+### NAPI (New API)
+**中文**：Linux 收包 IRQ/poll 混合
+**所屬層**：net/core
+**首次出現**：[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
+**一句話**：Mogul-Ramakrishnan TOCS 1997 livelock 啟發；high-load 時 disable IRQ + poll batch；現代 NIC driver 標配；epoll busy_poll 跟 NAPI 整合。
+
+### PCIe / Endpoint Networking Bottleneck
+**中文**：PCIe 鏈路是 100Gbps NIC 的隱形天花板
+**所屬層**：硬體 + interconnect
+**首次出現**：[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
+**一句話**：Neugebauer SIGCOMM 2018；PCIe TLP overhead + NUMA + cache coherence 把 100Gbps 實際吃到 70Gbps 以下；DPU 演化動因之一。
+
+### Click Modular Router
+**中文**：模組化封包處理 graph
+**所屬層**：軟體 router architecture
+**首次出現**：[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
+**一句話**：Kohler TOCS 2000；directed graph of element 描述 packet path；VPP/Cilium 後繼；G6 server packet processing 內部抽象。
+
+### Stack Specialization
+**中文**：協議堆疊特化
+**所屬層**：systems design philosophy
+**首次出現**：[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)、[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
+**一句話**：Marinos SIGCOMM 2014；general-purpose stack 必然 overhead，為 application 量身打造 stack 可大幅減 code；G6 是「為 proxy 量身打造的 transport」。
+
+### Byte Touch Count
+**中文**：byte 觸碰次數
+**所屬層**：performance modeling
+**首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
+**一句話**：packet 從 NIC RX 到 NIC TX 路徑上 CPU load/store 次數；加密協議下界 = 1（加密本身）；G6 目標穩定達 1。

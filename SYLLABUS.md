@@ -219,72 +219,72 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 > **深度準繩**：學完能寫一個 1M qps 的 echo server；能用 eBPF 做 packet-level 監控；能解釋 io_uring 的 submission queue / completion queue 設計。
 
-### 2.1 從 select 到 epoll 的演化
+### 2.1 從 select 到 epoll 的演化 ✅
 - select / poll 的 O(n) 為什麼是死路
 - epoll 的 edge-triggered vs level-triggered 完整語意
 - **原始碼**：Linux `fs/eventpoll.c`
 
-### 2.2 io_uring：Linux I/O 的未來
+### 2.2 io_uring：Linux I/O 的未來 ✅
 - 設計哲學（無系統呼叫熱路徑）
 - SQE/CQE、polling、registered files/buffers
 - 為什麼 5.x kernel 出來後高效能網路全跳船
 - **論文**：The io_uring Asynchronous I/O Interface (Axboe 2019)
 
-### 2.3 零拷貝技術全解
+### 2.3 零拷貝技術全解 ✅
 - splice / sendfile / MSG_ZEROCOPY / SO_ZEROCOPY
 - mmap 大頁、HUGETLB
 - 為什麼 TLS 偏偏不能零拷貝（要加密內容），kTLS 怎麼解
 
-### 2.4 kTLS：把 TLS 塞進 kernel
+### 2.4 kTLS：把 TLS 塞進 kernel ✅
 - kernel 4.13 引入的 kTLS、現在的 status
 - 為什麼 nginx + kTLS 可以 sendfile 加密檔案
 - **對我們的意義**：協議能不能受益於 kTLS
 
-### 2.5 eBPF 入門：Linux 的可程式化革命
+### 2.5 eBPF 入門：Linux 的可程式化革命 ✅
 - 什麼是 eBPF、verifier 怎麼工作、JIT
 - BCC / bpftrace / libbpf 工具鏈
 - 一個簡單例子：監控 TCP 重傳
 
-### 2.6 eBPF 進階：對網路的意義
+### 2.6 eBPF 進階：對網路的意義 ✅
 - TC eBPF、socket filter、cgroup-bpf
 - **對我們的意義**：能不能用 eBPF 做更早期的封包改寫、做客戶端側的協議實作
 
-### 2.7 XDP：在驅動層處理封包
+### 2.7 XDP：在驅動層處理封包 ✅
 - XDP_PASS / XDP_DROP / XDP_TX / XDP_REDIRECT
 - AF_XDP socket
 - **論文**：The eXpress Data Path (CoNEXT 2018)
 
-### 2.8 DPDK：完全 bypass kernel
+### 2.8 DPDK：完全 bypass kernel ✅
 - Poll-mode driver、大頁、NUMA-aware
 - 為什麼資料中心和 CDN 用 DPDK
 - **對我們的意義**：高端伺服器端能否選 DPDK
 
-### 2.9 用戶態 TCP stack
+### 2.9 用戶態 TCP stack ✅
 - mTCP、F-Stack、Seastar、TCP/IP in userspace
 - **論文**：mTCP: A Highly Scalable User-level TCP Stack (NSDI 2014)
 
-### 2.10 macOS 上能做什麼
+### 2.10 macOS 上能做什麼 ✅
 - kqueue（epoll 的對應物）
 - Network Extension framework
 - macOS 為什麼**沒有** eBPF/XDP 對等物（DTrace 算半個）
 
-### 2.11 TUN/TAP 完整深度
+### 2.11 TUN/TAP 完整深度 ✅
 - /dev/net/tun 的 ioctl 介面
 - TUN 多 queue、IFF_TUN_EXCL、IFF_NO_PI
 - macOS utun 與 Linux tun 的真實差異
 - **原始碼**：Linux `drivers/net/tun.c`
 
-### 2.12 網路命名空間 (netns)
+### 2.12 網路命名空間 (netns) ✅
 - clone(CLONE_NEWNET) 內部
 - veth pair、bridge、netns + iptables
 - 怎麼用 netns 做協議測試環境
 
-### 2.13 流量整形：tc / netem
+### 2.13 流量整形：tc / netem ✅
 - htb / fq / fq_codel / cake
 - netem 模擬丟包/延遲/亂序——**這是我們對抗測試的核心工具**
 - **對我們的意義**：怎麼用 netem 模擬「中美鏈路 5% 丟包 200ms RTT」
 
-### 2.14 高效能網路的最終 picture
+### 2.14 高效能網路的最終 picture ✅
 把上面 13 堂串起來：一個 packet 從 NIC（DMA + AF_XDP）到 user space（io_uring + zero-copy）到應用程式（協議邏輯）的完整最佳化路徑圖。
 
 ---
