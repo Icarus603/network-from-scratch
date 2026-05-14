@@ -296,82 +296,82 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 > **深度準繩**：學完能讀懂任一篇 IACR ePrint 論文的 abstract 與 intro，能用 ProVerif 驗證自己設計的協議。
 
-### 3.1 密碼學的目標分類學
+### 3.1 密碼學的目標分類學 ✅
 機密性 / 完整性 / 認證 / 不可否認性 / 前向保密 / 後相容性。
 
-### 3.2 對稱加密：從 block cipher 到現代 AEAD
+### 3.2 對稱加密：從 block cipher 到現代 AEAD ✅
 - AES 的 Rijndael 設計、AES-NI 硬體加速
 - 模式：ECB（為什麼是死的）、CBC、CTR、GCM、CCM
 - ChaCha20 設計，為什麼軟體效能勝 AES
 - **論文**：Authenticated Encryption: Relations among Notions (Bellare, Namprempre 2000)
 
-### 3.3 雜湊函數
+### 3.3 雜湊函數 ✅
 - Merkle-Damgård 結構、長度延伸攻擊
 - SHA-2、SHA-3 (Keccak)、BLAKE2、BLAKE3
 - KDF：HKDF（RFC 5869）、Argon2、scrypt
 
-### 3.4 公鑰密碼學一：RSA
+### 3.4 公鑰密碼學一：RSA ✅
 - 數論基礎（剛好夠：歐拉定理、CRT）
 - RSA-OAEP / RSA-PSS、為什麼別用 textbook RSA
 - **論文**：Twenty Years of Attacks on the RSA Cryptosystem (Boneh 1999)
 
-### 3.5 公鑰密碼學二：橢圓曲線
+### 3.5 公鑰密碼學二：橢圓曲線 ✅
 - 群論到 ECDLP 的最短路徑
 - Curve25519、Ed25519、Ristretto255
 - **論文**：Curve25519: new Diffie-Hellman speed records (Bernstein 2006)
 
-### 3.6 金鑰交換協議
+### 3.6 金鑰交換協議 ✅
 - DH、ECDH、X25519
 - **三方金鑰交換**：MQV、HMQV、Triple DH
 - **論文**：The OPTLS Protocol and TLS 1.3 (Krawczyk, Wee 2015)
 
-### 3.7 數位簽章
+### 3.7 數位簽章 ✅
 - ECDSA / EdDSA 的細節差異（為什麼 ECDSA 對隨機數敏感）
 - Schnorr、BLS（聚合簽章）
 - 證書透明度（CT）為什麼重要
 
-### 3.8 Noise Protocol Framework 完整精讀
+### 3.8 Noise Protocol Framework 完整精讀 ✅
 - 命名規則（IK / XK / NK / IX / XX...）
 - 每個 pattern 的安全屬性
 - WireGuard 的 Noise IK + cookie reply
 - **論文**：The Noise Protocol Framework (Perrin 2018)
 
-### 3.9 PAKE：用密碼做金鑰交換
+### 3.9 PAKE：用密碼做金鑰交換 ✅
 - SRP、SPAKE2、OPAQUE
 - **對我們的意義**：能不能用 PAKE 設計「弱認證強保護」的協議
 
-### 3.10 零知識證明入門
+### 3.10 零知識證明入門 ✅
 - Sigma protocol、Schnorr identification
 - zk-SNARK / zk-STARK 概念
 - **對我們的意義**：未來協議能不能用 ZK 做匿名認證
 
-### 3.11 後量子密碼（PQC）
+### 3.11 後量子密碼（PQC）✅
 - ML-KEM (Kyber)、ML-DSA (Dilithium)、SLH-DSA (SPHINCS+)
 - TLS 1.3 hybrid X25519+Kyber 的部署現況（Cloudflare 2023~ 已部署）
 - **對我們的意義**：SOTA 協議要不要 PQ-ready
 
-### 3.12 隨機性
+### 3.12 隨機性 ✅
 - /dev/random vs /dev/urandom 的爭論
 - getrandom() 的勝利
 - 為什麼很多協議因為 PRNG 出包（Debian OpenSSL、Sony PS3）
 
-### 3.13 側信道攻擊概論
+### 3.13 側信道攻擊概論 ✅
 - Timing、cache、power、acoustic
 - constant-time programming（為什麼 `if (a == b)` 可能洩密）
 - **論文**：Lucky Thirteen: Breaking the TLS and DTLS Record Protocols
 
-### 3.14 現代密碼工程實踐
+### 3.14 現代密碼工程實踐 ✅
 - libsodium、ring、BoringSSL 的 API 哲學
 - 「不要自己寫密碼學」 vs 「我們就是要設計新協議」的張力如何處理
 - 必看：Cryptographic Right Answers (Latacora 2018)
 
-### 3.15 形式化驗證入門
+### 3.15 形式化驗證入門 ✅
 - ProVerif：基於 applied pi-calculus
 - Tamarin：基於 multiset rewriting
 - CryptoVerif：computational model
 - 第一次親手用 ProVerif 驗證一個簡單 KE 協議
 
-### 3.16 整合：設計協議的密碼學工具箱
+### 3.16 整合：設計協議的密碼學工具箱 ✅
 從前 15 堂的工具，整理成一張「設計新協議時你會選什麼」的決策樹。
 **這是 Phase I 密碼學的期末考。**
 

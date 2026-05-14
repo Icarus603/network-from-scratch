@@ -1428,3 +1428,705 @@
 **首次出現**：[5.8](lessons/part-5-formal-methods/5.8-spec-first-methodology.md)
 **一句話**：Cremers TLS 1.3 CCS 2017 best practice；spec prose 每段對 Tamarin rule / ProVerif process 一一對應；reviewer auditable; 我們協議 Part 11.10 採此模板。
 
+
+### IND-CPA / IND-CCA1 / IND-CCA2
+**中文**：選擇明文 / 選擇密文（非適應性 / 適應性）攻擊下的不可區分性
+**所屬層**：密碼學安全定義
+**首次出現**：[3.1 — 密碼學的目標分類學](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：對手能挑明文（CPA）或密文（CCA）並查 oracle，仍無法在兩個等長明文間區分密文對應哪一個；現代加密最低門檻是 IND-CCA2，G6 record layer 必須達成。
+
+### EUF-CMA / sUF-CMA
+**中文**：Existential / Strong Unforgeability under Chosen-Message Attack
+**所屬層**：密碼學安全定義（簽章 / MAC）
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：對手在 adaptively 查 signing oracle 後仍無法產生新訊息（EUF）或新對 (m, σ)（sUF）的有效簽章；GMR 1988 給出原始定義；G6 用 Ed25519 達成 sUF-CMA。
+
+### AEAD (Authenticated Encryption with Associated Data)
+**中文**：帶附加資料的認證加密
+**所屬層**：對稱加密 primitive
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：合機密 (IND-CCA2) + 完整 (INT-CTXT) 為一原語；現代協議 record layer 標配；ChaCha20-Poly1305、AES-GCM 是 G6 候選。
+
+### INT-PTXT / INT-CTXT
+**中文**：明文 / 密文完整性
+**所屬層**：密碼學安全定義
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：INT-PTXT 防止對手讓 Dec 接受對應新明文的密文；INT-CTXT 進一步禁止任何新密文（即使對應舊明文）；現代 AEAD 必達 INT-CTXT。
+
+### Forward Secrecy (FS / PFS)
+**中文**：前向保密
+**所屬層**：AKE 安全屬性
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Diffie 1976 萌芽；DOW 1992 正式化）
+**一句話**：長期金鑰 t 時刻外洩，**早於** t 完成的 session 仍安全；G6 必達，由 ephemeral X25519 達成。
+
+### PCS (Post-Compromise Security)
+**中文**：後折損安全性
+**所屬層**：AKE 安全屬性
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Cohn-Gordon-Cremers-Garratt CSF 2016）
+**一句話**：t 時刻長期金鑰外洩 + 對手之後離開／無持續 active，**晚於** t 的 session 重新安全；Signal Double Ratchet 是代表；G6 用 per-N-record DH ratchet 達成粗粒度版。
+
+### KCI Resistance (Key Compromise Impersonation)
+**中文**：金鑰折損冒充抗性
+**所屬層**：AKE 安全屬性
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：A 的 LTK 被偷後，對手仍**不能假冒 B 對 A 講話**；plain DH 沒這屬性，SIGMA-I（Krawczyk 2003）有；G6 用 SIGMA-I 結構達成。
+
+### UKS (Unknown Key Share)
+**中文**：未知金鑰共享攻擊
+**所屬層**：AKE 攻擊類別
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：A 與 B 完成 handshake 並對共享 key 一致，但雙方註冊的對方身份不一致；STS 1992 有此 bug，SIGMA 用 MAC 綁 identity 修補；G6 transcript 必含雙方 ID。
+
+### SIGMA / SIGMA-I
+**中文**：SIGn-and-MAc 結構的認證 DH
+**所屬層**：AKE 設計範式
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Krawczyk CRYPTO 2003）
+**一句話**：簽 ephemeral DH share + MAC 綁 identity；TLS 1.3、IKEv2、Noise IK 的學術根基；G6 採用其 identity protection (SIGMA-I) 變體。
+
+### Dolev-Yao Model
+**中文**：Dolev-Yao 對手模型
+**所屬層**：protocol verification 抽象
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Dolev-Yao IEEE TIT 1983）
+**一句話**：對手控制整個網路（讀寫刪重排注入）但不能破密碼學原語；ProVerif、Tamarin、Scyther 等所有 symbolic verifier 的根基。
+
+### Random Oracle Model (ROM)
+**中文**：隨機 oracle 模型
+**所屬層**：密碼學證明 model
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Bellare-Rogaway CCS 1993）
+**一句話**：把 hash function 當 truly random function 證明；Canetti-Goldreich-Halevi 1998 證明 ROM 不嚴格 sound 但實務上仍是 standard heuristic；G6 證明盡量 standard model。
+
+### Replay Resistance
+**中文**：重放抗性
+**所屬層**：protocol-level 安全屬性
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
+**一句話**：對手錄下訊息事後重送會被拒；通常用 sequence counter 嵌入 AEAD nonce + receiver window 達成；0-RTT 是著名例外。
+
+### CK / eCK Model
+**中文**：Canetti-Krawczyk / extended CK 模型
+**所屬層**：AKE 安全 model
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Canetti-Krawczyk EUROCRYPT 2001 / LaMacchia-Lauter-Mityagin 2007）
+**一句話**：定義 AKE 中對手能查哪些 oracle（session-key、ephemeral、long-term）；G6 spec 必須宣告其證明採用哪個 model。
+
+### Concrete Security
+**中文**：具體安全性
+**所屬層**：密碼學定義範式
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（BDJR FOCS 1997）
+**一句話**：把 asymptotic「negligible」改為 explicit `Adv ≤ q²/2^n` 形式；現代 RFC（如 RFC 8446 Appendix E）寫法的根基；G6 spec 必含 concrete bound。
+
+### AES / Rijndael
+**中文**：高級加密標準 / Rijndael 演算法
+**所屬層**：對稱 block cipher
+**首次出現**：[3.2 對稱加密](lessons/part-3-cryptography/3.2-symmetric-aead.md)
+**一句話**：Daemen-Rijmen 1998 設計，1997-2000 NIST 競賽勝出，FIPS 197 (2001) 標準化；128-bit block，128/192/256-bit key；G6 在硬體加速場景用 AES-256-GCM。
+
+### AES-NI / PCLMULQDQ
+**中文**：AES 硬體指令集 / Carryless multiply
+**所屬層**：CPU 指令集 / 硬體加速
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Intel 2008 Westmere 起；ARMv8 對應 AES + PMULL）
+**一句話**：把 AES round 與 GHASH GF(2^128) 乘法降到 1 cycle/op；單核 80 Gbps line-rate AES-GCM 的物理基礎；G6 hardware-fast path 必依賴。
+
+### ChaCha20
+**中文**：Bernstein 設計的 ARX stream cipher
+**所屬層**：對稱加密
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bernstein 2008，Salsa20 改良）
+**一句話**：256-bit key、20-round ARX 設計，無 S-box 天然 constant-time，軟體效能 ~1.5 c/b (SIMD)；RFC 8439 標準化；G6 預設 cipher。
+
+### Poly1305
+**中文**：Z_p (p=2^130-5) 多項式評估 MAC
+**所屬層**：對稱 MAC
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bernstein FSE 2005）
+**一句話**：Carter-Wegman ε-AXU MAC + one-time mask；ε ≤ 8L/2^106；常與 ChaCha20 配對成 RFC 8439 AEAD。
+
+### AEAD modes (GCM / CCM / OCB / GCM-SIV)
+**中文**：AEAD 模式族
+**所屬層**：對稱加密 mode
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)
+**一句話**：GCM = CTR + GHASH（最普及）；CCM = CTR + CBC-MAC（IoT）；OCB3 = single-pass tweakable（最快但 IPR 歷史拖累）；GCM-SIV = misuse-resistant；G6 default ChaCha20-Poly1305 + AES-GCM HW fallback + GCM-SIV for 0-RTT。
+
+### Forbidden Attack
+**中文**：GCM nonce 重用 → recover GHASH H 攻擊
+**所屬層**：對稱加密 cryptanalysis
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Joux 2006 NIST comment）
+**一句話**：同 (key, IV) 兩 message → 多項式系統 → recover H = AES_K(0) → 完全打破 INT-CTXT；TLS 1.3 nonce 構造規則的源頭；G6 用 deterministic counter 結構避免。
+
+### Carter-Wegman / ε-AXU
+**中文**：Universal hash + one-time pad → MAC 範式
+**所屬層**：MAC 設計理論
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Carter-Wegman JCSS 1979/1981）
+**一句話**：universal hash family + 每 message 新 nonce derived key → provably secure MAC，可平行；Poly1305、GHASH、UMAC 都是此範式。
+
+### ECB Penguin
+**中文**：ECB 模式 deterministic 災難可視化
+**所屬層**：對稱加密 mode 教訓
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)
+**一句話**：ECB 對相同 plaintext block 給相同 ciphertext block；用 Tux 圖加密後 outline 仍清晰可見；ECB 連 IND-CPA 都做不到，現代 spec 全禁。
+
+### Cache-timing Attack
+**中文**：cache 行為差異洩 secret
+**所屬層**：side-channel
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bernstein 2005 cache-timing on AES T-table）
+**一句話**：T-table-based AES 軟體實作 cache 行為依賴 plaintext，遠程觀察可 recover key；G6 禁用 T-table impl，必用 AES-NI 或 bitsliced。
+
+### Multi-User Security
+**中文**：多使用者安全模型
+**所屬層**：密碼學安全模型
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bellare-Tackmann CRYPTO 2016）
+**一句話**：μ users 各自有 key；對手對任一 user 的 advantage 算總；GCM bound 在 μ × q × ℓ ≤ 2^60 大致 secure；G6 spec 必含 multi-user analysis。
+
+### Misuse-Resistant AE (MRAE) / SIV
+**中文**：抗誤用認證加密 / Synthetic IV
+**所屬層**：AEAD 設計範式
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Rogaway-Shrimpton EUROCRYPT 2006）
+**一句話**：nonce 重用只洩 message equality，不洩 key；GCM-SIV (RFC 8452) 是 deployment；G6 0-RTT data 用此防護。
+
+### Merkle-Damgård Construction
+**中文**：Merkle-Damgård 雜湊結構
+**所屬層**：hash function 設計範式
+**首次出現**：[3.3 雜湊函數](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Merkle 1979 / Damgård 1989）
+**一句話**：把任意長 input 切 block 用 fixed-size compression function 迭代；SHA-2 family 用此；致命 length-extension vulnerability。
+
+### Length-Extension Attack
+**中文**：長度延伸攻擊
+**所屬層**：hash function 缺陷
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)
+**一句話**：給 H(M)，無需知 M 即可算 H(M ‖ pad ‖ X)；Flickr 2009 真實災難；HMAC 為主修補。
+
+### Sponge Construction / Keccak / SHA-3
+**中文**：海綿構造 / Keccak 演算法 / SHA-3 標準
+**所屬層**：hash function 範式
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Bertoni-Daemen-Peeters-Van Assche 2011；FIPS 202 2015）
+**一句話**：state = rate + capacity，capacity 永不外露 → 天然無 length-extension；SHA-3 / SHAKE / Ascon 都是 sponge。
+
+### HMAC
+**中文**：Hash-based Message Authentication Code
+**所屬層**：MAC 構造
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Bellare-Canetti-Krawczyk CRYPTO 1996, RFC 2104）
+**一句話**：`HMAC = H(K' ⊕ opad ‖ H(K' ⊕ ipad ‖ m))`；防 length-extension 的 nested 結構；G6 KDF 與 transcript bind 全用 HMAC-SHA-256。
+
+### HKDF (Extract-then-Expand)
+**中文**：兩段式金鑰派生
+**所屬層**：KDF 設計
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Krawczyk CRYPTO 2010, RFC 5869）
+**一句話**：Extract 把 high-entropy biased input → uniform PRK；Expand 把 PRK + info → arbitrary-length keystream；TLS 1.3 / Noise / Signal / WireGuard 共同 KDF。
+
+### BLAKE2 / BLAKE3
+**中文**：ARX-based 現代雜湊家族
+**所屬層**：hash function
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)
+**一句話**：BLAKE2 (Aumasson 2013, RFC 7693) ~3 c/b、WireGuard 用；BLAKE3 (2020) 加 Merkle tree + SIMD 達 ~0.5 c/b；G6 hash agility 候選。
+
+### Argon2 (i / d / id)
+**中文**：Memory-hard 密碼雜湊
+**所屬層**：password hashing
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Biryukov-Dinu-Khovratovich EuroS&P 2016）
+**一句話**：PHC 2015 winner；OWASP/NIST 推薦 Argon2id；G6 PSK-from-passphrase 模式必用。
+
+### scrypt
+**中文**：第一代 sequential memory-hard KDF
+**所屬層**：password hashing / KDF
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Percival BSDCan 2009, RFC 7914）
+**一句話**：用大記憶體 sequential operation 對抗 GPU/ASIC 暴力；後被 Argon2 超越。
+
+### Memory-Hard Function (MHF)
+**中文**：記憶體硬函數
+**所屬層**：密碼設計範式
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)
+**一句話**：computing function 需大量 memory，attacker 用 GPU/ASIC 平行優勢失效；TA-product 是衡量指標。
+
+### SHAttered
+**中文**：第一個實際 SHA-1 collision
+**所屬層**：hash cryptanalysis
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Stevens 等 CRYPTO 2017）
+**一句話**：~$110k cloud cost 算出兩 PDF 同 SHA-1；2017 後 SHA-1 完全棄用；G6 強制 SHA-256+。
+
+### Random Oracle (Indifferentiability)
+**中文**：隨機 oracle 不可區分性
+**所屬層**：hash function security model
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Maurer-Renner-Holenstein TCC 2004）
+**一句話**：sponge 構造在 PRP 假設下與 RO indifferentiable；MD construction 不是；指導 G6 hash 選擇。
+
+### RSA Problem / FACT
+**中文**：RSA 問題 / 整數分解問題
+**所屬層**：computational hardness assumption
+**首次出現**：[3.4 公鑰密碼學一：RSA](lessons/part-3-cryptography/3.4-rsa.md)（Rivest-Shamir-Adleman CACM 1978）
+**一句話**：給 (N, e, c)，計算 m = c^d；安全性 anchor 在 N 的 factorization；Shor 1994 量子可解。
+
+### RSA-OAEP / RSA-PSS
+**中文**：RSA 加密 / 簽章的安全 padding
+**所屬層**：公鑰密碼 padding scheme
+**首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)（Bellare-Rogaway EUROCRYPT 1994 / 1996, PKCS#1 v2）
+**一句話**：OAEP 給 IND-CCA2 RSA encryption；PSS 給 EUF-CMA RSA signature with tight reduction；PKCS#1 v1.5 完全棄用。
+
+### Bleichenbacher Padding Oracle
+**中文**：Bleichenbacher padding oracle 攻擊
+**所屬層**：protocol-level attack
+**首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)（Bleichenbacher CRYPTO 1998）
+**一句話**：PKCS#1 v1.5 padding 錯誤回應作 oracle，~10^6 queries 解 plaintext；ROBOT 2018 證明 20 年後仍在 wild；G6 從不依賴任何 server-side validation 差異化回應。
+
+### Coppersmith's Method
+**中文**：Coppersmith 多項式小根尋找法
+**所屬層**：lattice-based cryptanalysis
+**首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)（Coppersmith EUROCRYPT 1996）
+**一句話**：給 polynomial mod n of degree d，找 |x| < n^(1/d) 的所有 root；對 RSA small e / partial-known plaintext 攻擊的基礎。
+
+### Wiener Attack / Boneh-Durfee
+**中文**：RSA 小私鑰攻擊
+**所屬層**：RSA cryptanalysis
+**首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)
+**一句話**：Wiener 1990 d < n^(1/4)；Boneh-Durfee 1999 d < n^0.292；現代 RSA 強制 random d, 此攻擊不適用但 spec validator 要 check。
+
+### RSA Blinding
+**中文**：RSA 盲化
+**所屬層**：side-channel defense
+**首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)（Kocher 1996）
+**一句話**：解密前 multiply by random r^e，解密後 multiply by r^-1；防 timing / power side-channel；現代 RSA 實作 mandatory。
+
+### ECDLP (Elliptic Curve Discrete Logarithm Problem)
+**中文**：橢圓曲線離散對數問題
+**所屬層**：computational hardness
+**首次出現**：[3.5 ECC](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Miller 1985 / Koblitz 1987）
+**一句話**：給 P, Q=nP，找 n；best classical attack Pollard's rho O(√n)；256-bit curve → 128-bit security；Shor 量子可解。
+
+### Curve25519 / X25519
+**中文**：Bernstein 設計的 ECC 曲線 / 對應 ECDH
+**所屬層**：橢圓曲線
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein PKC 2006；RFC 7748）
+**一句話**：prime 2^255-19 + Montgomery form；128-bit security；32-byte pk；clamping + Montgomery ladder 給 constant-time；G6 key exchange 必選。
+
+### Ed25519 / EdDSA
+**中文**：Edwards-curve digital signature
+**所屬層**：數位簽章
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein 等 CHES 2011；RFC 8032）
+**一句話**：Schnorr-style + deterministic nonce + sUF-CMA + 64-byte sig + ~50k cycle sign；徹底取代 ECDSA 於 modern protocol；G6 簽章用此。
+
+### Edwards Curve / Twisted Edwards
+**中文**：Edwards 形式橢圓曲線
+**所屬層**：橢圓曲線 representation
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Edwards 2007 / Bernstein-Lange 2007 generalized）
+**一句話**：a x² + y² = 1 + d x² y²；unified complete addition formula → constant-time impl 容易；edwards25519 / curve448 採用。
+
+### Montgomery Ladder
+**中文**：Montgomery 階梯
+**所屬層**：scalar multiplication algorithm
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)
+**一句話**：每 iteration 一個 add + 一個 double；operation count 固定不依賴 scalar bits；X25519 標準 algorithm。
+
+### Clamping
+**中文**：scalar 截位
+**所屬層**：X25519 設計 trick
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)
+**一句話**：清低 3 bit (eliminate cofactor) + 設 bit 254 (fixed ladder length) + 清高 bit (in scalar field)；單一操作防三類攻擊。
+
+### Cofactor / Ristretto255
+**中文**：cofactor / Ristretto255 商群
+**所屬層**：橢圓曲線 group structure
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Hamburg CRYPTO 2015 Decaf；Ristretto255 IETF draft）
+**一句話**：cofactor 8 在 Edwards25519 帶來 protocol 陷阱；Ristretto255 商 quotient out 形成 prime-order group；G6 advanced protocol 用此。
+
+### SafeCurves
+**中文**：橢圓曲線安全評估標準
+**所屬層**：ECC curve selection
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein-Lange 2014+）
+**一句話**：九項 curve safety criteria；Curve25519 全綠，NIST P-curves 多項紅；G6 選 curve 必須 SafeCurves 全綠。
+
+### Elligator
+**中文**：曲線點 ↔ 隨機 byte 雙射
+**所屬層**：ECC point encoding
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein-Hamburg-Krasnova-Lange 2013）
+**一句話**：把 curve point map 成 indistinguishable-from-random 32 byte；G6 cover-traffic 用於把 ephemeral pk 偽裝為 random padding。
+
+### Signature Malleability
+**中文**：簽章可變形性
+**所屬層**：signature security
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)
+**一句話**：給 valid (M, σ) 找 σ' ≠ σ 也 valid；ECDSA (r, s) ↔ (r, -s) 有此問題；Ed25519 deterministic 設計免疫；Bitcoin BIP-66 enforce low-s 修補。
+
+### Schnorr Signature
+**中文**：Schnorr 簽章
+**所屬層**：signature scheme family
+**首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Schnorr 1989）
+**一句話**：R = rG; c = H(R, A, M); s = r + c·sk; 短 + tight EUF-CMA reduction；Ed25519 是 deterministic Schnorr。
+
+### MQV / HMQV
+**中文**：implicit-authentication DH protocol family
+**所屬層**：AKE
+**首次出現**：[3.6 金鑰交換協議](lessons/part-3-cryptography/3.6-key-exchange.md)（MQV 1995；HMQV CRYPTO 2005）
+**一句話**：結合 long-term + ephemeral key 直接 compute shared secret 達 implicit auth；HMQV 給 CK model formal proof；G6 不選（偏 SIGMA-I 結構）。
+
+### X3DH (Extended Triple DH)
+**中文**：擴展三重 DH
+**所屬層**：asynchronous AKE
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Marlinspike-Perrin 2016, Signal whitepaper）
+**一句話**：4-DH combine (IK + SPK + EK + OPK) → asynchronous auth + FS + PCS seed；Signal/WhatsApp 部署；G6 借鑑 multi-DH combine 思想。
+
+### Noise Protocol Framework
+**中文**：Noise 協議框架
+**所屬層**：AKE design framework
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Perrin 2016, rev 34 2018）
+**一句話**：用 (e, s, ee, es, se, ss, psk) DSL 描述握手 pattern；WireGuard (Noise IK)、Lightning Network 等採用；G6 採用 Noise IK 變體。
+
+### Static / Ephemeral Key Combination
+**中文**：靜態 / 短暫金鑰組合
+**所屬層**：AKE 設計
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)
+**一句話**：static-static DH 認證 identity；ephemeral-ephemeral DH 給 FS；混合給 mutual auth + FS + KCI；G6 hybrid。
+
+### Logjam / Downgrade Attack
+**中文**：Logjam 降級攻擊
+**所屬層**：protocol-level attack
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Adrian 等 CCS 2015）
+**一句話**：MitM 降級 TLS 到 512-bit DHE_EXPORT，用 pre-computed NFS table 即時解 DH；G6 設計教訓——hard-code cipher, no negotiation。
+
+### Selfie Attack
+**中文**：自我攻擊
+**所屬層**：multi-device AKE 缺陷
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Cremers 等 2019 on Signal X3DH）
+**一句話**：multi-device 同 user 場景下，attacker 讓 device 跟自己對話；修補：identifier binding into transcript / KDF info。
+
+### Forking Lemma
+**中文**：分叉引理
+**所屬層**：signature security proof
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Pointcheval-Stern 1996）
+**一句話**：對 Schnorr-style signature 的 ROM-based EUF-CMA reduction 核心 technique；通過 rewinding adversary 兩次提取 sk；Ed25519 / ECDSA / BLS 證明均用此。
+
+### BLS Signature
+**中文**：Boneh-Lynn-Shacham 配對簽章
+**所屬層**：pairing-based signature
+**首次出現**：[3.7 數位簽章](lessons/part-3-cryptography/3.7-digital-signatures.md)（Boneh-Lynn-Shacham ASIACRYPT 2001）
+**一句話**：σ = sk · HashToCurve(M)；verify 用 bilinear pairing；signature 短 + 天然 aggregation；Ethereum 2.0、Filecoin 部署；G6 不直接用但 future group mode 候選。
+
+### Fiat-Shamir Heuristic
+**中文**：Fiat-Shamir 轉換
+**所屬層**：signature design technique
+**首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)（Fiat-Shamir CRYPTO 1986）
+**一句話**：把 interactive identification protocol 透過 hash challenge 變 non-interactive signature；Schnorr / Ed25519 / Dilithium 全用此。
+
+### MuSig / MuSig2 / FROST
+**中文**：多方 Schnorr 簽章方案
+**所屬層**：multi-party signature
+**首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)
+**一句話**：MuSig (Maxwell 等 2018) n-of-n key aggregation；MuSig2 (Nick 等 2020) 兩輪；FROST (Komlo-Goldberg 2020) t-of-n threshold。
+
+### ECDSA Malleability / Low-S Normalization
+**中文**：ECDSA 簽章可變形性 / 低 s 規範化
+**所屬層**：ECDSA implementation defense
+**首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)
+**一句話**：(r, s) ↔ (r, -s mod n) 都 valid → malleability；Bitcoin BIP-66 enforce s ≤ n/2；G6 verify ECDSA 必加此 check。
+
+### Certificate Transparency (CT)
+**中文**：證書透明度
+**所屬層**：PKI accountability
+**首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)（Laurie RFC 6962 2013 / RFC 9162 2021）
+**一句話**：公開 append-only Merkle log 記錄所有 issued cert；CA 無法秘密發 cert；Chrome 2018+ 強制 SCT；G6 可借鑑做 update log。
+
+### Threshold Signature / DKG
+**中文**：門檻簽章 / 分散式金鑰生成
+**所屬層**：multi-party crypto
+**首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)
+**一句話**：t-of-n parties 才能簽；DKG (Pedersen 1991) 分散生成 key；BLS / Schnorr 變體；G6 future server key management 候選。
+
+### Noise Pattern DSL (NN/NK/NX/IK/XK/XX...)
+**中文**：Noise pattern 描述語言
+**所屬層**：AKE protocol DSL
+**首次出現**：[3.8 Noise](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)（Perrin 2018 rev 34）
+**一句話**：用 e/s/ee/es/se/ss/psk tokens 機械描述 handshake；12 個 fundamental patterns 涵蓋多數 AKE 場景。
+
+### Noise IK Pattern
+**中文**：Noise initiator-known pattern
+**所屬層**：Noise AKE
+**首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
+**一句話**：1-RTT, responder static pre-known, mutual auth, initiator identity encrypted；WireGuard 採用；G6 base pattern。
+
+### WireGuard MAC1 / MAC2 / Cookie Reply
+**中文**：WireGuard anti-DoS 機制
+**所屬層**：handshake DoS defense
+**首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)（Donenfeld NDSS 2017）
+**一句話**：MAC1 確認 client 知 server static pk；Cookie Reply 確認 client 是 routable IP；G6 借用此機制 + cover-traffic disguise。
+
+### Cryptokey Routing
+**中文**：金鑰路由
+**所屬層**：VPN routing model
+**首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
+**一句話**：peer 由 static pk 識別而非 IP；允許 roaming + 自動 endpoint update；WireGuard 標誌設計；G6 採用。
+
+### HandshakeState / SymmetricState / CipherState
+**中文**：Noise framework 三層 state machine
+**所屬層**：Noise 內部 abstraction
+**首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
+**一句話**：HandshakeState 管 ephemeral/static keys；SymmetricState 管 ck + h；CipherState 管 (k, n) AEAD state；G6 直接繼承。
+
+### PSK in Noise
+**中文**：Noise PSK 混入機制
+**所屬層**：post-quantum hybrid
+**首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
+**一句話**：MixKeyAndHash(psk) 把 PSK 混入 chaining key；out-of-band 安全分發 PSK → 即使 ECDH 被 Shor 破仍保密；G6 PQ 過渡用。
+
+### PAKE (Password-Authenticated Key Exchange)
+**中文**：密碼認證金鑰交換
+**所屬層**：AKE family
+**首次出現**：[3.9 PAKE](lessons/part-3-cryptography/3.9-pake.md)（Bellovin-Merritt EKE IEEE S&P 1992）
+**一句話**：使用者只有 password (~40-bit entropy) 仍能 secure KE；passive observer 不能 offline dictionary attack；G6 PSK-from-passphrase mode 用。
+
+### Balanced vs Augmented PAKE
+**中文**：對等 / 增強 PAKE
+**所屬層**：PAKE 分類
+**首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)
+**一句話**：balanced 雙方對等知 password (SPAKE2, EKE, CPace)；augmented server 只存 verifier (SRP, OPAQUE)；G6 用 augmented OPAQUE。
+
+### SPAKE2
+**中文**：Simple Password-based Encrypted Key Exchange
+**所屬層**：Balanced PAKE
+**首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)（Abdalla-Pointcheval CT-RSA 2005, RFC 9382 2023）
+**一句話**：用 magic constants M, N + password-derived scalar w 構造 balanced PAKE；簡單、無 patent；G6 antiDoS pre-handshake 候選。
+
+### OPAQUE
+**中文**：增強型 PAKE with pre-computation resistance
+**所屬層**：Augmented PAKE
+**首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)（Jarecki-Krawczyk-Xu EUROCRYPT 2018, RFC 9807 2025）
+**一句話**：OPRF + envelope + AKE 三段；server compromise 後仍須 online OPRF query 才能 brute-force；WhatsApp / 1Password 部署；G6 passphrase 模式必用。
+
+### OPRF (Oblivious PRF)
+**中文**：不可知 PRF
+**所屬層**：cryptographic primitive
+**首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)
+**一句話**：client 給 x server 回 F_k(x) but server 不學 x, client 不學 k；OPAQUE 核心；Privacy Pass / blind signature 也用。
+
+### Pre-computation Attack
+**中文**：預計算攻擊
+**所屬層**：PAKE / password storage attack
+**首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)
+**一句話**：攻陷 server 偷 verifier 後在自己 hardware 離線 brute-force；OPAQUE 從根本防範。
+
+### Zero-Knowledge Proof (ZK)
+**中文**：零知識證明
+**所屬層**：cryptographic primitive
+**首次出現**：[3.10 ZK](lessons/part-3-cryptography/3.10-zero-knowledge.md)（Goldwasser-Micali-Rackoff STOC 1985 / SICOMP 1989）
+**一句話**：P 可證 statement 為真且 V 學不到 witness 任何 information；Ed25519 是 NIZK Schnorr 的 special case；Zcash / StarkNet 等部署。
+
+### Sigma Protocol
+**中文**：Σ-協議（3-move 互動證明）
+**所屬層**：ZK protocol family
+**首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)
+**一句話**：(commit, challenge, response) three-move structure；HVZK + special soundness；Fiat-Shamir 可變 NIZK；Schnorr identification 是經典範例。
+
+### zk-SNARK / zk-STARK
+**中文**：簡潔 / 透明 ZK argument
+**所屬層**：modern ZK system
+**首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)（Groth16 EUROCRYPT 2016 / Ben-Sasson 等 2018）
+**一句話**：SNARK proof ~200 byte but trusted setup + pairing；STARK ~100 KB but transparent + PQ-safe；G6 future anonymous auth 候選。
+
+### Trusted Setup / CRS
+**中文**：可信設置 / 公開參考字串
+**所屬層**：ZK preprocessing
+**首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)
+**一句話**：Groth16 SNARK 需要 setup ceremony 生成 CRS，toxic waste 必須銷毀；Zcash 用 multi-party ceremony 確保 only need ONE honest participant。
+
+### Bulletproofs
+**中文**：bulletproofs ZK 證明
+**所屬層**：ZK protocol
+**首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)（Bünz 等 IEEE S&P 2018）
+**一句話**：無 trusted setup, short proofs (~700 byte for range)；Monero 部署；G6 confidential subscription 候選。
+
+### Shor's Algorithm
+**中文**：Shor 量子分解 / 離散對數演算法
+**所屬層**：quantum cryptanalysis
+**首次出現**：[3.11 後量子](lessons/part-3-cryptography/3.11-post-quantum.md)（Shor 1994 / SIAM J. Comp. 1997）
+**一句話**：量子電腦 polynomial time 解 FACT / DLP / ECDLP；殺死 RSA / DH / ECC；觸發 NIST PQ 競賽；G6 必 PQ hybrid。
+
+### Grover's Algorithm
+**中文**：Grover 量子搜索
+**所屬層**：quantum cryptanalysis
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（Grover STOC 1996）
+**一句話**：對稱 key search quadratic speedup O(2^n) → O(2^(n/2))；AES-256 quantum 仍 128-bit safe；AES-128 quantum 64-bit (不夠)。
+
+### ML-KEM (Kyber)
+**中文**：Module-Lattice-based KEM
+**所屬層**：post-quantum KEM
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 203 2024，原 CRYSTALS-Kyber）
+**一句話**：基於 Module-LWE problem；ML-KEM-768 = 1184-byte pk + 1088-byte ct + 110k cycles encap；G6 hybrid with X25519。
+
+### ML-DSA (Dilithium)
+**中文**：Module-Lattice-based signature
+**所屬層**：post-quantum signature
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 204 2024，原 CRYSTALS-Dilithium）
+**一句話**：lattice Fiat-Shamir with aborts；ML-DSA-65 = 1952-byte pk + 3293-byte sig + 700k cycles sign；G6 hybrid with Ed25519。
+
+### SLH-DSA (SPHINCS+)
+**中文**：Stateless Hash-based digital signature
+**所屬層**：post-quantum signature
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 205 2024，原 SPHINCS+）
+**一句話**：純 hash-based, multi-tree Merkle 結構; ~17 KB sig but 最 conservative 對未來 cryptanalysis；G6 root signing backup。
+
+### FN-DSA (Falcon)
+**中文**：NTRU-lattice signature
+**所屬層**：post-quantum signature
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
+**一句話**：~666-byte sig but floating-point impl 引入 side-channel risk；G6 不選 v1 default，future evaluate。
+
+### Hybrid PQ Mode
+**中文**：混合後量子模式
+**所屬層**：PQ deployment strategy
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
+**一句話**：classical + PQ concatenated; 任一 break 不致命；過渡期 standard practice。
+
+### Harvest Now Decrypt Later
+**中文**：先存後解
+**所屬層**：long-term threat model
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
+**一句話**：對手錄存今天加密流量，等未來量子電腦解開；對長壽 information critical；G6 hybrid 立即部署的核心動機。
+
+### SIKE Disaster
+**中文**：SIKE 災難（Castryck-Decru 2022）
+**所屬層**：PQ cryptanalysis
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
+**一句話**：~25 年 isogeny-based research SIKE 被 1 小時 laptop 破；教訓 G6 只用 NIST-standardized PQ。
+
+### CSPRNG (Cryptographically Secure PRNG)
+**中文**：密碼學安全的偽隨機數生成器
+**所屬層**：cryptographic primitive
+**首次出現**：[3.12 隨機性](lessons/part-3-cryptography/3.12-randomness.md)
+**一句話**：output 與 uniform distribution computationally indistinguishable；現代 Linux 用 ChaCha20-based；G6 必用 OS getrandom()。
+
+### getrandom() syscall
+**中文**：Linux/POSIX 安全隨機 syscall
+**所屬層**：OS interface
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（Linux 3.17 2014）
+**一句話**：block until entropy pool seeded then non-blocking secure random output；G6 mandatory entropy source。
+
+### Dual_EC_DRBG
+**中文**：NSA backdoored RNG 標準
+**所屬層**：cryptographic standard scandal
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（NIST SP 800-90A 2007, 撤回 2014）
+**一句話**：基於 ECC 的 DRBG with hard-coded constants P, Q；若 Q = c·P with known c, holder 可預測輸出；Snowden 2013 證實 NSA backdoor。
+
+### Nothing-Up-My-Sleeve Constants
+**中文**：無暗藏動機之常數
+**所屬層**：cryptographic design principle
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)
+**一句話**：spec 中常數必須來自 public verifiable process (SHA of well-known string)；Curve25519 / SHA-3 都符合；NIST P-curves seeds 仍 controversial。
+
+### Debian OpenSSL 2008 (Bug #363516)
+**中文**：Debian OpenSSL 弱 RNG 災難
+**所屬層**：RNG failure incident
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)
+**一句話**：Debian 修補 Valgrind warning 意外移除 OpenSSL entropy mixing；2006-2008 generated keys entropy 只 PID (~32k possible)；需 mass key rotation。
+
+### Heninger Ps-and-Qs / Lenstra Public Keys
+**中文**：嵌入式 device 弱 key 大規模調查
+**所屬層**：empirical security study
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（USENIX Security 2012 / CRYPTO 2012）
+**一句話**：~5% TLS hosts share keys / ~0.5% share RSA primes → GCD factor；root cause boot-time entropy deficit；G6 IoT 部署設計關鍵教訓。
+
+### Min-entropy / Leftover Hash Lemma
+**中文**：min-entropy / 剩餘哈希引理
+**所屬層**：cryptographic information theory
+**首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（Impagliazzo-Levin-Luby STOC 1989）
+**一句話**：universal hash 應用於 min-entropy source 可 extract uniform output；HKDF Extract step 的理論根據。
+
+### Side-Channel Attack (SCA)
+**中文**：側信道攻擊
+**所屬層**：implementation-level cryptanalysis
+**首次出現**：[3.13 側信道](lessons/part-3-cryptography/3.13-side-channels.md)（Kocher CRYPTO 1996）
+**一句話**：通過 timing / cache / power / EM 等 observable 推 secret；G6 implementation 必 constant-time。
+
+### Constant-Time Programming
+**中文**：恆時程式設計
+**所屬層**：cryptographic implementation discipline
+**首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)
+**一句話**：no secret-dependent branch / memory access / division；用 mask + bitwise ops 替代；G6 必驗證 via ctgrind/dudect。
+
+### Lucky Thirteen
+**中文**：Lucky 13 timing 攻擊
+**所屬層**：TLS protocol attack
+**首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（AlFardan-Paterson IEEE S&P 2013）
+**一句話**：TLS-CBC + HMAC server 處理 padding vs MAC error 時間差 ~13 cycles → padding oracle；驅動 TLS 1.3 AEAD-only。
+
+### Spectre / Meltdown
+**中文**：推測執行 microarchitectural 攻擊
+**所屬層**：CPU-level side-channel
+**首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（Kocher / Lipp 2018-2019）
+**一句話**：跨 security boundary 透過 speculative execution + cache side-channel 讀任意 memory；甚至 constant-time impl 不夠；G6 必加 lfence + speculative load hardening。
+
+### Hertzbleed
+**中文**：CPU 頻率時序洩漏
+**所屬層**：microarch side-channel
+**首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（Wang 等 USENIX Security 2022）
+**一句話**：CPU 動態頻率管理依賴計算內容 → remote timing leak 即使 constant-time impl；G6 推薦 disable Turbo Boost in production。
+
+### Flush+Reload / Prime+Probe
+**中文**：快取側信道技術
+**所屬層**：cache attack 範式
+**首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（Yarom-Falkner USENIX Security 2014）
+**一句話**：flush 特定 cache line, 等 victim 操作, reload + 測時間判 victim 是否 access 該 line；Spectre / Meltdown 利用此 building block。
+
+### NaCl Philosophy
+**中文**：NaCl 設計哲學
+**所屬層**：cryptographic library API design
+**首次出現**：[3.14 密碼工程](lessons/part-3-cryptography/3.14-crypto-engineering.md)（Bernstein 等 NaCl 2009 / LATINCRYPT 2012）
+**一句話**：Operations not algorithms / Hard to misuse / Constant-time inside / Hyperoptimized；libsodium / ring / monocypher 全繼承。
+
+### Cryptographic Right Answers
+**中文**：密碼學正確答案
+**所屬層**：modern crypto engineering survey
+**首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)（Latacora blog 2018）
+**一句話**：每 use case 給「單一正確選擇」（ChaCha20-Poly1305, HKDF-SHA-256, Argon2id, Ed25519, X25519...）；G6 全採。
+
+### libsodium / ring / BoringSSL
+**中文**：modern crypto library 三大主流
+**所屬層**：cryptographic library
+**首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
+**一句話**：libsodium (C, NaCl-compat) / ring (Rust, BoringSSL-derived) / BoringSSL (Google internal); G6 用 ring。
+
+### HACL* / EverCrypt
+**中文**：形式化驗證的密碼庫
+**所屬層**：verified crypto
+**首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)（Zinzindohoué 等 CCS 2017 / Bhargavan 等 IEEE S&P 2020）
+**一句話**：F* 語言 + Vale assembly 驗證 ChaCha20-Poly1305 / Curve25519 / Ed25519 等；性能 within 10-30% of hand-tuned；G6 future evaluate。
+
+### "Don't roll your own crypto"
+**中文**：別自製密碼學
+**所屬層**：crypto engineering principle
+**首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
+**一句話**：別實作 primitive (AES, SHA, ECC) 也別設計新 primitive；但 protocol composition 可設計 — G6 嚴格遵守此邊界。
+
+### Algorithm Agility / Crypto Agility
+**中文**：密碼學敏捷性
+**所屬層**：protocol design
+**首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
+**一句話**：太多 agility 引發 Logjam downgrade；太少難 PQ migrate；G6 採 version-based agility (no per-handshake negotiation)。
+
+### ProVerif
+**中文**：基於 applied pi-calculus 的 protocol verifier
+**所屬層**：formal verification tool
+**首次出現**：[3.15 形式化驗證](lessons/part-3-cryptography/3.15-formal-verification.md)（Blanchet CSFW 2001）
+**一句話**：把 protocol 翻譯為 Horn clauses + SLD resolution 自動證 secrecy / auth；TLS 1.3 / Noise / MLS / WireGuard 等 IETF spec verify 主工具；G6 Phase III 11.10 必用。
+
+### Tamarin
+**中文**：基於 multiset rewriting 的 protocol verifier
+**所屬層**：formal verification tool
+**首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Meier-Schmidt-Cremers-Basin CAV 2013）
+**一句話**：表達力強處理 stateful protocols (Signal ratchet, 5G AKA)；G6 ratchet / multi-device 部分用 Tamarin。
+
+### CryptoVerif
+**中文**：computational sound 的 protocol verifier
+**所屬層**：formal verification tool
+**首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Blanchet IEEE S&P 2008）
+**一句話**：在 computational model 透過 game transformation chain 證明；WireGuard handshake formal proof 用此；G6 handshake computational proof 用。
+
+### F* / miTLS / EverCrypt
+**中文**：implementation-level verification
+**所屬層**：verified implementation
+**首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)
+**一句話**：F\* 語言寫 cryptographic implementations + mechanised proof of functional correctness + side-channel resistance；Project Everest 整合。
+
+### Lowe's Needham-Schroeder Bug
+**中文**：Lowe 1995 對 NS protocol 的攻擊
+**所屬層**：protocol verification milestone
+**首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Lowe IPL 1995）
+**一句話**：1978 設計的 Needham-Schroeder 17 年後被 FDR model checker 找到 MitM bug；現代 protocol design 必 formal verify 教訓的源頭。
+
+### Noise Explorer
+**中文**：Noise pattern 自動驗證工具
+**所屬層**：automated formal verification
+**首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Kobeissi-Bhargavan-Beurdouche EuroS&P 2019）
+**一句話**：對所有 Noise patterns 自動 generate ProVerif models + verify 18 properties；G6 借用作 baseline。
