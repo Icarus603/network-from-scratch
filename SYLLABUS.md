@@ -187,31 +187,34 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 - IPv6 在翻牆場景的優劣（GFW IPv6 部署狀態）
 - **論文 / 規格**：RFC 8200 (IPv6 STD 86) / 4291 (addressing) / 6724 (default selection) / 8305 (Happy Eyeballs v2) / 7136 (IID significance) / 7872 (EH drop measurement) / 8981 + 7217 (privacy) / 4007 (scope) / Czyz 2014 SIGCOMM (adoption)
 
-### 1.14 DNS 完整解剖
+### 1.14 DNS 完整解剖 ✅
 - 報文格式逐 byte
 - 遞迴/迭代/權威、cache poisoning（Kaminsky 攻擊）
 - DNSSEC 為什麼失敗、為什麼 DoH/DoT/DoQ 取而代之
 - ECS（EDNS Client Subnet）對 CDN 與翻牆的雙刃影響
-- **論文**：Where The Wild Things Are: Brute-Force SSH Attacks ... (DNS measurement 系列)
+- **論文 / 規格**：RFC 1034/1035 (DNS) / 2308 (negative cache) / 6891 (EDNS) / 4033-4035 (DNSSEC) / 7858 (DoT) / 8484 (DoH) / 9250 (DoQ) / 7871 (ECS) / 9460 (SVCB/HTTPS RR) / 9462 (DDR) / 9463 (DHCP encrypted DNS) / Kaminsky 2008 / Chung 2017 / Lu 2019 IMC / Hoang 2021 USENIX Sec GFWatch / Hoang 2024 GFWeb / Klein 2020 NDSS
 
-### 1.15 BGP：「網際網路為什麼會塞」的根本原因
+### 1.15 BGP：「網際網路為什麼會塞」的根本原因 ✅
 - AS、Tier 1/2/3、IXP
-- BGP 路由洩漏與劫持（YouTube/Pakistan 事件、AS7007 事件）
-- **論文**：Investigating the Impact of DDoS Attacks on DNS Infrastructure
+- BGP 路由洩漏與劫持（YouTube/Pakistan 事件、AS7007 事件、China Telecom 2010、MyEtherWallet 2018、Facebook 2021、Cloudflare 2022）
+- **論文 / 規格**：RFC 4271 (BGP-4) / 4277 (experience) / 4760 (MP-BGP) / 4456 (RR) / 6480 + 6810/8210 (RPKI) / 8205 (BGPsec) / 7908 (route leak) / 9234 (BGP Roles) / Griffin-Wilfong 1999 / Mahajan 2002 / Sermpezis 2018 CCR / Demchak-Shavitt 2018 / Sun 2018 USENIX Sec (Bamboozling CA) / Pilosov-Kapela DEFCON 2008
 - 為什麼這對「中轉節點」「BGP 加速」這些機場行話有意義
 
-### 1.16 CDN 與 Anycast
+### 1.16 CDN 與 Anycast ✅
 - Anycast 怎麼工作、CDN 的選路邏輯
 - Cloudflare 的 IP 段、為什麼 CF Workers 能當免費中轉
-- **論文**：A First Look at Modern Enterprise Traffic (IMC)
+- iCloud Private Relay 的兩跳 trust split 架構
+- **論文**：Fifield 2015 PoPETs (domain fronting) / Calder 2015 IMC (anycast CDN) / Calder 2013 IMC (Google infra) / Calder 2018 NSDI (Odin) / Wei-Heidemann 2020 CoNEXT / Bocovich-Goldberg 2016 CCS Slitheen / 2019 CCS Conjure
 
-### 1.17 把所有東西串起來：「點開 google.com 的 50 ms」
-真實 packet capture 的 frame-by-frame 講解：從 ARP 到 DNS 到 TCP+TLS 到 HTTP 到渲染。
+### 1.17 把所有東西串起來：「點開 google.com 的 50 ms」 ✅
+真實 packet capture 的 frame-by-frame 講解：從 ARP/DHCP 到 DoH 到 QUIC+TLS 1.3+ECH 到 HTTP/3 到渲染；對應 G6 client boot sequence 的 architectural reference。
 
-### 1.18 Linux 網路 stack 巡禮
+### 1.18 Linux 網路 stack 巡禮 ✅
 - skbuff 結構、netfilter hooks、qdisc、TC
 - 一個封包從 NIC 到 socket 的完整路徑（圖 + 對應原始碼檔案）
-- **原始碼**：Linux `net/core/dev.c`、`net/ipv4/ip_input.c`、`net/ipv4/tcp_ipv4.c`
+- nftables vs iptables vs eBPF / TC qdisc (fq/fq_codel/cake) / XDP / AF_XDP
+- **原始碼**：Linux `net/core/dev.c`、`net/ipv4/ip_input.c`、`net/ipv4/tcp_ipv4.c`、`net/sched/`、`kernel/bpf/`
+- **論文 / 文檔**：Linux Foundation Kernel Flow / kernel.org skbuff / Stephan-Wüstrich 2024 TUM / Høiland-Jørgensen 2018 CoNEXT XDP / Axboe 2019 io_uring whitepaper / Marinos 2014 SIGCOMM Network Stack Specialization
 
 ---
 

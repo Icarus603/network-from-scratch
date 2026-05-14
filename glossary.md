@@ -515,6 +515,162 @@
 **首次出現**：[1.13](lessons/part-1-networking/1.13-ipv6-anatomy.md)
 **一句話**：Czyz et al. SIGCOMM 2014——12 metrics + 10 datasets；IPv6 prefix 2004-2014 增 37×、traffic 年增 400%；2024 update：全球 ~45% user IPv6 capable，India 75%；G6 dual-stack mandatory。
 
+### DNS (RFC 1034/1035) + Resource Records
+**中文**：域名系統與資源記錄
+**所屬層**：L7 application protocol
+**首次出現**：[1.14 DNS 完整解剖](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：Mockapetris 1987 奠基；4-section 報文（Header/Question/Answer/Authority/Additional）；典型 RR 種類 A/AAAA/CNAME/MX/TXT/NS/SOA/SRV/CAA/HTTPS(RFC 9460)/SVCB；現代 HTTPS RR 整合 ALPN+IP hint+ECH config。
+
+### Kaminsky 2008 DNS Cache Poisoning + RFC 5452
+**中文**：Kaminsky 快取污染
+**所屬層**：DNS attack + mitigation
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：2008 Kaminsky 發現用 random subdomain query 觸發 outgoing → 注 forged response 含 NS pointing to attacker；RFC 5452 用 source port randomization 把 entropy 從 16-bit 推到 32-bit 解；2020 fragmentation reload 復活該攻擊。
+
+### DNSSEC (RFC 4033-4035) — Failed Standard
+**中文**：DNS 安全擴展（失敗）
+**所屬層**：DNS authentication
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：對 RR 簽章配 zone key + DS chain of trust；理論完美但 deployment ~5-15%、resolver validation ~1-3%；複雜性 + NSEC enumeration + algorithm rollover 痛 + errors 比 unprotected 更糟；G6 不依賴。
+
+### DoT / DoH / DoQ (RFC 7858 / 8484 / 9250)
+**中文**：加密 DNS 三件套
+**所屬層**：DNS transport security
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：DoT (TLS over TCP/853, 2016) / DoH (HTTPS, 2018, port 443 與 HTTPS 混合難 block) / DoQ (QUIC, dedicated UDP/853, 2022, 0-RTT 快但同 DoT 易 selective block)；G6 bootstrap：DoH > DoQ > 預配 IP。
+
+### ECS (EDNS Client Subnet, RFC 7871)
+**中文**：EDNS 客戶端子網
+**所屬層**：DNS EDNS option
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：resolver 把 client subnet (/24 IPv4 或 /48 IPv6) 透過 EDNS 傳給 authoritative，使 CDN 選 edge IP 對 client geo 友善；隱私洩漏 client geographic location；Cloudflare 不傳 by default。
+
+### ECH (Encrypted Client Hello) + HTTPS RR (RFC 9460)
+**中文**：加密 ClientHello + HTTPS 記錄
+**所屬層**：TLS + DNS
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：HTTPS RR (type 65) 在 DNS 階段同傳 ALPN/IP hint/ECH config；ECH 把 ClientHello 內 SNI 加密；2024+ GFW 對 ECH 部分 selective drop；G6 publish HTTPS RR 是 mandatory，但需 ECH-less fallback。
+
+### Hoang 2021 GFWatch — GFW DNS Censorship Measurement
+**中文**：GFW DNS 審查量測
+**所屬層**：censorship measurement
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)；[1.6 ICMP](lessons/part-1-networking/1.6-icmp-deep.md) reference
+**一句話**：Hoang et al. USENIX Sec 2021——411M domain/day × 9 月發現 311K 受審查域名、3 個 injector（Injector 2 負責 99%）、11 組 forged IP、41K 無辜 overblocking、77K 受 public resolver spillover；G6 server domain 命名與 client bootstrap 直接依此設計。
+
+### DDR (RFC 9462) + Encrypted DNS Discovery
+**中文**：發現指定解析器
+**所屬層**：DNS auto-config
+**首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
+**一句話**：client 啟動時用 plain DNS resolver IP 查 `_dns.resolver.arpa.` SVCB → 拿到該 resolver 的 DoH/DoT/DoQ endpoint；對應 RFC 9463 透過 DHCP/RA option 推 encrypted DNS endpoint；G6 client opportunistic 採用。
+
+### Tier 1/2/3 ISP + IXP
+**中文**：ISP 分層與 IXP
+**所屬層**：BGP economics
+**首次出現**：[1.15 BGP](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：Tier 1 不付任何人 transit（settlement-free peering 即可全球可達，~15-20 個如 AT&T/Telia/NTT/Tata）；Tier 2 部分付；Tier 3 全付 transit；IXP（DE-CIX/AMS-IX/LINX/HKIX 等）為多 AS 互換流量物理 location。
+
+### BGP Best Path Selection (13 steps)
+**中文**：BGP 最佳路徑選擇
+**所屬層**：L3 control
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：RFC 4271 §9.1 13 步決策——validity → WEIGHT → LOCAL_PREF → 本地起源 → AS_PATH 短 → ORIGIN 低 → MED 低 → eBGP > iBGP → IGP cost → 老/router ID/neighbor IP tiebreaker；LOCAL_PREF 是 AS-wide policy 工具。
+
+### BGP Path Attributes (LOCAL_PREF / AS_PATH / MED / COMMUNITY)
+**中文**：BGP 路徑屬性
+**所屬層**：L3 BGP
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：LOCAL_PREF 為 AS-wide outbound policy（最高勝、override AS_PATH）；AS_PATH prepending 是常用 traffic engineering 但 APNIC 警告勿 > 5；COMMUNITY 是 32-bit tag（無正式語意，ISP 之間 convention）。
+
+### China Telecom 2010 BGP Hijack
+**中文**：中國電信 2010 BGP 劫持
+**所屬層**：BGP incident
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：2010-04-08 AS23724 誤 announce ~37K prefix（含 .gov/.mil/Dell/CNN 等）18 分鐘，15% 全球 traffic 被 redirect；意外 vs 故意至今未定論；推動 RPKI 加速部署。
+
+### CN2 GIA / 「BGP 加速」/ 中轉節點
+**中文**：中國電信優質國際線路與機場行話
+**所屬層**：BGP economics + traffic engineering
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：CN2 GIA (AS4809) 是 China Telecom 商業優質國際線路（價格 $$$ × ChinaNet）；「BGP 加速 / 中轉節點」實際是「**機房選 transit + 在合適 AS 加 relay VPS**」，無神奇技術；G6 server 部署應選 IXP-rich 城市 + 對中峰值優化 transit。
+
+### Griffin-Wilfong 1999 BGP Non-Convergence
+**中文**：BGP 不收斂性
+**所屬層**：distributed system theory
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：SIGCOMM 1999 證明 BGP 在 expressive policy 下動態系統可能不收斂、永久 oscillation；對 G6 control plane 反面教訓——不要設計可表達任意 policy 的 protocol，採 Raft/Paxos 等 proven algorithm。
+
+### BGPsec (RFC 8205) — Failed Standard
+**中文**：BGPsec 失敗標準
+**所屬層**：BGP security
+**首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
+**一句話**：每 AS 對 AS_PATH 加 signature 達 path integrity；signature 巨大化 + CPU/memory cost + algorithm rollover 痛使 deployment ~0%；RPKI ROA 仍是部分解。
+
+### Anycast (CDN)
+**中文**：任播
+**所屬層**：BGP + routing
+**首次出現**：[1.16 CDN/Anycast](lessons/part-1-networking/1.16-cdn-anycast.md)
+**一句話**：同一 IP prefix 從多個物理 POP 同時 BGP announce，BGP best-path 自動把 client 導到最近；Cloudflare/Bing/Google DNS 用；Calder 2015 IMC 量測 80% client geo-optimal、20% sub-optimal；G6 baseline 不採用（一封全封）。
+
+### Domain Fronting (Fifield 2015)
+**中文**：域名前置
+**所屬層**：HTTPS over CDN
+**首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
+**一句話**：Fifield et al. PoPETs 2015——TLS SNI 標 allowed.com（censor 放行）+ HTTP Host header 標 forbidden.com（加密內 censor 看不見）+ CDN 看 Host route 到 forbidden origin；2018+ Google/AWS/Azure 主動禁，Cloudflare/Fastly 部分允許；ECH 取代中。
+
+### Cloudflare Workers / Lambda@Edge / Fastly Compute@Edge
+**中文**：邊緣 serverless 計算
+**所屬層**：CDN compute
+**首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
+**一句話**：在 CDN POP 上跑 JavaScript / WASM；典型 5ms cold start, <1ms warm；G6 可用作 endpoint discovery / control plane / lightweight relay，但 ToS 對 circumvention use 模糊。
+
+### iCloud Private Relay (Apple, 2021)
+**中文**：iCloud 私密轉送
+**所屬層**：production VPN architecture
+**首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
+**一句話**：兩跳 trust split 設計——Apple-operated ingress（知身份不知目標）+ CDN-operated egress（知目標不知身份）；MASQUE over QUIC；千萬 user scale 部署；GFW 完全封；G6 v2 可考慮 architecture reference。
+
+### Cloudflare WARP / cloudflared / Spectrum / Magic Transit
+**中文**：Cloudflare 全家桶（VPN/Tunnel/L4 proxy/DDoS）
+**所屬層**：CDN-based VPN/Tunneling
+**首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
+**一句話**：WARP 為 consumer VPN（WireGuard + MASQUE）；cloudflared 讓 origin 主動 outbound tunnel 隱藏 IP；Spectrum 是 L4 任意 TCP/UDP proxy；Magic Transit 是 L3 DDoS protection；G6 deployment 可選擇 partial 採用。
+
+### Refraction Networking / Conjure / Slitheen
+**中文**：折射網路
+**所屬層**：transport-layer circumvention
+**首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)（提及）；Part 7/10 詳述
+**一句話**：Bocovich-Goldberg 2016 Slitheen / 2019 Conjure (CCS)——讓 censored client 透過「**正常 HTTPS 流量到 decoy site**」與 ISP-cooperative decoy router 達 circumvention；ISP cooperation required，部署 limited。
+
+### sk_buff (SKB)
+**中文**：Linux 網路 stack 中心資料結構
+**所屬層**：Linux kernel
+**首次出現**：[1.18 Linux 網路 stack](lessons/part-1-networking/1.18-linux-network-stack.md)
+**一句話**：用 4 個 pointer (head/data/tail/end) 表達線性 buffer 內 3 個 boundary——packet 過各 protocol layer 時只調 pointer 不 memcpy；是 Linux network stack zero-copy 設計核心。
+
+### Netfilter Hooks + nftables vs iptables vs eBPF
+**中文**：Netfilter 框架與 packet 過濾工具演化
+**所屬層**：Linux netfilter
+**首次出現**：[1.18](lessons/part-1-networking/1.18-linux-network-stack.md)
+**一句話**：5 個 hook (PREROUTING/INPUT/FORWARD/OUTPUT/POSTROUTING)；iptables (legacy linear scan) → nftables (modern, expression-based) → eBPF (programmable, 5-10× 快); G6 killswitch 用 nftables baseline。
+
+### TC qdisc (fq / fq_codel / cake / mq)
+**中文**：流量控制 / 佇列規則
+**所屬層**：Linux egress
+**首次出現**：[1.18](lessons/part-1-networking/1.18-linux-network-stack.md)
+**一句話**：dev_queue_xmit → qdisc → driver；fq_codel 為現代 Linux default（fair queue + CoDel AQM）；BBR pacing 必須 fq qdisc 配合；cake 整合 shaper+FQ+AQM+DiffServ。
+
+### XDP (eXpress Data Path) + AF_XDP
+**中文**：高性能封包處理路徑
+**所屬層**：Linux driver-layer eBPF
+**首次出現**：[1.18](lessons/part-1-networking/1.18-linux-network-stack.md)
+**一句話**：在 driver layer 跑 eBPF program（pre-skb），支援 DROP/PASS/TX/REDIRECT 動作；Facebook Katran ~30M pps per core；AF_XDP 為 user space zero-copy socket via XDP。
+
+### Linux NAPI Path + softirq budget
+**中文**：Linux 接收路徑 + softirq 預算
+**所屬層**：Linux kernel networking
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)（提及）；[1.18](lessons/part-1-networking/1.18-linux-network-stack.md) 深度展開
+**一句話**：NIC HardIRQ → NAPI schedule softirq → net_rx_action → napi_poll → __netif_receive_skb → protocol dispatch；netdev_budget=300 packets / netdev_budget_usecs=2ms 為 polling cycle 上限。
+
 ---
 
 ## Part 4 — TLS / QUIC 內部完全解剖
