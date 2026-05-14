@@ -126,58 +126,66 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 - DMA、ring buffer、NIC offload（TSO/GSO/GRO/LRO）
 - **論文**：Mogul 1997 (Receive Livelock) / Rizzo 2012 (netmap) / Han 2012 (MegaPipe) / Neugebauer 2018 (PCIe)
 
-### 1.3 乙太網路與 L2：交換器內部
+### 1.3 乙太網路與 L2：交換器內部 ✅
 - MAC 學習、CAM 表、VLAN、STP 為什麼存在
 - 為什麼資料中心改用 VXLAN / Geneve
+- **論文**：Perlman 1985 (STP) / Al-Fares 2008 (fat-tree) / Greenberg 2009 (VL2) / RFC 7348 (VXLAN) / RFC 8926 (Geneve) / RFC 7432 (EVPN)
 
-### 1.4 IP 層：路由是個圖論問題
+### 1.4 IP 層：路由是個圖論問題 ✅
 - 路由表 = trie 結構（Linux 用 LC-trie，FIB 設計）
 - ECMP、policy routing、source routing
 - **原始碼**：Linux `net/ipv4/fib_trie.c`
+- **論文**：Morrison 1968 (PATRICIA) / Nilsson 1999 (LC-trie) / Eatherton 2004 (Tree Bitmap) / Asai 2015 (Poptrie) / RFC 4271 (BGP) / RFC 6480 (RPKI) / RFC 8754 (SRv6)
 
-### 1.5 ARP / NDP / DHCP：「啟動時的兩三件事」
+### 1.5 ARP / NDP / DHCP：「啟動時的兩三件事」 ✅
 為什麼這些協議的設計缺陷會變成攻擊面（ARP spoofing 還活著）。
+- **論文 / 規格**：RFC 826 (ARP) / RFC 4861 (NDP) / RFC 4862 (SLAAC) / RFC 8415 (DHCPv6) / RFC 8981 + 7217 (IPv6 privacy) / RFC 6105 + 7113 (RA-Guard) / Leviathan 2024 TunnelVision (CVE-2024-3661) / Vanhoef 2016 MAC randomization
 
-### 1.6 ICMP 深度：不只是 ping
+### 1.6 ICMP 深度：不只是 ping ✅
 - ICMP type/code 全表
 - Path MTU Discovery 的細節（為什麼 PMTUD blackhole 是真實災難）
 - 為什麼 GFW 用 ICMP 做 active probing
+- **論文 / 規格**：RFC 792 / 4443 (ICMP) / 1191 / 4821 / 8899 (PMTUD 三代) / 5927 (ICMP attacks) / Ensafi 2015 IMC (active probing) / Ensafi 2015 PETS (idle scan)
 
-### 1.7 NAT 完整分類學
+### 1.7 NAT 完整分類學 ✅
 - Full Cone / Address-Restricted / Port-Restricted / Symmetric
 - Carrier-Grade NAT (CGNAT) 對 P2P 與翻牆的影響
-- **論文**：Behavior of and Requirements for Internet Firewalls and NATs (RFC 5382)
+- **論文 / 規格**：RFC 3022 / 4787 (BEHAVE UDP) / 5382 (BEHAVE TCP) / 5128 (P2P SoK) / 6888 (CGN) / 6146 (NAT64) / 8445 (ICE) / 8489 (STUN) / 8656 (TURN) / Ford-Srisuresh-Kegel 2005 USENIX ATC (hole punching)
 
-### 1.8 TCP 完整解剖（一）：連線管理
+### 1.8 TCP 完整解剖（一）：連線管理 ✅
 - 三次握手的狀態機完整圖（含所有邊界狀態：SYN_RECV、TIME_WAIT、FIN_WAIT_2）
 - TCP Fast Open（RFC 7413）—— 為什麼 GFW 對 TFO 特別敏感
 - 半開連線、SYN cookies、防 DoS
+- **論文 / 規格**：RFC 9293 (2022 STD 7) / 5961 (challenge ACK) / 7413 (TFO) / 6528 (ISN) / Bernstein 1996 (SYN cookies) / Watson 2004 (slipping window) / Cao 2016 USENIX Sec (CVE-2016-5696) / Feng 2020 CCS (IPID side channel) / Wang 2020 NDSS (SymTCP)
 
-### 1.9 TCP 完整解剖（二）：可靠傳輸
+### 1.9 TCP 完整解剖（二）：可靠傳輸 ✅
 - 序號、ACK、SACK、DSACK
 - 重傳：RTO 計算（Karn's algorithm）、快速重傳、F-RTO、ER
 - **原始碼**：Linux `net/ipv4/tcp_input.c`
+- **論文 / 規格**：Karn-Partridge 1987 / Jacobson 1988 SIGCOMM / RFC 2018 (SACK) / 2883 (DSACK) / 6298 (RTO) / 5681 / 5682 (F-RTO) / 5827 (ER) / 6675 / 6937 (PRR) / 8985 (RACK-TLP) / Padhye 1998 / Mathis 1997
 
-### 1.10 TCP 完整解剖（三）：擁塞控制
+### 1.10 TCP 完整解剖（三）：擁塞控制 ✅
 - AIMD 的最優性證明
 - Reno → NewReno → Cubic → BBR → BBRv3 完整演化
-- **論文**：BBR: Congestion-Based Congestion Control (CACM 2017)
+- **論文**：Jacobson 1988 / Chiu-Jain 1989 / Ha-Rhee-Xu 2008 CUBIC / Cardwell 2017 BBR CACM / RFC 9438 (CUBIC) / RFC 9330-9332 (L4S) / Mishra 2020 SIGMETRICS / Ware 2019 IMC / Padhye 1998 / Pantheon 2018
 - 為什麼 Hysteria 的 Brutal 算法在「自私」假設下能 work
 
-### 1.11 TCP 進階話題
+### 1.11 TCP 進階話題 ✅
 - TCP Offload Engine、TSO/GSO/USO、為什麼開了之後 wireshark 看到 64K 「封包」
 - Multipath TCP (MPTCP) — Apple 在用、可能的翻牆應用
 - TCP-AO（RFC 5925）取代 TCP-MD5 的故事
+- **論文 / 規格**：RFC 8684 (MPTCP v1) / 6356 (LIA) / 6182 (架構) / 6181 (威脅) / 5925 (TCP-AO) / 5926 (algorithms) / 2385 (legacy MD5) / 7323 (high-perf) / Multipath QUIC draft
 
-### 1.12 UDP 完整解剖
+### 1.12 UDP 完整解剖 ✅
 - header 8 bytes 一一拆解
 - UDP-Lite、UDP fragmentation 為什麼很糟
 - UDP socket 的 connect() 為什麼有意義
+- **論文 / 規格**：RFC 768 (UDP) / 8085 (BCP 145 UDP Guidelines) / 3828 (UDP-Lite) / 8899 (DPLPMTUD) / 9000-9002 (QUIC) / 9147 (DTLS 1.3) / 7670 (IPsec-in-UDP)
 
-### 1.13 IPv6 完整解剖
+### 1.13 IPv6 完整解剖 ✅
 - 不只是「位址變長」：header 簡化、extension header、SLAAC、Privacy Extensions、Happy Eyeballs
 - IPv6 在翻牆場景的優劣（GFW IPv6 部署狀態）
-- **論文**：Measuring IPv6 Adoption (SIGCOMM 2014)
+- **論文 / 規格**：RFC 8200 (IPv6 STD 86) / 4291 (addressing) / 6724 (default selection) / 8305 (Happy Eyeballs v2) / 7136 (IID significance) / 7872 (EH drop measurement) / 8981 + 7217 (privacy) / 4007 (scope) / Czyz 2014 SIGCOMM (adoption)
 
 ### 1.14 DNS 完整解剖
 - 報文格式逐 byte
@@ -370,55 +378,55 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 > **深度準繩**：學完能逐 byte 重現 TLS 1.3 ClientHello；能解釋 QUIC packet number space 為什麼這樣設計。
 
-### 4.1 TLS 歷史：SSL 2 到 TLS 1.3 的血淚史
+### 4.1 TLS 歷史：SSL 2 到 TLS 1.3 的血淚史 ✅
 為什麼每一版都有重大漏洞（POODLE、BEAST、CRIME、Heartbleed、Logjam、ROBOT...）。
 
-### 4.2 TLS 1.2 vs TLS 1.3 完整對比
+### 4.2 TLS 1.2 vs TLS 1.3 完整對比 ✅
 握手次數、加密原語、moved-up 的東西。
 
-### 4.3 TLS 1.3 握手完整解剖（RFC 8446 精讀）
+### 4.3 TLS 1.3 握手完整解剖（RFC 8446 精讀）✅
 逐 byte 拆 ClientHello / ServerHello / EncryptedExtensions / Certificate / CertificateVerify / Finished。
 
-### 4.4 TLS 擴展深度
+### 4.4 TLS 擴展深度 ✅
 - SNI / ALPN / Supported Groups / Key Share / PSK
 - Application-Layer Protocol Settings (ALPS)
 - 每個擴展對指紋（JA3/JA4）的貢獻
 
-### 4.5 0-RTT 與重放攻擊
+### 4.5 0-RTT 與重放攻擊 ✅
 - 為什麼 0-RTT 是把雙刃劍
 - anti-replay 機制的取捨
 
-### 4.6 ECH (Encrypted Client Hello) 完整解剖
+### 4.6 ECH (Encrypted Client Hello) 完整解剖 ✅
 - HPKE 是什麼
 - ECH 的 outer/inner ClientHello
 - Cloudflare 的部署、各國的反應、GFW 對 ECH 的態度
 - **論文/draft**：draft-ietf-tls-esni-17
 
-### 4.7 QUIC 完整解剖（一）：transport 層
+### 4.7 QUIC 完整解剖（一）：transport 層 ✅
 - UDP datagram 上面的 packet number、frame、stream
 - congestion control & loss recovery（RFC 9002）
 - **論文**：The QUIC Transport Protocol: Design and Internet-Scale Deployment (SIGCOMM 2017)
 
-### 4.8 QUIC 完整解剖（二）：握手
+### 4.8 QUIC 完整解剖（二）：握手 ✅
 - QUIC + TLS 1.3 整合（RFC 9001）
 - Initial / Handshake / 1-RTT packet
 - Retry 機制與 token
 
-### 4.9 QUIC 完整解剖（三）：進階
+### 4.9 QUIC 完整解剖（三）：進階 ✅
 - 連線遷移（connection migration）
 - 0-RTT in QUIC
 - QUIC v2、QUIC datagram extension（RFC 9221）
 
-### 4.10 HTTP/3 與 MASQUE
+### 4.10 HTTP/3 與 MASQUE ✅
 - HTTP/3 的 frame 結構
 - MASQUE（Multiplexed Application Substrate over QUIC Encryption）— 把 QUIC 當隧道
 - **對我們的意義**：MASQUE 是 SOTA 翻牆的潛在新方向
 
-### 4.11 quic-go 原始碼通讀
+### 4.11 quic-go 原始碼通讀 ✅
 逐目錄讀 quic-go，跟 RFC 9000/9001/9002 對照。
 **這是 Part 4 的期末考之一**。
 
-### 4.12 比較：HTTP/2 vs HTTP/3 vs MASQUE
+### 4.12 比較：HTTP/2 vs HTTP/3 vs MASQUE ✅
 從翻牆視角審視三者的優劣。
 
 ---
