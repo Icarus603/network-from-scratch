@@ -438,35 +438,35 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 > **深度準繩**：學完能用 TLA+ 規格化你協議的關鍵不變量；用 ProVerif 證明 secrecy/authenticity。
 
-### 5.1 為什麼要形式化
+### 5.1 為什麼要形式化 ✅
 - TLS 1.3 設計時就跟 ProVerif/Tamarin 共同進化
 - 沒形式化的協議出過什麼事（Needham-Schroeder 17 年才發現缺陷）
 
-### 5.2 TLA+ 入門
+### 5.2 TLA+ 入門 ✅
 - 狀態機建模、temporal logic、PlusCal
 - 用 TLA+ 建模一個 SOCKS5 握手
 
-### 5.3 TLA+ 進階
+### 5.3 TLA+ 進階 ✅
 - TLC model checker、refinement
 - Apalache（symbolic）
 
-### 5.4 Applied Pi-Calculus 與 ProVerif
+### 5.4 Applied Pi-Calculus 與 ProVerif ✅
 - 進程代數基礎
 - ProVerif 的 Horn clause 後端
 - 親手驗證 Diffie-Hellman
 
-### 5.5 ProVerif 實戰：驗證 Noise IK
+### 5.5 ProVerif 實戰：驗證 Noise IK ✅
 重現 WireGuard 論文裡的 ProVerif 證明。
 
-### 5.6 Tamarin Prover
+### 5.6 Tamarin Prover ✅
 - multiset rewriting
 - 與 ProVerif 的差異
 - 驗證 TLS 1.3 的範例
 
-### 5.7 CryptoVerif：computational model
+### 5.7 CryptoVerif：computational model ✅
 為什麼有時候 symbolic 不夠、要 computational 證明。
 
-### 5.8 設計協議的方法論：spec-first
+### 5.8 設計協議的方法論：spec-first ✅
 從威脅模型 → 形式化規格 → 證明 → 實作的方法論流程。
 
 ---

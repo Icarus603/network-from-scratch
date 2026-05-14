@@ -1273,3 +1273,158 @@
 **所屬層**：performance modeling
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
 **一句話**：packet 從 NIC RX 到 NIC TX 路徑上 CPU load/store 次數；加密協議下界 = 1（加密本身）；G6 目標穩定達 1。
+
+---
+
+## Part 5 — 形式化方法
+
+### Needham-Schroeder Public-Key Protocol
+**中文**：Needham-Schroeder 公鑰協議
+**所屬層**：authenticated key exchange
+**首次出現**：[5.1](lessons/part-5-formal-methods/5.1-why-formalize.md)
+**一句話**：Needham & Schroeder CACM 1978 三步 nonce exchange；1978-1995 沒人發現 MITM；Lowe 1996 用 FDR 找出 attack + NSL fix 加 responder identity；formal verification 必要性的最 striking 例證。
+
+### Dolev-Yao Model
+**中文**：Dolev-Yao 對手模型
+**所屬層**：cryptographic adversary model
+**首次出現**：[5.1](lessons/part-5-formal-methods/5.1-why-formalize.md)、[4.1](lessons/part-4-tls-quic/4.1-tls-history-bloodshed.md)
+**一句話**：Dolev & Yao IEEE TIT 1983；attacker 完全控制 wire (read/inject/drop/replay) 但密碼學原語視 ideal；symbolic model 的標準 adversary; ProVerif/Tamarin 內建。
+
+### Lowe's Authentication Hierarchy
+**中文**：Lowe 認證階層
+**所屬層**：formal definition
+**首次出現**：[5.1](lessons/part-5-formal-methods/5.1-why-formalize.md)
+**一句話**：Lowe CSFW 1997 把「authentication」拆 4 層 — aliveness / weak agreement / non-injective agreement / injective agreement；每層對 attack 免疫度遞增；Selfie attack 違反 injective agreement。
+
+### Safety vs Liveness Property
+**中文**：安全性 vs 活性
+**所屬層**：formal property classification
+**首次出現**：[5.2](lessons/part-5-formal-methods/5.2-tla-plus-intro.md)
+**一句話**：Lamport 1977 經典分類；safety = 「不好的事永遠不發生」(`[][Inv]`); liveness = 「好的事最終會發生」(`<>Goal`)；需 fairness 假設證明 liveness。
+
+### TLA+
+**中文**：Temporal Logic of Actions + ZF set theory specification language
+**所屬層**：formal specification
+**首次出現**：[5.2](lessons/part-5-formal-methods/5.2-tla-plus-intro.md)、[5.3](lessons/part-5-formal-methods/5.3-tla-plus-advanced.md)
+**一句話**：Lamport 1994 logic + 1999 language；spec = `Init /\ [][Next]_vars /\ Fairness`；AWS DynamoDB/S3/EBS 部署；TLC explicit-state + Apalache symbolic + TLAPS proof system 三 backend。
+
+### TLC / Apalache
+**中文**：TLA+ model checkers
+**所屬層**：verification tool
+**首次出現**：[5.3](lessons/part-5-formal-methods/5.3-tla-plus-advanced.md)
+**一句話**：TLC (Yu-Manolios-Lamport 1999) explicit-state BFS over reachable states；Apalache (Konnov 2019) symbolic with SMT solver；前者對 finite model 完整；後者對 unbounded data type bounded-depth 強。
+
+### PlusCal
+**中文**：TLA+ procedural language frontend
+**所屬層**：spec frontend
+**首次出現**：[5.2](lessons/part-5-formal-methods/5.2-tla-plus-intro.md)
+**一句話**：Lamport 設計，編譯到 TLA+；syntax 像 imperative pseudo-code；初學者友善但 state space 較 hand-written TLA+ 大；對 protocol modeling 通常 hand-written TLA+ 更乾淨。
+
+### Refinement (TLA+)
+**中文**：規格精化
+**所屬層**：spec methodology
+**首次出現**：[5.3](lessons/part-5-formal-methods/5.3-tla-plus-advanced.md)
+**一句話**：low-level spec `L` refines high-level spec `H` iff `L => H` (temporal implication)；對 layered design 必要；TLA+ 用 `INSTANCE` keyword + refinement mapping function 表達。
+
+### Inductive Invariant
+**中文**：歸納不變量
+**所屬層**：proof technique
+**首次出現**：[5.3](lessons/part-5-formal-methods/5.3-tla-plus-advanced.md)
+**一句話**：`I` inductive iff `Init => I` AND `(I /\ Next) => I'`；對 unbounded state 唯一可行 proof technique；強於 reachable invariant；用 TLAPS 或 Apalache 部分自動 derive。
+
+### Applied Pi-Calculus
+**中文**：applied 進程代數
+**所屬層**：formal model language
+**首次出現**：[5.4](lessons/part-5-formal-methods/5.4-applied-pi-calculus-proverif.md)
+**一句話**：Abadi & Fournet POPL 2001 extension of pi-calculus (Milner 1989)；加 function symbols + equational theory + active substitution；ProVerif 的 input language；對 cryptographic protocol 表達自然。
+
+### ProVerif
+**中文**：cryptographic protocol verifier
+**所屬層**：symbolic verification tool
+**首次出現**：[5.4](lessons/part-5-formal-methods/5.4-applied-pi-calculus-proverif.md)、[5.5](lessons/part-5-formal-methods/5.5-proverif-noise-ik.md)
+**一句話**：Blanchet CSFW 2001（Test of Time CSF 2023）；把 applied pi-calculus 抽象為 Horn clauses + resolution 求 attacker derivability；unbounded sessions; TLS 1.3 / Signal / WireGuard / MLS / ECH 主要 verifier。
+
+### Horn Clause Abstraction
+**中文**：Horn 子句抽象
+**所屬層**：ProVerif internal
+**首次出現**：[5.4](lessons/part-5-formal-methods/5.4-applied-pi-calculus-proverif.md)
+**一句話**：把 protocol step 表示為 `att(M1) /\ ... /\ att(Mn) => att(M)` 形式; ProVerif 用 resolution 求 `att(secret)` 是否 derivable；over-approximation 可能有 false positive。
+
+### Noise Protocol Framework
+**中文**：Noise 協議框架
+**所屬層**：handshake pattern family
+**首次出現**：[5.5](lessons/part-5-formal-methods/5.5-proverif-noise-ik.md)
+**一句話**：Trevor Perrin 設計；不是單一 protocol 而是 family；每 pattern 由 letter token 組合 (e, s, es, ee, se, ss)；NN/NK/NX/KK/XX/IK 各 trade-off; WireGuard 用 IK; Signal X3DH 啟發自 Noise。
+
+### Noise IK
+**中文**：Noise IK handshake pattern
+**所屬層**：handshake pattern
+**首次出現**：[5.5](lessons/part-5-formal-methods/5.5-proverif-noise-ik.md)
+**一句話**：Immediate initiator key + known responder key；message 1 含 ephemeral + encrypted initiator static + DH(es, ss)；message 2 含 ephemeral + DH(ee, se)；mutual auth + FS + identity hiding (responder)；WireGuard 採用。
+
+### WireGuard
+**中文**：next-generation VPN protocol
+**所屬層**：VPN
+**首次出現**：[5.5](lessons/part-5-formal-methods/5.5-proverif-noise-ik.md)、Part 6 (forthcoming)
+**一句話**：Donenfeld NDSS 2017; Noise IK + Curve25519 + ChaCha20-Poly1305 + BLAKE2s; 4000 LOC kernel impl; Donenfeld-Milner 2018 Tamarin + Lipp-Blanchet-Bhargavan 2019 ProVerif 完整 verify; **但 wire 強指紋對 GFW 透明**。
+
+### Noise Explorer
+**中文**：自動化 Noise variants verifier
+**所屬層**：verification tool
+**首次出現**：[5.5](lessons/part-5-formal-methods/5.5-proverif-noise-ik.md)
+**一句話**：Kobeissi-Nicolas-Bhargavan EuroS&P 2019；輸入 Noise pattern notation，自動生成 ProVerif + Tamarin spec 並 verify；100+ Noise variant 對比工具。
+
+### Tamarin Prover
+**中文**：symbolic protocol verifier
+**所屬層**：verification tool
+**首次出現**：[5.6](lessons/part-5-formal-methods/5.6-tamarin-prover.md)
+**一句話**：Meier-Schmidt-Cremers-Basin CAV 2013；multiset rewriting + first-order logic + backwards reasoning；對 DH algebraic + multi-stage AKE + stateful protocol 強於 ProVerif；TLS 1.3 / WireGuard / 5G-AKA / EMV / MLS 主力 verifier。
+
+### Multiset Rewriting
+**中文**：multiset 改寫系統
+**所屬層**：Tamarin internal
+**首次出現**：[5.6](lessons/part-5-formal-methods/5.6-tamarin-prover.md)
+**一句話**：rule `[premise_facts] --[ action ]--> [conclusion_facts]`；state = multiset of facts；linear (consumed) vs persistent (`!`-prefix) facts；對 mutable global state 自然。
+
+### CryptoVerif
+**中文**：computational model verifier
+**所屬層**：verification tool
+**首次出現**：[5.7](lessons/part-5-formal-methods/5.7-cryptoverif.md)
+**一句話**：Blanchet IEEE TDSC 2008；同樣 Blanchet 設計 in computational model；自動 game transformation 給 tight ε bound on attacker advantage；TLS 1.3 record limit + WireGuard tight bound 來源；比 ProVerif 慢，需要 user-provided cryptographic axioms。
+
+### Game-Based Proof
+**中文**：賽局證明
+**所屬層**：cryptographic methodology
+**首次出現**：[5.7](lessons/part-5-formal-methods/5.7-cryptoverif.md)
+**一句話**：Bellare-Rogaway CRYPTO 1993 + Bellare EUROCRYPT 2006；security 透過 game (challenger vs adversary) 形式化；advantage = `|Pr[A wins] - 1/2|`；secure iff advantage negligible for PPT adversary。
+
+### IND-CPA / IND-CCA / UF-CMA
+**中文**：標準 security 定義集合
+**所屬層**：cryptographic primitive
+**首次出現**：[5.7](lessons/part-5-formal-methods/5.7-cryptoverif.md)
+**一句話**：IND-CPA = indistinguishability under chosen-plaintext attack (對稱加密)；IND-CCA = under chosen-ciphertext attack；UF-CMA = unforgeability under chosen-message attack (signature)；現代密碼學 primitive 標準目標。
+
+### Game Transformation
+**中文**：賽局變換
+**所屬層**：CryptoVerif technique
+**首次出現**：[5.7](lessons/part-5-formal-methods/5.7-cryptoverif.md)
+**一句話**：把 game $G_i$ 變換成 $G_{i+1}$ 累積 ε cost；最終 reduce 到 ideal game (perfect secrecy)；total advantage bound = sum of ε per transformation；TLS 1.3 record layer proof 30+ transformations。
+
+### Spec-First Methodology
+**中文**：規格優先方法論
+**所屬層**：design methodology
+**首次出現**：[5.8](lessons/part-5-formal-methods/5.8-spec-first-methodology.md)、[5.1](lessons/part-5-formal-methods/5.1-why-formalize.md)
+**一句話**：先寫 threat model → 先 spec → 先 verify → 才寫 implementation；TLS 1.3 是 IETF 第一個此模式 RFC；spec / proof / impl 同 repo + cross-reference；PhD-level 設計協議 standard。
+
+### Lightweight Formal Methods (LFM)
+**中文**：輕量化形式化方法
+**所屬層**：methodology
+**首次出現**：[5.8](lessons/part-5-formal-methods/5.8-spec-first-methodology.md)
+**一句話**：Bornholt et al. SOSP 2021；對 critical component 做 partial verification + executable model + property test；對 less critical part 採 LFM 省 cost；AWS S3 production case。
+
+### Annotated RFC
+**中文**：交叉參照規格
+**所屬層**：documentation
+**首次出現**：[5.8](lessons/part-5-formal-methods/5.8-spec-first-methodology.md)
+**一句話**：Cremers TLS 1.3 CCS 2017 best practice；spec prose 每段對 Tamarin rule / ProVerif process 一一對應；reviewer auditable; 我們協議 Part 11.10 採此模板。
+
