@@ -103,6 +103,10 @@ enum AdminCmd {
         /// Per-step network timeout in seconds. Default 5 s.
         #[arg(long, default_value_t = 5)]
         timeout_secs: u64,
+        /// Output format: `text` (default, human-friendly) or
+        /// `json` (one-line JSON for jq / scripted alerting).
+        #[arg(long, default_value = "text")]
+        format: String,
     },
     /// Compute counter deltas between two saved scrape bodies. Use
     /// when you want to see "what changed in the last N seconds"
@@ -126,12 +130,15 @@ enum AdminCmd {
         /// raw counts).
         #[arg(long, default_value_t = 1.0)]
         interval_secs: f64,
+        /// Output format: `text` (default) or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
     },
     /// Live delta loop: scrapes /metrics at the given interval and
     /// prints deltas between successive scrapes. First iteration is
     /// the absolute snapshot (no delta source yet). Clears the
-    /// screen on every iteration when stdout is a TTY. Ctrl-C to
-    /// exit.
+    /// screen on every iteration when stdout is a TTY (text mode
+    /// only). Ctrl-C to exit.
     Watch {
         /// URL of the metrics endpoint.
         #[arg(long, default_value = "http://127.0.0.1:9090/metrics")]
@@ -145,6 +152,10 @@ enum AdminCmd {
         /// Refresh interval in seconds.
         #[arg(long, default_value_t = 5)]
         interval_secs: u64,
+        /// Output format: `text` (default) or `json` (JSON Lines —
+        /// one document per refresh, screen clearing suppressed).
+        #[arg(long, default_value = "text")]
+        format: String,
     },
 }
 
@@ -172,39 +183,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 url,
                 token_file,
                 timeout_secs,
+                format,
             } => {
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
                     None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
                 };
+                let fmt: proteus_server::admin::OutputFormat = format.parse()?;
                 proteus_server::admin::run(
                     &url,
                     token.as_deref(),
                     std::time::Duration::from_secs(timeout_secs),
+                    fmt,
                 )?;
             }
             AdminCmd::Diff {
                 before,
                 after,
                 interval_secs,
+                format,
             } => {
-                proteus_server::admin::run_diff(&before, &after, interval_secs)?;
+                let fmt: proteus_server::admin::OutputFormat = format.parse()?;
+                proteus_server::admin::run_diff(&before, &after, interval_secs, fmt)?;
             }
             AdminCmd::Watch {
                 url,
                 token_file,
                 timeout_secs,
                 interval_secs,
+                format,
             } => {
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
                     None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
                 };
+                let fmt: proteus_server::admin::OutputFormat = format.parse()?;
                 proteus_server::admin::run_watch(
                     &url,
                     token.as_deref(),
                     std::time::Duration::from_secs(timeout_secs),
                     std::time::Duration::from_secs(interval_secs),
+                    fmt,
                 )?;
             }
         },

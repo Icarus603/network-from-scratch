@@ -349,6 +349,39 @@ the output displays a `⚠ counter reset detected` banner — operators
 know to discard the rate numbers for that interval. The display
 saturates clamped to 0, never wraps.
 
+### JSON output for scripts
+
+All three admin subcommands accept `--format json`, which emits a
+single canonical JSON document (no banners, no human formatting).
+Field names are stable snake_case `u64`/`bool`. Pipe straight into
+`jq` for scripted alerting:
+
+```bash
+# Alert when rejection rate goes above 1/s over the last 30s.
+proteus-server admin diff --before /tmp/before --after /tmp/after \
+                          --interval-secs 30 --format json |
+    jq 'if .total_rejected / .interval_secs > 1
+        then "ALERT: \(.total_rejected) rejections in \(.interval_secs)s"
+        else empty
+        end'
+
+# Live-watch loop emitting one JSON line per refresh:
+proteus-server admin watch --interval-secs 5 --format json |
+    jq -c 'select(.firewall_denied > 0) | {ts: now, firewall_denied}'
+```
+
+JSON shape:
+
+- `MetricsSnapshot` (status): every counter as snake_case `u64`,
+  plus `alive`/`ready` bools, plus `other: {…}` for unknown
+  counters (forward-compat).
+- `MetricsDelta` (diff/watch): same counters as deltas, plus
+  `interval_secs` (`f64`), `counter_reset` (`bool`), and end-of-
+  interval `alive`/`ready`/`in_flight_sessions`.
+
+Zero-interval calls render `interval_secs: 0.000` (never `Inf` or
+`NaN` — those are not valid JSON).
+
 ## Pre-deploy validation (`proteus-server validate`)
 
 Every YAML edit should be dry-run-checked before SIGHUP or

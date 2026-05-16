@@ -51,6 +51,35 @@ pub struct MetricsSnapshot {
     pub other: BTreeMap<String, u64>,
 }
 
+/// Output format for `admin status` / `diff` / `watch`. The
+/// hand-rolled JSON shape is stable across releases: existing
+/// fields will not be renamed or have their types changed; new
+/// fields are append-only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum OutputFormat {
+    /// Human-friendly table (default).
+    #[default]
+    Text,
+    /// One canonical JSON document per invocation. Fields are
+    /// snake_case `u64` (counters / gauges) or `bool` (alive,
+    /// ready, counter_reset). Suitable for `jq` post-processing
+    /// and scripted alerting.
+    Json,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "text" | "human" => Ok(Self::Text),
+            "json" => Ok(Self::Json),
+            other => Err(format!(
+                "unknown format {other:?} (expected 'text' or 'json')"
+            )),
+        }
+    }
+}
+
 impl MetricsSnapshot {
     /// Parse a Prometheus 0.0.4 exposition body.
     ///
@@ -122,6 +151,82 @@ impl MetricsSnapshot {
             .saturating_add(self.rate_limited)
             .saturating_add(self.conn_limit_rejected)
             .saturating_add(self.user_rate_rejected)
+    }
+
+    /// Render as a single-line JSON document with a trailing newline.
+    /// Field names are snake_case and stable across releases. Unknown
+    /// counters (`other`) are emitted as a nested object so consumers
+    /// can index into them by name.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut s = String::with_capacity(512);
+        s.push('{');
+        push_json_bool(&mut s, "alive", self.up == 1, true);
+        push_json_bool(&mut s, "ready", self.ready == 1, false);
+        push_json_u64(&mut s, "in_flight_sessions", self.in_flight_sessions, false);
+        push_json_u64(&mut s, "sessions_accepted", self.sessions_accepted, false);
+        push_json_u64(
+            &mut s,
+            "handshakes_succeeded",
+            self.handshakes_succeeded,
+            false,
+        );
+        push_json_u64(&mut s, "handshakes_failed", self.handshakes_failed, false);
+        push_json_u64(&mut s, "handshake_timeouts", self.handshake_timeouts, false);
+        push_json_u64(
+            &mut s,
+            "handshake_budget_rejected",
+            self.handshake_budget_rejected,
+            false,
+        );
+        push_json_u64(&mut s, "rate_limited", self.rate_limited, false);
+        push_json_u64(
+            &mut s,
+            "conn_limit_rejected",
+            self.conn_limit_rejected,
+            false,
+        );
+        push_json_u64(&mut s, "firewall_denied", self.firewall_denied, false);
+        push_json_u64(&mut s, "user_rate_rejected", self.user_rate_rejected, false);
+        push_json_u64(&mut s, "cover_forwards", self.cover_forwards, false);
+        push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
+        push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
+        push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
+        push_json_u64(&mut s, "aead_drops", self.aead_drops, false);
+        push_json_u64(&mut s, "ratchets", self.ratchets, false);
+        push_json_u64(
+            &mut s,
+            "session_idle_reaped",
+            self.session_idle_reaped,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "session_byte_budget_exhausted",
+            self.session_byte_budget_exhausted,
+            false,
+        );
+
+        // Always emit the "other" object so scripts can rely on its
+        // presence regardless of which extra counters happen to be
+        // present.
+        s.push_str(r#","other":{"#);
+        let mut first = true;
+        for (k, v) in &self.other {
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push('"');
+            json_escape_str(k, &mut s);
+            s.push_str("\":");
+            s.push_str(&v.to_string());
+        }
+        s.push('}');
+
+        s.push('}');
+        s.push('\n');
+        s
     }
 }
 
@@ -344,10 +449,15 @@ pub fn run(
     url: &str,
     token: Option<&str>,
     timeout: Duration,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let body = http_get(url, token, timeout)?;
     let snap = MetricsSnapshot::parse(&body);
-    let _ = std::io::stdout().write_all(snap.to_string().as_bytes());
+    let rendered = match format {
+        OutputFormat::Text => snap.to_string(),
+        OutputFormat::Json => snap.to_json(),
+    };
+    let _ = std::io::stdout().write_all(rendered.as_bytes());
     Ok(())
 }
 
@@ -467,6 +577,127 @@ impl MetricsDelta {
             .saturating_add(self.rate_limited)
             .saturating_add(self.conn_limit_rejected)
             .saturating_add(self.user_rate_rejected)
+    }
+
+    /// Render as a single-line JSON document with a trailing newline.
+    /// Field names are snake_case and stable across releases. Counter
+    /// fields are deltas; gauges (`alive`, `ready`, `in_flight`) are
+    /// end-of-interval values. `interval_secs` is the wall-clock
+    /// width of the window; `counter_reset` is a bool flag.
+    #[must_use]
+    pub fn to_json(&self) -> String {
+        let mut s = String::with_capacity(512);
+        s.push('{');
+        // Interval / state up front so a one-line jq is readable.
+        push_json_f64(&mut s, "interval_secs", self.interval_secs, true);
+        push_json_bool(&mut s, "alive", self.now_up == 1, false);
+        push_json_bool(&mut s, "ready", self.now_ready == 1, false);
+        push_json_bool(&mut s, "counter_reset", self.counter_reset, false);
+        push_json_u64(&mut s, "in_flight_sessions", self.now_in_flight, false);
+        // Counter deltas.
+        push_json_u64(&mut s, "sessions_accepted", self.sessions_accepted, false);
+        push_json_u64(
+            &mut s,
+            "handshakes_succeeded",
+            self.handshakes_succeeded,
+            false,
+        );
+        push_json_u64(&mut s, "handshakes_failed", self.handshakes_failed, false);
+        push_json_u64(&mut s, "handshake_timeouts", self.handshake_timeouts, false);
+        push_json_u64(
+            &mut s,
+            "handshake_budget_rejected",
+            self.handshake_budget_rejected,
+            false,
+        );
+        push_json_u64(&mut s, "rate_limited", self.rate_limited, false);
+        push_json_u64(
+            &mut s,
+            "conn_limit_rejected",
+            self.conn_limit_rejected,
+            false,
+        );
+        push_json_u64(&mut s, "firewall_denied", self.firewall_denied, false);
+        push_json_u64(&mut s, "user_rate_rejected", self.user_rate_rejected, false);
+        push_json_u64(&mut s, "cover_forwards", self.cover_forwards, false);
+        push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
+        push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
+        push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
+        push_json_u64(&mut s, "aead_drops", self.aead_drops, false);
+        push_json_u64(&mut s, "ratchets", self.ratchets, false);
+        push_json_u64(
+            &mut s,
+            "session_idle_reaped",
+            self.session_idle_reaped,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "session_byte_budget_exhausted",
+            self.session_byte_budget_exhausted,
+            false,
+        );
+        s.push('}');
+        s.push('\n');
+        s
+    }
+}
+
+// ---- minimal hand-rolled JSON emitter helpers ----
+
+fn push_json_u64(out: &mut String, key: &str, value: u64, first: bool) {
+    if !first {
+        out.push(',');
+    }
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":");
+    out.push_str(&value.to_string());
+}
+
+fn push_json_bool(out: &mut String, key: &str, value: bool, first: bool) {
+    if !first {
+        out.push(',');
+    }
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":");
+    out.push_str(if value { "true" } else { "false" });
+}
+
+fn push_json_f64(out: &mut String, key: &str, value: f64, first: bool) {
+    if !first {
+        out.push(',');
+    }
+    out.push('"');
+    out.push_str(key);
+    out.push_str("\":");
+    // NaN/Inf are not valid JSON. Map them to 0 so the output is
+    // always a parseable JSON document.
+    if value.is_finite() {
+        // {:.3} keeps three decimal places; trailing zeros are harmless
+        // to consumers but stable across runs.
+        use std::fmt::Write as _;
+        let _ = write!(out, "{value:.3}");
+    } else {
+        out.push('0');
+    }
+}
+
+fn json_escape_str(s: &str, out: &mut String) {
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write as _;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
     }
 }
 
@@ -597,13 +828,18 @@ pub fn run_diff(
     a_path: &Path,
     b_path: &Path,
     interval_secs: f64,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let a_text = std::fs::read_to_string(a_path).map_err(|e| format!("read {a_path:?}: {e}"))?;
     let b_text = std::fs::read_to_string(b_path).map_err(|e| format!("read {b_path:?}: {e}"))?;
     let a = MetricsSnapshot::parse(&a_text);
     let b = MetricsSnapshot::parse(&b_text);
     let d = MetricsDelta::between(&a, &b, interval_secs);
-    let _ = std::io::stdout().write_all(d.to_string().as_bytes());
+    let rendered = match format {
+        OutputFormat::Text => d.to_string(),
+        OutputFormat::Json => d.to_json(),
+    };
+    let _ = std::io::stdout().write_all(rendered.as_bytes());
     Ok(())
 }
 
@@ -616,6 +852,7 @@ pub fn run_watch(
     token: Option<&str>,
     timeout: Duration,
     interval: Duration,
+    format: OutputFormat,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut prev: Option<(MetricsSnapshot, std::time::Instant)> = None;
     loop {
@@ -623,21 +860,24 @@ pub fn run_watch(
         let now = std::time::Instant::now();
         let cur = MetricsSnapshot::parse(&body);
         // ANSI clear-screen + cursor-home, so `watch`-like output
-        // doesn't accumulate. Skipped when stdout isn't a TTY (a
-        // pipe would record the escape codes).
-        if is_tty_stdout() {
+        // doesn't accumulate. Skipped for JSON (pipes/jq would
+        // record the escape codes) and when stdout isn't a TTY.
+        if format == OutputFormat::Text && is_tty_stdout() {
             let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
         }
-        match &prev {
-            None => {
-                let _ = std::io::stdout().write_all(cur.to_string().as_bytes());
-            }
-            Some((before, t0)) => {
+        let rendered = match (&prev, format) {
+            (None, OutputFormat::Text) => cur.to_string(),
+            (None, OutputFormat::Json) => cur.to_json(),
+            (Some((before, t0)), OutputFormat::Text) => {
                 let secs = now.duration_since(*t0).as_secs_f64();
-                let d = MetricsDelta::between(before, &cur, secs);
-                let _ = std::io::stdout().write_all(d.to_string().as_bytes());
+                MetricsDelta::between(before, &cur, secs).to_string()
             }
-        }
+            (Some((before, t0)), OutputFormat::Json) => {
+                let secs = now.duration_since(*t0).as_secs_f64();
+                MetricsDelta::between(before, &cur, secs).to_json()
+            }
+        };
+        let _ = std::io::stdout().write_all(rendered.as_bytes());
         prev = Some((cur, now));
         std::thread::sleep(interval);
     }
@@ -831,6 +1071,134 @@ proteus_some_future_counter_total 43
         let r = read_token_file(&p);
         assert!(r.is_err(), "empty/whitespace-only token must fail");
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ----- JSON output -----
+
+    #[test]
+    fn snapshot_json_emits_every_field() {
+        let s = MetricsSnapshot::parse(SAMPLE);
+        let j = s.to_json();
+        // Sanity: well-formed JSON envelope.
+        assert!(j.starts_with('{'), "JSON should start with {{: {j}");
+        assert!(j.trim_end().ends_with('}'), "JSON should end with }}: {j}");
+        assert!(j.ends_with('\n'), "should end with newline");
+        // Each declared counter shows up.
+        for (k, v) in [
+            ("\"alive\":true", true),
+            ("\"ready\":true", true),
+            ("\"in_flight_sessions\":7", true),
+            ("\"sessions_accepted\":100", true),
+            ("\"handshakes_succeeded\":95", true),
+            ("\"handshakes_failed\":5", true),
+            ("\"handshake_timeouts\":2", true),
+            ("\"handshake_budget_rejected\":3", true),
+            ("\"rate_limited\":11", true),
+            ("\"conn_limit_rejected\":13", true),
+            ("\"firewall_denied\":17", true),
+            ("\"user_rate_rejected\":19", true),
+            ("\"cover_forwards\":23", true),
+            ("\"total_rejected\":63", true),
+            ("\"tx_bytes\":1048576", true),
+            ("\"rx_bytes\":2097152", true),
+            ("\"aead_drops\":0", true),
+            ("\"ratchets\":31", true),
+            ("\"session_idle_reaped\":37", true),
+            ("\"session_byte_budget_exhausted\":41", true),
+            ("\"other\":{", true),
+            ("\"proteus_some_future_counter_total\":43", true),
+        ] {
+            assert_eq!(j.contains(k), v, "field check {k} mismatch in: {j}");
+        }
+    }
+
+    #[test]
+    fn snapshot_json_emits_alive_false_when_not_up() {
+        let s = MetricsSnapshot {
+            up: 0,
+            ready: 0,
+            ..MetricsSnapshot::default()
+        };
+        let j = s.to_json();
+        assert!(j.contains("\"alive\":false"));
+        assert!(j.contains("\"ready\":false"));
+    }
+
+    #[test]
+    fn snapshot_json_other_object_empty_when_no_unknown_counters() {
+        let body = "proteus_up 1\nproteus_sessions_accepted_total 7\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(j.contains("\"other\":{}"), "expected empty other: {j}");
+    }
+
+    #[test]
+    fn delta_json_emits_interval_and_counter_reset() {
+        let a = MetricsSnapshot::parse(SAMPLE);
+        let b = MetricsSnapshot {
+            sessions_accepted: 1,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 30.0);
+        let j = d.to_json();
+        assert!(j.starts_with('{') && j.trim_end().ends_with('}'));
+        assert!(j.contains("\"interval_secs\":30."));
+        assert!(j.contains("\"counter_reset\":true"));
+    }
+
+    #[test]
+    fn delta_json_renders_zero_interval_safely() {
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot::default();
+        let d = MetricsDelta::between(&a, &b, 0.0);
+        let j = d.to_json();
+        assert!(!j.contains("inf"), "got: {j}");
+        assert!(!j.contains("NaN"), "got: {j}");
+        assert!(j.contains("\"interval_secs\":0."));
+    }
+
+    #[test]
+    fn delta_json_emits_every_counter_delta() {
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot {
+            up: 1,
+            ready: 1,
+            sessions_accepted: 30,
+            handshakes_succeeded: 28,
+            firewall_denied: 5,
+            rate_limited: 7,
+            tx_bytes: 1024,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 60.0);
+        let j = d.to_json();
+        for field in [
+            "\"sessions_accepted\":30",
+            "\"handshakes_succeeded\":28",
+            "\"firewall_denied\":5",
+            "\"rate_limited\":7",
+            "\"tx_bytes\":1024",
+            "\"total_rejected\":12",
+            "\"alive\":true",
+            "\"ready\":true",
+        ] {
+            assert!(j.contains(field), "missing {field} in: {j}");
+        }
+    }
+
+    #[test]
+    fn output_format_parses_text_and_json() {
+        assert_eq!("text".parse::<OutputFormat>().unwrap(), OutputFormat::Text);
+        assert_eq!("human".parse::<OutputFormat>().unwrap(), OutputFormat::Text);
+        assert_eq!("json".parse::<OutputFormat>().unwrap(), OutputFormat::Json);
+        assert!("yaml".parse::<OutputFormat>().is_err());
+    }
+
+    #[test]
+    fn json_escape_str_handles_dangerous_chars() {
+        let mut out = String::new();
+        json_escape_str("foo\"bar\\baz\nq", &mut out);
+        assert_eq!(out, "foo\\\"bar\\\\baz\\nq");
     }
 
     // ----- MetricsDelta -----
