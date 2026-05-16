@@ -83,6 +83,47 @@ pub mod server;
 /// stack can call this on their own [`quinn::TransportConfig`]
 /// before handing it to `quinn::{ServerConfig,ClientConfig}`.
 pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
+    apply_perf_tuning_with(transport, PerfProfile::default());
+}
+
+/// Performance + privacy knobs for β QUIC. The defaults match what
+/// `apply_perf_tuning` ships — Hy2/TUIC5-grade throughput, no
+/// extra traffic-analysis padding at the UDP layer.
+///
+/// Operators who care more about wire-fingerprint uniformity than
+/// raw throughput can flip `pad_quic_datagrams_to_mtu = true`.
+#[derive(Debug, Clone, Copy)]
+pub struct PerfProfile {
+    /// Initial UDP payload size assumed before MTU discovery
+    /// negotiates a better value. `1200` is the QUIC v1 safe min;
+    /// `1350` is our conservative bump covering most modern paths;
+    /// `1452` is the maximum that fits under a 1500-byte Ethernet
+    /// MTU with IPv6 + UDP headers (matches Hy2 / TUIC5).
+    pub initial_mtu: u16,
+    /// When true, quinn pads every application UDP datagram to the
+    /// current path-MTU. Defense-in-depth on top of the cell-split
+    /// AEAD padding (commit 105268f) — defeats UDP-packet-length
+    /// traffic analysis. **OFF by default** because the bandwidth
+    /// amplification can ratelimit loopback throughput tests
+    /// (lo0 packet pacing on macOS) and modestly increases the
+    /// cost on small writes (HTTP/2 control frames etc.). Flip on
+    /// for production anti-censorship deployments where bandwidth
+    /// >> detectability.
+    pub pad_quic_datagrams_to_mtu: bool,
+}
+
+impl Default for PerfProfile {
+    fn default() -> Self {
+        Self {
+            initial_mtu: 1350,
+            pad_quic_datagrams_to_mtu: false,
+        }
+    }
+}
+
+/// Apply the production performance tuning with an explicit
+/// `PerfProfile`. Public + idempotent.
+pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: PerfProfile) {
     use std::sync::Arc;
     transport
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
@@ -103,7 +144,11 @@ pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
         // Per-stream send window — bytes the LOCAL sender will keep
         // buffered before back-pressuring writes. 8 MiB is a
         // sensible Linux-default-ish value.
-        .send_window(8 * 1024 * 1024);
+        .send_window(8 * 1024 * 1024)
+        // MTU bump — see PerfProfile docs.
+        .initial_mtu(profile.initial_mtu)
+        // Optional UDP-layer padding — see PerfProfile docs.
+        .pad_to_mtu(profile.pad_quic_datagrams_to_mtu);
 }
 
 /// The β-profile ALPN identifier, per spec §14.4 ("ALPN Protocol IDs:
