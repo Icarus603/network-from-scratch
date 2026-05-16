@@ -53,6 +53,24 @@ pub struct ClientConfig {
     /// a slow QUIC handshake on a marginal path still wins.
     #[serde(default)]
     pub beta_first_timeout_secs: Option<u64>,
+    /// Data-plane padding quantum (bytes). When non-zero, every
+    /// outgoing DATA record's plaintext is wrapped as
+    /// `[4-byte BE real_len | real_payload | zero-pad]` and rounded
+    /// up to a multiple of this value before AEAD seal. On the wire
+    /// the ciphertext length is always `k*quantum + 16` bytes, so a
+    /// passive observer learns only "which quantum bucket", not the
+    /// exact payload size. Spec §4.6 / §22.
+    ///
+    /// Trade-off:
+    /// - 0 (default): no padding, max throughput, wire length leaks
+    /// - 64: ~1% overhead at 16 KiB records, kills sub-64-byte signal
+    /// - 1280: matches β-profile cell, kills sub-cell length signal
+    ///   but adds up to ~7% overhead at typical request sizes
+    ///
+    /// Recommended for any deployment where the operator cares about
+    /// traffic-analysis resistance (i.e. anti-censorship use cases).
+    #[serde(default)]
+    pub pad_quantum: Option<u16>,
 }
 
 #[derive(Debug, Deserialize)]

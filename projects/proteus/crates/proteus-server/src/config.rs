@@ -182,6 +182,23 @@ pub struct ServerConfig {
     #[serde(default)]
     pub session_idle_secs: Option<u64>,
 
+    /// Data-plane padding quantum (bytes) for the server→client
+    /// direction. When non-zero, every outgoing DATA record is
+    /// length-prefixed + zero-padded to a multiple of this value
+    /// before AEAD seal, so the on-wire ciphertext length leaks only
+    /// "which quantum bucket". Spec §4.6 / §22.
+    ///
+    /// Recommended values:
+    /// - 0 / unset: no padding, max throughput, wire lengths leak
+    /// - 64: ~1% overhead at 16 KiB records, kills sub-64-byte signal
+    /// - 1280: matches β cell size, full sub-cell hiding (~5% overhead)
+    ///
+    /// The client side has an independent `pad_quantum` knob; setting
+    /// only the server side leaves the client→server direction
+    /// unpadded.
+    #[serde(default)]
+    pub pad_quantum: Option<u16>,
+
     /// CIDR firewall rules. Evaluated before rate-limit / max-connections.
     /// Denied connections are routed to `cover_endpoint` so an attacker
     /// cannot distinguish "you're blocked" from a generic HTTPS proxy.

@@ -719,7 +719,16 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         max_session_bytes: cfg.max_session_bytes,
         abuse_detector_byte_budget,
         outbound_filter: outbound_filter.clone(),
+        pad_quantum: cfg.pad_quantum,
     };
+    if let Some(q) = cfg.pad_quantum {
+        if q > 0 {
+            info!(
+                quantum = q,
+                "data-plane padding enabled (server→client direction)"
+            );
+        }
+    }
     if let Some(n) = relay_cfg.max_session_bytes {
         info!(bytes = n, "per-session byte budget configured");
     }

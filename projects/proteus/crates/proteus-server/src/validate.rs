@@ -585,6 +585,7 @@ mod tests {
             drain_secs: None,
             access_log: None,
             session_idle_secs: None,
+            pad_quantum: None,
             firewall: None,
             max_connections: None,
             max_session_bytes: None,

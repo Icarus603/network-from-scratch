@@ -50,6 +50,7 @@ pub struct StartupSummary {
     pub handshake_deadline_secs: u64,
     pub tcp_keepalive_secs: u64,
     pub session_idle_secs: u64,
+    pub pad_quantum: Option<u16>,
     pub max_session_bytes: Option<u64>,
     pub drain_secs: u64,
     pub metrics_listen: Option<String>,
@@ -86,6 +87,7 @@ impl StartupSummary {
             handshake_deadline_secs: cfg.handshake_deadline_secs.unwrap_or(15),
             tcp_keepalive_secs: cfg.tcp_keepalive_secs.unwrap_or(30),
             session_idle_secs: cfg.session_idle_secs.unwrap_or(600),
+            pad_quantum: cfg.pad_quantum,
             max_session_bytes: cfg.max_session_bytes,
             drain_secs: cfg.drain_secs.unwrap_or(30),
             metrics_listen: cfg.metrics_listen.clone(),
@@ -243,6 +245,10 @@ impl fmt::Display for StartupSummary {
             )?,
             None => row!("max_session_bytes", "<unset>")?,
         }
+        match self.pad_quantum {
+            Some(q) if q > 0 => row!("pad_quantum", format_args!("{q} bytes (server→client)"))?,
+            _ => row!("pad_quantum", "<disabled>")?,
+        }
         row!("drain", format_args!("{}s", self.drain_secs))?;
         match &self.metrics_listen {
             Some(addr) => row!(
@@ -337,6 +343,7 @@ mod tests {
             drain_secs: None,
             access_log: None,
             session_idle_secs: None,
+            pad_quantum: None,
             firewall: None,
             max_connections: None,
             max_session_bytes: None,

@@ -176,6 +176,21 @@ handshake_deadline_secs: 15
 # too loose lets a malicious idle holder eat FDs.
 session_idle_secs: 600
 
+# Data-plane padding quantum (bytes) for the server→client direction.
+# When non-zero, every outgoing AEAD record is length-prefixed and zero-
+# padded to a multiple of this value before encryption, so a passive
+# observer measuring record lengths learns only "which quantum bucket"
+# — sub-quantum length signal is destroyed (spec §4.6 / §22).
+#
+# Recommended values:
+#   - 0 / unset: no padding, max throughput, wire lengths leak
+#   - 64: ~1% overhead at 16 KiB records, kills sub-64-byte signal
+#   - 1280: matches β cell size, full sub-cell hiding (~5% overhead)
+#
+# This sets the server→client direction only. Clients set their own
+# `pad_quantum` in client.yaml for the client→server direction.
+# pad_quantum: 64
+
 # TCP keepalive interval (idle-session reaper). Default 30s.
 tcp_keepalive_secs: 30
 

@@ -79,6 +79,7 @@ async fn access_log_emits_one_record_per_session() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: None,
+        pad_quantum: None,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

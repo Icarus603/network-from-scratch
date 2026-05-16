@@ -69,6 +69,18 @@ pub struct RelayConfig {
     /// `OutboundPolicy::default()` (ports 80/443 only, all
     /// SSRF-relevant CIDRs blocked).
     pub outbound_filter: Option<Arc<OutboundPolicy>>,
+    /// Data-plane padding quantum for the server→client direction.
+    /// When non-zero, every outgoing AEAD record's plaintext is
+    /// length-prefixed and zero-padded to a multiple of this value
+    /// before encryption, so a passive observer on the wire learns
+    /// only "which quantum bucket" — sub-quantum length signal is
+    /// destroyed. Spec §4.6 / §22.
+    ///
+    /// Independent of the client's outgoing padding choice; each
+    /// direction picks its own quantum. Operators concerned about
+    /// traffic-analysis MUST set this on the server side too, or
+    /// the response direction leaks unpadded lengths.
+    pub pad_quantum: Option<u16>,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -83,6 +95,7 @@ impl std::fmt::Debug for RelayConfig {
                 &self.abuse_detector_byte_budget.is_some(),
             )
             .field("outbound_filter", &self.outbound_filter.is_some())
+            .field("pad_quantum", &self.pad_quantum)
             .finish()
     }
 }
@@ -164,11 +177,20 @@ where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let metrics = cfg.metrics.clone();
+    let pad_quantum = cfg.pad_quantum.unwrap_or(0);
     let AlphaSession {
         mut sender,
         mut receiver,
         ..
     } = session;
+
+    // Apply server→client padding before any record is emitted on this
+    // direction. Spec §4.6 — when the operator configured `pad_quantum`
+    // on the server, EVERY outgoing record (including the very first
+    // upstream reply) is length-hidden.
+    if pad_quantum > 0 {
+        sender.set_pad_quantum(pad_quantum);
+    }
 
     // First record = connect request. Push it out immediately so the
     // server can dial upstream without waiting for buffering.

@@ -95,6 +95,16 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     records_in_epoch: u64,
     /// Shared metrics counter.
     metrics: std::sync::Arc<SessionMetrics>,
+    /// Length-quantum for data plane padding. 0 = no padding (legacy
+    /// `RECORD_DATA` wire form, identical to pre-padding wire bytes).
+    /// Non-zero = round every plaintext up to the next multiple of this
+    /// value, then emit `RECORD_DATA_PADDED`. Spec §4.6 / §22.
+    ///
+    /// Typical operator values:
+    /// - 0: no padding (CPU & throughput max; wire-length leak)
+    /// - 64: 64-byte buckets (most leakage gone, ~1% overhead at 16 KiB)
+    /// - 1280: 1280-byte buckets (matches β-profile β-CELL_SIZE, destroys all sub-cell length signal)
+    pad_quantum: u16,
 }
 
 impl<W: AsyncWrite + Unpin> AlphaSender<W> {
@@ -113,7 +123,29 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
             bytes_in_epoch: 0,
             records_in_epoch: 0,
             metrics,
+            pad_quantum: 0,
         }
+    }
+
+    /// Enable per-record padding to `quantum` bytes. `0` disables.
+    /// Returns the previous setting so callers can stack-restore in
+    /// composite handlers.
+    ///
+    /// This MUST be called before `send_record` if non-zero, ideally
+    /// right after handshake completion. Switching the quantum
+    /// mid-session is safe (each record carries its own type byte)
+    /// but loses the threat-model property — observers learn that
+    /// "this user toggled padding at sequence N", which is itself a
+    /// distinctive signature. Production deployments should pick one
+    /// quantum at handshake time and hold it.
+    pub fn set_pad_quantum(&mut self, quantum: u16) -> u16 {
+        std::mem::replace(&mut self.pad_quantum, quantum)
+    }
+
+    /// Read the current padding quantum.
+    #[must_use]
+    pub fn pad_quantum(&self) -> u16 {
+        self.pad_quantum
     }
 
     /// Derive an `out_len`-byte subkey from the sender's current
@@ -151,6 +183,14 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     ///
     /// May trigger a ratchet before sending if the byte / record budget
     /// has been exhausted.
+    ///
+    /// When `pad_quantum > 0`, the plaintext is wrapped as
+    /// `[4-byte BE real_len | real_payload | zero padding]` rounded up
+    /// to a multiple of the quantum. AEAD covers the entire padded
+    /// blob, so the wire ciphertext length only leaks
+    /// `ceil((4 + real_len) / quantum) * quantum`. A passive observer
+    /// sees uniform-width records within each bucket — sub-quantum
+    /// length signal is destroyed.
     pub async fn send_record(&mut self, payload: &[u8]) -> AlphaResult<u64> {
         if self.should_ratchet() {
             self.send_ratchet_frame().await?;
@@ -162,8 +202,16 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         }
         let combined = self.combined();
         let aad = combined.to_be_bytes();
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, payload)?;
-        let frame = alpha::encode_record(alpha::RECORD_DATA, &ct);
+        let (rec_type, pt_buf) = if self.pad_quantum == 0 {
+            (alpha::RECORD_DATA, std::borrow::Cow::Borrowed(payload))
+        } else {
+            (
+                alpha::RECORD_DATA_PADDED,
+                std::borrow::Cow::Owned(pad_payload(payload, self.pad_quantum)?),
+            )
+        };
+        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
+        let frame = alpha::encode_record(rec_type, &ct);
         self.write.write_all(&frame).await?;
         let used = self.seqnum;
         self.seqnum = self.seqnum.saturating_add(1);
@@ -336,6 +384,39 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                 }
                             }
                         }
+                        alpha::RECORD_DATA_PADDED => {
+                            let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
+                            let aad = combined.to_be_bytes();
+                            match aead::open(&self.keys.key, &self.keys.iv, combined, &aad, &body) {
+                                Ok(pt) => {
+                                    // Parse [4-byte BE real_len | real | zero-pad].
+                                    // Reject if length prefix points past pt
+                                    // — that's a corrupt sender or malicious
+                                    // peer trying to leak bytes outside the
+                                    // tagged region. Silent drop per §11.16.
+                                    let raw = pt.as_slice();
+                                    if raw.len() < 4 {
+                                        self.metrics.record_aead_drop();
+                                        continue;
+                                    }
+                                    let real_len =
+                                        u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])
+                                            as usize;
+                                    if 4 + real_len > raw.len() {
+                                        self.metrics.record_aead_drop();
+                                        continue;
+                                    }
+                                    self.next_seqnum = self.next_seqnum.saturating_add(1);
+                                    let bytes = raw[4..4 + real_len].to_vec();
+                                    self.metrics.record_rx(bytes.len() as u64);
+                                    return Ok(Some(bytes));
+                                }
+                                Err(_) => {
+                                    self.metrics.record_aead_drop();
+                                    continue;
+                                }
+                            }
+                        }
                         alpha::RECORD_RATCHET => {
                             self.apply_ratchet(&body)?;
                             continue;
@@ -428,6 +509,28 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         self.metrics.record_ratchet();
         Ok(())
     }
+}
+
+/// Pad a payload to `quantum`-byte boundary with a 4-byte BE length
+/// prefix. The output is exactly
+/// `ceil((4 + payload.len()) / quantum) * quantum` bytes.
+/// Rejects payloads larger than `u32::MAX` (the length field cannot
+/// represent them) — Proteus already caps single records well under
+/// that via the upstream-chunk size, so this is a defense-in-depth
+/// limit.
+fn pad_payload(payload: &[u8], quantum: u16) -> AlphaResult<Vec<u8>> {
+    if payload.len() > u32::MAX as usize {
+        return Err(AlphaError::Closed);
+    }
+    let q = quantum as usize;
+    let total_unpadded = 4usize.saturating_add(payload.len());
+    // Round up to next multiple of `q`. quantum is u16 so q ≥ 1.
+    let padded_len = total_unpadded.div_ceil(q).saturating_mul(q);
+    let mut out = vec![0u8; padded_len];
+    out[..4].copy_from_slice(&(payload.len() as u32).to_be_bytes());
+    out[4..4 + payload.len()].copy_from_slice(payload);
+    // The tail bytes are already zero from `vec![0u8; padded_len]`.
+    Ok(out)
 }
 
 /// Symmetric ratchet step: `new = HKDF-Expand-Label(current, "proteus ratchet v1", "", 32)`.

@@ -194,6 +194,11 @@ async fn try_beta(
         mut receiver,
         ..
     } = beta_client.session;
+    if let Some(q) = cfg.pad_quantum {
+        if q > 0 {
+            sender.set_pad_quantum(q);
+        }
+    }
     sender.send_record(target_bytes).await?;
     sender.flush().await?;
     sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
@@ -234,6 +239,11 @@ async fn try_alpha(
             mut receiver,
             ..
         } = session;
+        if let Some(q) = cfg.pad_quantum {
+            if q > 0 {
+                sender.set_pad_quantum(q);
+            }
+        }
         sender.send_record(target_bytes).await?;
         sender.flush().await?;
         sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
@@ -248,6 +258,11 @@ async fn try_alpha(
         mut receiver,
         ..
     } = session;
+    if let Some(q) = cfg.pad_quantum {
+        if q > 0 {
+            sender.set_pad_quantum(q);
+        }
+    }
     sender.send_record(target_bytes).await?;
     sender.flush().await?;
     sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])

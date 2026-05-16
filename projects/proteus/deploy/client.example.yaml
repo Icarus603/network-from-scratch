@@ -58,3 +58,19 @@ tls:
 # When the server raises this, update the client config too; mismatched
 # values lead to handshake reject (silent route to cover).
 pow_difficulty: 0
+
+# Data-plane padding quantum (bytes) for the client→server direction.
+# When non-zero, every outgoing AEAD record is length-prefixed and
+# zero-padded to a multiple of this value before encryption, so a
+# passive observer measuring upload record lengths learns only "which
+# quantum bucket" (spec §4.6 / §22). Independent of the server's
+# `pad_quantum` knob.
+#
+# Recommended values:
+#   - 0 / unset: no padding, max throughput, wire lengths leak
+#   - 64: ~1% overhead at 16 KiB, kills sub-64-byte signal
+#   - 1280: matches β cell size, full sub-cell hiding (~5% overhead)
+#
+# For true traffic-analysis resistance set BOTH client and server
+# `pad_quantum` (otherwise one direction stays unpadded).
+# pad_quantum: 64

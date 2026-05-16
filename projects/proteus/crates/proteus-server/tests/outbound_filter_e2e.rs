@@ -91,6 +91,7 @@ async fn outbound_filter_blocks_aws_metadata_ip() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: Some(Arc::new(OutboundPolicy::default())),
+        pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -145,6 +146,7 @@ async fn outbound_filter_blocks_disallowed_port() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: Some(Arc::new(policy)),
+        pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -194,6 +196,7 @@ async fn outbound_filter_blocks_hostname_not_on_allowlist() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: Some(Arc::new(policy)),
+        pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -248,6 +251,7 @@ async fn outbound_filter_blocks_hostname_on_denylist() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: Some(Arc::new(policy)),
+        pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -299,6 +303,7 @@ async fn outbound_filter_allows_explicitly_permitted_destination() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         outbound_filter: Some(Arc::new(policy)),
+        pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();

@@ -57,6 +57,30 @@ pub const RECORD_RATCHET: u8 = 0x11;
 /// NOT send any further records on this direction.
 pub const RECORD_CLOSE: u8 = 0x12;
 
+/// Record type for AEAD-protected DATA records whose plaintext was
+/// padded to a per-session length quantum BEFORE encryption (spec §4.6).
+///
+/// Padded-plaintext layout (inside the AEAD):
+///
+/// ```text
+/// pt[0..4]            = real_payload_len: u32 big-endian
+/// pt[4..4+real_len]   = real_payload
+/// pt[4+real_len..]    = zero-padding to next multiple of session quantum
+/// ```
+///
+/// On the wire the ciphertext length is always
+/// `quantum × k + 16 (Poly1305 tag)` for some integer k ≥ 1, so a passive
+/// observer measuring record lengths learns only "which quantum bucket",
+/// not the exact payload size. Distinct from `RECORD_DATA` so legacy
+/// peers refuse padded sessions cleanly (silently ignored as an unknown
+/// record type per spec §12.2).
+///
+/// Receivers MUST treat truncated / sub-4-byte / over-length prefix
+/// values as protocol errors (silent drop, like AEAD failures —
+/// spec §11.16). They MUST NOT trust the on-wire length prefix to
+/// exceed the AEAD-decrypted plaintext size; the parser validates this.
+pub const RECORD_DATA_PADDED: u8 = 0x13;
+
 /// Encode a handshake frame.
 pub fn encode_handshake(frame_type: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + 8 + body.len());
