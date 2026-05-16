@@ -52,6 +52,89 @@ use tokio_rustls::{TlsAcceptor, TlsConnector};
 /// Full uTLS-grade replay requires also matching extension order,
 /// signature_algorithms list, and grease injection — which need rustls
 /// patching. This is what we can achieve via the public rustls API.
+/// Chrome 124's signature_algorithms list on the wire (8 schemes,
+/// IN ORDER) — captured from a real Chrome ClientHello.
+///
+/// This is the `mapping` field of `WebPkiSupportedAlgorithms`. The
+/// order is wire-significant per rustls's docs: "The first mapping
+/// is our highest preference." So the order on the wire becomes the
+/// order of this static array.
+///
+/// `all` holds the verification algorithm pool used during cert
+/// chain validation — we keep rustls's default `all` so we can still
+/// validate certs that use schemes we don't advertise (matching
+/// browser behavior: browsers validate widely, advertise narrowly).
+static CHROME_SIG_ALGS: rustls::crypto::WebPkiSupportedAlgorithms =
+    rustls::crypto::WebPkiSupportedAlgorithms {
+        all: &[
+            webpki::ring::ECDSA_P256_SHA256,
+            webpki::ring::ECDSA_P256_SHA384,
+            webpki::ring::ECDSA_P384_SHA256,
+            webpki::ring::ECDSA_P384_SHA384,
+            webpki::ring::ED25519,
+            webpki::ring::RSA_PSS_2048_8192_SHA256_LEGACY_KEY,
+            webpki::ring::RSA_PSS_2048_8192_SHA384_LEGACY_KEY,
+            webpki::ring::RSA_PSS_2048_8192_SHA512_LEGACY_KEY,
+            webpki::ring::RSA_PKCS1_2048_8192_SHA256,
+            webpki::ring::RSA_PKCS1_2048_8192_SHA384,
+            webpki::ring::RSA_PKCS1_2048_8192_SHA512,
+        ],
+        mapping: &[
+            // Chrome 124 wire order, verified against captured PCAPs:
+            //
+            //   ecdsa_secp256r1_sha256  0x0403
+            //   rsa_pss_rsae_sha256     0x0804
+            //   rsa_pkcs1_sha256        0x0401
+            //   ecdsa_secp384r1_sha384  0x0503
+            //   rsa_pss_rsae_sha384     0x0805
+            //   rsa_pkcs1_sha384        0x0501
+            //   rsa_pss_rsae_sha512     0x0806
+            //   rsa_pkcs1_sha512        0x0601
+            //
+            // Note: Chrome does NOT advertise ed25519 (0x0807) — rustls
+            // does by default. Removing it shifts JA4 ext_hash toward
+            // Chrome's signature.
+            (
+                rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
+                &[
+                    webpki::ring::ECDSA_P256_SHA256,
+                    webpki::ring::ECDSA_P384_SHA256,
+                ],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                &[webpki::ring::RSA_PSS_2048_8192_SHA256_LEGACY_KEY],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PKCS1_SHA256,
+                &[webpki::ring::RSA_PKCS1_2048_8192_SHA256],
+            ),
+            (
+                rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
+                &[
+                    webpki::ring::ECDSA_P384_SHA384,
+                    webpki::ring::ECDSA_P256_SHA384,
+                ],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                &[webpki::ring::RSA_PSS_2048_8192_SHA384_LEGACY_KEY],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PKCS1_SHA384,
+                &[webpki::ring::RSA_PKCS1_2048_8192_SHA384],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PSS_SHA512,
+                &[webpki::ring::RSA_PSS_2048_8192_SHA512_LEGACY_KEY],
+            ),
+            (
+                rustls::SignatureScheme::RSA_PKCS1_SHA512,
+                &[webpki::ring::RSA_PKCS1_2048_8192_SHA512],
+            ),
+        ],
+    };
+
 fn proteus_chrome_provider() -> CryptoProvider {
     use rustls::crypto::ring::cipher_suite::*;
     let mut p = rustls::crypto::ring::default_provider();
@@ -71,6 +154,9 @@ fn proteus_chrome_provider() -> CryptoProvider {
         TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
         TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
     ];
+    // Chrome-shaped signature_algorithms on the wire (8 schemes vs
+    // rustls's 9 — drops ed25519 which Chrome doesn't advertise).
+    p.signature_verification_algorithms = CHROME_SIG_ALGS;
     p
 }
 

@@ -222,20 +222,32 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
 
     // ----- EXACT baseline assertion (regression guardrail) -----
     //
-    // This locks the JA4 fingerprint that rustls 0.23 emits today
-    // with our exact ClientConfig (TLS 1.3 only, ALPN = h2,http/1.1,
-    // webpki-roots, ring crypto provider, ed25519+ECDSA signature
-    // algs). A change here means either:
-    //   (a) the workspace bumped rustls and rustls altered its
-    //       cipher / extension ordering — operators should audit
-    //       that the new shape is intentional;
-    //   (b) the uTLS-grade ClientHello replay work just landed —
-    //       update this baseline to match the new fingerprint
-    //       (which should match a real browser, e.g. Chrome 124).
+    // This locks the JA4 fingerprint Proteus α emits with the
+    // Chrome-shaped CryptoProvider:
+    //   - cipher_suites: Chrome 124 wire order (9 ciphers,
+    //     0x1301-first)
+    //   - signature_verification_algorithms: Chrome 124's 8-scheme
+    //     mapping (drops ed25519 0x0807, reorders per Chrome's
+    //     preference)
     //
-    // Either way the change MUST be intentional. The test catches
-    // accidental TLS-shape regressions in CI.
-    const EXPECTED_BASELINE: &str = "t13d0910h2_f91f431d341e_6a7d638fc319";
+    // Compared against the FoxIO published Chrome 124 JA4
+    // (`t13d1517h2_8daaf6152771_b0da82dd1658`) the remaining diffs
+    // are:
+    //   - cipher_count: 09 vs Chrome's 15 (rustls deliberately omits
+    //     plain-RSA AES-CBC suites for safety reasons — adding them
+    //     bypasses rustls's safety policy and is the wrong direction
+    //     for a security-focused proxy)
+    //   - cipher_hash: differs because the SET differs (sorted-list
+    //     SHA-256 prefix is determined by the cipher SET, not order)
+    //   - ext_hash: still differs because rustls's extension SET +
+    //     ORDER on the wire differs from Chrome (ext order requires
+    //     forking rustls internally — separate commit)
+    //
+    // Drift here means either:
+    //   (a) the workspace bumped rustls and the shape changed —
+    //       audit the diff;
+    //   (b) the next uTLS step landed — update the baseline.
+    const EXPECTED_BASELINE: &str = "t13d0910h2_f91f431d341e_648ed004696a";
     assert_eq!(
         ja4.to_string(),
         EXPECTED_BASELINE,

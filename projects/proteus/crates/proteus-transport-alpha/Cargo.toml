@@ -36,6 +36,11 @@ tracing = "0.1"
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
+# Direct rustls-webpki dep so we can construct a custom
+# `WebPkiSupportedAlgorithms` that emits Chrome-shaped sig_algs on the
+# wire. rustls re-exports this same crate internally as `webpki`; we
+# pin the exact version rustls 0.23 uses to keep both views consistent.
+rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
 
 [dev-dependencies]
 rcgen = "0.13"
