@@ -132,12 +132,77 @@ pub async fn connect_with_timeout(
     crate::apply_perf_tuning(&mut transport);
     client_cfg.transport_config(Arc::new(transport));
 
-    // Bind an ephemeral UDP socket and connect outbound.
-    let bind: SocketAddr = match server_addr {
-        SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
-        SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+    // Bind a UDP socket — try GFW-evasion source-port choice first.
+    //
+    // ## GFW 2026 QUIC SNI Inspection evasion (USENIX Security '25)
+    //
+    // The Great Firewall of China deployed QUIC SNI inspection in
+    // early 2026. The "Exposing and Circumventing SNI-based QUIC
+    // Censorship" paper (Zohaib et al., USENIX Security 2025)
+    // documents a critical optimization in the GFW's QUIC inspector:
+    //
+    //     "The GFW does not block connections where the source port
+    //      number is less than or equal to the destination port
+    //      number."
+    //
+    // This single heuristic filters ~70% of UDP traffic from
+    // inspection while still catching >90% of standard QUIC client
+    // Initials (which typically use source ports in the 49152-65535
+    // ephemeral range, all > common destination ports like 443).
+    //
+    // We exploit it by binding our client socket to a source port
+    // **equal to** the destination port. No privileged port required
+    // (we don't go below 1024); just pick the same port number the
+    // server listens on, and the GFW's heuristic skips inspection
+    // entirely. On port conflict (port already in use) we walk down
+    // a small window and finally fall back to ephemeral.
+    let bind_attempts: Vec<SocketAddr> = {
+        let mut out = Vec::with_capacity(8);
+        let dst_port = server_addr.port();
+        // Try N candidate source ports in the [max(1024, dst_port-7) ..= dst_port] range.
+        // Source ports < 1024 require CAP_NET_BIND_SERVICE / root on
+        // Linux + macOS; skip them.
+        let lo = dst_port.saturating_sub(7).max(1024);
+        for src in (lo..=dst_port).rev() {
+            let s: SocketAddr = match server_addr {
+                SocketAddr::V4(_) => format!("0.0.0.0:{src}").parse().unwrap(),
+                SocketAddr::V6(_) => format!("[::]:{src}").parse().unwrap(),
+            };
+            out.push(s);
+        }
+        // Last-resort ephemeral fallback so we don't fail to dial
+        // when every low-source-port slot is busy.
+        let fallback: SocketAddr = match server_addr {
+            SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+            SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+        };
+        out.push(fallback);
+        out
     };
-    let mut endpoint = quinn::Endpoint::client(bind)?;
+    let mut endpoint = {
+        let mut last_err: Option<std::io::Error> = None;
+        let mut chosen: Option<quinn::Endpoint> = None;
+        for bind in &bind_attempts {
+            match quinn::Endpoint::client(*bind) {
+                Ok(ep) => {
+                    chosen = Some(ep);
+                    break;
+                }
+                Err(e) => {
+                    // EADDRINUSE / permission denied — try the next
+                    // candidate. Quietly fall through to the
+                    // ephemeral fallback at the end of the list.
+                    last_err = Some(e);
+                }
+            }
+        }
+        chosen.ok_or_else(|| {
+            BetaError::Io(
+                last_err
+                    .unwrap_or_else(|| std::io::Error::other("no UDP source port could be bound")),
+            )
+        })?
+    };
     endpoint.set_default_client_config(client_cfg);
 
     let conn = endpoint.connect(server_addr, server_name)?.await?;
