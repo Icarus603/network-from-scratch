@@ -1,8 +1,36 @@
-# Proteus α-profile client config example.
+# Proteus client config example.
 # Copy to /etc/proteus/client.yaml or run with `--config ./client.yaml`.
+#
+# Supports dual-stack carriers:
+#   - α (TCP + TLS 1.3): always available as fallback.
+#   - β (QUIC over UDP): optional, much faster on lossy paths.
+# When both are configured the client uses happy-eyeballs: tries β
+# first with a short timeout, falls back to α on any β failure.
 
-# Remote Proteus server `host:port`.
+# Remote Proteus server `host:port` for the α (TCP+TLS) carrier.
+# REQUIRED — this is the always-available fallback path.
 server_endpoint: "vps.example.com:8443"
+
+# Optional β (QUIC over UDP) endpoint on the same server. When set,
+# the client tries β first; on any β failure (timeout, UDP blocked,
+# cert mismatch, peer doesn't support DATAGRAM) it falls back to α.
+# Strongly recommended in production — β with BBR + zero-HoL
+# DATAGRAM beats α handily on lossy long-fat-pipe paths.
+#
+# Typical deployment: server binds α to :443/tcp and β to :443/udp
+# on the same host, so this client config has identical strings
+# for both endpoints.
+# server_endpoint_beta: "vps.example.com:8443"
+
+# Optional override for β's TLS SNI. Defaults to `tls.server_name`
+# below (the common case: same Let's Encrypt cert for both carriers).
+# Only set this when the operator has split cert/SNI per carrier.
+# beta_server_name: "vps.example.com"
+
+# Per-connection timeout (seconds) for the β-first dial attempt
+# before falling back to α. Default 3s. Tune up for high-RTT paths
+# (transcontinental: 5s), down for LAN-only deployments (1s).
+# beta_first_timeout_secs: 3
 
 # Local SOCKS5 inbound. Point your browser / curl / sing-box at this.
 socks_listen: "127.0.0.1:1080"
