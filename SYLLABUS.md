@@ -64,7 +64,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 | I | **0** | 定向、研究方法、文獻地圖 | 5 | 知道整門課的所有出處 |
 | I | **1** | 網路：從電晶體到 BGP | 18 | 能讀懂 Linux TCP/IP stack 任一行 |
 | I | **2** | 高效能 I/O 與 kernel 網路 | 14 | 會 epoll / io_uring / eBPF / XDP / DPDK |
-| I | **3** | 密碼學：從數論到 PQ | 16 | 能設計一個 protocol 並用 ProVerif 驗證 |
+| I | **3** | 密碼學：從數論到 PQ | 17 | 能設計一個 protocol 並用 ProVerif 驗證 |
 | I | **4** | TLS / QUIC 內部完全解剖 | 12 | 逐 byte 解釋 TLS 1.3 + QUIC v1 握手 |
 | I | **5** | 形式化方法 | 8 | TLA+ / ProVerif / Tamarin 入門 |
 | II | **6** | 真 VPN 協議精讀 + 原始碼 | 10 | 通讀 wireguard-go，能寫 PR |
