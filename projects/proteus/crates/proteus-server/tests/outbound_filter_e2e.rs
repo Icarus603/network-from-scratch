@@ -176,6 +176,109 @@ async fn outbound_filter_blocks_disallowed_port() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outbound_filter_blocks_hostname_not_on_allowlist() {
+    let server_keys = ServerKeys::generate();
+    let client_cfg = make_client_cfg(&server_keys);
+    let metrics = Arc::new(ServerMetrics::default());
+    let ctx = Arc::new(ServerCtx::new(server_keys));
+
+    // Hostname allowlist: only `*.example.com`. The client will try
+    // to dial `other.example.org` (different apex) — must be denied.
+    let mut policy = OutboundPolicy::default().with_no_default_blocklist();
+    policy.extend_allowed_hostnames(["*.example.com"]).unwrap();
+    let relay_cfg = RelayConfig {
+        idle_timeout: Some(Duration::from_secs(5)),
+        metrics: Some(Arc::clone(&metrics)),
+        access_log: None,
+        max_session_bytes: None,
+        abuse_detector_byte_budget: None,
+        outbound_filter: Some(Arc::new(policy)),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
+        let cfg = relay_cfg.clone();
+        async move {
+            let _ = relay::handle_session(session, cfg).await;
+        }
+    }));
+
+    let mut session = make_session(proxy_addr, &client_cfg).await;
+    let connect = encode_connect("other.example.org", 443);
+    session.sender.send_record(&connect).await.unwrap();
+    session.sender.flush().await.unwrap();
+
+    let mut blocked = 0u64;
+    for _ in 0..50 {
+        blocked = metrics
+            .outbound_blocked
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if blocked >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(
+        blocked, 1,
+        "hostname not on allowlist must be blocked, got {blocked}"
+    );
+
+    let _ = session.sender.shutdown().await;
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn outbound_filter_blocks_hostname_on_denylist() {
+    let server_keys = ServerKeys::generate();
+    let client_cfg = make_client_cfg(&server_keys);
+    let metrics = Arc::new(ServerMetrics::default());
+    let ctx = Arc::new(ServerCtx::new(server_keys));
+
+    // Block `*.badcdn.example`. Default SSRF list off so we can
+    // verify the rejection is hostname-driven, not CIDR-driven.
+    let mut policy = OutboundPolicy::default().with_no_default_blocklist();
+    policy
+        .extend_blocked_hostnames(["*.badcdn.example"])
+        .unwrap();
+    let relay_cfg = RelayConfig {
+        idle_timeout: Some(Duration::from_secs(5)),
+        metrics: Some(Arc::clone(&metrics)),
+        access_log: None,
+        max_session_bytes: None,
+        abuse_detector_byte_budget: None,
+        outbound_filter: Some(Arc::new(policy)),
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = listener.local_addr().unwrap();
+    let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
+        let cfg = relay_cfg.clone();
+        async move {
+            let _ = relay::handle_session(session, cfg).await;
+        }
+    }));
+
+    let mut session = make_session(proxy_addr, &client_cfg).await;
+    let connect = encode_connect("evil.badcdn.example", 443);
+    session.sender.send_record(&connect).await.unwrap();
+    session.sender.flush().await.unwrap();
+
+    let mut blocked = 0u64;
+    for _ in 0..50 {
+        blocked = metrics
+            .outbound_blocked
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if blocked >= 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(blocked, 1, "denylisted hostname must be blocked");
+
+    let _ = session.sender.shutdown().await;
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn outbound_filter_allows_explicitly_permitted_destination() {
     let echo_addr = spawn_echo_upstream().await;
     let server_keys = ServerKeys::generate();

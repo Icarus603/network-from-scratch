@@ -114,6 +114,12 @@ handshake_deadline_secs: 15
 #     extra_ports: [587, 993, 853]    # SMTP submission, IMAPS, DoT
 #     extra_blocked_cidrs:
 #       - 100.64.0.0/10                # block your own CGNAT
+#     blocked_hostnames:
+#       - "*.badcdn.example"           # known-abuse hostnames
+#     allowed_hostnames:               # when non-empty, ONLY these
+#       - "*.cdn.example.net"          # match (apex and subdomains).
+#       - "api.example.com"            # `*.foo` = strict subdomains;
+#                                      # `foo` = apex + subdomains.
 # To explicitly DISABLE the filter (testing / trusted LAN only):
 #   outbound_filter:
 #     disabled: true

@@ -808,10 +808,22 @@ fn build_outbound_filter(
             .extend_blocked_cidrs(&cfg.extra_blocked_cidrs)
             .map_err(|e| format!("outbound_filter.extra_blocked_cidrs: {e}"))?;
     }
+    if !cfg.allowed_hostnames.is_empty() {
+        policy
+            .extend_allowed_hostnames(&cfg.allowed_hostnames)
+            .map_err(|e| format!("outbound_filter.allowed_hostnames: {e}"))?;
+    }
+    if !cfg.blocked_hostnames.is_empty() {
+        policy
+            .extend_blocked_hostnames(&cfg.blocked_hostnames)
+            .map_err(|e| format!("outbound_filter.blocked_hostnames: {e}"))?;
+    }
     info!(
         replace_blocklist = cfg.replace_default_blocklist,
         extra_cidrs = cfg.extra_blocked_cidrs.len(),
         extra_ports = cfg.extra_ports.len(),
+        allowed_hostnames = cfg.allowed_hostnames.len(),
+        blocked_hostnames = cfg.blocked_hostnames.len(),
         "outbound destination filter configured"
     );
     Ok(Some(Arc::new(policy)))

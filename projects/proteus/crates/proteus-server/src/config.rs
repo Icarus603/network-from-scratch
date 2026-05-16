@@ -218,6 +218,16 @@ pub struct OutboundFilterCfg {
     /// know what you're doing.
     #[serde(default)]
     pub replace_default_blocklist: bool,
+    /// Hostname allowlist patterns. When non-empty, the destination
+    /// host MUST match one (`example.com` matches the apex and any
+    /// subdomain; `*.example.com` matches strict subdomains only).
+    /// Literal-IP destinations skip the hostname gate.
+    #[serde(default)]
+    pub allowed_hostnames: Vec<String>,
+    /// Hostname denylist patterns. Always applied; takes precedence
+    /// over the allowlist. Same pattern syntax as `allowed_hostnames`.
+    #[serde(default)]
+    pub blocked_hostnames: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

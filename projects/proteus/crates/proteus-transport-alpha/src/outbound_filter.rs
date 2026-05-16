@@ -36,6 +36,105 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use crate::firewall::CidrRule;
 
+/// A hostname suffix pattern. Two flavors:
+///
+/// - `"example.com"` matches `example.com` exactly and any subdomain
+///   (`foo.example.com`, `a.b.example.com`).
+/// - `"*.example.com"` matches **only** strict subdomains, not the
+///   apex (`foo.example.com` matches, `example.com` does not).
+///
+/// Comparisons are case-insensitive (DNS labels are not case-
+/// sensitive). Trailing dots in either the pattern or the candidate
+/// hostname are stripped before matching.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostPattern {
+    /// The pattern with any leading `*.` stripped and lowercased.
+    suffix: String,
+    /// True when the pattern was `*.…` (subdomain-only). False means
+    /// "match the suffix or any subdomain of it".
+    strict_subdomain: bool,
+}
+
+impl HostPattern {
+    /// Parse a string into a [`HostPattern`]. Rejects empty strings,
+    /// patterns with embedded wildcards (`a.*.b`), and patterns
+    /// containing characters other than alphanum / dot / hyphen /
+    /// the leading `*.`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim().trim_end_matches('.');
+        if s.is_empty() {
+            return Err("empty hostname pattern".to_string());
+        }
+        let (suffix, strict) = if let Some(rest) = s.strip_prefix("*.") {
+            (rest, true)
+        } else {
+            (s, false)
+        };
+        if suffix.is_empty() {
+            return Err(format!("pattern {s:?}: bare wildcard with no suffix"));
+        }
+        // Forbid embedded wildcards (`foo.*.bar`) — they're a common
+        // operator mistake and aren't worth the parser complexity.
+        if suffix.contains('*') {
+            return Err(format!(
+                "pattern {s:?}: embedded `*` not supported; use leading `*.suffix` form"
+            ));
+        }
+        // Every label must be valid LDH (letters, digits, hyphens)
+        // plus the dot separator.
+        for label in suffix.split('.') {
+            if label.is_empty() {
+                return Err(format!("pattern {s:?}: empty label (consecutive dots)"));
+            }
+            if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                return Err(format!("pattern {s:?}: invalid char in label {label:?}"));
+            }
+            if label.starts_with('-') || label.ends_with('-') {
+                return Err(format!(
+                    "pattern {s:?}: label {label:?} starts/ends with hyphen"
+                ));
+            }
+        }
+        Ok(Self {
+            suffix: suffix.to_ascii_lowercase(),
+            strict_subdomain: strict,
+        })
+    }
+
+    /// Does this pattern cover `host`? Case-insensitive; trailing
+    /// dots stripped from `host`.
+    #[must_use]
+    pub fn matches(&self, host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        if host == self.suffix {
+            return !self.strict_subdomain;
+        }
+        // Subdomain match: host must end with `.{self.suffix}`. We
+        // explicitly check the boundary dot to avoid `evilexample.com`
+        // matching pattern `example.com`.
+        if let Some(prefix_len) = host.len().checked_sub(self.suffix.len()) {
+            if prefix_len == 0 {
+                return false; // host shorter than suffix (or empty prefix already handled)
+            }
+            // host has the right length; verify the boundary char +
+            // suffix match.
+            let (left, right) = host.split_at(prefix_len);
+            if !left.ends_with('.') {
+                return false;
+            }
+            return right == self.suffix;
+        }
+        false
+    }
+}
+
+impl std::str::FromStr for HostPattern {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::parse(s)
+    }
+}
+
 /// Decision returned by [`OutboundPolicy::check`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
@@ -44,6 +143,10 @@ pub enum Decision {
     Allow(IpAddr),
     /// Port is not in the allow list.
     DeniedPort(u16),
+    /// Hostname matched a deny pattern.
+    DeniedHostname,
+    /// Hostname does NOT match the non-empty allow pattern list.
+    HostnameNotAllowed,
     /// At least one resolved IP matches a denylist CIDR; we return
     /// the offending IP for log triage.
     DeniedHost(IpAddr),
@@ -55,6 +158,16 @@ pub enum Decision {
 /// CidrRule are small) but the relay usually wraps this in
 /// `Arc<OutboundPolicy>` since one instance is shared by every
 /// session.
+///
+/// **Decision pipeline** (first failure wins):
+///
+/// 1. Port allowlist (default `[80, 443]`).
+/// 2. Hostname **deny** patterns (e.g. ban known abuse domains).
+/// 3. Hostname **allow** patterns — if non-empty, the host must
+///    match at least one. Empty = no hostname allowlist policy
+///    (any hostname can proceed to the CIDR check).
+/// 4. DNS resolution.
+/// 5. CIDR blocklist applied to every resolved IP.
 #[derive(Debug, Clone)]
 pub struct OutboundPolicy {
     allowed_ports: Vec<u16>,
@@ -63,16 +176,26 @@ pub struct OutboundPolicy {
     /// `false` we leave the dial path to fail naturally with a
     /// connection error. Default `true` — fail-closed.
     deny_unresolvable: bool,
+    /// Optional hostname allowlist. When non-empty, the candidate
+    /// host MUST match one of these patterns. Operator uses this
+    /// for "only let users reach our CDN + a couple of known APIs".
+    allowed_hostnames: Vec<HostPattern>,
+    /// Hostname denylist. Always applied; takes precedence over
+    /// the allowlist.
+    blocked_hostnames: Vec<HostPattern>,
 }
 
 impl Default for OutboundPolicy {
     /// Sensible production default: ports 80/443 only, SSRF CIDRs
-    /// all blocked, unresolvable hosts denied.
+    /// all blocked, unresolvable hosts denied, hostname allow/deny
+    /// lists empty (no hostname policy).
     fn default() -> Self {
         Self {
             allowed_ports: vec![80, 443],
             blocked_cidrs: default_ssrf_blocklist(),
             deny_unresolvable: true,
+            allowed_hostnames: Vec::new(),
+            blocked_hostnames: Vec::new(),
         }
     }
 }
@@ -86,7 +209,67 @@ impl OutboundPolicy {
             allowed_ports: Vec::new(),
             blocked_cidrs: Vec::new(),
             deny_unresolvable: false,
+            allowed_hostnames: Vec::new(),
+            blocked_hostnames: Vec::new(),
         }
+    }
+
+    /// Append patterns to the hostname allowlist. When the allowlist
+    /// is non-empty, only candidate hosts matching one of these
+    /// patterns survive the hostname gate. Errors on the first
+    /// invalid pattern string.
+    pub fn extend_allowed_hostnames<I, S>(&mut self, patterns: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for s in patterns {
+            self.allowed_hostnames.push(HostPattern::parse(s.as_ref())?);
+        }
+        Ok(())
+    }
+
+    /// Append patterns to the hostname denylist. Always applied,
+    /// takes precedence over the allowlist.
+    pub fn extend_blocked_hostnames<I, S>(&mut self, patterns: I) -> Result<(), String>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for s in patterns {
+            self.blocked_hostnames.push(HostPattern::parse(s.as_ref())?);
+        }
+        Ok(())
+    }
+
+    /// Apply hostname-level patterns. Returns None if the host
+    /// passes (either no policy or matched an allow + not denied),
+    /// or Some(Decision) describing the rejection. Public so the
+    /// relay can run the same logic on hostnames that ALSO appear
+    /// as IP literals (we treat literal IPs as "no hostname policy
+    /// applies" — they go straight to the CIDR check).
+    ///
+    /// Three short-circuits skip the gate entirely:
+    /// - Empty `host` (caller has no name to check).
+    /// - Literal IPv4/IPv6 string (no DNS hostname involved).
+    #[must_use]
+    pub fn check_hostname(&self, host: &str) -> Option<Decision> {
+        if host.is_empty() {
+            return None;
+        }
+        // Literal IPs aren't hostnames; skip the hostname gate.
+        if host.parse::<IpAddr>().is_ok() {
+            return None;
+        }
+        if self.blocked_hostnames.iter().any(|p| p.matches(host)) {
+            return Some(Decision::DeniedHostname);
+        }
+        if !self.allowed_hostnames.is_empty()
+            && !self.allowed_hostnames.iter().any(|p| p.matches(host))
+        {
+            return Some(Decision::HostnameNotAllowed);
+        }
+        None
     }
 
     /// Replace the allowed-port list. Empty = no port restriction.
@@ -147,28 +330,26 @@ impl OutboundPolicy {
         !self.blocked_cidrs.iter().any(|r| r.matches(ip))
     }
 
-    /// Full check: port + every resolved IP. The caller passes a
-    /// list of resolved IPs (e.g. from `tokio::net::lookup_host`).
-    /// We return [`Decision::Allow`] with the FIRST allowed IP — the
-    /// caller dials this exact IP so a malicious resolver can't swap
-    /// it for an internal one between policy check and dial.
+    /// Full check: port + hostname + every resolved IP. The caller
+    /// passes the original host (e.g. `"foo.example.com"` or
+    /// `"203.0.113.10"`) and the resolved IP list from
+    /// `tokio::net::lookup_host`. We return [`Decision::Allow`] with
+    /// the FIRST allowed IP — the caller dials that exact IP so a
+    /// malicious resolver can't swap it for an internal one between
+    /// policy check and dial.
     ///
-    /// If `resolved` is empty, returns [`Decision::UnresolvableHost`]
-    /// (when `deny_unresolvable`) — but the caller may also choose
-    /// to short-circuit with this themselves on a `lookup_host` error.
+    /// Pass `host = ""` (or a literal IP) when the hostname gate
+    /// shouldn't apply.
     #[must_use]
-    pub fn check(&self, port: u16, resolved: &[IpAddr]) -> Decision {
+    pub fn check(&self, host: &str, port: u16, resolved: &[IpAddr]) -> Decision {
         if !self.port_allowed(port) {
             return Decision::DeniedPort(port);
         }
+        if let Some(d) = self.check_hostname(host) {
+            return d;
+        }
         if resolved.is_empty() {
-            return if self.deny_unresolvable {
-                Decision::UnresolvableHost
-            } else {
-                // Caller wanted fail-open; surface as port-allow
-                // failure since we have no IP to give back.
-                Decision::UnresolvableHost
-            };
+            return Decision::UnresolvableHost;
         }
         // Reject if ANY resolved IP is on the blocklist. DNS rebind
         // returning a mix would still hit this check because the
@@ -272,7 +453,7 @@ mod tests {
     #[test]
     fn default_policy_blocks_aws_metadata() {
         let p = OutboundPolicy::default();
-        let d = p.check(80, &[ip("169.254.169.254")]);
+        let d = p.check("", 80, &[ip("169.254.169.254")]);
         assert!(matches!(d, Decision::DeniedHost(_)), "got: {d:?}");
     }
 
@@ -281,7 +462,7 @@ mod tests {
         let p = OutboundPolicy::default();
         for addr in ["127.0.0.1", "127.0.0.42", "127.255.255.255"] {
             assert!(
-                matches!(p.check(443, &[ip(addr)]), Decision::DeniedHost(_)),
+                matches!(p.check("", 443, &[ip(addr)]), Decision::DeniedHost(_)),
                 "{addr} should be blocked"
             );
         }
@@ -292,7 +473,7 @@ mod tests {
         let p = OutboundPolicy::default();
         for addr in ["10.0.0.1", "172.16.0.1", "172.31.255.255", "192.168.1.1"] {
             assert!(
-                matches!(p.check(443, &[ip(addr)]), Decision::DeniedHost(_)),
+                matches!(p.check("", 443, &[ip(addr)]), Decision::DeniedHost(_)),
                 "{addr} should be blocked"
             );
         }
@@ -303,7 +484,7 @@ mod tests {
         let p = OutboundPolicy::default();
         for addr in ["::1", "fc00::1", "fd12:3456:789a::1", "fe80::1"] {
             assert!(
-                matches!(p.check(443, &[ip(addr)]), Decision::DeniedHost(_)),
+                matches!(p.check("", 443, &[ip(addr)]), Decision::DeniedHost(_)),
                 "{addr} should be blocked"
             );
         }
@@ -317,14 +498,14 @@ mod tests {
         // `::ffff:a.b.c.d` as Ipv6Addr. The default blocklist covers
         // `::ffff:0:0/96` exactly to close this.
         let p = OutboundPolicy::default();
-        let d = p.check(443, &[ip("::ffff:10.0.0.1")]);
+        let d = p.check("", 443, &[ip("::ffff:10.0.0.1")]);
         assert!(matches!(d, Decision::DeniedHost(_)), "got: {d:?}");
     }
 
     #[test]
     fn default_policy_allows_public_ip() {
         let p = OutboundPolicy::default();
-        let d = p.check(443, &[ip("1.1.1.1")]);
+        let d = p.check("", 443, &[ip("1.1.1.1")]);
         assert_eq!(d, Decision::Allow(ip("1.1.1.1")));
     }
 
@@ -332,15 +513,15 @@ mod tests {
     fn default_policy_blocks_non_80_443_ports() {
         let p = OutboundPolicy::default();
         assert!(matches!(
-            p.check(22, &[ip("1.1.1.1")]),
+            p.check("", 22, &[ip("1.1.1.1")]),
             Decision::DeniedPort(22)
         ));
         assert!(matches!(
-            p.check(25, &[ip("1.1.1.1")]),
+            p.check("", 25, &[ip("1.1.1.1")]),
             Decision::DeniedPort(25)
         ));
         assert!(matches!(
-            p.check(8080, &[ip("1.1.1.1")]),
+            p.check("", 8080, &[ip("1.1.1.1")]),
             Decision::DeniedPort(8080)
         ));
     }
@@ -350,7 +531,7 @@ mod tests {
         let p = OutboundPolicy::default();
         for port in [80, 443] {
             assert!(matches!(
-                p.check(port, &[ip("1.1.1.1")]),
+                p.check("", port, &[ip("1.1.1.1")]),
                 Decision::Allow(_)
             ));
         }
@@ -359,13 +540,22 @@ mod tests {
     #[test]
     fn extend_allowed_ports_works() {
         let p = OutboundPolicy::default().extend_allowed_ports([22, 587]);
-        assert!(matches!(p.check(22, &[ip("1.1.1.1")]), Decision::Allow(_)));
-        assert!(matches!(p.check(587, &[ip("1.1.1.1")]), Decision::Allow(_)));
+        assert!(matches!(
+            p.check("", 22, &[ip("1.1.1.1")]),
+            Decision::Allow(_)
+        ));
+        assert!(matches!(
+            p.check("", 587, &[ip("1.1.1.1")]),
+            Decision::Allow(_)
+        ));
         // Default ports still allowed.
-        assert!(matches!(p.check(443, &[ip("1.1.1.1")]), Decision::Allow(_)));
+        assert!(matches!(
+            p.check("", 443, &[ip("1.1.1.1")]),
+            Decision::Allow(_)
+        ));
         // Unlisted port still denied.
         assert!(matches!(
-            p.check(8080, &[ip("1.1.1.1")]),
+            p.check("", 8080, &[ip("1.1.1.1")]),
             Decision::DeniedPort(8080)
         ));
     }
@@ -374,20 +564,23 @@ mod tests {
     fn empty_port_list_means_unrestricted() {
         let p = OutboundPolicy::default().with_allowed_ports(Vec::new());
         assert!(matches!(
-            p.check(8080, &[ip("1.1.1.1")]),
+            p.check("", 8080, &[ip("1.1.1.1")]),
             Decision::Allow(_)
         ));
-        assert!(matches!(p.check(22, &[ip("1.1.1.1")]), Decision::Allow(_)));
+        assert!(matches!(
+            p.check("", 22, &[ip("1.1.1.1")]),
+            Decision::Allow(_)
+        ));
     }
 
     #[test]
     fn permissive_policy_admits_everything() {
         let p = OutboundPolicy::permissive();
         assert!(matches!(
-            p.check(22, &[ip("127.0.0.1")]),
+            p.check("", 22, &[ip("127.0.0.1")]),
             Decision::Allow(_)
         ));
-        assert!(matches!(p.check(0, &[ip("::1")]), Decision::Allow(_)));
+        assert!(matches!(p.check("", 0, &[ip("::1")]), Decision::Allow(_)));
     }
 
     #[test]
@@ -403,12 +596,12 @@ mod tests {
         p.extend_blocked_cidrs(["198.51.100.0/24"]).unwrap();
         // No longer in default blocklist → loopback now passes.
         assert!(matches!(
-            p.check(443, &[ip("127.0.0.1")]),
+            p.check("", 443, &[ip("127.0.0.1")]),
             Decision::Allow(_)
         ));
         // Custom rule still fires.
         assert!(matches!(
-            p.check(443, &[ip("198.51.100.42")]),
+            p.check("", 443, &[ip("198.51.100.42")]),
             Decision::DeniedHost(_)
         ));
     }
@@ -420,21 +613,21 @@ mod tests {
         // deny the whole destination.
         let p = OutboundPolicy::default();
         let resolved = [ip("1.1.1.1"), ip("10.0.0.1")];
-        let d = p.check(443, &resolved);
+        let d = p.check("", 443, &resolved);
         assert_eq!(d, Decision::DeniedHost(ip("10.0.0.1")));
     }
 
     #[test]
     fn unresolvable_host_denied_by_default() {
         let p = OutboundPolicy::default();
-        assert_eq!(p.check(443, &[]), Decision::UnresolvableHost);
+        assert_eq!(p.check("", 443, &[]), Decision::UnresolvableHost);
     }
 
     #[test]
     fn allow_returns_first_resolved_ip() {
         let p = OutboundPolicy::default();
         let resolved = [ip("1.1.1.1"), ip("8.8.8.8")];
-        assert_eq!(p.check(443, &resolved), Decision::Allow(ip("1.1.1.1")));
+        assert_eq!(p.check("", 443, &resolved), Decision::Allow(ip("1.1.1.1")));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -467,5 +660,150 @@ mod tests {
                 "lying resolver returned {addr}, which should be in the SSRF blocklist"
             );
         }
+    }
+
+    // ----- HostPattern parsing -----
+
+    #[test]
+    fn host_pattern_rejects_empty() {
+        assert!(HostPattern::parse("").is_err());
+        assert!(HostPattern::parse("   ").is_err());
+    }
+
+    #[test]
+    fn host_pattern_rejects_embedded_wildcard() {
+        assert!(HostPattern::parse("foo.*.bar").is_err());
+        assert!(HostPattern::parse("*").is_err()); // bare wildcard
+        assert!(HostPattern::parse("*.").is_err());
+    }
+
+    #[test]
+    fn host_pattern_rejects_invalid_label_chars() {
+        assert!(HostPattern::parse("foo bar.com").is_err());
+        assert!(HostPattern::parse("under_score.com").is_err());
+        assert!(HostPattern::parse("-foo.com").is_err());
+        assert!(HostPattern::parse("foo-.com").is_err());
+    }
+
+    #[test]
+    fn host_pattern_rejects_consecutive_dots() {
+        assert!(HostPattern::parse("foo..com").is_err());
+    }
+
+    #[test]
+    fn host_pattern_apex_matches_self_and_subdomains() {
+        let p = HostPattern::parse("example.com").unwrap();
+        assert!(p.matches("example.com"));
+        assert!(p.matches("foo.example.com"));
+        assert!(p.matches("a.b.c.example.com"));
+        // Boundary check: evilexample.com must NOT match.
+        assert!(!p.matches("evilexample.com"));
+        assert!(!p.matches("example.com.evil.com"));
+    }
+
+    #[test]
+    fn host_pattern_strict_subdomain_excludes_apex() {
+        let p = HostPattern::parse("*.example.com").unwrap();
+        assert!(!p.matches("example.com"));
+        assert!(p.matches("foo.example.com"));
+        assert!(p.matches("a.b.example.com"));
+    }
+
+    #[test]
+    fn host_pattern_is_case_insensitive() {
+        let p = HostPattern::parse("Example.COM").unwrap();
+        assert!(p.matches("example.com"));
+        assert!(p.matches("FOO.example.com"));
+        assert!(p.matches("FOO.EXAMPLE.COM"));
+    }
+
+    #[test]
+    fn host_pattern_strips_trailing_dots() {
+        let p = HostPattern::parse("example.com.").unwrap();
+        assert!(p.matches("example.com"));
+        assert!(p.matches("example.com."));
+    }
+
+    // ----- hostname allow/deny pipeline -----
+
+    #[test]
+    fn hostname_denylist_blocks_match() {
+        let mut p = OutboundPolicy::permissive();
+        p.extend_blocked_hostnames(["badsite.example"]).unwrap();
+        let d = p.check("badsite.example", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::DeniedHostname);
+        // Subdomain also blocked.
+        let d = p.check("api.badsite.example", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::DeniedHostname);
+    }
+
+    #[test]
+    fn hostname_denylist_takes_precedence_over_allowlist() {
+        let mut p = OutboundPolicy::permissive();
+        p.extend_allowed_hostnames(["*.example.com"]).unwrap();
+        p.extend_blocked_hostnames(["bad.example.com"]).unwrap();
+        // Subdomain allowed by allowlist, but explicitly denied.
+        let d = p.check("bad.example.com", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::DeniedHostname);
+    }
+
+    #[test]
+    fn hostname_allowlist_blocks_non_match() {
+        let mut p = OutboundPolicy::permissive();
+        p.extend_allowed_hostnames(["example.com"]).unwrap();
+        let d = p.check("other.example.org", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::HostnameNotAllowed);
+    }
+
+    #[test]
+    fn hostname_allowlist_admits_match() {
+        let mut p = OutboundPolicy::permissive();
+        p.extend_allowed_hostnames(["*.cdn.example.net", "api.example.com"])
+            .unwrap();
+        let d = p.check("foo.cdn.example.net", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::Allow(ip("1.1.1.1")));
+        let d = p.check("api.example.com", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::Allow(ip("1.1.1.1")));
+    }
+
+    #[test]
+    fn literal_ip_host_skips_hostname_gate() {
+        // When the operator's allowlist is `example.com` and the
+        // client CONNECTs to a literal IP (no SNI / DNS involved),
+        // the hostname gate must NOT fire — only the CIDR check
+        // matters for IP-literal traffic. (Operator-style: use the
+        // CIDR blocklist to control IP-literal access.)
+        let mut p = OutboundPolicy::default();
+        p.extend_allowed_hostnames(["example.com"]).unwrap();
+        // Public IP literal — hostname gate skipped; CIDR allows it;
+        // port allowed.
+        let d = p.check("1.1.1.1", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::Allow(ip("1.1.1.1")));
+    }
+
+    #[test]
+    fn empty_hostname_skips_gate() {
+        // Caller passes "" when there's no hostname (literal IP path).
+        let mut p = OutboundPolicy::permissive();
+        p.extend_allowed_hostnames(["example.com"]).unwrap();
+        // Empty host means "no hostname policy applies" — the literal-
+        // IP branch in check_hostname returns None.
+        let d = p.check("", 443, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::Allow(ip("1.1.1.1")));
+    }
+
+    #[test]
+    fn port_check_runs_before_hostname() {
+        // Disallowed port should win over a hostname allow.
+        let mut p = OutboundPolicy::default();
+        p.extend_allowed_hostnames(["example.com"]).unwrap();
+        let d = p.check("example.com", 22, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::DeniedPort(22));
+    }
+
+    #[test]
+    fn extend_allowed_hostnames_propagates_parse_error() {
+        let mut p = OutboundPolicy::permissive();
+        assert!(p.extend_allowed_hostnames(["bad pattern!!"]).is_err());
     }
 }

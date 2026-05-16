@@ -186,7 +186,7 @@ where
         let resolved =
             proteus_transport_alpha::outbound_filter::resolve_host(target.0.as_str(), target.1)
                 .await;
-        match filter.check(target.1, &resolved) {
+        match filter.check(target.0.as_str(), target.1, &resolved) {
             Decision::Allow(ip) => std::net::SocketAddr::new(ip, target.1),
             other => {
                 warn!(
