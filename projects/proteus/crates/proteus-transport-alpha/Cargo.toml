@@ -38,6 +38,11 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "relay_throughput"
+harness = false
 
 [lints.rust]
 # `deny` (not `forbid`) so that the tightly-scoped TCP-keepalive

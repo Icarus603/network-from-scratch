@@ -165,8 +165,15 @@ Measured on Apple Silicon M-series, release profile (criterion, n=30):
 | AEAD seal — ChaCha20-Poly1305, 16 KiB record | **~645 MiB/s** |
 | AEAD seal — ChaCha20-Poly1305, 64 KiB record | **~648 MiB/s** |
 | AEAD open — ChaCha20-Poly1305, 1 KiB record | **~510 MiB/s** |
+| **End-to-end echo round-trip — 16 KiB records over loopback** | **~106 MiB/s (~0.85 Gbps)** |
+| **End-to-end echo round-trip — 64 KiB records over loopback** | **~116 MiB/s (~0.93 Gbps)** |
 
-Per-core single-stream ceiling is ~5 Gbps of bulk encrypt throughput.
+The end-to-end echo numbers above measure the **full round-trip
+path**: client send → AEAD seal → BufWriter coalesce → TCP loopback →
+server AEAD open → server send back → client AEAD open. One-way goodput
+in a real SOCKS5 relay scenario is roughly 2× this (echo doubles every
+operation). Per-core single-stream ceiling is ~5 Gbps of bulk encrypt
+throughput.
 The server-side handshake cost fits comfortably in the spec §17.2
 80 µs budget. Hysteria2 and TUIC-v5 use the same ChaCha20-Poly1305 cipher
 and hit the same cipher-bound ceiling; the per-handshake delta is

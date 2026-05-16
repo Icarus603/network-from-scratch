@@ -68,6 +68,8 @@ jobs:
         with:
           workspaces: projects/proteus
       - run: cargo build --workspace --release --bins
+      - name: Compile-check benchmarks
+        run: cargo build --workspace --release --benches
       - name: Smoke-test binaries
         run: |
           ./target/release/proteus-server --version
