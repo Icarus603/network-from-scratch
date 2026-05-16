@@ -66,8 +66,28 @@ pub async fn forward_to_cover(
         let _ = peer_w.shutdown().await;
     };
 
+    // `tokio::select!` (NOT `tokio::join!`) so a half-close in either
+    // direction tears down the other immediately. Without this, a
+    // misbehaving cover server (or one that holds its write side open
+    // while waiting on a long-poll request body) parks the forward
+    // for the full FORWARD_IDLE_TIMEOUT (120 s) — every junk
+    // ClientHello an attacker sends sits on an FD for 2 minutes,
+    // amplifying their DoS by a factor of `attempts × 120s`.
+    //
+    // Same class as the relay-pump bug fixed in 53c8dfc (client) and
+    // ee85b27 (server). Cover-forward damage was bounded by the 120 s
+    // outer timeout, but bounded != correct — production servers
+    // under sustained probe attacks would still see a continuous
+    // 120-s-rolling FD pile.
+    //
+    // Note: `tokio::io::copy` is cancel-safe — when the losing future
+    // is dropped here, its internal buffer is dropped along with the
+    // borrowed reader/writer halves, releasing the FDs immediately.
     let pump = async {
-        tokio::join!(peer_to_up, up_to_peer);
+        tokio::select! {
+            _ = peer_to_up => {}
+            _ = up_to_peer => {}
+        }
     };
     let _ = timeout(FORWARD_IDLE_TIMEOUT, pump).await;
     Ok(())
