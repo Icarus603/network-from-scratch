@@ -295,7 +295,156 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
+    // 12+. Cross-field coherence checks: catches policy combinations
+    // that pass per-field validation but interact badly at runtime.
+    coherence_checks(cfg, &mut r);
+
     r
+}
+
+/// Cross-field coherence: catches typos and policy combinations that
+/// look valid in isolation but make every client fail at runtime.
+/// Mostly emits [`Check::Warn`] — these are *unlikely* misconfigurations
+/// but the operator should see them rather than discover in prod.
+fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
+    // 12. PoW difficulty × handshake deadline.
+    //
+    // Rough cost model: at difficulty d, the *expected* SHA-256 hash
+    // count to find a solution is 2^d. A modern laptop runs ~10 M
+    // SHA-256/sec single-thread (we measured ~9-12 M across recent
+    // ARM/Intel cores). Worst-case clients (slow mobiles) are 5-10×
+    // slower. Treat 1 M hashes/sec as the floor.
+    //
+    // If the deadline is shorter than 2× the floor solve time, the
+    // operator has probably misconfigured — most legit clients won't
+    // finish PoW + KEX + sig in the budget.
+    if let Some(d) = cfg.pow_difficulty {
+        if d > 0 {
+            let deadline = cfg.handshake_deadline_secs.unwrap_or(15);
+            let expected_hashes = 1u64.checked_shl(u32::from(d.min(31))).unwrap_or(u64::MAX);
+            // Floor: 1 M hashes/sec for the slowest legit clients.
+            let floor_solve_secs = expected_hashes / 1_000_000;
+            if floor_solve_secs * 2 > deadline {
+                r.push_warn(format!(
+                    "pow_difficulty={d} bits implies ~{floor_solve_secs}s solve time on slow \
+                     mobile clients (1 M hashes/s floor); handshake_deadline_secs={deadline} \
+                     leaves no margin. Either lower difficulty or raise the deadline.",
+                ));
+            } else {
+                r.push_pass(format!(
+                    "pow_difficulty + deadline coherent (floor solve ≈{floor_solve_secs}s, deadline {deadline}s)",
+                ));
+            }
+        }
+    }
+
+    // 13. Per-IP rate-limit burst vs. per-user rate-limit burst.
+    // The per-IP limit is supposed to BOUND the per-user limit
+    // (multiple users share an IP under CGNAT). If per-user burst
+    // exceeds per-IP burst, a single-IP user can never actually
+    // reach their per-user quota — the IP limit fires first.
+    if let (Some(ip_rl), Some(user_rl)) = (cfg.rate_limit.as_ref(), cfg.user_rate_limit.as_ref()) {
+        if user_rl.burst > ip_rl.burst {
+            r.push_warn(format!(
+                "user_rate_limit.burst={} exceeds rate_limit.burst={} — single-IP users will \
+                 never reach their per-user quota because the per-IP limit fires first. \
+                 Either raise rate_limit.burst or lower user_rate_limit.burst.",
+                user_rl.burst, ip_rl.burst,
+            ));
+        }
+    }
+
+    // 14. drain_secs configured but /metrics + /readyz not bound.
+    // The graceful-drain path flips /readyz to 503 on SIGTERM so an
+    // upstream load balancer stops sending traffic. Without
+    // metrics_listen there's nothing for the LB to poll.
+    if let Some(drain) = cfg.drain_secs {
+        if drain > 0 && cfg.metrics_listen.is_none() {
+            r.push_warn(format!(
+                "drain_secs={drain} is set but metrics_listen is unset — no /readyz endpoint \
+                 means upstream load balancers can't observe the drain. Either set \
+                 metrics_listen or accept that drain is a server-internal flush only.",
+            ));
+        }
+    }
+
+    // 15. session_idle_secs < handshake_deadline_secs.
+    // Idle bounds the *steady-state* session lifetime; deadline bounds
+    // the *setup*. Idle smaller than deadline is almost certainly a
+    // typo — would mean an established session can be reaped faster
+    // than its handshake was allowed to take.
+    let idle = cfg.session_idle_secs.unwrap_or(600);
+    let deadline = cfg.handshake_deadline_secs.unwrap_or(15);
+    if idle > 0 && idle < deadline {
+        r.push_warn(format!(
+            "session_idle_secs={idle} is less than handshake_deadline_secs={deadline}. \
+             Sessions would be reaped while still finishing setup. Almost certainly a typo.",
+        ));
+    }
+
+    // 16. max_connections < rate_limit.burst.
+    // The per-IP rate limit's burst is the worst-case number of
+    // simultaneous in-flight handshakes from one source. If
+    // max_connections is smaller, a single source IP can saturate
+    // the global cap by itself — defeating both layers.
+    if let (Some(max_conn), Some(ip_rl)) = (cfg.max_connections, cfg.rate_limit.as_ref()) {
+        let burst = ip_rl.burst.ceil() as usize;
+        if max_conn < burst {
+            r.push_warn(format!(
+                "max_connections={max_conn} is below rate_limit.burst={burst} — one source IP \
+                 can saturate the global concurrency cap by itself. Raise max_connections.",
+            ));
+        }
+    }
+
+    // 17. Firewall allow ∩ deny: an IP matching both is denied
+    // (deny wins). Likely an operator typo where they thought
+    // allow trumps deny.
+    if let Some(fw) = cfg.firewall.as_ref() {
+        // Naive O(n*m): only realistic for the small N these lists
+        // ever have. A real conflict means the operator typoed the
+        // same /32 into both lists.
+        for d in &fw.deny {
+            if fw.allow.contains(d) {
+                r.push_warn(format!(
+                    "firewall: rule {d:?} appears in both allow and deny — deny wins, so this \
+                     IP is blocked. Likely an operator typo.",
+                ));
+            }
+        }
+    }
+
+    // 18. cover_endpoint host == listen_alpha host: would loop
+    // auth-fail traffic back into ourselves until both stack-bust.
+    if let Some(cover) = cfg.cover_endpoint.as_ref() {
+        // Compare host portions only (port may differ — e.g. 8443
+        // vs cover on 443). A loopback bind catches the simplest
+        // case.
+        let listen_host = cfg
+            .listen_alpha
+            .rsplit_once(':')
+            .map_or(cfg.listen_alpha.as_str(), |(h, _)| h);
+        let cover_host = cover.rsplit_once(':').map_or(cover.as_str(), |(h, _)| h);
+        if !listen_host.is_empty() && listen_host == cover_host {
+            r.push_warn(format!(
+                "cover_endpoint host {cover_host:?} matches listen_alpha host — auth-fail \
+                 traffic would loop back into the server. Configure cover_endpoint to a \
+                 distinct external HTTPS service (cloudflare/microsoft/apple).",
+            ));
+        }
+        if listen_host == "0.0.0.0" || listen_host == "::" {
+            // listen_alpha binds all interfaces; can't catch the
+            // loopback case structurally. Best we can do is flag
+            // common foot-guns.
+            if cover_host == "127.0.0.1" || cover_host == "localhost" || cover_host == "::1" {
+                r.push_warn(format!(
+                    "cover_endpoint {cover_host:?} is loopback while listen_alpha binds all \
+                     interfaces — auth-fail traffic loops back into ourselves. Configure a \
+                     distinct external HTTPS service.",
+                ));
+            }
+        }
+    }
 }
 
 /// Helper: assert a file exists and is readable by the current
@@ -546,6 +695,244 @@ mod tests {
         }];
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ----- coherence checks -----
+
+    #[test]
+    fn pow_aggressive_vs_short_deadline_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.pow_difficulty = Some(22); // ~4s floor solve
+        cfg.handshake_deadline_secs = Some(2);
+        let report = preflight(&cfg);
+        assert!(!report.has_failures(), "should warn, not fail: {report}");
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("solve time"))),
+            "expected pow/deadline coherence warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn pow_coherent_with_default_deadline_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.pow_difficulty = Some(16); // ~65 ms floor — fine for 15s default
+        let report = preflight(&cfg);
+        assert!(!report.has_failures(), "got: {report}");
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("solve time"))),
+            "should NOT warn at d=16: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn user_burst_exceeding_ip_burst_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.rate_limit = Some(RateLimitCfg {
+            burst: 5.0,
+            refill_per_sec: 1.0,
+        });
+        cfg.user_rate_limit = Some(crate::config::UserRateLimitCfg {
+            burst: 50.0,
+            refill_per_sec: 1.0,
+            max_users: 1024,
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report.checks.iter().any(
+                |c| matches!(c, Check::Warn(m) if m.contains("never reach their per-user quota"))
+            ),
+            "expected user-vs-ip-burst warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drain_without_metrics_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.drain_secs = Some(30);
+        // metrics_listen unset
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("/readyz"))),
+            "expected drain-without-metrics warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn drain_with_metrics_does_not_warn() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.drain_secs = Some(30);
+        cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("/readyz"))),
+            "should not warn when metrics_listen is set: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn idle_smaller_than_deadline_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.session_idle_secs = Some(5);
+        cfg.handshake_deadline_secs = Some(15);
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("less than handshake_deadline"))),
+            "expected idle<deadline warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn max_conn_below_burst_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_connections = Some(3);
+        cfg.rate_limit = Some(RateLimitCfg {
+            burst: 50.0,
+            refill_per_sec: 5.0,
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("can saturate the global concurrency cap"))),
+            "expected max_conn<burst warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn firewall_allow_deny_overlap_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.firewall = Some(FirewallCfg {
+            allow: vec!["10.0.0.0/8".to_string(), "192.0.2.42/32".to_string()],
+            deny: vec!["192.0.2.42/32".to_string()],
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("both allow and deny"))),
+            "expected allow/deny overlap warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cover_loopback_with_wildcard_listen_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.listen_alpha = "0.0.0.0:8443".to_string();
+        cfg.cover_endpoint = Some("127.0.0.1:443".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("loops back into ourselves"))),
+            "expected loopback-cover warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cover_same_host_as_listen_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.listen_alpha = "203.0.113.7:8443".to_string();
+        cfg.cover_endpoint = Some("203.0.113.7:443".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("matches listen_alpha host"))),
+            "expected same-host-cover warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn coherent_default_config_has_no_coherence_warnings() {
+        // A "normal" prod config — sensible knobs that don't trip any
+        // coherence rule.
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.pow_difficulty = Some(8);
+        cfg.handshake_deadline_secs = Some(15);
+        cfg.session_idle_secs = Some(600);
+        cfg.max_connections = Some(4096);
+        cfg.rate_limit = Some(RateLimitCfg {
+            burst: 10.0,
+            refill_per_sec: 5.0,
+        });
+        cfg.user_rate_limit = Some(crate::config::UserRateLimitCfg {
+            burst: 5.0,
+            refill_per_sec: 1.0,
+            max_users: 1024,
+        });
+        cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
+        cfg.drain_secs = Some(30);
+        cfg.cover_endpoint = Some("www.cloudflare.com:443".to_string());
+        cfg.listen_alpha = "0.0.0.0:8443".to_string();
+
+        let report = preflight(&cfg);
+        // Filter to coherence-class warnings only (those introduced by
+        // coherence_checks). The minimal_cfg may still emit warnings
+        // from the per-field checks (e.g. tls missing).
+        let coherence_warns: Vec<_> = report
+            .checks
+            .iter()
+            .filter_map(|c| match c {
+                Check::Warn(m)
+                    if m.contains("solve time")
+                        || m.contains("never reach their per-user quota")
+                        || m.contains("/readyz")
+                        || m.contains("less than handshake_deadline")
+                        || m.contains("can saturate the global concurrency cap")
+                        || m.contains("both allow and deny")
+                        || m.contains("matches listen_alpha")
+                        || m.contains("loops back into ourselves") =>
+                {
+                    Some(m.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            coherence_warns.is_empty(),
+            "coherent config tripped a coherence rule: {coherence_warns:?}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
