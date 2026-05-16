@@ -516,38 +516,38 @@ Committing AEAD (Bellare-Hoang 2022)、KEMTLS (Schwabe-Stebila-Wiggers 2020)、H
 
 ## Part 6 — 真 VPN 協議精讀 + 原始碼（10 堂）
 
-### 6.1 IPsec 完整解剖
+### 6.1 IPsec 完整解剖 ✅
 - ESP / AH / SA / SAD / SPD
 - IKEv1 vs IKEv2
 - 為什麼配置噩夢
 
-### 6.2 OpenVPN 完整解剖
+### 6.2 OpenVPN 完整解剖 ✅
 - TLS 控制通道 + 自訂資料通道
 - 為什麼曾被 GFW 識別
 
-### 6.3 WireGuard whitepaper 精讀
+### 6.3 WireGuard whitepaper 精讀 ✅
 12 頁逐段拆解。
 
-### 6.4 WireGuard 原始碼通讀（一）：握手
+### 6.4 WireGuard 原始碼通讀（一）：握手 ✅
 wireguard-go 的 noise.go、handshake.go 逐函數讀。
 
-### 6.5 WireGuard 原始碼通讀（二）：資料路徑
+### 6.5 WireGuard 原始碼通讀（二）：資料路徑 ✅
 device.go、send.go、receive.go。
 
-### 6.6 WireGuard 原始碼通讀（三）：TUN/UDP 整合
+### 6.6 WireGuard 原始碼通讀（三）：TUN/UDP 整合 ✅
 跟 Part 2.11 接上。
 
-### 6.7 為什麼 WireGuard 在中國被打
+### 6.7 為什麼 WireGuard 在中國被打 ✅
 - 特徵：固定 handshake 大小、固定 type byte、UDP 流量模式
 - amneziawg：對 WireGuard 的混淆 fork
 
-### 6.8 BoringTun（Cloudflare 的 Rust 實作）對比
+### 6.8 BoringTun（Cloudflare 的 Rust 實作）對比 ✅
 為什麼 Cloudflare 重寫一次、設計取捨差異。
 
-### 6.9 WireGuard 在 kernel 的實作（Linux）
+### 6.9 WireGuard 在 kernel 的實作（Linux）✅
 跟 wireguard-go 的差異、效能對比。
 
-### 6.10 WireGuard 給我們的啟示
+### 6.10 WireGuard 給我們的啟示 ✅
 作為協議設計者，我們從 WireGuard 學到什麼、不該學什麼。
 
 ---

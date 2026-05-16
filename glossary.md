@@ -2805,6 +2805,106 @@
 
 ---
 
+## Part 6 — 真 VPN 協議精讀
+
+### IPsec (RFC 4301)
+**中文**：IP 層安全架構（真 VPN 之祖）
+**所屬層**：L3
+**首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
+**一句話**：IETF 1998 起家、由 AH/ESP/IKE 三部曲 + SAD/SPD/PAD 三表構成的 modular 巨獸；25 年累積攻擊與配置複雜度是 G6「絕對不做」清單的最大來源。
+
+### ESP / AH (RFC 4302/4303)
+**中文**：Encapsulating Security Payload / Authentication Header
+**所屬層**：L3 payload format
+**首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
+**一句話**：ESP 加密+認證 inner payload；AH 只認證含 outer IP header；AH 與 NAT 互斥已死，ESP 一統江山但規格仍允許 encryption-only 留下 Degabriele-Paterson 2007 入口。
+
+### IKEv1 / IKEv2 (RFC 7296)
+**中文**：Internet Key Exchange v1 / v2
+**所屬層**：control plane key agreement
+**首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
+**一句話**：v1 Main/Aggressive/Quick Mode、v2 IKE_SA_INIT/IKE_AUTH/CREATE_CHILD_SA；兩版共享 long-term key 被 Felsch 2018 用 Bleichenbacher 跨版本破。
+
+### SAD / SPD / PAD
+**中文**：Security Association DB / Policy DB / Peer Authorization DB
+**所屬層**：IPsec 控制狀態
+**首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
+**一句話**：IPsec policy 三層分離；O(SAD × SPD × PAD) 是配置噩夢主因；WireGuard 摺疊成單一 peer table，G6 沿用。
+
+### NAT-T (RFC 3947/3948)
+**中文**：IPsec NAT Traversal
+**所屬層**：UDP encapsulation patch
+**首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
+**一句話**：UDP/4500 包 ESP + 開頭 4-byte 0 marker；對 GFW 是免費 fingerprint；G6 day-1 假設 UDP-only 避開此補丁。
+
+### Bleichenbacher 1998 / ROBOT
+**中文**：PKCS#1 v1.5 padding oracle 攻擊家族
+**所屬層**：密碼工程 / 攻擊
+**首次出現**：[3.4 RSA](lessons/part-3-cryptography/3.4-rsa.md)，於 [6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md) 跨版本 IKE 重現
+**一句話**：解密失敗回應的 timing/error 差洩漏 padding validity；Felsch 2018 把 IKEv1 oracle 投射成 IKEv2 signature bypass。
+
+### OpenVPN
+**中文**：開放原始碼 TLS-over-UDP VPN（2001 起）
+**所屬層**：L3/L4 混合（TLS control + UDP data）
+**首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)
+**一句話**：把 OpenSSL 當作 KE + 自製 UDP record layer；2022 被 Xue 三條 fingerprint 打死，現已退出嚴肅翻牆協議圈。
+
+### tls-auth / tls-crypt / tls-crypt-v2
+**中文**：OpenVPN 對 control channel 的三層 PSK 鎧甲
+**所屬層**：OpenVPN 子協議
+**首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)
+**一句話**：tls-auth=HMAC；tls-crypt=AES-CTR+HMAC 整段加密；v2=per-client wrapped key；**全部沒加密 opcode，全部被 Xue 2022 識別**。
+
+### Two-Phase Detection Framework (Xue 2022)
+**中文**：GFW 偵測新典範：先 passive 後 active
+**所屬層**：偵測方法論
+**首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)；於 [Part 9.5] 完整展開
+**一句話**：phase 1 低成本 DPI 過濾、phase 2 active probe 確認；ISP-scale >85% recall + <0.1% FP；2022 起成為 GFW 研究分析的標準範式。
+
+### Probe Resistance
+**中文**：對主動探測無可區分回應
+**所屬層**：抗審查協議設計屬性
+**首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)；於 [Part 7.10 REALITY] 全面展開
+**一句話**：對任意 probe message，server response 與 generic non-protocol server 計算上不可區分；REALITY、Conjure 提出，是 G6 hard requirement。
+
+### VPN Fingerprinting
+**中文**：對某條流量是否為 VPN（含哪一種）的識別
+**所屬層**：DPI / 流量分析
+**首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)
+**一句話**：Xue 2022 之後從 ML 派轉到 deterministic、bytes-level、probe-confirmed 派；G6 必須對 deterministic 派 day-1 設計對抗。
+
+### Cryptokey Routing
+**中文**：密碼-路由綁定
+**所屬層**：WireGuard 核心抽象
+**首次出現**：[6.3](lessons/part-6-vpn-internals/6.3-wireguard-whitepaper.md)
+**一句話**：peer 的 static pk 同時是 crypto identity 與 routing key；AllowedIPs 表 lookup 取代 SAD/SPD；G6 沿用。
+
+### MAC1 / MAC2 (WireGuard)
+**中文**：identity-based filter + DoS cookie
+**所屬層**：WireGuard 控制 protection
+**首次出現**：[6.3](lessons/part-6-vpn-internals/6.3-wireguard-whitepaper.md)
+**一句話**：MAC1 = MAC(BLAKE2s(LABEL_MAC1‖responder_static_pk), msg)，永遠檢查；MAC2 = MAC(cookie, msg)，僅 server 過載時要求；組合對 90% active probing 有效——但 server pk 公開後失效。
+
+### AmneziaWG
+**中文**：WireGuard-go 的抗審查 fork
+**所屬層**：WireGuard 變種協議
+**首次出現**：[6.7](lessons/part-6-vpn-internals/6.7-wireguard-blocked-china.md)
+**一句話**：透過 H1-H4 替換 message type、S1-S4 隨機 padding、Jc junk packet、I1-I5 protocol mimicry 補 WG 的 6 條 fingerprint；G6 對照範本。
+
+### Fully Encrypted Detection (Wu 2023)
+**中文**：對「看起來像隨機 bytes」的流量做 entropy/popcount 啟發式偵測
+**所屬層**：GFW 偵測機制
+**首次出現**：[6.7](lessons/part-6-vpn-internals/6.7-wireguard-blocked-china.md)，於 [Part 9.5] 完整展開
+**一句話**：GFW 2021 起部署的 passive heuristic——前 6 bytes 中 ≥5 須 ASCII printable，否則 flag；殺傷 SS/VMess/Obfs4/WG handshake；催生主流翻牆協議 first-bytes 補丁浪潮。
+
+### Protocol Mimicry vs Protocol Borrowing
+**中文**：偽裝 vs 真借殼
+**所屬層**：抗審查協議設計取向
+**首次出現**：[6.7](lessons/part-6-vpn-internals/6.7-wireguard-blocked-china.md)
+**一句話**：mimicry 偽造 protocol 簽名（FTE/Marionette/AmneziaWG I1-I5），仍可被深層 fingerprint 拆穿；borrowing 真正跑那個 protocol 作為 outer envelope（REALITY/Conjure），結構性更強。
+
+---
+
 ## Part 10 — 對抗式流量分析
 
 ### WF (Website Fingerprinting)
