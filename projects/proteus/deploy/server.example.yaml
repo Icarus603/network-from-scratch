@@ -49,6 +49,15 @@ rate_limit:
 # Per-handshake wall-clock deadline (slowloris defense). Default 15s.
 handshake_deadline_secs: 15
 
+# Per-session idle timeout in seconds. A session that goes this long
+# without any inner record (either direction) is closed and its FD
+# released. Distinct from handshake_deadline_secs which only bounds
+# setup. Default 600s (10 min); set to 0 to disable.
+# Tune relative to the longest legitimate idle period your clients
+# expect — too aggressive churns long-poll HTTP / WebSocket / SSH;
+# too loose lets a malicious idle holder eat FDs.
+session_idle_secs: 600
+
 # TCP keepalive interval (idle-session reaper). Default 30s.
 tcp_keepalive_secs: 30
 

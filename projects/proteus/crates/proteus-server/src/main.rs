@@ -294,12 +294,27 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // Per-session relay knobs. session_idle_secs=0 disables; default 600s.
+    let relay_cfg = relay::RelayConfig {
+        idle_timeout: match cfg.session_idle_secs.unwrap_or(600) {
+            0 => None,
+            n => Some(std::time::Duration::from_secs(n)),
+        },
+    };
+    if let Some(d) = relay_cfg.idle_timeout {
+        info!(secs = d.as_secs(), "session idle timeout configured");
+    } else {
+        warn!("session idle timeout disabled — long-idle sessions will not be reaped");
+    }
+
     let serve_fut: std::pin::Pin<
         Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
     > = {
         let metrics_tcp = Arc::clone(&metrics);
+        let relay_cfg_tcp = relay_cfg;
         let on_session_tcp = move |session: proteus_transport_alpha::session::AlphaSession| {
             let metrics = Arc::clone(&metrics_tcp);
+            let relay_cfg = relay_cfg_tcp;
             async move {
                 metrics
                     .sessions_accepted
@@ -311,7 +326,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     .in_flight_sessions
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let snap = session.metrics.snapshot();
-                if let Err(e) = relay::handle_session(session).await {
+                if let Err(e) = relay::handle_session(session, relay_cfg).await {
                     warn!(error = %e, "session terminated");
                 }
                 metrics.merge_session(&snap);
@@ -323,12 +338,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         match reloadable_acceptor.clone() {
             Some(acceptor) => {
                 let metrics = Arc::clone(&metrics);
+                let relay_cfg_tls = relay_cfg;
                 let on_session_tls =
                     move |session: proteus_transport_alpha::session::AlphaSession<
                         tokio::io::ReadHalf<proteus_transport_alpha::tls::ServerStream>,
                         tokio::io::WriteHalf<proteus_transport_alpha::tls::ServerStream>,
                     >| {
                         let metrics = Arc::clone(&metrics);
+                        let relay_cfg = relay_cfg_tls;
                         async move {
                             metrics
                                 .sessions_accepted
@@ -340,7 +357,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 .in_flight_sessions
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let snap = session.metrics.snapshot();
-                            if let Err(e) = relay::handle_session(session).await {
+                            if let Err(e) = relay::handle_session(session, relay_cfg).await {
                                 warn!(error = %e, "TLS session terminated");
                             }
                             metrics.merge_session(&snap);

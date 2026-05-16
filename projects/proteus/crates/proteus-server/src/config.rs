@@ -72,6 +72,19 @@ pub struct ServerConfig {
     #[serde(default)]
     pub drain_secs: Option<u64>,
 
+    /// Per-session idle timeout in seconds. A session that goes this
+    /// long without ANY inner traffic (either direction) is closed
+    /// and its FD released. Distinct from `handshake_deadline_secs`
+    /// which only bounds setup. Default 600s (10 min). Set to 0 to
+    /// disable.
+    ///
+    /// Tune relative to the longest legitimate idle period your
+    /// clients expect — too aggressive and you'll churn long-poll
+    /// HTTP / WebSocket / SSH sessions; too loose and a malicious
+    /// idle holder eats FDs.
+    #[serde(default)]
+    pub session_idle_secs: Option<u64>,
+
     /// CIDR firewall rules. Evaluated before rate-limit / max-connections.
     /// Denied connections are routed to `cover_endpoint` so an attacker
     /// cannot distinguish "you're blocked" from a generic HTTPS proxy.

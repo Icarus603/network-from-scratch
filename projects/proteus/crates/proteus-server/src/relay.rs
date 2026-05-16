@@ -15,13 +15,26 @@
 //! stream bidirectionally. Subsequent client records are forwarded to the
 //! upstream; upstream replies are wrapped in records back to the client.
 
+use std::time::Duration;
+
 use proteus_transport_alpha::session::AlphaSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
+/// Hold the per-session knobs the relay needs from the binary.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RelayConfig {
+    /// Per-direction idle timeout. `None` = no timeout (default).
+    /// When set, a session that goes this long without any record
+    /// arriving on a given direction is terminated and its FD
+    /// released.
+    pub idle_timeout: Option<Duration>,
+}
+
 pub async fn handle_session<R, W>(
     session: AlphaSession<R, W>,
+    cfg: RelayConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -70,10 +83,25 @@ where
     upstream.set_nodelay(true).ok();
     let (mut up_r, mut up_w) = upstream.into_split();
 
-    // Bidirectional pump.
+    // Bidirectional pump. Each direction is independently bounded by
+    // `cfg.idle_timeout`: a direction that goes idle longer than this
+    // window shuts itself down (which causes the joined task to
+    // finish, releasing the session's FDs and crypto state).
+    let idle = cfg.idle_timeout;
     let client_to_upstream = async {
         loop {
-            match receiver.recv_record().await {
+            let recv = receiver.recv_record();
+            let next = match idle {
+                Some(d) => match tokio::time::timeout(d, recv).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        warn!(idle_secs = d.as_secs(), "client→upstream idle timeout");
+                        break;
+                    }
+                },
+                None => recv.await,
+            };
+            match next {
                 Ok(Some(buf)) if !buf.is_empty() => {
                     if up_w.write_all(&buf).await.is_err() {
                         break;
@@ -88,16 +116,26 @@ where
     let upstream_to_client = async {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
-            match up_r.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
-                Ok(n) => {
-                    if sender.send_record(&buf[..n]).await.is_err() {
+            let read_fut = up_r.read(&mut buf);
+            let n = match idle {
+                Some(d) => match tokio::time::timeout(d, read_fut).await {
+                    Ok(Ok(0)) | Ok(Err(_)) => break,
+                    Ok(Ok(n)) => n,
+                    Err(_) => {
+                        warn!(idle_secs = d.as_secs(), "upstream→client idle timeout");
                         break;
                     }
-                    if sender.flush().await.is_err() {
-                        break;
-                    }
-                }
+                },
+                None => match read_fut.await {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => n,
+                },
+            };
+            if sender.send_record(&buf[..n]).await.is_err() {
+                break;
+            }
+            if sender.flush().await.is_err() {
+                break;
             }
         }
         // Notify the peer that we are intentionally closing the inner
@@ -112,6 +150,18 @@ where
     tokio::join!(client_to_upstream, upstream_to_client);
     debug!("session closed");
     Ok(())
+}
+
+/// Encode a CONNECT request the way the client transmits it. Public
+/// for integration tests that need to drive `handle_session` end-to-end.
+#[must_use]
+#[allow(dead_code)] // used by integration tests via the lib target
+pub fn encode_connect(host: &str, port: u16) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(1 + host.len() + 2);
+    buf.push(u8::try_from(host.len()).expect("connect host > 255 bytes"));
+    buf.extend_from_slice(host.as_bytes());
+    buf.extend_from_slice(&port.to_be_bytes());
+    buf
 }
 
 fn parse_connect(buf: &[u8]) -> Result<(String, u16), Box<dyn std::error::Error + Send + Sync>> {
