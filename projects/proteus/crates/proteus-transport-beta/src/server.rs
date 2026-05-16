@@ -65,6 +65,7 @@ pub fn make_endpoint(
         // 60s idle is the spec default; operators override via
         // server.yaml.
         .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    crate::apply_perf_tuning(&mut transport);
     server_cfg.transport_config(Arc::new(transport));
     let endpoint = quinn::Endpoint::server(server_cfg, addr)?;
     Ok(endpoint)

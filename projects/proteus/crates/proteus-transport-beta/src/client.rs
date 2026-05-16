@@ -86,6 +86,7 @@ pub async fn connect(
     let mut client_cfg = quinn::ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
     transport.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    crate::apply_perf_tuning(&mut transport);
     client_cfg.transport_config(Arc::new(transport));
 
     // Bind an ephemeral UDP socket and connect outbound.

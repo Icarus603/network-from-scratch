@@ -54,6 +54,51 @@ pub mod client;
 pub mod error;
 pub mod server;
 
+/// Apply the production performance tuning that motivated β in the
+/// first place: switch the congestion controller from CUBIC (quinn
+/// default) to BBR, and raise stream/connection flow-control windows
+/// well above the QUIC defaults so a single long-fat-pipe Proteus
+/// session isn't permanently flow-controlled at ~64 KiB inflight.
+///
+/// **Why BBR over CUBIC for censorship-resistance**: CUBIC treats
+/// every packet loss as a congestion signal and halves the window.
+/// On lossy long-fat-pipe paths (the typical cross-Pacific GFW
+/// scenario), this collapses throughput to a small fraction of
+/// available bandwidth. BBR estimates bandwidth × min-RTT directly
+/// and is loss-tolerant — the same observation Hysteria2 and
+/// TUIC-v5 build their entire performance story on.
+///
+/// **Window sizing**: defaults are 1 MiB stream-receive +
+/// 12.5 MB connection-receive (quinn 0.11), which caps throughput
+/// to `window / RTT`. At 100 ms RTT that's 100 Mbit/s — fine for
+/// LAN, abysmal for transcontinental. We bump to:
+///
+///   - stream-receive: 64 MiB
+///   - connection-receive: 256 MiB
+///
+/// Sized so 1 Gbit/s × 1 s RTT fits comfortably.
+///
+/// Public + idempotent — operators wiring β into their own quinn
+/// stack can call this on their own [`quinn::TransportConfig`]
+/// before handing it to `quinn::{ServerConfig,ClientConfig}`.
+pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
+    use std::sync::Arc;
+    transport
+        .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+        // Per-stream receive window — bytes the SENDER may have in
+        // flight on ONE stream before the receiver acks. 64 MiB
+        // sustains 1 Gbit/s at ~500 ms RTT.
+        .stream_receive_window(quinn::VarInt::from_u32(64 * 1024 * 1024))
+        // Per-connection receive window — sum across all streams.
+        // 4× the per-stream limit so a future multi-stream config
+        // (M3+) doesn't starve.
+        .receive_window(quinn::VarInt::from_u32(256 * 1024 * 1024))
+        // Per-stream send window — bytes the LOCAL sender will keep
+        // buffered before back-pressuring writes. 8 MiB is a
+        // sensible Linux-default-ish value.
+        .send_window(8 * 1024 * 1024);
+}
+
 /// The β-profile ALPN identifier, per spec §14.4 ("ALPN Protocol IDs:
 /// `proteus-β-v1`"). Both client and server pin this exactly; any
 /// mismatch surfaces as a TLS alert at handshake time.
