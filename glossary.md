@@ -2130,3 +2130,259 @@
 **所屬層**：automated formal verification
 **首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Kobeissi-Bhargavan-Beurdouche EuroS&P 2019）
 **一句話**：對所有 Noise patterns 自動 generate ProVerif models + verify 18 properties；G6 借用作 baseline。
+
+---
+
+## Part 12 — 實作、評測、發表
+
+### Constant-Time (CT) Implementation
+**中文**：常時實作 / 抗時序副通道
+**所屬層**：crypto engineering
+**首次出現**：[12.2](lessons/part-12-implement-evaluate/12.2-crypto-primitives-implementation.md)
+**一句話**：所有 secret-dependent 計算之 wall-clock + cache + branch trace 與 input 無關；用 `subtle::Choice` / ct-verif / dudect 強制。
+
+### Zeroize / ZeroizeOnDrop
+**中文**：敏感記憶體歸零
+**所屬層**：crypto memory safety
+**首次出現**：[12.2](lessons/part-12-implement-evaluate/12.2-crypto-primitives-implementation.md)
+**一句話**：drop 時把 key buffer 顯式覆寫 0 + `compiler_fence`，避免 compiler elide；handshake / record key 之必備 wrapper。
+
+### Sans-IO
+**中文**：純邏輯協議實作
+**所屬層**：implementation pattern
+**首次出現**：[12.3](lessons/part-12-implement-evaluate/12.3-handshake-implementation.md)
+**一句話**：協議 state machine 與 socket I/O 分離；hyper/quinn/python-h2 採用；deterministic test 友善。
+
+### Typestate Pattern
+**中文**：型別化狀態機
+**所屬層**：Rust impl pattern
+**首次出現**：[12.3](lessons/part-12-implement-evaluate/12.3-handshake-implementation.md)
+**一句話**：每 handshake state 是不同 type，編譯期阻擋非法 transition；rustls/quinn-proto 採用。
+
+### io_uring
+**中文**：Linux 非同步 syscall 環
+**所屬層**：kernel I/O
+**首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)（Axboe 2019），[12.4 production use](lessons/part-12-implement-evaluate/12.4-data-path-zerocopy-iouring-xdp.md)
+**一句話**：submission + completion ring + SQPOLL kernel thread；對 high-pps proxy 是 syscall 攤銷之關鍵。
+
+### AF_XDP
+**中文**：kernel-bypass UDP socket
+**所屬層**：kernel networking
+**首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-dpdk-afxdp.md)（先提名），[12.4 production](lessons/part-12-implement-evaluate/12.4-data-path-zerocopy-iouring-xdp.md)
+**一句話**：與 XDP 程式配合的 zero-copy ring；NIC DMA 到 user UMEM；單核 25+ Gbps。
+
+### Traffic Shaping / Morphing
+**中文**：流量整形
+**所屬層**：anti-DPI defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/)（forward ref）, [12.5 impl](lessons/part-12-implement-evaluate/12.5-traffic-shaping-implementation.md)
+**一句話**：對 packet size + IPG + burst 重新 sample 到 cover protocol 之 distribution；Wright NDSS 2009 起點，Walkie-Talkie / Regulator / TrafficSliver 為延伸。
+
+### Pacer / Token Bucket
+**中文**：發送速率整形器
+**所屬層**：transport
+**首次出現**：[12.5](lessons/part-12-implement-evaluate/12.5-traffic-shaping-implementation.md)
+**一句話**：對發包 timing 控制；用 `timerfd` (Linux) / kqueue 配合；BBR pacing + shaping pacing 之 min 取 effective rate。
+
+### Subscription URL / Subscription Server
+**中文**：訂閱機制
+**所屬層**：client config provisioning
+**首次出現**：[12.6](lessons/part-12-implement-evaluate/12.6-client-integration.md)
+**一句話**：用戶貼一條 URL → client 解出多 server 配置；short-lived signed URL + CDN-fronting 為 security baseline。
+
+### cgo / FFI Batch
+**中文**：跨語言呼叫批次化
+**所屬層**：implementation
+**首次出現**：[12.1](lessons/part-12-implement-evaluate/12.1-implementation-language-choice.md), [12.6 batch](lessons/part-12-implement-evaluate/12.6-client-integration.md)
+**一句話**：每 cgo call ~100ns 開銷；high-pps 場景必須 `proto_session_write_batch` 攤銷成本。
+
+### Fallback / Cover Server Splice
+**中文**：未驗證連線轉發到 cover 站
+**所屬層**：active probing defense
+**首次出現**：[12.7](lessons/part-12-implement-evaluate/12.7-server-panel-fallback.md)
+**一句話**：parse / auth fail → zero-copy splice 整個 byte stream 到 Caddy；對 prober 與真實 web server 行為不可區。
+
+### Probe Resistance / Indistinguishability
+**中文**：探測抗性 / 探測不可區分性
+**所屬層**：anti-censorship property
+**首次出現**：[12.7](lessons/part-12-implement-evaluate/12.7-server-panel-fallback.md), [12.16 evaluation](lessons/part-12-implement-evaluate/12.16-active-probing-evaluation.md)
+**一句話**：對 random / replay / TLS-style / FEP-style probe 之 byte+timing response 與 reference Caddy 不可區（ε ≤ 1e-3）。
+
+### Coverage-Guided Fuzzing
+**中文**：覆蓋率引導模糊測試
+**所屬層**：software testing
+**首次出現**：[12.8](lessons/part-12-implement-evaluate/12.8-fuzzing.md)
+**一句話**：libFuzzer / AFL++；mutate input + SanitizerCoverage feedback，比 random fuzz 強數量級。
+
+### Differential Fuzzing
+**中文**：差分模糊測試
+**所屬層**：crypto/parser testing
+**首次出現**：[12.8](lessons/part-12-implement-evaluate/12.8-fuzzing.md), [12.9](lessons/part-12-implement-evaluate/12.9-unit-integration-testing.md)
+**一句話**：同 input 餵兩 impl，divergence = bug；對 AEAD / KDF / parser 互通保證之 SOTA test。
+
+### Property-Based Testing (proptest / QuickCheck)
+**中文**：性質測試
+**所屬層**：software testing
+**首次出現**：[12.9](lessons/part-12-implement-evaluate/12.9-unit-integration-testing.md)
+**一句話**：對 ∀ input s.t. precondition: postcondition holds — 寫 invariant 而非 example；shrink 自動找最小 reproducer。
+
+### Mutation Testing
+**中文**：變異測試
+**所屬層**：test quality assessment
+**首次出現**：[12.9](lessons/part-12-implement-evaluate/12.9-unit-integration-testing.md)
+**一句話**：故意 perturb code，看 test 是否 fail；mutation kill rate 是 test strength 之 metric。
+
+### KAT (Known-Answer Test)
+**中文**：已知答案測試 / 測試向量
+**所屬層**：crypto compliance
+**首次出現**：[12.2](lessons/part-12-implement-evaluate/12.2-crypto-primitives-implementation.md), [12.9](lessons/part-12-implement-evaluate/12.9-unit-integration-testing.md)
+**一句話**：RFC / NIST CAVP / Wycheproof 提供 input → expected output hex；對每 primitive 必通過。
+
+### Interop Runner
+**中文**：互通測試 harness
+**所屬層**：spec conformance
+**首次出現**：[12.10](lessons/part-12-implement-evaluate/12.10-interoperability-testing.md)
+**一句話**：QUIC interop runner 之模式；每 impl 提供 Docker image + testcase set + matrix 跑配對。
+
+### Coordinated Omission
+**中文**：協同遺漏（latency 量測陷阱）
+**所屬層**：performance measurement
+**首次出現**：[12.11](lessons/part-12-implement-evaluate/12.11-performance-baseline.md)
+**一句話**：load generator stall 期間漏記 latency，導致 p99 嚴重 underestimate；wrk2 / oha / HdrHistogram 之 constant-rate scheduling 修。
+
+### Mathis Equation
+**中文**：TCP 損失型吞吐上界
+**所屬層**：congestion control theory
+**首次出現**：[12.11](lessons/part-12-implement-evaluate/12.11-performance-baseline.md), [12.12](lessons/part-12-implement-evaluate/12.12-throughput-evaluation.md)
+**一句話**：T ≤ MSS × C / (RTT × √p)；對 CUBIC / Reno 在 loss link 之 theoretical bound。
+
+### BBRv2 / Brutal CC
+**中文**：congestion control 取捨
+**所屬層**：transport
+**首次出現**：[12.12](lessons/part-12-implement-evaluate/12.12-throughput-evaluation.md), [12.13](lessons/part-12-implement-evaluate/12.13-high-loss-evaluation.md)
+**一句話**：BBRv2 = model-based fair（Cardwell CACM 2017）；Brutal = user-set bandwidth no-loss-react（Hysteria 風格）；trade-off fairness vs throughput in lossy link.
+
+### FEC (Forward Error Correction)
+**中文**：前向錯誤更正
+**所屬層**：transport
+**首次出現**：[12.13](lessons/part-12-implement-evaluate/12.13-high-loss-evaluation.md)
+**一句話**：Reed-Solomon / Raptor codes；每 K 包送 R 個 parity；loss 鏈路無需 retx；overhead vs robustness trade-off。
+
+### Gilbert-Elliott Loss Model
+**中文**：突發性丟包模型
+**所屬層**：network emulation
+**首次出現**：[12.11](lessons/part-12-implement-evaluate/12.11-performance-baseline.md), [12.13](lessons/part-12-implement-evaluate/12.13-high-loss-evaluation.md)
+**一句話**：Markov 兩狀態（good/bad）model；比 iid uniform loss 更接近真實 wifi / GFW QoS。
+
+### IPC (Instructions per Cycle)
+**中文**：每週期指令數
+**所屬層**：CPU perf
+**首次出現**：[12.14](lessons/part-12-implement-evaluate/12.14-cpu-memory-evaluation.md)
+**一句話**：proxy worker 健康範圍 1.5-3.5；低 IPC 通常代表 memory-bound 或 branch-heavy。
+
+### jemalloc / Allocator Choice
+**中文**：分配器替換
+**所屬層**：memory perf
+**首次出現**：[12.14](lessons/part-12-implement-evaluate/12.14-cpu-memory-evaluation.md)
+**一句話**：對 multi-thread proxy server，replace system malloc 為 jemalloc 可減 RSS 20-40%。
+
+### nDPI
+**中文**：開源 DPI library
+**所屬層**：traffic classification
+**首次出現**：[12.15](lessons/part-12-implement-evaluate/12.15-passive-dpi-evaluation.md)
+**一句話**：ntop 維護；280+ 協議識別；對 v2ray / shadowsocks / hysteria / TUIC 已有 specific rule；我們協議目標 fall to `TLS.Unknown`.
+
+### Zeek (Bro)
+**中文**：scripting-driven traffic monitor
+**所屬層**：traffic analysis
+**首次出現**：[12.15](lessons/part-12-implement-evaluate/12.15-passive-dpi-evaluation.md)
+**一句話**：Paxson 1998 起源；script extension 每 protocol 寫 log；FlowPrint / 各 statistical detector 之 implementation host。
+
+### FlowPrint
+**中文**：semi-supervised mobile app fingerprinting
+**所屬層**：traffic classification
+**首次出現**：[12.15](lessons/part-12-implement-evaluate/12.15-passive-dpi-evaluation.md), [12.17](lessons/part-12-implement-evaluate/12.17-ml-classification-evaluation.md)
+**一句話**：van Ede NDSS 2020；destination graph + cluster；對 encrypted mobile app 識別之 SOTA reference。
+
+### JA3 / JA4
+**中文**：TLS Client Hello 指紋
+**所屬層**：traffic classification
+**首次出現**：[12.15](lessons/part-12-implement-evaluate/12.15-passive-dpi-evaluation.md)
+**一句話**：MD5 hash of cipher suite + extensions + groups（Salesforce 2017）；JA4（FoxIO 2023）加 entropy；對「客戶端模仿瀏覽器」之主要 testing 工具。
+
+### FEP (Frolov-Wustrow / Wu Eckert) Probe
+**中文**：偽認證式探測
+**所屬層**：active probing
+**首次出現**：[12.16](lessons/part-12-implement-evaluate/12.16-active-probing-evaluation.md)
+**一句話**：Wu USENIX 2023；攻擊者送看似 valid 之 handshake，看 server fallback timing differential；對 VLESS+REALITY 達 20-30% detection rate.
+
+### Deep Fingerprinting (DF)
+**中文**：CNN-based 流量分類
+**所屬層**：ML traffic classification
+**首次出現**：[12.17](lessons/part-12-implement-evaluate/12.17-ml-classification-evaluation.md)
+**一句話**：Sirinam CCS 2018；6-layer CNN on direction sequence；對 Tor 達 98% accuracy；對 proxy 評測之 strong adversary baseline.
+
+### Var-CNN
+**中文**：dilated CNN for WF
+**所屬層**：ML traffic classification
+**首次出現**：[12.17](lessons/part-12-implement-evaluate/12.17-ml-classification-evaluation.md)
+**一句話**：Bhat PETS 2019；data-efficient WF；對 protoxx adversary 評測重要 baseline.
+
+### Open-World vs Closed-World Classification
+**中文**：開放世界 vs 封閉世界分類
+**所屬層**：ML evaluation methodology
+**首次出現**：[12.17](lessons/part-12-implement-evaluate/12.17-ml-classification-evaluation.md)
+**一句話**：closed-world 只 K 已知 class；open-world 包括 unknown noise；後者更接近真實 GFW 部署；報 FPR@TPR=99%。
+
+### Geneva
+**中文**：RL-evolved censorship evasion
+**所屬層**：active circumvention
+**首次出現**：[12.18](lessons/part-12-implement-evaluate/12.18-real-world-testing.md)
+**一句話**：Bock CCS 2019 + USENIX 2021；GA evolves TCP/IP-layer evasion strategy；對 packet-level circumvention 之 SOTA。
+
+### OONI (Open Observatory of Network Interference)
+**中文**：開放網路干擾觀測台
+**所屬層**：measurement infrastructure
+**首次出現**：[12.18](lessons/part-12-implement-evaluate/12.18-real-world-testing.md)
+**一句話**：Tor 系；全球志願者跑 probe；提供 censorship measurement ground truth。
+
+### Pareto Frontier
+**中文**：帕累托前沿
+**所屬層**：design trade-off
+**首次出現**：[12.19](lessons/part-12-implement-evaluate/12.19-results-iteration.md)
+**一句話**：對 throughput vs censorship-resistance 之 (x, y) plane；frontier = no design dominates；protoxx 之目標是在 frontier 推進。
+
+### Diátaxis Documentation Framework
+**中文**：文件 4 分類框架
+**所屬層**：technical writing
+**首次出現**：[12.20](lessons/part-12-implement-evaluate/12.20-documentation.md)
+**一句話**：Procida 提出；tutorial / how-to / reference / explanation 四類；對 OpenVPN-style docs 災難之矯正方案。
+
+### SLSA (Supply-chain Levels for Software Artifacts)
+**中文**：供應鏈完整性等級
+**所屬層**：release engineering
+**首次出現**：[12.21](lessons/part-12-implement-evaluate/12.21-release-preparation.md)
+**一句話**：v1.0 by openssf；4 級從文件化到 hermetic + reproducible；我們 v0.1 target SLSA 3 (sigstore-based).
+
+### Sigstore / Cosign
+**中文**：無密鑰簽章框架
+**所屬層**：release engineering
+**首次出現**：[12.21](lessons/part-12-implement-evaluate/12.21-release-preparation.md)
+**一句話**：OIDC token 即身份；Rekor transparency log + Fulcio CA；無 long-lived signing key 需 keep。
+
+### Reproducible Build
+**中文**：可重現建置
+**所屬層**：supply chain integrity
+**首次出現**：[12.21](lessons/part-12-implement-evaluate/12.21-release-preparation.md)
+**一句話**：兩獨立 machine 之 build 必須 byte-identical；Lamb-Zacchiroli CACM 2022；對 binary 後門攻擊之 essential 防禦。
+
+### USENIX AE (Artifact Evaluation)
+**中文**：USENIX 工件評估流程
+**所屬層**：academic publishing
+**首次出現**：[12.22](lessons/part-12-implement-evaluate/12.22-paper-writing-intro-related.md), [12.23](lessons/part-12-implement-evaluate/12.23-paper-writing-design-eval.md)
+**一句話**：3 badge：Available / Functional / Reproduced；對 systems paper visibility 顯著加分。
+
+### ADR (Architecture Decision Record)
+**中文**：架構決策紀錄
+**所屬層**：engineering practice
+**首次出現**：[12.1](lessons/part-12-implement-evaluate/12.1-implementation-language-choice.md)
+**一句話**：對重大設計決策寫 1-2 page 紀錄（context / decision / consequence）；對 review / future maintainer / 自己未來 reference 都關鍵。
