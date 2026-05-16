@@ -924,6 +924,14 @@ async fn handshake_buffered(
                 return Err(HandshakeFailure::new(buf, Some(stream)));
             }
         }
+        // Cap handshake-time buffer growth. A malicious client could
+        // otherwise send a varint-encoded frame body length of 2^30
+        // bytes and then stream garbage forever — the
+        // `WireError::Short` branch loops happily forever waiting
+        // for the declared body. See crate::client::HANDSHAKE_RX_HARD_CAP.
+        if buf.len() >= crate::client::HANDSHAKE_RX_HARD_CAP {
+            return Err(HandshakeFailure::new(buf, Some(stream)));
+        }
         let n = match stream.read(&mut tmp).await {
             Ok(0) => return Err(HandshakeFailure::new(buf, None)),
             Ok(n) => n,
@@ -1402,6 +1410,12 @@ async fn read_frame_drain<R: tokio::io::AsyncRead + Unpin>(
                 }
             }
         }
+        // Cap handshake-time buffer (see crate::client::HANDSHAKE_RX_HARD_CAP).
+        // A peer flooding bytes that never parse to a complete frame is
+        // trying to OOM us — fail fast.
+        if buf.len() >= crate::client::HANDSHAKE_RX_HARD_CAP {
+            return Err(std::io::Error::other("handshake rx buffer cap exceeded"));
+        }
         let mut tmp = [0u8; 4096];
         let n = read.read(&mut tmp).await?;
         if n == 0 {
@@ -1762,6 +1776,10 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
                 Err(proteus_wire::WireError::Short { .. }) => {}
                 Err(e) => return Err(e.into()),
             }
+        }
+        // Handshake-time buffer cap — see crate::client::HANDSHAKE_RX_HARD_CAP.
+        if buf.len() >= crate::client::HANDSHAKE_RX_HARD_CAP {
+            return Err(AlphaError::Closed);
         }
         let mut tmp = [0u8; 4096];
         let n = read.read(&mut tmp).await?;

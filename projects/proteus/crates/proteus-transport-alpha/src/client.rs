@@ -461,6 +461,23 @@ where
 /// writes, so a single `read()` may surface multiple frames at once.
 /// Using a fresh buffer per call would discard any tail past the first
 /// frame and cause the next call to block forever.
+/// Hard cap on the **handshake-time** read buffer. Distinct from
+/// `RX_BUF_HARD_CAP` (16 MiB) which applies post-handshake. During
+/// handshake the entire frame budget is well under 17 KiB:
+/// - ClientHello body = AUTH_EXT_LEN_V10 (1378) + ~5 header bytes
+/// - ServerHello / Finished bodies = 32 + ~5 bytes each
+/// - Coalesced first DATA record ≤ 16 KiB
+///
+/// 64 KiB gives ~4× safety margin while still failing fast against a
+/// malicious peer (compromised server, post-MITM upstream) that
+/// streams garbage during the handshake window to OOM the client.
+/// Pre-this-cap, an attacker could allocate unlimited memory by
+/// sending bytes that never decode to a complete frame.
+///
+/// `pub` so the server-side handshake handlers can share the same
+/// constant — one source of truth.
+pub const HANDSHAKE_RX_HARD_CAP: usize = 64 * 1024;
+
 async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
     read: &mut R,
     buf: &mut Vec<u8>,
@@ -477,6 +494,12 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
                 Err(proteus_wire::WireError::Short { .. }) => {}
                 Err(e) => return Err(e.into()),
             }
+        }
+        // Refuse to grow the handshake buffer past the hard cap. A
+        // peer that floods bytes that never form a parseable frame
+        // is trying to OOM us — fail fast.
+        if buf.len() >= HANDSHAKE_RX_HARD_CAP {
+            return Err(AlphaError::Closed);
         }
         let mut tmp = [0u8; 4096];
         let n = read.read(&mut tmp).await?;
