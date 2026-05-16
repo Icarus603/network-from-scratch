@@ -362,7 +362,15 @@ where
     if sf_frame.body.len() != 32 {
         return Err(AlphaError::BadServerFinished);
     }
-    let received_server_finished: [u8; 32] = (&sf_frame.body[..]).try_into().unwrap();
+    // Defense-in-depth: `try_into` makes the safety property local
+    // to this line instead of relying on the length check above
+    // surviving every future refactor. A rogue server sending a
+    // mismatched SF length would otherwise panic the client.
+    let received_server_finished: [u8; 32] = sf_frame
+        .body
+        .as_slice()
+        .try_into()
+        .map_err(|_| AlphaError::BadServerFinished)?;
 
     // Server's Finished MAC is over the transcript hash so far (ch || sh).
     // We do not append the SF bytes themselves to the transcript before

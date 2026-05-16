@@ -1715,7 +1715,17 @@ where
         &mut client_finished_key,
     )?;
     let expected_cf = hmac_sha256(&client_finished_key, &th_ch_sf);
-    let received_cf: [u8; 32] = cf.body.as_slice().try_into().unwrap();
+    // Defense-in-depth: even though the `cf.body.len() != 32` early
+    // return above makes this conversion infallible TODAY, an
+    // accidental refactor of the early check would convert this
+    // into a server-side panic on adversary-supplied bytes.
+    // `try_into()` + `?` makes the safety property local instead of
+    // tracking a separate line.
+    let received_cf: [u8; 32] = cf
+        .body
+        .as_slice()
+        .try_into()
+        .map_err(|_| AlphaError::BadClientFinished)?;
     if !ct_eq(&expected_cf, &received_cf) {
         return Err(AlphaError::BadClientFinished);
     }
