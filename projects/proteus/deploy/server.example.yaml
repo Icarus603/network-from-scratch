@@ -100,14 +100,20 @@ handshake_deadline_secs: 15
 # (`copytruncate` also works without SIGUSR1.) Unset = disabled.
 # access_log: /var/log/proteus/access.log
 
-# Per-user anomaly detector. Sliding-window counter over abnormal
-# session-close events. Fire-once per burst: when the same user_id
-# trips `threshold` byte-budget cap hits within `window_secs`,
-# proteus-server emits a WARN log + bumps `abuse_alerts_byte_budget_total`.
-# Resets after the window goes empty so a later burst re-alerts.
-# Sensible production value: 3 cap-hits in 5 minutes.
+# Per-user anomaly detectors. Sliding-window counters over abnormal
+# events. Each fires WARN + bumps a counter once-per-burst; resets
+# after the window goes empty so a later burst re-alerts.
+#   byte_budget — same user_id trips max_session_bytes cap repeatedly.
+#                 Signal: stolen credential being used to exfiltrate.
+#   rate_limit  — same user_id repeatedly rejected by user_rate_limit.
+#                 Signal: misconfigured client, or bots sharing one
+#                 credential / brute-forcing.
+# Sensible production value: threshold=3 over a 300s window.
 # abuse_detector:
 #   byte_budget:
+#     window_secs: 300
+#     threshold: 3
+#   rate_limit:
 #     window_secs: 300
 #     threshold: 3
 

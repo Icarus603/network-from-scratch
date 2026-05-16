@@ -186,6 +186,12 @@ pub struct AbuseDetectorCfg {
     /// Byte-budget cap-hit detector. See [`AbuseDetectorEntry`].
     #[serde(default)]
     pub byte_budget: Option<AbuseDetectorEntry>,
+    /// Per-user rate-limit reject detector. Same shape as
+    /// `byte_budget`. Fires once-per-burst when the same `user_id`
+    /// trips `user_rate_rejected` `threshold` times within
+    /// `window_secs`.
+    #[serde(default)]
+    pub rate_limit: Option<AbuseDetectorEntry>,
 }
 
 #[derive(Debug, Deserialize)]

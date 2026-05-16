@@ -158,11 +158,30 @@ where
     }
     tracing::warn!(
         user_id = ?uid,
+        peer = ?session.peer_addr,
         "per-user rate limit exceeded; closing session"
     );
     if let Some(m) = ctx.metrics() {
         m.user_rate_rejected
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Anomaly aggregation: repeated rate-limit hits from the same
+    // user_id are a credential-abuse signal (legitimate clients
+    // rarely sustain the rate; bots / misconfigured clients do).
+    // Fire-once-per-burst via the sliding-window detector.
+    if let Some(detector) = ctx.abuse_detector_rate_limit() {
+        if detector.record(uid) {
+            tracing::warn!(
+                user_id = ?uid,
+                peer = ?session.peer_addr,
+                "abuse: user repeatedly tripping per-user rate limit — \
+                 likely misconfigured client or shared/leaked credential"
+            );
+            if let Some(m) = ctx.metrics() {
+                m.abuse_alerts_rate_limit
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
     false
 }
@@ -233,6 +252,11 @@ pub struct ServerCtx {
     /// matched during handshake. Layered on top of the per-IP limit
     /// so CGNAT'd clients each get their own budget.
     user_limiter: Option<Arc<crate::rate_limit::KeyedRateLimiter<[u8; 8]>>>,
+    /// Optional sliding-window abuse detector for the per-user rate
+    /// limit. Fires (once per burst) when the same user_id trips
+    /// `user_rate_rejected` `threshold` times within `window`. Sibling
+    /// to the byte-budget detector wired in the relay.
+    abuse_detector_rate_limit: Option<Arc<crate::abuse_detector::AbuseDetector>>,
 }
 
 impl ServerCtx {
@@ -252,7 +276,27 @@ impl ServerCtx {
             firewall: crate::firewall::ReloadableFirewall::default(),
             handshake_budget: None,
             user_limiter: None,
+            abuse_detector_rate_limit: None,
         }
+    }
+
+    /// Install a sliding-window abuse detector for the per-user
+    /// rate limiter. Bursty rate-limit hits from the same user_id
+    /// alert at the threshold and fire-once until the window empties.
+    #[must_use]
+    pub fn with_abuse_detector_rate_limit(
+        mut self,
+        detector: Arc<crate::abuse_detector::AbuseDetector>,
+    ) -> Self {
+        self.abuse_detector_rate_limit = Some(detector);
+        self
+    }
+
+    /// Read the rate-limit abuse-detector handle.
+    pub(crate) fn abuse_detector_rate_limit(
+        &self,
+    ) -> Option<&Arc<crate::abuse_detector::AbuseDetector>> {
+        self.abuse_detector_rate_limit.as_ref()
     }
 
     /// Install a global handshake-budget limiter (single shared bucket).

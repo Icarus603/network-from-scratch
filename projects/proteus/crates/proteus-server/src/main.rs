@@ -331,6 +331,28 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // increments the right counters.
     let metrics = Arc::new(proteus_transport_alpha::metrics::ServerMetrics::default());
     ctx = ctx.with_metrics(Arc::clone(&metrics));
+
+    // Rate-limit abuse detector — lives on ServerCtx because the
+    // rate-limit rejection happens in the per-IP-rate gate before
+    // the relay even runs.
+    if let Some(c) = cfg
+        .abuse_detector
+        .as_ref()
+        .and_then(|d| d.rate_limit.as_ref())
+    {
+        info!(
+            window_secs = c.window_secs,
+            threshold = c.threshold,
+            "rate-limit abuse detector configured"
+        );
+        ctx = ctx.with_abuse_detector_rate_limit(Arc::new(
+            proteus_transport_alpha::abuse_detector::AbuseDetector::new(
+                std::time::Duration::from_secs(c.window_secs),
+                c.threshold,
+            ),
+        ));
+    }
+
     let ctx = Arc::new(ctx);
 
     if let Some(metrics_addr) = cfg.metrics_listen.clone() {
@@ -594,8 +616,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
-    // Optional abuse detector (byte-budget). Build it here so the
-    // accept-loop closures all share one Arc<AbuseDetector>.
+    // Build the byte-budget abuse detector; the rate-limit detector
+    // is wired into the ctx earlier (before the Arc<ServerCtx> wrap)
+    // because it's a ctx-resident component, while this one is owned
+    // by RelayConfig.
     let abuse_detector_byte_budget = cfg
         .abuse_detector
         .as_ref()
