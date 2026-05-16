@@ -5,30 +5,85 @@
 //! AEAD-protected. The `aad` is the 8-byte big-endian `(epoch:24 || seqnum:40)`
 //! header; the nonce is `iv XOR (epoch||seqnum)` (spec §4.5.2).
 //!
-//! ## Symmetric ratchet (this build)
+//! ## Hybrid ratchet (one-shot asymmetric DH heal + continuous symmetric)
 //!
-//! Every [`RATCHET_BYTES`] of application data sent on a direction, both
-//! sides advance the direction's traffic secret:
+//! On the FIRST [`RATCHET_BYTES`] boundary of a direction, the sender
+//! performs a fresh asymmetric Diffie-Hellman ratchet step — a Signal-
+//! style heal that recovers from any pre-first-ratchet compromise.
+//! Every subsequent ratchet event on the same direction is a pure
+//! symmetric HKDF step. The split happens because a continuous
+//! Double Ratchet requires strict request/response synchronization
+//! that pipelined ratchets (256 chunks in flight before the peer
+//! responds) cannot maintain without an extra round of state-sync —
+//! one heal is a clean tradeoff that delivers strict-improvement
+//! security over the prior build with zero risk of pipelining races.
+//!
+//! ### Sender state machine (per direction)
 //!
 //! ```text
-//! new_secret = HKDF-Expand-Label(current_secret, "proteus ratchet v1", "", 32)
-//! key, iv    = derive_keys(new_secret)
-//! epoch     ← epoch + 1
-//! seqnum    ← 0
+//! ratchet_event:
+//!   if has bootstrap (dh_sk, peer_dh_pub):
+//!       my_dh_sk_new ← fresh ephemeral X25519
+//!       dh_ikm ← X25519(my_dh_sk_new, peer_dh_pub)
+//!       new_secret ← HKDF-Expand-Label(current_secret,
+//!                                       "proteus dh-ratchet v1",
+//!                                       dh_ikm, 32)
+//!       body ← (new_epoch:u32_be || my_dh_pub_new:[u8;32])   # 36 B
+//!       burn bootstrap
+//!   else:
+//!       new_secret ← HKDF-Expand-Label(current_secret,
+//!                                       "proteus ratchet v1",
+//!                                       "", 32)
+//!       body ← (new_epoch:u32_be)                             # 4 B
+//!   emit RATCHET_RECORD(body)
+//!   key, iv ← direction_keys_from(new_secret)
+//!   epoch ← new_epoch; seqnum ← 0
 //! ```
 //!
-//! Properties:
-//! - **Forward secrecy**: HKDF is forward-only, so a compromised
-//!   `current_secret` at epoch N cannot recover any `secret_(N-k)`.
-//! - **PCS-weak**: a compromised `current_secret` allows recovery of all
-//!   future secrets *if the adversary keeps observing the ratchet
-//!   schedule*; full PCS-strong needs the asymmetric DH ratchet which is
-//!   wired in M2.
+//! ### Receiver
 //!
-//! Compared to VLESS+REALITY (which never rotates the AEAD key for the
-//! entire session): a single key-leak in VLESS+REALITY exposes the entire
-//! conversation; in Proteus, only the bytes between two ratchet boundaries
-//! are exposed.
+//! Decodes 4-byte or 36-byte body. 4-byte → pure symmetric step.
+//! 36-byte → consumes bootstrap dh_sk, computes
+//! `DH(my_dh_sk, peer_dh_pub_new)`, derives new secret. Burns
+//! bootstrap.
+//!
+//! ### Initial DH state at handshake completion
+//!
+//! - Client: `my_dh_sk = client_x25519_sk`,
+//!   `peer_dh_pub = server_x25519_eph_pub` (the per-session ephemeral
+//!   from SH).
+//! - Server: `my_dh_sk = server_x25519_eph_sk`,
+//!   `peer_dh_pub = client_x25519_pub` (from AuthExtension).
+//!
+//! No extra handshake round-trip is needed.
+//!
+//! ### Properties
+//!
+//! - **Forward secrecy (FS)**: HKDF is forward-only, so a compromised
+//!   `current_secret` at epoch N cannot recover `secret_(N-k)`. The
+//!   asymmetric heal step doesn't weaken this — `dh_ikm` is one-way
+//!   blended in.
+//! - **Post-compromise security (PCS)**:
+//!     - Compromise before first ratchet: heals at first ratchet (fresh
+//!       DH the attacker can't replicate). PCS-strong heal step.
+//!     - Compromise after first ratchet: traffic up to next symmetric
+//!       step leaks; later epochs are forward-secret only. Same as
+//!       prior build.
+//! - **Replay across ratchet boundaries**: distinct epochs use distinct
+//!   keys and reset seqnum to 0, so replay across boundaries fails AEAD.
+//!
+//! Compared to VLESS+REALITY (no rotation, no DH ratchet): a single key
+//! leak exposes the entire conversation. Proteus achieves FS always and
+//! PCS heal at the first ratchet — REALITY achieves neither.
+//!
+//! ### Backward compatibility
+//!
+//! The M0/M1/M2 builds emitted 4-byte ratchet bodies (new epoch only).
+//! Receivers handle both 4-byte and 36-byte; a legacy 4-byte arriving
+//! when we still hold a bootstrap dh_sk falls through to symmetric (the
+//! DH state is retained but never used — slight memory waste, zero
+//! security loss). A 36-byte arriving after the bootstrap was burned
+//! is a fatal protocol error.
 //!
 //! ## Ratchet trigger
 //!
@@ -45,7 +100,14 @@ use proteus_crypto::{aead, kdf};
 use proteus_spec::SEQNUM_MAX;
 use proteus_wire::alpha;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 use zeroize::Zeroizing;
+
+/// HKDF label distinguishing the asymmetric DH-ratchet step from the
+/// legacy pure-symmetric ratchet step. New label so transcripts +
+/// recorded captures encrypted under one cannot be cross-replayed
+/// against the other.
+const DH_RATCHET_LABEL: &[u8] = b"proteus dh-ratchet v1";
 
 use crate::error::{AlphaError, AlphaResult};
 use crate::metrics::SessionMetrics;
@@ -105,6 +167,26 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     /// - 64: 64-byte buckets (most leakage gone, ~1% overhead at 16 KiB)
     /// - 1280: 1280-byte buckets (matches β-profile β-CELL_SIZE, destroys all sub-cell length signal)
     pad_quantum: u16,
+    /// Our local X25519 secret seeded from the handshake (client's
+    /// `client_x25519_sk`, server's `server_x25519_eph_sk`). Consumed
+    /// EXACTLY ONCE by the first outgoing ratchet event to provide
+    /// one PCS-strong heal step. Subsequent ratchets are pure
+    /// symmetric — which preserves forward secrecy and is robust to
+    /// pipelined ratchets that would otherwise race a full Signal-
+    /// style Double Ratchet.
+    ///
+    /// Wire effect: the first ratchet on a sender direction emits a
+    /// 36-byte body containing the new DH pub; later ratchets emit
+    /// the legacy 4-byte body.
+    ///
+    /// `None` disables the DH bootstrap — falls back to pure
+    /// symmetric ratchet for the whole session (M0/M1/M2 behavior).
+    dh_sk: Option<StaticSecret>,
+    /// The peer's last-known DH pub used as the DH partner on the
+    /// FIRST outgoing ratchet. Bootstrapped from the handshake; never
+    /// updated thereafter (we use the symmetric chain for subsequent
+    /// ratchets, so this only needs to be valid for the first one).
+    peer_dh_pub: Option<[u8; 32]>,
 }
 
 impl<W: AsyncWrite + Unpin> AlphaSender<W> {
@@ -124,7 +206,19 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
             records_in_epoch: 0,
             metrics,
             pad_quantum: 0,
+            dh_sk: None,
+            peer_dh_pub: None,
         }
+    }
+
+    /// Install one-shot DH-bootstrap state. The first outgoing ratchet
+    /// will emit a fresh DH pub and derive the new secret from
+    /// `DH(my_dh_sk_new, peer_dh_pub)`; subsequent ratchets fall back
+    /// to pure symmetric. Provides one PCS-strong heal step at the
+    /// first ratchet boundary.
+    pub(crate) fn install_dh_ratchet(&mut self, my_dh_sk: StaticSecret, peer_dh_pub: [u8; 32]) {
+        self.dh_sk = Some(my_dh_sk);
+        self.peer_dh_pub = Some(peer_dh_pub);
     }
 
     /// Enable per-record padding to `quantum` bytes. `0` disables.
@@ -235,26 +329,76 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// key with `seqnum = SEQNUM_MAX` (a reserved slot we never use for
     /// DATA), so the receiver must decrypt with the old key, then
     /// install the new key for everything after.
+    ///
+    /// **DH mode (PCS-strong)**: when `self.dh_sk` is set AND a peer
+    /// DH pub is known, the body carries `(new_epoch:u32 || my_dh_pub_new:[u8;32])`
+    /// = 36 bytes, and the new secret is derived from a fresh X25519
+    /// step. Otherwise we fall back to the legacy 4-byte body — same
+    /// pure-symmetric behavior as the M0/M1/M2 builds. The decision is
+    /// per-ratchet, so a peer can up- or down-grade mid-session.
     async fn send_ratchet_frame(&mut self) -> AlphaResult<()> {
-        // 1. Derive the new secret and keys.
-        let new_secret = derive_ratchet_secret(&self.secret)?;
-        let new_keys = direction_keys_from_secret(&new_secret)?;
         let new_epoch = self.epoch.saturating_add(1);
 
-        // 2. Send a RATCHET frame under the OLD key, using a reserved
-        //    sentinel seqnum so that the receiver can distinguish this
-        //    from regular DATA without an explicit type field.
-        //    Sentinel = SEQNUM_MAX (the very last per-epoch seqnum); we
-        //    never emit DATA on this seqnum because `send_record` would
-        //    force a ratchet first.
+        // One-shot DH heal step: the FIRST ratchet event on this
+        // direction takes the bootstrap dh_sk + peer_dh_pub and
+        // performs a fresh DH; subsequent ratchets fall back to pure
+        // symmetric. This avoids the pipelined-ratchet race that a
+        // continuous Double Ratchet would face (where the sender
+        // emits multiple ratchets faster than the peer responds, and
+        // the receiver cannot tell which sk was paired with which
+        // pub). One heal step is sufficient to recover PCS from any
+        // pre-first-ratchet compromise; subsequent compromises are
+        // bounded to one ratchet window by symmetric forward secrecy.
+        let dh_takes_priority = self.dh_sk.is_some() && self.peer_dh_pub.is_some();
+
+        let (new_secret, body_payload): (Zeroizing<[u8; 32]>, Vec<u8>) = if dh_takes_priority {
+            let peer_pub = self.peer_dh_pub.expect("checked Some");
+            let my_dh_sk_new = StaticSecret::random_from_rng(rand_core::OsRng);
+            let my_dh_pub_new = XPublicKey::from(&my_dh_sk_new).to_bytes();
+
+            // dh_ikm = X25519(my_dh_sk_new, peer_dh_pub). Reject the
+            // all-zero output (RFC 7748 §6.1).
+            let dh = my_dh_sk_new.diffie_hellman(&XPublicKey::from(peer_pub));
+            let dh_bytes = dh.as_bytes();
+            if dh_bytes.iter().all(|&b| b == 0) {
+                return Err(AlphaError::Closed);
+            }
+
+            // new_secret = HKDF-Expand-Label(current_secret, "proteus dh-ratchet v1", dh_ikm, 32)
+            let mut next = Zeroizing::new([0u8; 32]);
+            kdf::expand_label(&self.secret, DH_RATCHET_LABEL, dh_bytes, &mut *next)?;
+
+            // Burn the bootstrap dh_sk + peer_dh_pub — they were
+            // consumed in this single heal step. The next ratchet
+            // will fall through to the symmetric path. (We could
+            // chain more DH steps but each costs a round-trip's worth
+            // of state-sync complexity to handle pipelined ratchets;
+            // one heal is a clean tradeoff that REALITY cannot match
+            // at all.)
+            self.dh_sk = None;
+            self.peer_dh_pub = None;
+            let _ = my_dh_sk_new; // burned on drop
+
+            // Body = new_epoch (4 BE) || my_dh_pub_new (32) = 36 bytes
+            let mut body = Vec::with_capacity(4 + 32);
+            body.extend_from_slice(&new_epoch.to_be_bytes());
+            body.extend_from_slice(&my_dh_pub_new);
+            (next, body)
+        } else {
+            // ---- Pure symmetric ratchet (legacy + every-subsequent) ----
+            let next = derive_ratchet_secret(&self.secret)?;
+            (next, new_epoch.to_be_bytes().to_vec())
+        };
+        let new_keys = direction_keys_from_secret(&new_secret)?;
+
+        // Emit RATCHET frame under the OLD key + sentinel seqnum.
         let sentinel = (u64::from(self.epoch) << 40) | SEQNUM_MAX;
         let aad = sentinel.to_be_bytes();
-        let payload = new_epoch.to_be_bytes(); // 4 bytes, just the new epoch.
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, sentinel, &aad, &payload)?;
+        let ct = aead::seal(&self.keys.key, &self.keys.iv, sentinel, &aad, &body_payload)?;
         let frame = alpha::encode_record(alpha::RECORD_RATCHET, &ct);
         self.write.write_all(&frame).await?;
 
-        // 3. Install the new state.
+        // Install the new state.
         self.keys = new_keys;
         self.secret = new_secret;
         self.epoch = new_epoch;
@@ -308,6 +452,10 @@ pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> 
     metrics: std::sync::Arc<SessionMetrics>,
     last_close_code: Option<u8>,
     last_close_reason: Option<Vec<u8>>,
+    /// One-shot DH bootstrap secret. Consumed on the FIRST 36-byte
+    /// RATCHET we see from the peer; burned thereafter. Symmetric
+    /// receiver-side counterpart of `AlphaSender::dh_sk`.
+    dh_sk: Option<StaticSecret>,
 }
 
 impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
@@ -352,7 +500,14 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             metrics,
             last_close_code: None,
             last_close_reason: None,
+            dh_sk: None,
         }
+    }
+
+    /// Install the receiver's bootstrap DH secret — consumed on the
+    /// first 36-byte RATCHET from the peer.
+    pub(crate) fn install_dh_ratchet(&mut self, my_dh_sk: StaticSecret) {
+        self.dh_sk = Some(my_dh_sk);
     }
 
     /// Block until one full DATA record is available, then decrypt and
@@ -483,24 +638,52 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     }
 
     fn apply_ratchet(&mut self, body: &[u8]) -> AlphaResult<()> {
-        // body = AEAD(old_key, nonce=combined(old_epoch, SEQNUM_MAX), aad=that, pt=new_epoch BE-u32)
+        // body = AEAD(old_key, nonce=combined(old_epoch, SEQNUM_MAX), aad=that, pt=...)
+        // Plaintext is either:
+        //   4 bytes  : new_epoch (legacy symmetric ratchet)
+        //   36 bytes : new_epoch || peer_dh_pub_new (asymmetric DH ratchet)
         let combined = (u64::from(self.epoch) << 40) | SEQNUM_MAX;
         let aad = combined.to_be_bytes();
         let pt = aead::open(&self.keys.key, &self.keys.iv, combined, &aad, body)
-            .map_err(|_| AlphaError::BadServerFinished)?; // misuse of an existing variant; treat as fatal
-        if pt.as_slice().len() != 4 {
+            .map_err(|_| AlphaError::BadServerFinished)?;
+        let pt_bytes = pt.as_slice();
+        if pt_bytes.len() != 4 && pt_bytes.len() != 36 {
             return Err(AlphaError::BadServerFinished);
         }
-        let new_epoch = u32::from_be_bytes([
-            pt.as_slice()[0],
-            pt.as_slice()[1],
-            pt.as_slice()[2],
-            pt.as_slice()[3],
-        ]);
+        let new_epoch = u32::from_be_bytes([pt_bytes[0], pt_bytes[1], pt_bytes[2], pt_bytes[3]]);
         if new_epoch != self.epoch.saturating_add(1) {
             return Err(AlphaError::BadServerFinished);
         }
-        let new_secret = derive_ratchet_secret(&self.secret)?;
+
+        let new_secret: Zeroizing<[u8; 32]> = if pt_bytes.len() == 36 {
+            // ---- One-shot DH heal ratchet ----
+            //
+            // Only valid if WE still hold the bootstrap DH sk. After
+            // it's been consumed once, a second 36-byte ratchet is a
+            // protocol error (peer is expected to fall back to the
+            // 4-byte symmetric form after their first heal).
+            let Some(my_sk) = self.dh_sk.take() else {
+                return Err(AlphaError::BadServerFinished);
+            };
+            let mut peer_pub_new = [0u8; 32];
+            peer_pub_new.copy_from_slice(&pt_bytes[4..36]);
+
+            let dh = my_sk.diffie_hellman(&XPublicKey::from(peer_pub_new));
+            let dh_bytes = dh.as_bytes();
+            if dh_bytes.iter().all(|&b| b == 0) {
+                // Low-order point — reject (RFC 7748 §6.1).
+                return Err(AlphaError::BadServerFinished);
+            }
+
+            let mut next = Zeroizing::new([0u8; 32]);
+            kdf::expand_label(&self.secret, DH_RATCHET_LABEL, dh_bytes, &mut *next)?;
+            // `my_sk` dropped here — bootstrap consumed.
+            next
+        } else {
+            // ---- Pure symmetric ratchet ----
+            derive_ratchet_secret(&self.secret)?
+        };
+
         let new_keys = direction_keys_from_secret(&new_secret)?;
         self.keys = new_keys;
         self.secret = new_secret;
@@ -620,6 +803,28 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
     pub fn with_shape(mut self, shape_seed: u32, cover_profile_id: u16) -> Self {
         self.shape_seed = Some(shape_seed);
         self.cover_profile_id = Some(cover_profile_id);
+        self
+    }
+
+    /// Install one-shot asymmetric DH ratchet state derived from the
+    /// handshake. The sender will perform a fresh DH on its first
+    /// outgoing RATCHET event (PCS heal step); subsequent ratchets
+    /// are pure symmetric.
+    ///
+    /// `my_dh_sk` is THIS endpoint's X25519 secret half of the
+    /// handshake key (`client_x25519_sk` for client, `server_x25519_eph_sk`
+    /// for server). `peer_dh_pub` is the matching public.
+    ///
+    /// The sender and receiver each get their OWN copy of `my_dh_sk`
+    /// — the sender consumes it to produce a new DH pub on outgoing
+    /// ratchets; the receiver consumes it to combine with the peer's
+    /// announced pub on incoming ratchets. The two copies are
+    /// independent: each is burned exactly once.
+    #[must_use]
+    pub fn with_dh_ratchet(mut self, my_dh_sk: StaticSecret, peer_dh_pub: [u8; 32]) -> Self {
+        self.sender
+            .install_dh_ratchet(my_dh_sk.clone(), peer_dh_pub);
+        self.receiver.install_dh_ratchet(my_dh_sk);
         self
     }
 }

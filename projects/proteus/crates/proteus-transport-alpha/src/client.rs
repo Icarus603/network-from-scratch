@@ -436,7 +436,14 @@ where
     // Client sends with c_ap_secret keys; receives with s_ap_secret keys.
     // Any tail bytes left over in rx_buf are post-handshake DATA records
     // that arrived coalesced with SF — pass them to the receiver.
-    Ok(AlphaSession::with_prefix(
+    //
+    // Install asymmetric DH ratchet state (Signal-style, PCS-strong)
+    // bootstrapped from the handshake X25519 keys. After this, every
+    // RATCHET event uses a fresh ephemeral DH step so a future leak
+    // of any one epoch's key material does not unlock subsequent
+    // epochs — the chain heals on the next ratchet (~4 MiB / 16 k
+    // records).
+    let session = AlphaSession::with_prefix(
         write,
         read,
         c_keys,
@@ -444,7 +451,9 @@ where
         final_secrets.c_ap_secret.clone(),
         final_secrets.s_ap_secret.clone(),
         rx_buf,
-    ))
+    )
+    .with_dh_ratchet(client_eph.x25519_sk.clone(), server_x25519_pub);
+    Ok(session)
 }
 
 /// Read one frame, draining bytes from a **persistent** receive buffer

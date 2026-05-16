@@ -1356,6 +1356,12 @@ async fn handshake_with_prefix(
 
     // Pass any post-CF tail bytes (coalesced DATA records) to the session
     // receiver so we don't lose them.
+    //
+    // Install asymmetric DH ratchet bootstrap: server holds
+    // `server_x25519_eph_sk` (the fresh per-session ephemeral) and the
+    // client's announced `client_x25519_pub`. Both halves are known
+    // post-handshake, so no extra round-trip is needed to enable PCS-
+    // strong ratcheting.
     let mut session = AlphaSession::with_prefix(
         write,
         read,
@@ -1365,7 +1371,8 @@ async fn handshake_with_prefix(
         final_secrets.c_ap_secret.clone(),
         rx_buf,
     )
-    .with_shape(ext.shape_seed, ext.cover_profile_id);
+    .with_shape(ext.shape_seed, ext.cover_profile_id)
+    .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
@@ -1717,6 +1724,7 @@ where
     )?;
     let (c_keys, s_keys) = final_secrets.direction_keys()?;
     // Server: sends with s_ap_secret keys, receives with c_ap_secret keys.
+    // DH ratchet bootstrap — same comment as in `handshake_with_cover`.
     let mut session = AlphaSession::with_prefix(
         write,
         read,
@@ -1726,7 +1734,8 @@ where
         final_secrets.c_ap_secret.clone(),
         rx_buf,
     )
-    .with_shape(ext.shape_seed, ext.cover_profile_id);
+    .with_shape(ext.shape_seed, ext.cover_profile_id)
+    .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
