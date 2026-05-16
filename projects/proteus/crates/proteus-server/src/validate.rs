@@ -539,6 +539,7 @@ mod tests {
             firewall: None,
             max_connections: None,
             max_session_bytes: None,
+            abuse_detector: None,
         }
     }
 

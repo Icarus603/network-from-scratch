@@ -151,6 +151,16 @@ pub struct ServerMetrics {
     /// legitimate streaming workload is hitting the cap (raise it) or
     /// a single user is dominating egress (the cap is doing its job).
     pub session_byte_budget_exhausted: AtomicU64,
+    /// Abuse-detector alerts. Bumped once per burst (sliding-window,
+    /// fire-once semantics) when a user hits the byte-budget cap
+    /// repeatedly. Operator sees this counter rise = likely a
+    /// stolen credential being used to exfiltrate.
+    pub abuse_alerts_byte_budget: AtomicU64,
+    /// Abuse-detector alerts for the per-user rate limiter. Bumped
+    /// once per burst when a user trips `user_rate_rejected`
+    /// repeatedly. Operator sees this counter rise = likely a
+    /// misconfigured / bot-controlled client.
+    pub abuse_alerts_rate_limit: AtomicU64,
     /// In-flight session count (incremented on accept, decremented on
     /// session completion). Exported as a Prometheus gauge.
     pub in_flight_sessions: AtomicU64,
@@ -182,6 +192,8 @@ impl Default for ServerMetrics {
             total_ratchets: AtomicU64::new(0),
             session_idle_reaped: AtomicU64::new(0),
             session_byte_budget_exhausted: AtomicU64::new(0),
+            abuse_alerts_byte_budget: AtomicU64::new(0),
+            abuse_alerts_rate_limit: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             // Default to "not alive, not ready". The accept loop flips
             // alive→true once it binds; the operator flips ready→true
@@ -258,6 +270,12 @@ impl ServerMetrics {
              # HELP proteus_session_byte_budget_exhausted_total Sessions torn down by the per-session byte cap.\n\
              # TYPE proteus_session_byte_budget_exhausted_total counter\n\
              proteus_session_byte_budget_exhausted_total {}\n\
+             # HELP proteus_abuse_alerts_byte_budget_total Per-user byte-budget abuse alert fires (sliding window).\n\
+             # TYPE proteus_abuse_alerts_byte_budget_total counter\n\
+             proteus_abuse_alerts_byte_budget_total {}\n\
+             # HELP proteus_abuse_alerts_rate_limit_total Per-user rate-limit abuse alert fires (sliding window).\n\
+             # TYPE proteus_abuse_alerts_rate_limit_total counter\n\
+             proteus_abuse_alerts_rate_limit_total {}\n\
              # HELP proteus_in_flight_sessions In-flight sessions (gauge).\n\
              # TYPE proteus_in_flight_sessions gauge\n\
              proteus_in_flight_sessions {}\n\
@@ -283,6 +301,8 @@ impl ServerMetrics {
             s(&self.total_ratchets),
             s(&self.session_idle_reaped),
             s(&self.session_byte_budget_exhausted),
+            s(&self.abuse_alerts_byte_budget),
+            s(&self.abuse_alerts_rate_limit),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),
             u64::from(self.ready.load(Ordering::Relaxed)),

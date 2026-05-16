@@ -18,6 +18,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use proteus_transport_alpha::abuse_detector::AbuseDetector;
 use proteus_transport_alpha::access_log::{AccessLogHandle, AccessLogRecord};
 use proteus_transport_alpha::metrics::ServerMetrics;
 use proteus_transport_alpha::session::AlphaSession;
@@ -53,6 +54,12 @@ pub struct RelayConfig {
     /// value is "expected max per-session transfer × 2" — e.g.
     /// 50 GiB for streaming-heavy users.
     pub max_session_bytes: Option<u64>,
+    /// Optional per-user abuse detector — sliding-window counter
+    /// over the byte-budget cap hits. When the same `user_id` trips
+    /// the cap `threshold` times within `window`, the detector
+    /// fires ONCE (per burst), emitting a structured `WARN` log
+    /// and bumping `abuse_alerts_byte_budget`.
+    pub abuse_detector_byte_budget: Option<Arc<AbuseDetector>>,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -62,6 +69,10 @@ impl std::fmt::Debug for RelayConfig {
             .field("metrics", &self.metrics.is_some())
             .field("access_log", &self.access_log.is_some())
             .field("max_session_bytes", &self.max_session_bytes)
+            .field(
+                "abuse_detector_byte_budget",
+                &self.abuse_detector_byte_budget.is_some(),
+            )
             .finish()
     }
 }
@@ -80,9 +91,37 @@ where
     let peer_addr = session.peer_addr;
     let session_metrics = std::sync::Arc::clone(&session.metrics);
     let access_log = cfg.access_log.clone();
+    let metrics_for_alerts = cfg.metrics.clone();
+    let abuse_detector = cfg.abuse_detector_byte_budget.clone();
     let started = Instant::now();
 
     let outcome = handle_session_inner(session, cfg).await;
+
+    let close_reason: Option<&'static str> = match &outcome {
+        Ok(reason) => Some(*reason),
+        Err(_) => Some("relay_error"),
+    };
+
+    // Anomaly detection: a session that ended on the byte-budget
+    // cap for a KNOWN user is a credential-abuse signal when it
+    // happens repeatedly. Sliding-window counter; fires once per
+    // burst.
+    if close_reason == Some("byte_budget_exhausted") {
+        if let (Some(uid), Some(detector)) = (user_id, abuse_detector.as_ref()) {
+            if detector.record(uid) {
+                tracing::warn!(
+                    user_id = ?uid,
+                    peer = ?peer_addr,
+                    "abuse: user repeatedly exhausting per-session byte budget — \
+                     possible stolen credential being used to exfiltrate"
+                );
+                if let Some(m) = metrics_for_alerts.as_ref() {
+                    m.abuse_alerts_byte_budget
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
 
     // Emit one access-log line for the completed session, regardless
     // of whether the inner body returned Ok / Err / through a panic
@@ -90,10 +129,6 @@ where
     // panics, but the log path is the same).
     if let Some(logger) = access_log {
         let snap = session_metrics.snapshot();
-        let close_reason = match &outcome {
-            Ok(reason) => Some(*reason),
-            Err(_) => Some("relay_error"),
-        };
         logger.log(AccessLogRecord {
             user_id,
             peer: peer_addr,

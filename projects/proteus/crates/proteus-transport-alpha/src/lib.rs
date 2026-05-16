@@ -25,6 +25,7 @@
 //!   (spec §4.5.2), 16-byte tag.
 //! - State machine (spec §5.1) — every legitimate transition is taken.
 
+pub mod abuse_detector;
 pub mod access_log;
 pub mod client;
 pub mod cover;

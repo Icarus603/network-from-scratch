@@ -594,6 +594,24 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // Optional abuse detector (byte-budget). Build it here so the
+    // accept-loop closures all share one Arc<AbuseDetector>.
+    let abuse_detector_byte_budget = cfg
+        .abuse_detector
+        .as_ref()
+        .and_then(|d| d.byte_budget.as_ref())
+        .map(|c| {
+            info!(
+                window_secs = c.window_secs,
+                threshold = c.threshold,
+                "byte-budget abuse detector configured"
+            );
+            Arc::new(proteus_transport_alpha::abuse_detector::AbuseDetector::new(
+                std::time::Duration::from_secs(c.window_secs),
+                c.threshold,
+            ))
+        });
+
     // Per-session relay knobs. session_idle_secs=0 disables; default 600s.
     let relay_cfg = relay::RelayConfig {
         idle_timeout: match cfg.session_idle_secs.unwrap_or(600) {
@@ -603,6 +621,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         metrics: Some(Arc::clone(&metrics)),
         access_log: access_log_handle,
         max_session_bytes: cfg.max_session_bytes,
+        abuse_detector_byte_budget,
     };
     if let Some(n) = relay_cfg.max_session_bytes {
         info!(bytes = n, "per-session byte budget configured");

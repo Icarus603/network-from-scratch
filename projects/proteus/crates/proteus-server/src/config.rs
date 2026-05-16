@@ -116,6 +116,21 @@ pub struct ServerConfig {
     #[serde(default)]
     pub access_log: Option<PathBuf>,
 
+    /// Optional anomaly detector for per-user byte-budget abuse.
+    /// When the same `user_id` triggers `close_reason =
+    /// "byte_budget_exhausted"` `threshold` times within `window_secs`,
+    /// the server logs one WARN and bumps `abuse_alerts_byte_budget_total`.
+    /// Fire-once per burst; resets after the window goes empty.
+    ///
+    /// Sensible production value:
+    ///   abuse_detector:
+    ///     byte_budget:
+    ///       window_secs: 300   # 5-minute sliding window
+    ///       threshold: 3       # 3 cap hits → alert
+    /// Unset = disabled.
+    #[serde(default)]
+    pub abuse_detector: Option<AbuseDetectorCfg>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -164,6 +179,31 @@ pub struct ServerConfig {
     /// `nofile` ulimit (one connection ≈ one FD).
     #[serde(default)]
     pub max_connections: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AbuseDetectorCfg {
+    /// Byte-budget cap-hit detector. See [`AbuseDetectorEntry`].
+    #[serde(default)]
+    pub byte_budget: Option<AbuseDetectorEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AbuseDetectorEntry {
+    /// Sliding-window length in seconds. Default 300 (5 min).
+    #[serde(default = "default_abuse_window_secs")]
+    pub window_secs: u64,
+    /// Number of events within the window that constitute "abuse".
+    /// Default 3.
+    #[serde(default = "default_abuse_threshold")]
+    pub threshold: usize,
+}
+
+const fn default_abuse_window_secs() -> u64 {
+    300
+}
+const fn default_abuse_threshold() -> usize {
+    3
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
