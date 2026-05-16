@@ -124,7 +124,13 @@ where
     let server_mlkem_pk = EncapsulationKey::<MlKem768Params>::from_bytes(&ek_array);
 
     let client_eph = kex::client_ephemeral(&mut rng, &server_mlkem_pk)?;
-    let combined_dh = kex::client_combine(&client_eph, &config.server_x25519_pub)?;
+    // NB: client_combine is deferred until after we read SH — the server
+    // now sends a per-session EPHEMERAL X25519 pub in SH (PFS hardening),
+    // not its long-term static pub. `config.server_x25519_pub` is kept
+    // for backward-compat of the ClientConfig surface but is no longer
+    // used as DH input. Server identity is gated by ML-KEM-768 decap +
+    // the Finished MAC chain — an MITM cannot swap the SH pubkey
+    // without producing an invalid SF MAC over the transcript.
 
     // shape/cover/identity flags — all zeroes for M1, will be populated in M3.
     let now = SystemTime::now()
@@ -255,6 +261,15 @@ where
     let th_ch_sh = transcript.snapshot();
 
     // ----- 4. Derive hybrid shared + key schedule -----
+    // NOW run client_combine against the SH-supplied EPHEMERAL pub.
+    // If the server is the rightful one (i.e. owns the ML-KEM secret),
+    // its `server_combine` produced the same `K_classic` because it
+    // used the same X25519 sk for which the pub above is the public
+    // half. A MITM can replace the SH pub but will not be able to
+    // produce a Finished MAC under the right key schedule because
+    // K_pq (ML-KEM half) requires the long-term ML-KEM secret which
+    // the MITM does not have.
+    let combined_dh = kex::client_combine(&client_eph, &server_x25519_pub)?;
     let mut hybrid_shared = [0u8; 64];
     hybrid_shared[..32].copy_from_slice(&combined_dh[..32]);
     hybrid_shared[32..].copy_from_slice(&combined_dh[32..]);

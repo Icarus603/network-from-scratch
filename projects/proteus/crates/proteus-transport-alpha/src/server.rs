@@ -1105,8 +1105,48 @@ async fn handshake_with_prefix(
         return Err(HandshakeFailure::new(Vec::new(), None));
     }
 
+    // ----- Per-session ephemeral X25519 (Perfect Forward Secrecy) -----
+    //
+    // ARCHITECTURAL HARDENING vs REALITY + earlier Proteus drafts:
+    //
+    // REALITY uses a *long-term* X25519 keypair on the server (the
+    // operator generates it once, distributes the public-half to
+    // clients, and the secret-half sits in /etc/<reality>/server.key
+    // for months). A compromise of that single file retroactively
+    // decrypts every past session that ever DH'd against it. This is
+    // the "harvest-now-decrypt-later" attack with a classical lever.
+    //
+    // Pre-this-commit Proteus inherited the same flaw: `ctx.keys.
+    // x25519_sk` was a `StaticSecret` generated once at boot. Even
+    // though the ML-KEM half was per-session-ephemeral on the client
+    // side (PQ-FS by construction), the X25519 half was static on
+    // the server side. An adversary who later seized the server's
+    // x25519_sk could go back to a packet capture, replay
+    // `server_combine`, and recover the classical 32 bytes of every
+    // captured session's hybrid_shared. ML-KEM-only forward secrecy
+    // is still strong, but a defense-in-depth crypto design must
+    // not rely on a single primitive being unbroken.
+    //
+    // FIX: generate a fresh X25519 keypair on EVERY incoming session.
+    // The secret half lives in this stack frame and is dropped
+    // (zeroized via Zeroizing/StaticSecret's Drop) as soon as
+    // `combined` is consumed. The public half is shipped in the
+    // SH frame, transcript-hashed, and the client uses it for its
+    // own `client_combine` — same as before, but the server's
+    // identity to the wire never reuses an X25519 key.
+    //
+    // Server IDENTITY is unaffected: it still rests on the
+    // long-term ML-KEM-768 keypair (the client encapsulates to a
+    // pinned `server_pq_fingerprint`, only the rightful server can
+    // decap). Stealing the server's ML-KEM secret would still hurt,
+    // but ML-KEM keys are large + don't sit in process memory
+    // outside of an active session's stack — much harder to exfil
+    // than a 32-byte X25519 file.
+    let server_x25519_eph_sk = x25519_dalek::StaticSecret::random_from_rng(rand_core::OsRng);
+    let server_x25519_eph_pub = x25519_dalek::PublicKey::from(&server_x25519_eph_sk).to_bytes();
+
     let combined = match kex::server_combine(
-        &ctx.keys.x25519_sk,
+        &server_x25519_eph_sk,
         &ctx.keys.mlkem_sk,
         &ext.client_x25519_pub,
         &ext.client_mlkem768_ct,
@@ -1211,7 +1251,11 @@ async fn handshake_with_prefix(
 
     let mut transcript = Transcript::new();
     transcript.update(&ch_frame_body);
-    let sh_body = ctx.x25519_pub();
+    // SH carries the SERVER'S EPHEMERAL X25519 pub, not the long-term
+    // one. Transcript-hashing it binds the ephemeral into the Finished
+    // MAC chain so a MITM cannot swap the pub for a key it controls
+    // without invalidating the MAC.
+    let sh_body = &server_x25519_eph_pub;
     let sh_frame =
         proteus_wire::alpha::encode_handshake(proteus_wire::alpha::FRAME_SERVER_HELLO, sh_body);
     transcript.update(sh_body);
@@ -1473,9 +1517,14 @@ where
         Verdict::Replay => return Err(AlphaError::AuthReplay),
     }
 
-    // ----- 4. Decap ML-KEM-768 + X25519 combine -----
+    // ----- 4. Decap ML-KEM-768 + per-session-ephemeral X25519 combine -----
+    // Per-session ephemeral X25519: see comment block in
+    // `handshake_with_cover` — same PFS hardening, applied identically
+    // to the raw-TCP path so neither variant leaks classical-FS.
+    let server_x25519_eph_sk = x25519_dalek::StaticSecret::random_from_rng(rand_core::OsRng);
+    let server_x25519_eph_pub = x25519_dalek::PublicKey::from(&server_x25519_eph_sk).to_bytes();
     let combined = kex::server_combine(
-        &ctx.keys.x25519_sk,
+        &server_x25519_eph_sk,
         &ctx.keys.mlkem_sk,
         &ext.client_x25519_pub,
         &ext.client_mlkem768_ct,
@@ -1540,7 +1589,8 @@ where
     // ----- 7. Build ServerHello with server X25519 share -----
     let mut transcript = Transcript::new();
     transcript.update(&ch.body);
-    let sh_body = ctx.x25519_pub();
+    // SH carries the EPHEMERAL pub (PFS) — see `handshake_with_cover`.
+    let sh_body = &server_x25519_eph_pub;
     let sh_frame = alpha::encode_handshake(alpha::FRAME_SERVER_HELLO, sh_body);
     transcript.update(sh_body);
     let th_ch_sh = transcript.snapshot();
