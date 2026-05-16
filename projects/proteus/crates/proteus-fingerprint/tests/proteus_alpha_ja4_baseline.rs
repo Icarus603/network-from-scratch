@@ -161,6 +161,16 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
         ja4.ext_count >= 5,
         "minimum TLS 1.3 extension set is supported_versions + key_share + signature_algorithms + server_name + supported_groups (5)"
     );
+    // Compress-certificate (0x001b) extension MUST be enabled — this
+    // is what the rustls `brotli` feature flag in the workspace
+    // Cargo.toml turns on. Chrome 124 ships this extension; matching
+    // it closes one ext_count gap toward Chrome.
+    assert!(
+        ja4.ext_count >= 11,
+        "compress_certificate extension expected to be enabled (ext_count should be ≥ 11); \
+         got {} — did the rustls `brotli` workspace feature get dropped?",
+        ja4.ext_count,
+    );
     // Hashes are 12 lowercase hex chars.
     assert_eq!(ja4.cipher_hash.len(), 12);
     assert!(
@@ -222,32 +232,32 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
 
     // ----- EXACT baseline assertion (regression guardrail) -----
     //
-    // This locks the JA4 fingerprint Proteus α emits with the
-    // Chrome-shaped CryptoProvider:
+    // Locks the JA4 fingerprint Proteus α emits with the cumulative
+    // Chrome-shaped configuration:
     //   - cipher_suites: Chrome 124 wire order (9 ciphers,
     //     0x1301-first)
     //   - signature_verification_algorithms: Chrome 124's 8-scheme
     //     mapping (drops ed25519 0x0807, reorders per Chrome's
     //     preference)
+    //   - compress_certificate (ext 0x001b): enabled via rustls
+    //     `brotli` feature, +1 to ext_count and shifts ext_hash
     //
-    // Compared against the FoxIO published Chrome 124 JA4
-    // (`t13d1517h2_8daaf6152771_b0da82dd1658`) the remaining diffs
-    // are:
-    //   - cipher_count: 09 vs Chrome's 15 (rustls deliberately omits
-    //     plain-RSA AES-CBC suites for safety reasons — adding them
-    //     bypasses rustls's safety policy and is the wrong direction
-    //     for a security-focused proxy)
-    //   - cipher_hash: differs because the SET differs (sorted-list
-    //     SHA-256 prefix is determined by the cipher SET, not order)
-    //   - ext_hash: still differs because rustls's extension SET +
-    //     ORDER on the wire differs from Chrome (ext order requires
-    //     forking rustls internally — separate commit)
-    //
-    // Drift here means either:
-    //   (a) the workspace bumped rustls and the shape changed —
-    //       audit the diff;
-    //   (b) the next uTLS step landed — update the baseline.
-    const EXPECTED_BASELINE: &str = "t13d0910h2_f91f431d341e_648ed004696a";
+    // Compared to FoxIO Chrome 124 baseline
+    // (`t13d1517h2_8daaf6152771_b0da82dd1658`):
+    //   ext_count: 11 vs Chrome's 17 (still short — Chrome ships
+    //     6 more extensions Proteus doesn't: padding 0x0015,
+    //     application_settings 0x4469 / 0x4468, status_request
+    //     0x0005, etc. Some of these are rustls-internal and not
+    //     toggleable via the public ClientConfig API; closing the
+    //     rest requires forking rustls's ClientHello assembler).
+    //   cipher_count: 09 vs 15 (rustls omits plain-RSA-AES-CBC
+    //     suites for safety, intentionally; closing this means
+    //     bypassing rustls's safety policy which is the wrong
+    //     direction for a security-focused proxy).
+    //   cipher_hash + ext_hash: both differ because the SETS still
+    //     differ. Each commit chipping at the SET moves the hash;
+    //     this CI gate locks each step.
+    const EXPECTED_BASELINE: &str = "t13d0911h2_f91f431d341e_165ef185bad8";
     assert_eq!(
         ja4.to_string(),
         EXPECTED_BASELINE,
