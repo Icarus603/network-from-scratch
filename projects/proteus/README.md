@@ -152,6 +152,32 @@ Every push and PR runs:
 
 ---
 
+## Performance baseline
+
+Measured on Apple Silicon M-series, release profile (criterion, n=30):
+
+| Operation | Latency / Throughput |
+|---|---|
+| Handshake — client side (X25519 keygen + ML-KEM-768 Encaps) | **~40 µs** |
+| Handshake — server side (X25519 DH + ML-KEM-768 Decaps) | **~43 µs** |
+| AEAD seal — ChaCha20-Poly1305, 1 KiB record | **~595 MiB/s** |
+| AEAD seal — ChaCha20-Poly1305, 4 KiB record | **~627 MiB/s** |
+| AEAD seal — ChaCha20-Poly1305, 16 KiB record | **~645 MiB/s** |
+| AEAD seal — ChaCha20-Poly1305, 64 KiB record | **~648 MiB/s** |
+| AEAD open — ChaCha20-Poly1305, 1 KiB record | **~510 MiB/s** |
+
+Per-core single-stream ceiling is ~5 Gbps of bulk encrypt throughput.
+The server-side handshake cost fits comfortably in the spec §17.2
+80 µs budget. Hysteria2 and TUIC-v5 use the same ChaCha20-Poly1305 cipher
+and hit the same cipher-bound ceiling; the per-handshake delta is
+dominated by Proteus's ML-KEM-768 Decap (~30 µs) — the price of
+post-quantum confidentiality (the others don't have).
+
+To reproduce:
+```bash
+cargo bench -p proteus-crypto
+```
+
 ## Test coverage
 
 ```

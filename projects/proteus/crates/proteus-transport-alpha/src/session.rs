@@ -405,6 +405,21 @@ fn derive_ratchet_secret(current: &[u8; 32]) -> AlphaResult<Zeroizing<[u8; 32]>>
     Ok(next)
 }
 
+/// On drop, scrub any plaintext bytes that transited the receive
+/// buffer (decrypted DATA, post-handshake tail, peer-supplied CLOSE
+/// reason). `keys` / `secret` are wrapped in `Zeroizing` so they
+/// already zero themselves on drop; we wipe the variable-length
+/// buffers manually.
+impl<R: AsyncRead + Unpin> Drop for AlphaReceiver<R> {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.rx_buf.zeroize();
+        if let Some(reason) = self.last_close_reason.as_mut() {
+            reason.zeroize();
+        }
+    }
+}
+
 /// Re-derive `(key, iv)` from a freshly-installed traffic secret. Mirrors
 /// `proteus_crypto::key_schedule::direction_keys_from_secret` but kept
 /// local because that function is private.

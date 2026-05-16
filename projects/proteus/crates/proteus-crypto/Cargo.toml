@@ -23,6 +23,15 @@ thiserror.workspace = true
 
 [dev-dependencies]
 rand_core = { workspace = true, features = ["getrandom"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "aead_throughput"
+harness = false
+
+[[bench]]
+name = "handshake_kex"
+harness = false
 
 [lints.rust]
 unsafe_code = "forbid"
