@@ -24,6 +24,24 @@ use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
     pub listen_alpha: String,
+    /// Optional β-profile (QUIC over UDP) listen address. When set,
+    /// the binary additionally binds a quinn endpoint and accepts
+    /// β-profile sessions in parallel with α. The two carriers share
+    /// the same ServerCtx (single allowlist, single rate limiter,
+    /// single abuse detector, single access log, single metrics).
+    /// Example: `"0.0.0.0:8444"`. Unset = α only.
+    #[serde(default)]
+    pub listen_beta: Option<String>,
+    /// Path to the TLS cert chain to present on β QUIC handshakes.
+    /// Required when `listen_beta` is set; defaults to `tls.cert_chain`
+    /// if both are configured and this is unset (operators typically
+    /// use the same Let's Encrypt cert for both carriers).
+    #[serde(default)]
+    pub beta_cert_chain: Option<PathBuf>,
+    /// Path to the TLS private key. Same fallback behavior as
+    /// `beta_cert_chain` — defaults to `tls.private_key` if unset.
+    #[serde(default)]
+    pub beta_private_key: Option<PathBuf>,
     pub keys: KeysCfg,
     #[serde(default)]
     pub client_allowlist: Vec<ClientCfg>,

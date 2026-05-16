@@ -106,6 +106,52 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         Ok(_) => r.push_pass(format!("listen_alpha parses ({})", cfg.listen_alpha)),
         Err(e) => r.push_fail(format!("listen_alpha {:?}: {e}", cfg.listen_alpha)),
     }
+    // 1b. listen_beta parses (when set) AND cert/key resolution
+    // policy is consistent (β-specific paths take precedence; α tls
+    // fallback applies otherwise).
+    if let Some(beta) = cfg.listen_beta.as_ref() {
+        match beta.parse::<std::net::SocketAddr>() {
+            Ok(_) => r.push_pass(format!("listen_beta parses ({beta})")),
+            Err(e) => r.push_fail(format!("listen_beta {beta:?}: {e}")),
+        }
+        // The binary will refuse to start if neither β-specific nor
+        // α-tls cert/key paths are available. Surface that here as a
+        // FAIL so operators catch it pre-deploy.
+        let beta_has_explicit = cfg.beta_cert_chain.is_some() && cfg.beta_private_key.is_some();
+        let tls_fallback_available = cfg.tls.is_some();
+        if !beta_has_explicit && !tls_fallback_available {
+            r.push_fail(
+                "listen_beta is set but no cert/key resolution path: \
+                 set beta_cert_chain + beta_private_key, OR configure tls block",
+            );
+        }
+        // If β-specific paths are partially set, that's a typo.
+        if cfg.beta_cert_chain.is_some() != cfg.beta_private_key.is_some() {
+            r.push_fail(
+                "beta_cert_chain and beta_private_key must be either both set or both unset",
+            );
+        }
+        // Make sure the resolved cert/key files actually load.
+        let (cert_path, key_path) = match (
+            cfg.beta_cert_chain.as_ref(),
+            cfg.beta_private_key.as_ref(),
+            cfg.tls.as_ref(),
+        ) {
+            (Some(c), Some(k), _) => (Some(c.clone()), Some(k.clone())),
+            (_, _, Some(tls)) => (Some(tls.cert_chain.clone()), Some(tls.private_key.clone())),
+            _ => (None, None),
+        };
+        if let (Some(c), Some(k)) = (cert_path, key_path) {
+            match proteus_transport_alpha::tls::load_cert_chain(&c) {
+                Ok(_) => r.push_pass(format!("β cert chain loads ({c:?})")),
+                Err(e) => r.push_fail(format!("β cert chain {c:?}: {e}")),
+            }
+            match proteus_transport_alpha::tls::load_private_key(&k) {
+                Ok(_) => r.push_pass(format!("β private key loads ({k:?})")),
+                Err(e) => r.push_fail(format!("β private key {k:?}: {e}")),
+            }
+        }
+    }
 
     // 2. Server key files exist + readable.
     check_file(&mut r, "keys.mlkem_pk", &cfg.keys.mlkem_pk);
@@ -516,6 +562,9 @@ mod tests {
         }
         ServerConfig {
             listen_alpha: "0.0.0.0:8443".to_string(),
+            listen_beta: None,
+            beta_cert_chain: None,
+            beta_private_key: None,
             keys: KeysCfg {
                 mlkem_pk: dir.join("mlkem.pk"),
                 mlkem_sk: dir.join("mlkem.sk"),

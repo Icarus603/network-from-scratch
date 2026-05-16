@@ -5,6 +5,20 @@
 # CAP_NET_BIND_SERVICE (see systemd unit).
 listen_alpha: "0.0.0.0:8443"
 
+# Optional β-profile (QUIC over UDP) listen address. When set, the
+# server additionally binds a quinn endpoint and accepts β sessions
+# in parallel with α. Both carriers share the SAME state (allowlist,
+# rate limiter, abuse detector, access log, metrics) — operators see
+# unified observability across protocols.
+#
+# β reuses the α `tls.cert_chain` / `tls.private_key` by default;
+# set `beta_cert_chain` / `beta_private_key` to override.
+#
+# Production tip: bind α to 443/tcp and β to 443/udp on the same
+# host — clients first try β (zero-HoL, BBR) and fall back to α
+# when UDP is blocked.
+# listen_beta: "0.0.0.0:8443"
+
 # Prometheus exposition + container health probes (optional). The
 # same listener serves three routes:
 #   GET /metrics — Prometheus 0.0.4 text exposition.

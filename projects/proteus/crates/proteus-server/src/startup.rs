@@ -35,6 +35,7 @@ use crate::config::ServerConfig;
 pub struct StartupSummary {
     pub version: &'static str,
     pub listen_alpha: String,
+    pub listen_beta: Option<String>,
     pub tls_enabled: bool,
     pub tls_cert_chain: Option<String>,
     pub allowlist_users: usize,
@@ -64,6 +65,7 @@ impl StartupSummary {
         Self {
             version: env!("CARGO_PKG_VERSION"),
             listen_alpha: cfg.listen_alpha.clone(),
+            listen_beta: cfg.listen_beta.clone(),
             tls_enabled: cfg.tls.is_some(),
             tls_cert_chain: cfg.tls.as_ref().map(|t| t.cert_chain.display().to_string()),
             allowlist_users: cfg.client_allowlist.len(),
@@ -158,6 +160,10 @@ impl fmt::Display for StartupSummary {
         }
 
         row!("listen_alpha", &self.listen_alpha)?;
+        match &self.listen_beta {
+            Some(b) => row!("listen_beta (QUIC)", b)?,
+            None => row!("listen_beta (QUIC)", "<unset>")?,
+        }
         row!(
             "tls",
             if self.tls_enabled {
@@ -308,6 +314,9 @@ mod tests {
     fn empty_cfg() -> ServerConfig {
         ServerConfig {
             listen_alpha: "0.0.0.0:8443".to_string(),
+            listen_beta: None,
+            beta_cert_chain: None,
+            beta_private_key: None,
             keys: KeysCfg {
                 mlkem_pk: PathBuf::from("/dev/null"),
                 mlkem_sk: PathBuf::from("/dev/null"),

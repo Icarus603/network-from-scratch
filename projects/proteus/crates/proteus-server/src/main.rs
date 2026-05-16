@@ -662,6 +662,56 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         warn!("session idle timeout disabled — long-idle sessions will not be reaped");
     }
 
+    // Optionally bind the β-profile (QUIC over UDP) listener alongside
+    // α. Both carriers share the SAME ServerCtx, metrics, allowlist,
+    // rate limiter, abuse detector, access log — so operators get a
+    // single unified observability surface across protocols.
+    let beta_serve_fut: Option<std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>> =
+        match build_beta_endpoint(&cfg)? {
+            Some(beta_endpoint) => {
+                info!(addr = ?beta_endpoint.local_addr().ok(), "β-profile (QUIC) listener bound");
+                let metrics_beta = Arc::clone(&metrics);
+                let relay_cfg_beta = relay_cfg.clone();
+                let ctx_beta = Arc::clone(&ctx);
+                let on_session_beta =
+                    move |session: proteus_transport_alpha::session::AlphaSession<
+                        quinn::RecvStream,
+                        quinn::SendStream,
+                    >| {
+                        let metrics = Arc::clone(&metrics_beta);
+                        let relay_cfg = relay_cfg_beta.clone();
+                        async move {
+                            metrics
+                                .sessions_accepted
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            metrics
+                                .handshakes_succeeded
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let snap = session.metrics.snapshot();
+                            let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
+                                Arc::clone(&metrics),
+                                snap,
+                            );
+                            if let Err(e) = relay::handle_session(session, relay_cfg).await {
+                                warn!(error = %e, "β session terminated");
+                            }
+                        }
+                    };
+                Some(Box::pin(async move {
+                    if let Err(e) = proteus_transport_beta::server::serve(
+                        beta_endpoint,
+                        ctx_beta,
+                        on_session_beta,
+                    )
+                    .await
+                    {
+                        error!(error = %e, "β accept loop failed");
+                    }
+                }))
+            }
+            None => None,
+        };
+
     let serve_fut: std::pin::Pin<
         Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
     > = {
@@ -729,6 +779,13 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
 
+    // If β is configured, spawn it as a background task that runs
+    // for the lifetime of the process. The shutdown signal (SIGTERM
+    // / SIGINT) reaches it through the same `serve_fut`-completes-
+    // or-shutdown-signal-fires select below; on signal we drop both
+    // futures together via tokio::select!'s cancel semantics.
+    let _beta_task = beta_serve_fut.map(tokio::spawn);
+
     tokio::select! {
         res = serve_fut => {
             if let Err(e) = res {
@@ -767,6 +824,46 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 ///
 /// `disabled: true`: returns `None` (relay runs with no filter).
 /// Strongly discouraged in production — emit a WARN at startup.
+/// Build the β-profile quinn endpoint from config, falling back to
+/// the α `tls.cert_chain` / `tls.private_key` when β-specific paths
+/// aren't set (the common case: same Let's Encrypt cert for both
+/// carriers). Returns Ok(None) when `listen_beta` isn't configured.
+fn build_beta_endpoint(
+    cfg: &config::ServerConfig,
+) -> Result<Option<quinn::Endpoint>, Box<dyn std::error::Error>> {
+    let listen = match cfg.listen_beta.as_ref() {
+        Some(l) => l,
+        None => return Ok(None),
+    };
+    let bind: std::net::SocketAddr = listen
+        .parse()
+        .map_err(|e| format!("listen_beta {listen:?}: {e}"))?;
+    // Resolve the cert + key. Prefer the β-specific paths if set;
+    // fall back to the α `tls.*` paths so operators don't have to
+    // double-configure on the common case.
+    let (cert_path, key_path) = match (
+        cfg.beta_cert_chain.as_ref(),
+        cfg.beta_private_key.as_ref(),
+        cfg.tls.as_ref(),
+    ) {
+        (Some(c), Some(k), _) => (c.clone(), k.clone()),
+        (_, _, Some(tls)) => (tls.cert_chain.clone(), tls.private_key.clone()),
+        _ => {
+            return Err(
+                "listen_beta is set but neither beta_cert_chain+beta_private_key nor tls.* is configured"
+                    .into(),
+            );
+        }
+    };
+    let chain = proteus_transport_alpha::tls::load_cert_chain(&cert_path)
+        .map_err(|e| format!("β cert chain {cert_path:?}: {e}"))?;
+    let key = proteus_transport_alpha::tls::load_private_key(&key_path)
+        .map_err(|e| format!("β private key {key_path:?}: {e}"))?;
+    let endpoint = proteus_transport_beta::server::make_endpoint(bind, chain, key)
+        .map_err(|e| format!("β endpoint: {e}"))?;
+    Ok(Some(endpoint))
+}
+
 fn build_outbound_filter(
     cfg: Option<&config::OutboundFilterCfg>,
 ) -> Result<

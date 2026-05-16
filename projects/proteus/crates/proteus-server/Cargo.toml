@@ -17,6 +17,8 @@ proteus-wire = { path = "../proteus-wire" }
 proteus-crypto = { path = "../proteus-crypto" }
 proteus-handshake = { path = "../proteus-handshake" }
 proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+proteus-transport-beta = { path = "../proteus-transport-beta" }
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 
 ml-kem.workspace = true
 ed25519-dalek.workspace = true
@@ -37,6 +39,8 @@ rcgen = "0.13"
 
 [dev-dependencies]
 libc = "0.2"
+rcgen = "0.13"
+rustls = { workspace = true }
 
 [lints.rust]
 # `deny` (not `forbid`) so that the binary_launch integration test
