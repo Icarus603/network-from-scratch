@@ -272,6 +272,22 @@ async fn try_alpha(
 }
 
 /// Bidirectional pump between SOCKS5 inbound and Proteus session.
+/// Bidirectional pump with **EOF propagation in both directions** —
+/// this is the production fix for the broken session-teardown that
+/// shipped in 58b56d8.
+///
+/// Previously: when the SOCKS5 client closed its socket, the
+/// `client_to_server` half exited but the `server_to_client` half
+/// kept blocking on `receiver.recv_record()` forever (the proteus
+/// server was still happily relaying). The `tokio::join!` waited
+/// on both halves → session leaked → semaphore permit never
+/// released → `max_inflight_sessions` effectively == 0.
+///
+/// Fix: use `tokio::select!` so either half exiting fires the
+/// teardown. On `client_to_server` EOF, send a CLOSE record to the
+/// proteus server so it drops its relay and propagates to upstream.
+/// On `server_to_client` EOF, shut down the SOCKS5 socket so the
+/// client's read returns EOF.
 async fn pump<R, W>(
     sock: &mut TcpStream,
     sender: &mut proteus_transport_alpha::session::AlphaSender<W>,
@@ -309,7 +325,24 @@ async fn pump<R, W>(
                 Ok(None) | Err(_) => break,
             }
         }
-        let _ = sock_w.shutdown().await;
     };
-    tokio::join!(client_to_server, server_to_client);
+    // Either half exiting triggers a clean teardown of both.
+    //
+    // - If client→server hit EOF first: SOCKS5 client closed. Send
+    //   a Proteus CLOSE record so the server drops the relay (and
+    //   propagates upstream-side EOF), then drop the socket.
+    // - If server→client hit EOF first: the upstream / Proteus
+    //   session is gone. Shut down the SOCKS5 write side so the
+    //   local app sees EOF and stops sending; this also wakes the
+    //   client→server half if it's blocked on read.
+    tokio::select! {
+        _ = client_to_server => {
+            // CLOSE error code 0x00 = clean close (spec §26.1).
+            let _ = sender.send_close(0x00, b"socks5-eof").await;
+            let _ = sock_w.shutdown().await;
+        }
+        _ = server_to_client => {
+            let _ = sock_w.shutdown().await;
+        }
+    }
 }
