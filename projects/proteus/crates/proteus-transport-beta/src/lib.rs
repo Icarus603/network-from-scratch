@@ -51,6 +51,7 @@
 #![forbid(unsafe_code)]
 
 pub mod client;
+pub mod datagram;
 pub mod error;
 pub mod server;
 
@@ -85,6 +86,12 @@ pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
     use std::sync::Arc;
     transport
         .congestion_controller_factory(Arc::new(quinn::congestion::BbrConfig::default()))
+        // Enable QUIC DATAGRAM frames (RFC 9221). Receive-side
+        // buffer cap: 8 MiB of buffered application-unread
+        // datagrams. Sent datagrams beyond send-buffer back-pressure
+        // via try_send/poll_ready semantics.
+        .datagram_receive_buffer_size(Some(8 * 1024 * 1024))
+        .datagram_send_buffer_size(8 * 1024 * 1024)
         // Per-stream receive window — bytes the SENDER may have in
         // flight on ONE stream before the receiver acks. 64 MiB
         // sustains 1 Gbit/s at ~500 ms RTT.

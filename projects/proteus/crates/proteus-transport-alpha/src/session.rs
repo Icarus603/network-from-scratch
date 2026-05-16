@@ -116,6 +116,26 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         }
     }
 
+    /// Derive an `out_len`-byte subkey from the sender's current
+    /// traffic secret using HKDF-Expand-Label with the operator-
+    /// supplied `label`. The secret itself stays inside the
+    /// AlphaSender and is **not** exposed.
+    ///
+    /// Used by side-channels that need independent keying material
+    /// but want to bind it to the same handshake — e.g. the β-
+    /// profile QUIC DATAGRAM AEAD path keys its out-of-band datagram
+    /// channel via `derive_subkey(b"proteus-beta-datagram-key-v1", 32)`
+    /// + `derive_subkey(b"proteus-beta-datagram-iv-v1", 12)`.
+    ///
+    /// Caller is responsible for zeroizing the returned Vec when
+    /// done (return type is `Zeroizing<Vec<u8>>` for safety).
+    pub fn derive_subkey(&self, label: &[u8], out_len: usize) -> AlphaResult<Zeroizing<Vec<u8>>> {
+        let mut out = Zeroizing::new(vec![0u8; out_len]);
+        proteus_crypto::kdf::expand_label(&self.secret, label, b"", &mut out)
+            .map_err(|_| AlphaError::Closed)?;
+        Ok(out)
+    }
+
     /// Flush any buffered frames to the kernel TCP buffer.
     ///
     /// Call this at every logical "batch boundary" (e.g. after copying
@@ -251,6 +271,18 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         metrics: std::sync::Arc<SessionMetrics>,
     ) -> Self {
         Self::with_prefix(read, keys, secret, metrics, Vec::with_capacity(8192))
+    }
+
+    /// Mirror of [`AlphaSender::derive_subkey`] for the receive
+    /// direction. The two endpoints' sender→receiver pairs share
+    /// the same secret so deriving with the same label on
+    /// `client.session.sender` and `server.session.receiver` yields
+    /// identical key material.
+    pub fn derive_subkey(&self, label: &[u8], out_len: usize) -> AlphaResult<Zeroizing<Vec<u8>>> {
+        let mut out = Zeroizing::new(vec![0u8; out_len]);
+        proteus_crypto::kdf::expand_label(&self.secret, label, b"", &mut out)
+            .map_err(|_| AlphaError::Closed)?;
+        Ok(out)
     }
 
     /// Like `new`, but seeds the receive buffer with bytes already read
