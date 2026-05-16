@@ -5,8 +5,14 @@
 # CAP_NET_BIND_SERVICE (see systemd unit).
 listen_alpha: "0.0.0.0:8443"
 
-# Prometheus exposition listener (optional). Bind to a private address;
-# the endpoint has no authentication. Comment out to disable.
+# Prometheus exposition + container health probes (optional). Bind to a
+# private address; the endpoint has no authentication. Comment out to
+# disable. The same listener serves three routes:
+#   GET /metrics — Prometheus 0.0.4 text exposition.
+#   GET /healthz — Kubernetes liveness probe (200 alive, 503 dead).
+#   GET /readyz  — Kubernetes readiness probe (200 ready, 503 draining).
+# On SIGTERM, /readyz immediately flips to 503 so the load balancer
+# drains us before the drain_secs window expires.
 metrics_listen: "127.0.0.1:9090"
 
 # Per-source-IP token-bucket rate limit. Burst = max handshakes that may

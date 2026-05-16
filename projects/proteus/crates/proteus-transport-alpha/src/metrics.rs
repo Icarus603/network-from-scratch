@@ -1,7 +1,7 @@
 //! Per-session metrics. Cheap atomic counters that the server / client
 //! can scrape for Prometheus-style exposition.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Per-session metrics. All counters are monotonically increasing.
 #[derive(Default, Debug)]
@@ -79,7 +79,13 @@ pub struct SessionMetricsSnapshot {
 }
 
 /// Aggregate metrics across multiple sessions, e.g. on the server.
-#[derive(Default, Debug)]
+///
+/// Also carries the **liveness/readiness flags** consumed by the
+/// `/healthz` and `/readyz` HTTP probes. Liveness flips to `true` once
+/// the accept loop has bound; readiness flips to `true` once the
+/// server is willing to accept new traffic, and flips back to `false`
+/// during graceful drain so load balancers stop sending it work.
+#[derive(Debug)]
 pub struct ServerMetrics {
     pub sessions_accepted: AtomicU64,
     pub handshakes_succeeded: AtomicU64,
@@ -91,6 +97,39 @@ pub struct ServerMetrics {
     pub total_rx_bytes: AtomicU64,
     pub total_aead_drops: AtomicU64,
     pub total_ratchets: AtomicU64,
+    /// In-flight session count (incremented on accept, decremented on
+    /// session completion). Exported as a Prometheus gauge.
+    pub in_flight_sessions: AtomicU64,
+    /// `/healthz` flag — process is alive and event loop running.
+    /// Set to `true` once the listener is bound; never flipped back.
+    pub alive: AtomicBool,
+    /// `/readyz` flag — server is willing to accept new traffic.
+    /// Flipped to `false` on graceful shutdown so load balancers
+    /// stop steering traffic before in-flight sessions complete.
+    pub ready: AtomicBool,
+}
+
+impl Default for ServerMetrics {
+    fn default() -> Self {
+        Self {
+            sessions_accepted: AtomicU64::new(0),
+            handshakes_succeeded: AtomicU64::new(0),
+            handshakes_failed: AtomicU64::new(0),
+            handshake_timeouts: AtomicU64::new(0),
+            rate_limited: AtomicU64::new(0),
+            cover_forwards: AtomicU64::new(0),
+            total_tx_bytes: AtomicU64::new(0),
+            total_rx_bytes: AtomicU64::new(0),
+            total_aead_drops: AtomicU64::new(0),
+            total_ratchets: AtomicU64::new(0),
+            in_flight_sessions: AtomicU64::new(0),
+            // Default to "not alive, not ready". The accept loop flips
+            // alive→true once it binds; the operator flips ready→true
+            // once they're satisfied the process has warmed up.
+            alive: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
+        }
+    }
 }
 
 impl ServerMetrics {
@@ -140,7 +179,16 @@ impl ServerMetrics {
              proteus_aead_drops_total {}\n\
              # HELP proteus_ratchets_total Key ratchets performed.\n\
              # TYPE proteus_ratchets_total counter\n\
-             proteus_ratchets_total {}\n",
+             proteus_ratchets_total {}\n\
+             # HELP proteus_in_flight_sessions In-flight sessions (gauge).\n\
+             # TYPE proteus_in_flight_sessions gauge\n\
+             proteus_in_flight_sessions {}\n\
+             # HELP proteus_up 1 if the server is alive, 0 otherwise.\n\
+             # TYPE proteus_up gauge\n\
+             proteus_up {}\n\
+             # HELP proteus_ready 1 if the server is accepting new traffic, 0 otherwise.\n\
+             # TYPE proteus_ready gauge\n\
+             proteus_ready {}\n",
             s(&self.sessions_accepted),
             s(&self.handshakes_succeeded),
             s(&self.handshakes_failed),
@@ -151,6 +199,9 @@ impl ServerMetrics {
             s(&self.total_rx_bytes),
             s(&self.total_aead_drops),
             s(&self.total_ratchets),
+            s(&self.in_flight_sessions),
+            u64::from(self.alive.load(Ordering::Relaxed)),
+            u64::from(self.ready.load(Ordering::Relaxed)),
         )
     }
 }

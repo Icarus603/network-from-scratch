@@ -176,6 +176,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         proteus_transport_alpha::server::bind_listener_with_reuseaddr(&cfg.listen_alpha).await?;
     info!(addr = %listener.local_addr()?, "α-profile listener bound (SO_REUSEADDR enabled)");
 
+    // Listener bound and accept loop about to start — we are live and
+    // ready. `alive` stays true for the lifetime of the process;
+    // `ready` flips back to false on SIGTERM so load balancers drain
+    // before the process exits.
+    metrics
+        .alive
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    metrics
+        .ready
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
     // Periodic rate-limit vacuum (every 60 s) so per-IP token-bucket
     // memory stays bounded regardless of traffic patterns.
     {
@@ -217,11 +228,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 metrics
                     .handshakes_succeeded
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                metrics
+                    .in_flight_sessions
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let snap = session.metrics.snapshot();
                 if let Err(e) = relay::handle_session(session).await {
                     warn!(error = %e, "session terminated");
                 }
                 metrics.merge_session(&snap);
+                metrics
+                    .in_flight_sessions
+                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
         match acceptor {
@@ -240,11 +257,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            metrics
+                                .in_flight_sessions
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let snap = session.metrics.snapshot();
                             if let Err(e) = relay::handle_session(session).await {
                                 warn!(error = %e, "TLS session terminated");
                             }
                             metrics.merge_session(&snap);
+                            metrics
+                                .in_flight_sessions
+                                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     };
                 Box::pin(server::serve_tls(listener, ctx, acceptor, on_session_tls))
@@ -261,11 +284,18 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
         () = shutdown => {
             let drain_secs = cfg.drain_secs.unwrap_or(30);
-            info!(secs = drain_secs, "draining outstanding sessions");
+            // Flip /readyz to 503 *immediately* so the load balancer
+            // stops sending new traffic. Existing in-flight sessions
+            // continue to run during the drain window.
+            metrics.ready.store(false, std::sync::atomic::Ordering::Relaxed);
+            info!(secs = drain_secs, "draining outstanding sessions, /readyz now reports 503");
             // tokio::spawn'd session tasks are detached; we give them
             // a window to flush. Production deployment should set
             // systemd's `TimeoutStopSec` to drain_secs + 5s of margin.
             tokio::time::sleep(std::time::Duration::from_secs(drain_secs)).await;
+            // Final liveness flip — we are about to exit; any further
+            // /healthz probe should see 503.
+            metrics.alive.store(false, std::sync::atomic::Ordering::Relaxed);
             info!("proteus-server exiting");
         }
     }

@@ -126,8 +126,17 @@ journalctl -u proteus-server -f | grep 'peer=203.0.113'
 
 ## Observability
 
-Set `metrics_listen: "127.0.0.1:9090"` in `server.yaml` to expose a
-Prometheus-format `/metrics` endpoint. Sample scrape:
+Set `metrics_listen: "127.0.0.1:9090"` in `server.yaml` to expose three
+co-hosted HTTP endpoints:
+
+- `GET /metrics` — Prometheus 0.0.4 text exposition.
+- `GET /healthz` — liveness probe. `200 alive` once the listener is
+  bound, `503 dead` during shutdown after the drain window.
+- `GET /readyz`  — readiness probe. `200 ready` while accepting new
+  traffic, `503 draining` the instant SIGTERM/SIGINT arrives so an
+  upstream load balancer drains us before the process exits.
+
+Sample `/metrics` scrape:
 
 ```
 proteus_sessions_accepted_total 42
@@ -138,6 +147,23 @@ proteus_tx_bytes_total 5048321
 proteus_rx_bytes_total 4119883
 proteus_aead_drops_total 0
 proteus_ratchets_total 14
+proteus_in_flight_sessions 3
+proteus_up 1
+proteus_ready 1
+```
+
+Kubernetes example:
+
+```yaml
+livenessProbe:
+  httpGet: { path: /healthz, port: 9090 }
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  failureThreshold: 3
+readinessProbe:
+  httpGet: { path: /readyz, port: 9090 }
+  periodSeconds: 5
+  failureThreshold: 2
 ```
 
 Bind only to a private interface (loopback or VPN). The endpoint has no
@@ -145,10 +171,19 @@ authentication.
 
 ## Graceful shutdown
 
-`proteus-server` installs SIGTERM/SIGINT handlers; on signal it stops
-accepting new connections and drains in-flight sessions for up to 30 s
-(systemd's default `TimeoutStopSec`). For longer drain windows, override
-`TimeoutStopSec` in the unit override.
+`proteus-server` installs SIGTERM/SIGINT handlers. The signal flow is:
+
+1. Signal received → `/readyz` flips to `503 draining` immediately so
+   the load balancer steers new traffic elsewhere.
+2. The accept loop is dropped (no new sessions are admitted).
+3. In-flight sessions are given up to `drain_secs` (default 30 s) to
+   flush. Override in `server.yaml` and match systemd's
+   `TimeoutStopSec` accordingly (`drain_secs + 5 s` of margin).
+4. After the drain window, `/healthz` flips to `503 dead` and the
+   process exits cleanly.
+
+For longer drain windows, raise both `drain_secs` in `server.yaml` and
+`TimeoutStopSec` in the systemd unit override.
 
 ## Security checklist before going live
 

@@ -24,6 +24,21 @@ services:
       nofile:
         soft: 1048576
         hard: 1048576
+    # Container liveness + readiness probe. /healthz returns 200 once
+    # the listener is bound; /readyz returns 200 while accepting traffic
+    # and flips to 503 the instant SIGTERM is received, so an upstream
+    # load balancer drains us before docker stops the container. Set
+    # `metrics_listen: 127.0.0.1:9090` in server.yaml (default in the
+    # bundled example) for this to work.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/proteus-server-healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+    # Match server.yaml `drain_secs` (default 30s) + 5s margin so docker
+    # gives the server time to flush in-flight sessions cleanly.
+    stop_grace_period: 35s
 
 volumes:
   proteus_logs:
