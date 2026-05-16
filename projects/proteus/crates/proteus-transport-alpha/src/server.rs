@@ -99,10 +99,15 @@ pub enum ConnGate {
 ///
 /// Order matches the spec admission pipeline:
 /// 1. CIDR firewall (cheapest, configured by operator).
-/// 2. Per-IP rate limiter.
-/// 3. (Caller handles max_connections separately because it needs to
+/// 2. Global handshake budget (fleet-wide cap).
+/// 3. Per-IP rate limiter.
+/// 4. (Caller handles max_connections separately because it needs to
 ///    hold a permit through the spawned task.)
-fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
+///
+/// `pub` so the β QUIC accept loop can reuse the exact same gate.
+/// Keep one canonical admission pipeline — never re-implement it
+/// in the β crate, or the two will drift.
+pub fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
     // Single snapshot of the firewall — atomic across the is_active +
     // admit pair so a concurrent SIGHUP reload can't observe us with a
     // stale "active" flag and a fresh "admit" result. Cloning the
@@ -145,7 +150,9 @@ fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
 /// caller MUST drop the session on `false` (the TLS / Proteus
 /// transport is already established, so there's no way to route to
 /// cover at this point — we just close cleanly with a CLOSE record).
-fn user_admission_ok<R, W>(ctx: &Arc<ServerCtx>, session: &AlphaSession<R, W>) -> bool
+///
+/// `pub` so β can reuse the same per-user policy.
+pub fn user_admission_ok<R, W>(ctx: &Arc<ServerCtx>, session: &AlphaSession<R, W>) -> bool
 where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,

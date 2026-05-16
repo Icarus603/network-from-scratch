@@ -7,7 +7,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use proteus_transport_alpha::server::{handshake_over_split, ServerCtx};
+use proteus_transport_alpha::server::{
+    admission_ok, handshake_over_split, user_admission_ok, ConnGate, ServerCtx,
+};
 use proteus_transport_alpha::session::AlphaSession;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -96,6 +98,42 @@ where
                 Ok(conn) => {
                     let remote = conn.remote_address();
                     debug!(remote = %remote, "β QUIC connection accepted");
+
+                    // ----- Admission gates (firewall + global handshake
+                    // budget + per-IP rate limit). These MUST mirror α
+                    // 1:1 — without them an attacker that speaks UDP to
+                    // the server can drain ML-KEM cycles unmetered.
+                    //
+                    // β has no cover-forward path (the QUIC handshake
+                    // already completed; we don't have a raw TLS byte
+                    // stream below it). Rejection mode is therefore a
+                    // clean QUIC close. From the peer's perspective the
+                    // close is indistinguishable from "server decided
+                    // to terminate" — same fingerprint as a normal
+                    // server-initiated close.
+                    if !admission_ok(&ctx, &remote) {
+                        conn.close(1u32.into(), b"admission-denied");
+                        return;
+                    }
+
+                    // ----- max_connections semaphore (same as α).
+                    let _permit = match ctx.try_acquire_connection() {
+                        ConnGate::Unbounded => None,
+                        ConnGate::Allowed(p) => Some(p),
+                        ConnGate::Rejected => {
+                            tracing::warn!(
+                                peer = %remote,
+                                "β: max_connections cap reached; closing"
+                            );
+                            if let Some(m) = ctx.metrics() {
+                                m.firewall_denied
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            conn.close(2u32.into(), b"max-connections");
+                            return;
+                        }
+                    };
+
                     // ALPN sanity (rustls already enforced it, but
                     // confirm for log clarity).
                     if let Some(p) = conn.handshake_data().and_then(|d| {
@@ -109,21 +147,66 @@ where
                             return;
                         }
                     }
-                    // Accept exactly one bidi stream.
-                    let (send, recv) = match conn.accept_bi().await {
-                        Ok(pair) => pair,
-                        Err(e) => {
-                            warn!(error = %e, "β: accept_bi failed");
-                            return;
-                        }
-                    };
-                    let session = match handshake_over_split(recv, send, &ctx).await {
-                        Ok(s) => s.with_peer_addr(remote),
-                        Err(e) => {
+
+                    // Accept exactly one bidi stream, bounded by the
+                    // configured per-handshake wall-clock deadline so
+                    // a peer that opens a QUIC connection then refuses
+                    // to send the inner stream cannot park resources
+                    // indefinitely (slowloris-over-QUIC).
+                    let bi_fut = conn.accept_bi();
+                    let (send, recv) =
+                        match tokio::time::timeout(ctx.handshake_deadline(), bi_fut).await {
+                            Ok(Ok(pair)) => pair,
+                            Ok(Err(e)) => {
+                                warn!(error = %e, "β: accept_bi failed");
+                                return;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    remote = %remote,
+                                    "β: peer never opened bidi stream within handshake_deadline"
+                                );
+                                if let Some(m) = ctx.metrics() {
+                                    m.handshake_timeouts
+                                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                }
+                                conn.close(3u32.into(), b"bi-stream-timeout");
+                                return;
+                            }
+                        };
+
+                    // Run the Proteus handshake, also bounded by the
+                    // wall-clock deadline. Same semantics as α.
+                    let hs_fut = handshake_over_split(recv, send, &ctx);
+                    let session = match tokio::time::timeout(ctx.handshake_deadline(), hs_fut).await
+                    {
+                        Ok(Ok(s)) => s.with_peer_addr(remote),
+                        Ok(Err(e)) => {
                             warn!(remote = %remote, error = %e, "β: Proteus handshake failed");
                             return;
                         }
+                        Err(_) => {
+                            warn!(
+                                remote = %remote,
+                                "β: Proteus handshake exceeded handshake_deadline"
+                            );
+                            if let Some(m) = ctx.metrics() {
+                                m.handshake_timeouts
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            return;
+                        }
                     };
+
+                    // Post-handshake per-user limit. Mirrors α.
+                    if !user_admission_ok(&ctx, &session) {
+                        // user_admission_ok already logged + bumped the
+                        // rate-limit counter. Drop the session — the
+                        // QUIC connection close on scope exit is the
+                        // peer-visible signal.
+                        return;
+                    }
+
                     handler(session).await;
                     // After the handler returns, wait for the peer
                     // to close the QUIC connection. This lets the
