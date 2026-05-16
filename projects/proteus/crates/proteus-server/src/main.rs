@@ -111,7 +111,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         info!(
             burst = rl.burst,
             refill = rl.refill_per_sec,
-            "rate limit configured"
+            "per-IP rate limit configured"
         );
         ctx = ctx.with_rate_limiter(proteus_transport_alpha::rate_limit::RateLimiter::new(
             rl.burst,
@@ -119,6 +119,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         ));
     } else {
         warn!("no rate_limit configured — server may be vulnerable to ML-KEM amplification DoS");
+    }
+    if let Some(b) = &cfg.handshake_budget {
+        info!(
+            burst = b.burst,
+            refill = b.refill_per_sec,
+            "global handshake budget configured"
+        );
+        ctx = ctx.with_handshake_budget(b.burst, b.refill_per_sec);
+    }
+    if let Some(u) = &cfg.user_rate_limit {
+        info!(
+            burst = u.burst,
+            refill = u.refill_per_sec,
+            max_users = u.max_users,
+            "per-user rate limit configured"
+        );
+        ctx = ctx.with_user_rate_limit(u.burst, u.refill_per_sec, u.max_users);
     }
     if let Some(secs) = cfg.handshake_deadline_secs {
         ctx = ctx.with_handshake_deadline(std::time::Duration::from_secs(secs));
@@ -266,6 +283,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             loop {
                 interval.tick().await;
                 ctx_for_vacuum.vacuum_rate_limit();
+                ctx_for_vacuum.vacuum_user_limit();
             }
         });
     }

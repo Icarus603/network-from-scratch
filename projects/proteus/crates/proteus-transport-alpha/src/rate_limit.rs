@@ -19,7 +19,9 @@
 //! "rate-limited" from "this is a generic HTTPS server".
 
 use std::collections::HashMap;
+use std::hash::Hash;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
@@ -103,6 +105,104 @@ impl RateLimiter {
     #[must_use]
     pub fn tracked(&self) -> usize {
         self.buckets.lock().expect("rate-limit mutex").len()
+    }
+}
+
+/// Generic token-bucket limiter keyed on any `Hash + Eq + Clone` type.
+///
+/// Mirrors [`RateLimiter`] but generic in the key. Two instantiations
+/// ship today:
+///
+/// - `KeyedRateLimiter<[u8; 8]>` — per-user-id limit. Layered on top
+///   of the per-IP limit, this is what makes Proteus CGNAT-fair:
+///   multiple users behind one NAT can each get their own budget.
+/// - `KeyedRateLimiter<()>` — degenerate single-bucket limit, used
+///   as the global `max_handshakes_per_minute` cap. The unit-keyed
+///   variant amortizes to one HashMap entry forever.
+pub struct KeyedRateLimiter<K: Hash + Eq + Clone> {
+    capacity: f64,
+    refill_per_sec: f64,
+    buckets: Mutex<HashMap<K, Bucket>>,
+    max_buckets: usize,
+    /// Monotonic counter of `check()` calls that returned `false`.
+    /// Exported to Prometheus by the binary (per-user, global).
+    rejections: AtomicU64,
+}
+
+impl<K: Hash + Eq + Clone> KeyedRateLimiter<K> {
+    /// Build a new limiter. `capacity` is the burst size, `refill_per_sec`
+    /// the steady-state rate. `max_buckets` caps memory (one bucket per
+    /// distinct key). For single-key buckets (global cap), pass 1.
+    #[must_use]
+    pub fn new(capacity: f64, refill_per_sec: f64, max_buckets: usize) -> Self {
+        Self {
+            capacity,
+            refill_per_sec,
+            buckets: Mutex::new(HashMap::new()),
+            max_buckets,
+            rejections: AtomicU64::new(0),
+        }
+    }
+
+    /// Try to consume one token for `key`. Returns `true` if allowed.
+    /// Rejections increment a monotonic counter readable via
+    /// [`Self::rejection_count`].
+    pub fn check(&self, key: &K) -> bool {
+        let allowed = self.check_inner(key);
+        if !allowed {
+            self.rejections.fetch_add(1, Ordering::Relaxed);
+        }
+        allowed
+    }
+
+    fn check_inner(&self, key: &K) -> bool {
+        let mut buckets = self.buckets.lock().expect("keyed rate-limit mutex");
+        if buckets.len() >= self.max_buckets && !buckets.contains_key(key) {
+            // GC: drop fully-refilled idle buckets first.
+            buckets.retain(|_, b| b.tokens < self.capacity);
+            if buckets.len() >= self.max_buckets {
+                return false;
+            }
+        }
+        let now = Instant::now();
+        let entry = buckets.entry(key.clone()).or_insert(Bucket {
+            tokens: self.capacity,
+            last_refill: now,
+        });
+        let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
+        entry.tokens = (entry.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        entry.last_refill = now;
+        if entry.tokens >= 1.0 {
+            entry.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drop entries that have refilled to capacity (idle).
+    pub fn vacuum(&self) {
+        let now = Instant::now();
+        let mut buckets = self.buckets.lock().expect("keyed rate-limit mutex");
+        let cap = self.capacity;
+        let refill = self.refill_per_sec;
+        buckets.retain(|_, b| {
+            let elapsed = now.duration_since(b.last_refill).as_secs_f64();
+            let projected_tokens = (b.tokens + elapsed * refill).min(cap);
+            projected_tokens < cap
+        });
+    }
+
+    /// Number of tracked buckets.
+    #[must_use]
+    pub fn tracked(&self) -> usize {
+        self.buckets.lock().expect("keyed rate-limit mutex").len()
+    }
+
+    /// Number of `check()` calls that returned `false` since startup.
+    #[must_use]
+    pub fn rejection_count(&self) -> u64 {
+        self.rejections.load(Ordering::Relaxed)
     }
 }
 
@@ -196,5 +296,68 @@ mod tests {
         assert_eq!(lim.tracked(), 1);
         lim.vacuum();
         assert_eq!(lim.tracked(), 1, "active bucket must be retained");
+    }
+
+    // ----- KeyedRateLimiter ([u8; 8] user-id bucket) -----
+
+    #[test]
+    fn keyed_per_user_independent_buckets() {
+        let lim: KeyedRateLimiter<[u8; 8]> = KeyedRateLimiter::new(2.0, 0.001, 1024);
+        let alice = *b"alice001";
+        let bob = *b"bob00001";
+        assert!(lim.check(&alice));
+        assert!(lim.check(&alice));
+        assert!(!lim.check(&alice));
+        // Bob has his own budget — CGNAT users behind alice's IP are
+        // not penalized.
+        assert!(lim.check(&bob));
+        assert!(lim.check(&bob));
+        assert!(!lim.check(&bob));
+        assert_eq!(lim.rejection_count(), 2);
+    }
+
+    #[test]
+    fn keyed_global_single_bucket_via_unit_key() {
+        // Global handshake budget — one shared bucket.
+        let lim: KeyedRateLimiter<()> = KeyedRateLimiter::new(3.0, 0.001, 1);
+        for _ in 0..3 {
+            assert!(lim.check(&()));
+        }
+        assert!(!lim.check(&()));
+        assert_eq!(lim.tracked(), 1);
+        assert_eq!(lim.rejection_count(), 1);
+    }
+
+    #[test]
+    fn keyed_max_buckets_cap_blocks_new_keys_when_full() {
+        let lim: KeyedRateLimiter<u32> = KeyedRateLimiter::new(2.0, 0.001, 2);
+        assert!(lim.check(&1));
+        assert!(lim.check(&2));
+        // Both buckets busy (haven't refilled). A 3rd key must fail.
+        // First consume both so they're below capacity.
+        assert!(lim.check(&1));
+        assert!(lim.check(&2));
+        assert!(!lim.check(&3), "third distinct key must be denied at cap");
+        assert_eq!(lim.tracked(), 2);
+    }
+
+    #[test]
+    fn keyed_rejection_counter_tracks_only_denies() {
+        let lim: KeyedRateLimiter<u8> = KeyedRateLimiter::new(1.0, 0.001, 16);
+        assert!(lim.check(&7));
+        assert!(!lim.check(&7));
+        assert!(!lim.check(&7));
+        assert_eq!(lim.rejection_count(), 2);
+    }
+
+    #[test]
+    fn keyed_refills_over_time() {
+        let lim: KeyedRateLimiter<u8> = KeyedRateLimiter::new(2.0, 100.0, 16);
+        let k = 42u8;
+        assert!(lim.check(&k));
+        assert!(lim.check(&k));
+        assert!(!lim.check(&k));
+        thread::sleep(Duration::from_millis(50));
+        assert!(lim.check(&k));
     }
 }

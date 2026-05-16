@@ -39,6 +39,10 @@ async fn every_advertised_counter_is_in_exposition() {
         .conn_limit_rejected
         .fetch_add(127, Ordering::Relaxed);
     metrics.firewall_denied.fetch_add(131, Ordering::Relaxed);
+    metrics
+        .handshake_budget_rejected
+        .fetch_add(167, Ordering::Relaxed);
+    metrics.user_rate_rejected.fetch_add(173, Ordering::Relaxed);
     metrics.cover_forwards.fetch_add(137, Ordering::Relaxed);
     metrics.total_tx_bytes.fetch_add(139, Ordering::Relaxed);
     metrics.total_rx_bytes.fetch_add(149, Ordering::Relaxed);
@@ -87,6 +91,8 @@ async fn every_advertised_counter_is_in_exposition() {
         ("proteus_rate_limited_total", 113),
         ("proteus_conn_limit_rejected_total", 127),
         ("proteus_firewall_denied_total", 131),
+        ("proteus_handshake_budget_rejected_total", 167),
+        ("proteus_user_rate_rejected_total", 173),
         ("proteus_cover_forwards_total", 137),
         // total_tx/rx_bytes get +1, +2 from merge_session above.
         ("proteus_tx_bytes_total", 140),

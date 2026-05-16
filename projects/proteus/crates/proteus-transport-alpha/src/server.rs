@@ -118,6 +118,17 @@ fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
         }
         return false;
     }
+    // Global handshake budget. Independent of per-IP — caps fleet-wide
+    // hands per second so a botnet that stays under each per-IP
+    // ceiling still can't exhaust the ML-KEM-decap CPU budget.
+    if !ctx.check_handshake_budget() {
+        tracing::warn!(peer = %peer, "global handshake budget exhausted; routing to cover");
+        if let Some(m) = ctx.metrics() {
+            m.handshake_budget_rejected
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return false;
+    }
     if !ctx.check_rate_limit(peer.ip()) {
         tracing::debug!(peer = %peer, "rate-limited; routing to cover");
         if let Some(m) = ctx.metrics() {
@@ -127,6 +138,33 @@ fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
         return false;
     }
     true
+}
+
+/// Post-handshake admission check: returns `true` if the session may
+/// proceed to `handle()`, `false` if the per-user limit was hit. The
+/// caller MUST drop the session on `false` (the TLS / Proteus
+/// transport is already established, so there's no way to route to
+/// cover at this point — we just close cleanly with a CLOSE record).
+fn user_admission_ok<R, W>(ctx: &Arc<ServerCtx>, session: &AlphaSession<R, W>) -> bool
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let Some(uid) = session.user_id else {
+        return true; // no allowlist configured → no user-rate check
+    };
+    if ctx.check_user_rate(&uid) {
+        return true;
+    }
+    tracing::warn!(
+        user_id = ?uid,
+        "per-user rate limit exceeded; closing session"
+    );
+    if let Some(m) = ctx.metrics() {
+        m.user_rate_rejected
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    false
 }
 
 /// Helper used by every accept loop: spawn a cover-forward task that
@@ -185,6 +223,16 @@ pub struct ServerCtx {
     /// in-flight sessions. An empty firewall is a no-op on the hot
     /// path (one RwLock read, then short-circuit return).
     firewall: crate::firewall::ReloadableFirewall,
+    /// Optional global handshake budget — a single shared token bucket
+    /// keyed on `()` that caps **total** completed handshakes across
+    /// every source. Independent of the per-IP limiter and
+    /// `max_connections`: protects against fleet-wide handshake
+    /// flooding where each IP stays under its limit.
+    handshake_budget: Option<Arc<crate::rate_limit::KeyedRateLimiter<()>>>,
+    /// Optional per-user rate limiter. Keyed on the 8-byte user_id
+    /// matched during handshake. Layered on top of the per-IP limit
+    /// so CGNAT'd clients each get their own budget.
+    user_limiter: Option<Arc<crate::rate_limit::KeyedRateLimiter<[u8; 8]>>>,
 }
 
 impl ServerCtx {
@@ -202,7 +250,85 @@ impl ServerCtx {
             metrics: None,
             conn_limit: None,
             firewall: crate::firewall::ReloadableFirewall::default(),
+            handshake_budget: None,
+            user_limiter: None,
         }
+    }
+
+    /// Install a global handshake-budget limiter (single shared bucket).
+    /// `capacity` is the burst size; `refill_per_sec` the steady-state
+    /// rate. Caps **total** completed handshakes regardless of source.
+    #[must_use]
+    pub fn with_handshake_budget(mut self, capacity: f64, refill_per_sec: f64) -> Self {
+        self.handshake_budget = Some(Arc::new(crate::rate_limit::KeyedRateLimiter::new(
+            capacity,
+            refill_per_sec,
+            1,
+        )));
+        self
+    }
+
+    /// Install a per-user rate limiter keyed on the 8-byte user_id.
+    /// `max_users` caps memory (one bucket per distinct user).
+    #[must_use]
+    pub fn with_user_rate_limit(
+        mut self,
+        capacity: f64,
+        refill_per_sec: f64,
+        max_users: usize,
+    ) -> Self {
+        self.user_limiter = Some(Arc::new(crate::rate_limit::KeyedRateLimiter::new(
+            capacity,
+            refill_per_sec,
+            max_users,
+        )));
+        self
+    }
+
+    /// Try to consume one handshake-budget token from the global
+    /// bucket. Returns `true` if allowed (or no budget configured).
+    /// Called by the accept loop before paying the ML-KEM cost.
+    pub fn check_handshake_budget(&self) -> bool {
+        match &self.handshake_budget {
+            Some(b) => b.check(&()),
+            None => true,
+        }
+    }
+
+    /// Try to consume one token from the per-user bucket. Returns
+    /// `true` if allowed (or no per-user limiter configured). Called
+    /// by the post-handshake admission shim once `user_id` is known.
+    pub fn check_user_rate(&self, user_id: &[u8; 8]) -> bool {
+        match &self.user_limiter {
+            Some(l) => l.check(user_id),
+            None => true,
+        }
+    }
+
+    /// Vacuum idle per-user buckets (caller-driven, like the per-IP
+    /// limiter). Caller should call on a 60-second cadence in
+    /// production.
+    pub fn vacuum_user_limit(&self) {
+        if let Some(l) = &self.user_limiter {
+            l.vacuum();
+        }
+    }
+
+    /// Read the cumulative rejection count of the global handshake
+    /// budget. Used by the exposition layer to emit a counter.
+    #[must_use]
+    pub fn handshake_budget_rejections(&self) -> u64 {
+        self.handshake_budget
+            .as_ref()
+            .map_or(0, |b| b.rejection_count())
+    }
+
+    /// Read the cumulative rejection count of the per-user limiter.
+    #[must_use]
+    pub fn user_rate_rejections(&self) -> u64 {
+        self.user_limiter
+            .as_ref()
+            .map_or(0, |l| l.rejection_count())
     }
 
     /// Install a source-IP firewall (CIDR allow/deny). Evaluated
@@ -448,7 +574,12 @@ where
             let outcome =
                 tokio::time::timeout(deadline, handshake_over_tls(stream, &acceptor, &ctx)).await;
             match outcome {
-                Ok(Ok(session)) => handle(session.with_peer_addr(peer)).await,
+                Ok(Ok(session)) => {
+                    let session = session.with_peer_addr(peer);
+                    if user_admission_ok(&ctx, &session) {
+                        handle(session).await;
+                    }
+                }
                 Ok(Err(e)) => {
                     tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
                     if let Some(m) = ctx.metrics() {
@@ -535,7 +666,12 @@ where
             )
             .await;
             match outcome {
-                Ok(Ok(session)) => handle(session.with_peer_addr(peer)).await,
+                Ok(Ok(session)) => {
+                    let session = session.with_peer_addr(peer);
+                    if user_admission_ok(&ctx, &session) {
+                        handle(session).await;
+                    }
+                }
                 Ok(Err(e)) => {
                     tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
                     if let Some(m) = ctx.metrics() {
@@ -612,7 +748,10 @@ where
             let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;
             let (replay_buf, raw_stream, timed_out) = match result {
                 Ok(Ok((session, _))) => {
-                    handle(session.with_peer_addr(peer)).await;
+                    let session = session.with_peer_addr(peer);
+                    if user_admission_ok(&ctx, &session) {
+                        handle(session).await;
+                    }
                     return;
                 }
                 Ok(Err(HandshakeFailure { buffer, stream, .. })) => {

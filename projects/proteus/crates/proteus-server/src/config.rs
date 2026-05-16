@@ -60,6 +60,22 @@ pub struct ServerConfig {
     #[serde(default)]
     pub rate_limit: Option<RateLimitCfg>,
 
+    /// Optional **global** handshake budget — a single shared token
+    /// bucket that caps total handshakes/sec across every source.
+    /// Independent of `rate_limit` (per-IP) and `max_connections`
+    /// (in-flight count); this protects against fleet-wide flooding
+    /// where every individual IP stays under its per-IP limit but
+    /// the aggregate cost exceeds the server's ML-KEM CPU budget.
+    #[serde(default)]
+    pub handshake_budget: Option<RateLimitCfg>,
+
+    /// Optional per-user rate limit. Keyed on the matched 8-byte
+    /// user_id, so CGNAT'd users each get their own budget. Layered
+    /// on top of the per-IP limit. `max_users` caps memory at one
+    /// bucket per distinct user (defaults to 64 K).
+    #[serde(default)]
+    pub user_rate_limit: Option<UserRateLimitCfg>,
+
     /// Per-handshake wall-clock deadline. Defaults to 15 s.
     #[serde(default)]
     pub handshake_deadline_secs: Option<u64>,
@@ -166,6 +182,22 @@ pub struct RateLimitCfg {
     pub burst: f64,
     /// Steady-state refill rate (tokens per second per source IP).
     pub refill_per_sec: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserRateLimitCfg {
+    /// Burst capacity per user.
+    pub burst: f64,
+    /// Steady-state refill per user (tokens/sec).
+    pub refill_per_sec: f64,
+    /// Cap on distinct users tracked. Defaults to 65 536. Bound your
+    /// memory: each bucket is ~64 bytes.
+    #[serde(default = "default_max_users")]
+    pub max_users: usize,
+}
+
+const fn default_max_users() -> usize {
+    65_536
 }
 
 #[derive(Debug, Deserialize)]
