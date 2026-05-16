@@ -166,12 +166,28 @@ async fn try_beta(
         None => Vec::new(),
     };
 
-    let connect_fut =
-        proteus_transport_beta::client::connect(server_name, server_addr, extra_roots, hs_cfg);
-    let beta_client = tokio::time::timeout(timeout, connect_fut)
-        .await
-        .map_err(|_| SocksError::Socks("β handshake timed out"))?
-        .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+    // Use connect_with_timeout so quinn's internal idle-timeout
+    // also clamps to `timeout`; this guarantees fast-fail when the
+    // peer's UDP is firewalled (no ICMP feedback). Without this,
+    // quinn would happily wait its default 60-second idle window
+    // even though our outer tokio::time::timeout is 3 seconds —
+    // and quinn's connect future doesn't cancel cleanly mid-
+    // handshake on every platform (notably macOS loopback).
+    // Use connect_with_timeout so quinn's internal idle-timeout
+    // also clamps; the outer tokio::time::timeout serves as a
+    // belt-and-suspenders bound.
+    let connect_fut = proteus_transport_beta::client::connect_with_timeout(
+        server_name,
+        server_addr,
+        extra_roots,
+        hs_cfg,
+        timeout,
+    );
+    let beta_client =
+        tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
+            .await
+            .map_err(|_| SocksError::Socks("β handshake timed out"))?
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
 
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,

@@ -62,15 +62,48 @@ pub struct BetaClientSession {
 /// return a [`BetaClientSession`] wrapper that keeps the endpoint
 /// and connection alive alongside the session.
 ///
-/// `server_name` is the SNI string (must match the server cert's
-/// SAN). `cfg` carries the client's Proteus identity; the caller
-/// MUST set `cfg.profile_hint = ProfileHint::Beta` (we enforce it
-/// here as a fail-fast safeguard).
+/// Equivalent to [`connect_with_timeout`] using the default
+/// 60-second idle timeout. Prefer the explicit-timeout variant when
+/// the caller wants fast-fail dial semantics (e.g. dual-stack
+/// happy-eyeballs).
 pub async fn connect(
     server_name: &str,
     server_addr: SocketAddr,
     extra_roots: Vec<CertificateDer<'static>>,
     cfg: ClientConfig,
+) -> Result<BetaClientSession, BetaError> {
+    connect_with_timeout(
+        server_name,
+        server_addr,
+        extra_roots,
+        cfg,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+}
+
+/// Like [`connect`] but takes an explicit `connect_timeout` that
+/// bounds **both** the QUIC handshake and the post-handshake
+/// idle-timeout behavior. This is the right entry point for
+/// dual-stack happy-eyeballs:
+///
+///   - `connect_timeout = 3 s` for a fast-fail try-β dial. If the
+///     peer's UDP is firewalled (no ICMP feedback), quinn's
+///     handshake aborts within ~2× the configured idle window
+///     instead of waiting for the default 60-second timeout.
+///   - The outer `tokio::time::timeout` on the caller's side still
+///     applies; this just makes quinn give up on its own first.
+///
+/// `server_name` is the SNI string (must match the server cert's
+/// SAN). `cfg` carries the client's Proteus identity; the caller
+/// MUST set `cfg.profile_hint = ProfileHint::Beta` (we enforce it
+/// here as a fail-fast safeguard).
+pub async fn connect_with_timeout(
+    server_name: &str,
+    server_addr: SocketAddr,
+    extra_roots: Vec<CertificateDer<'static>>,
+    cfg: ClientConfig,
+    connect_timeout: std::time::Duration,
 ) -> Result<BetaClientSession, BetaError> {
     if !matches!(cfg.profile_hint, ProfileHint::Beta) {
         return Err(BetaError::AlpnMismatch(
@@ -85,7 +118,15 @@ pub async fn connect(
     );
     let mut client_cfg = quinn::ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
-    transport.max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+    // The idle timeout doubles as quinn's effective handshake
+    // timeout — its internal abort fires when no progress happens
+    // for `idle_timeout` and during a stalled handshake there's no
+    // progress at all. Clamp to the caller's connect_timeout so a
+    // dead UDP peer doesn't hang for the default 60 s.
+    transport.max_idle_timeout(Some(connect_timeout.try_into().unwrap_or_else(|_| {
+        // Saturate to ~10 min if the caller supplied something insane.
+        std::time::Duration::from_secs(600).try_into().unwrap()
+    })));
     crate::apply_perf_tuning(&mut transport);
     client_cfg.transport_config(Arc::new(transport));
 
