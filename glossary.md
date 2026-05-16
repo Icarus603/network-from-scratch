@@ -721,6 +721,65 @@
 
 ---
 
+## Part 3 進階補遺（3.17）
+
+### Committing AEAD / CMTD
+**所屬層**：對稱密碼學
+**首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §1
+**一句話**：AEAD 的 key-/context-commitment 性質——確保 ciphertext 在 ≠ key 下不可能同時 decrypt 成功；標準 ChaCha20-Poly1305 / AES-GCM 都不滿足，被 partitioning oracle attack 利用（Telegram 2022 中招）。
+
+### CTX (Context Commitment Transform)
+**所屬層**：AEAD generic transform
+**首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §1
+**一句話**：Bellare-Hoang EUROCRYPT 2022 提出，在現有 AEAD 後接一個 HMAC-based commit tag，達 CMT-4 安全 (最強)；G6 採用，每 record +16 byte (~1.5% MTU overhead)。
+
+### Partitioning Oracle Attack
+**所屬層**：適用對 password-derived key AEAD 的攻擊
+**首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §1
+**一句話**：Len-Grubbs-Ristenpart USENIX Security 2021。攻擊者送一個 multi-key-valid ciphertext，server 一次互動可排除 2^k password candidate；Albrecht 等 IEEE S&P 2022 用之完整 break Telegram MTProto。
+
+### KEMTLS
+**所屬層**：握手協議家族
+**首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §2
+**一句話**：Schwabe-Stebila-Wiggers CCS 2020。用 server long-term KEM (decap capability) 替代 server signature 做 implicit authentication；PQ mode 下握手減 ~6 KB；G6 v1 採 Mode C (KEMTLS server + signature client)。
+
+### Hybrid KEM Combiner
+**所屬層**：PQ KE
+**首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §3
+**一句話**：將 classical KEM (X25519) 與 PQ KEM (ML-KEM) combine 成 hybrid KEM 的構造；Bindel-Brendel-Fischlin-Goncalves-Stebila PQCrypto 2019 證明 "ciphertext + KDF" 構造 IND-CCA2 OR-secure (任一 component 安全則 hybrid 安全)；G6 hybrid spec 直接套用。
+
+### Double Ratchet
+**所屬層**：cryptographic ratchet
+**首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)、[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §4
+**一句話**：Marlinspike-Perrin 2016 Signal protocol。DH ratchet (粗) + symmetric chain ratchet (細) 兩層；每 message FS、每 round-trip PCS；G6 採 coarser-grained 版 (per N records 而非 per message)。
+
+### PCS Healing Window
+**所屬層**：AKE 安全性質
+**首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §4
+**一句話**：對手洩漏 state at time t 後，協議自動恢復 secrecy 所需時間；Signal ~1 message；G6 ~2 minutes (與 WireGuard rekey 同階)；衡量「snapshot adversary」防禦能力。
+
+### Domain Separation (Label Discipline)
+**所屬層**：hash / KDF 工程
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §5
+**一句話**：不同 context 用 unique label 隔離 hash 輸入空間；TLS 1.3 用 "tls13 " prefix; G6 用 "g6_v1__ " prefix；防 cross-protocol / cross-version key reuse；對應 indifferentiability 工程實踐。
+
+### Indifferentiability
+**所屬層**：hash function 理論
+**首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §5
+**一句話**：Maurer-Renner-Holenstein TCC 2004。hash 對 random oracle 不可區分；SHA-3 sponge inherently indifferentiable，SHA-2 MD 不是 (Coron-Dodis 等 2005)；G6 透過 HMAC/HKDF wrapper 解決 SHA-2 indifferentiability gap。
+
+### Robust AE (RAE)
+**所屬層**：AEAD 強化版
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §6
+**一句話**：Rogaway-Shrimpton EUROCRYPT 2006 提出，AEAD 對任意 input 都產 IND-CCA + INT-CTXT 並 constant-time abort；G6 mandate RAE-style 錯誤路徑防 timing-oracle。
+
+### Beyond-Birthday-Bound (BBB) Security
+**所屬層**：AEAD 安全 bound
+**首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §6
+**一句話**：AEAD 安全 bound 超越 q²/2^128 standard birthday；AES-GCM-SIV (q³/2^256)、XChaCha20 (24-byte nonce 把 ~2^32 推到 ~2^48 records-per-key)；G6 採 XChaCha20-Poly1305 為 record cipher。
+
+---
+
 ## Part 4 — TLS / QUIC 內部完全解剖
 
 ### TLS 1.3 (RFC 8446)

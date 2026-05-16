@@ -301,7 +301,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 ---
 
-## Part 3 — 密碼學：從數論到後量子（16 堂）
+## Part 3 — 密碼學：從數論到後量子（17 堂）
 
 > **深度準繩**：學完能讀懂任一篇 IACR ePrint 論文的 abstract 與 intro，能用 ProVerif 驗證自己設計的協議。
 
@@ -383,6 +383,9 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 ### 3.16 整合：設計協議的密碼學工具箱 ✅
 從前 15 堂的工具，整理成一張「設計新協議時你會選什麼」的決策樹。
 **這是 Phase I 密碼學的期末考。**
+
+### 3.17 進階補遺：超越 SOTA 必備的密碼學深水區 ✅
+Committing AEAD (Bellare-Hoang 2022)、KEMTLS (Schwabe-Stebila-Wiggers 2020)、Hybrid KEM combiner 形式化證明 (Bindel 2019)、Signal Double Ratchet 完整解剖、Domain separation discipline、Robust AE / Beyond-Birthday-Bound。**G6 真正能宣稱「超越 SOTA」的 7 個 differentiator 的密碼學基礎**。
 
 ---
 
