@@ -60,6 +60,7 @@ async fn every_advertised_counter_is_in_exposition() {
     metrics
         .abuse_alerts_rate_limit
         .fetch_add(193, Ordering::Relaxed);
+    metrics.outbound_blocked.fetch_add(197, Ordering::Relaxed);
     metrics.in_flight_sessions.fetch_add(7, Ordering::Relaxed);
     metrics.alive.store(true, Ordering::Relaxed);
     metrics.ready.store(true, Ordering::Relaxed);
@@ -112,6 +113,7 @@ async fn every_advertised_counter_is_in_exposition() {
         ("proteus_session_byte_budget_exhausted_total", 179),
         ("proteus_abuse_alerts_byte_budget_total", 191),
         ("proteus_abuse_alerts_rate_limit_total", 193),
+        ("proteus_outbound_blocked_total", 197),
         ("proteus_in_flight_sessions", 7),
         ("proteus_up", 1),
         ("proteus_ready", 1),

@@ -100,6 +100,28 @@ handshake_deadline_secs: 15
 # (`copytruncate` also works without SIGUSR1.) Unset = disabled.
 # access_log: /var/log/proteus/access.log
 
+# Outbound destination filter (SSRF defense). PRODUCTION REQUIRED
+# unless you're running on an isolated test bench.
+# Without this filter, any authenticated client can ask the server
+# to dial cloud metadata endpoints (169.254.169.254), RFC 1918
+# internal networks, loopback services, or IPv6 ULA. Standard
+# stolen-credential exploitation pattern. The default policy blocks
+# every standard SSRF range AND restricts dial ports to {80, 443}.
+#
+# Default (no `outbound_filter:` block) is the production-safe
+# policy. To extend without weakening the defaults:
+#   outbound_filter:
+#     extra_ports: [587, 993, 853]    # SMTP submission, IMAPS, DoT
+#     extra_blocked_cidrs:
+#       - 100.64.0.0/10                # block your own CGNAT
+# To explicitly DISABLE the filter (testing / trusted LAN only):
+#   outbound_filter:
+#     disabled: true
+# To completely replace the SSRF default blocklist (advanced):
+#   outbound_filter:
+#     replace_default_blocklist: true
+#     extra_blocked_cidrs: [...]
+
 # Per-user anomaly detectors. Sliding-window counters over abnormal
 # events. Each fires WARN + bumps a counter once-per-burst; resets
 # after the window goes empty so a later burst re-alerts.

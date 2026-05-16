@@ -107,6 +107,7 @@ async fn abuse_detector_fires_once_per_burst_on_repeated_byte_cap_hits() {
         access_log: None,
         max_session_bytes: Some(32 * 1024),
         abuse_detector_byte_budget: Some(Arc::clone(&detector)),
+        outbound_filter: None,
     };
     let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
         let cfg = relay_cfg.clone();

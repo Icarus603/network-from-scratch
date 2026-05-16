@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use proteus_transport_alpha::abuse_detector::AbuseDetector;
 use proteus_transport_alpha::access_log::{AccessLogHandle, AccessLogRecord};
 use proteus_transport_alpha::metrics::ServerMetrics;
+use proteus_transport_alpha::outbound_filter::{Decision, OutboundPolicy};
 use proteus_transport_alpha::session::AlphaSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -60,6 +61,14 @@ pub struct RelayConfig {
     /// fires ONCE (per burst), emitting a structured `WARN` log
     /// and bumping `abuse_alerts_byte_budget`.
     pub abuse_detector_byte_budget: Option<Arc<AbuseDetector>>,
+    /// Outbound destination filter (SSRF defense). When set, every
+    /// upstream-dial request is resolved + checked against this
+    /// policy before the TCP connect. Strongly recommended for any
+    /// deployment where the server can route to private networks
+    /// (cloud VPCs, datacenter LANs). Default in production:
+    /// `OutboundPolicy::default()` (ports 80/443 only, all
+    /// SSRF-relevant CIDRs blocked).
+    pub outbound_filter: Option<Arc<OutboundPolicy>>,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -73,6 +82,7 @@ impl std::fmt::Debug for RelayConfig {
                 "abuse_detector_byte_budget",
                 &self.abuse_detector_byte_budget.is_some(),
             )
+            .field("outbound_filter", &self.outbound_filter.is_some())
             .finish()
     }
 }
@@ -168,11 +178,56 @@ where
     let target = parse_connect(&req)?;
     info!(host = %target.0, port = target.1, "dialing upstream");
 
+    // Outbound destination filter (SSRF defense). Resolve the host
+    // ourselves and pass the chosen IP literal to TcpStream::connect
+    // so a malicious resolver can't swap it for an internal IP
+    // between our policy check and the dial.
+    let dial_addr: std::net::SocketAddr = if let Some(filter) = cfg.outbound_filter.as_ref() {
+        let resolved =
+            proteus_transport_alpha::outbound_filter::resolve_host(target.0.as_str(), target.1)
+                .await;
+        match filter.check(target.1, &resolved) {
+            Decision::Allow(ip) => std::net::SocketAddr::new(ip, target.1),
+            other => {
+                warn!(
+                    host = %target.0,
+                    port = target.1,
+                    decision = ?other,
+                    "outbound dial blocked by destination filter"
+                );
+                if let Some(m) = cfg.metrics.as_ref() {
+                    m.outbound_blocked
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                let _ = sender.send_record(&[]).await;
+                let _ = sender.flush().await;
+                return Ok("outbound_blocked");
+            }
+        }
+    } else {
+        // No filter configured — fall back to the legacy "let the
+        // OS resolver pick" behavior. ONLY safe for trusted-LAN /
+        // testing deployments.
+        match tokio::net::lookup_host((target.0.as_str(), target.1))
+            .await
+            .ok()
+            .and_then(|mut a| a.next())
+        {
+            Some(sa) => sa,
+            None => {
+                warn!(host = %target.0, "upstream lookup_host returned no addrs");
+                let _ = sender.send_record(&[]).await;
+                let _ = sender.flush().await;
+                return Ok("upstream_dial_fail");
+            }
+        }
+    };
+
     // Bound the upstream dial — DNS hangs or unreachable targets must
     // not block the relay task indefinitely.
     let dial = tokio::time::timeout(
         std::time::Duration::from_secs(10),
-        TcpStream::connect((target.0.as_str(), target.1)),
+        TcpStream::connect(dial_addr),
     )
     .await;
     let upstream = match dial {

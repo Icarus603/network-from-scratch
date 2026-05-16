@@ -540,6 +540,7 @@ mod tests {
             max_connections: None,
             max_session_bytes: None,
             abuse_detector: None,
+            outbound_filter: None,
         }
     }
 

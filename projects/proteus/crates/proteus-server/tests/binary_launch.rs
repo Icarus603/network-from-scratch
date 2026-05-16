@@ -100,6 +100,8 @@ async fn binary_run_handshake_and_relay() {
         format!(
             "listen_alpha: \"127.0.0.1:{port}\"\n\
              drain_secs: 1\n\
+             outbound_filter:\n  \
+                 disabled: true\n\
              keys:\n  \
                  mlkem_pk: {keys_dir}/server_lt.mlkem768.pk\n  \
                  mlkem_sk: {keys_dir}/server_lt.mlkem768.sk\n  \

@@ -616,6 +616,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // Outbound destination filter (SSRF defense). Default is the
+    // production policy (ports 80/443, SSRF CIDRs blocked); operator
+    // can extend, override, or explicitly opt out.
+    let outbound_filter = build_outbound_filter(cfg.outbound_filter.as_ref())?;
+
     // Build the byte-budget abuse detector; the rate-limit detector
     // is wired into the ctx earlier (before the Arc<ServerCtx> wrap)
     // because it's a ctx-resident component, while this one is owned
@@ -646,6 +651,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         access_log: access_log_handle,
         max_session_bytes: cfg.max_session_bytes,
         abuse_detector_byte_budget,
+        outbound_filter: outbound_filter.clone(),
     };
     if let Some(n) = relay_cfg.max_session_bytes {
         info!(bytes = n, "per-session byte budget configured");
@@ -754,6 +760,63 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 /// config block. Returns a human-readable error on the first
 /// invalid CIDR (so the operator's typo doesn't silently downgrade
 /// to "no firewall").
+/// Build the runtime [`OutboundPolicy`] from the operator's YAML.
+///
+/// Defaults (no `outbound_filter` block): the production policy
+/// (`OutboundPolicy::default()`, ports 80/443, SSRF blocklist on).
+///
+/// `disabled: true`: returns `None` (relay runs with no filter).
+/// Strongly discouraged in production — emit a WARN at startup.
+fn build_outbound_filter(
+    cfg: Option<&config::OutboundFilterCfg>,
+) -> Result<
+    Option<Arc<proteus_transport_alpha::outbound_filter::OutboundPolicy>>,
+    Box<dyn std::error::Error>,
+> {
+    let cfg = match cfg {
+        Some(c) => c,
+        None => {
+            // Operator left the block unset → production defaults.
+            info!("outbound destination filter: default (ports 80/443, SSRF CIDRs blocked)");
+            return Ok(Some(Arc::new(
+                proteus_transport_alpha::outbound_filter::OutboundPolicy::default(),
+            )));
+        }
+    };
+    if cfg.disabled {
+        warn!(
+            "outbound_filter.disabled = true — server will dial ANY destination including \
+             cloud metadata endpoints (169.254.169.254) and RFC 1918 internal networks. \
+             ONLY safe for testing / trusted-LAN deployments."
+        );
+        return Ok(None);
+    }
+    let mut policy = proteus_transport_alpha::outbound_filter::OutboundPolicy::default();
+    // Port handling: explicit allowed_ports replaces the default;
+    // extra_ports adds on top.
+    if let Some(ports) = cfg.allowed_ports.clone() {
+        policy = policy.with_allowed_ports(ports);
+    }
+    if !cfg.extra_ports.is_empty() {
+        policy = policy.extend_allowed_ports(cfg.extra_ports.iter().copied());
+    }
+    if cfg.replace_default_blocklist {
+        policy = policy.with_no_default_blocklist();
+    }
+    if !cfg.extra_blocked_cidrs.is_empty() {
+        policy
+            .extend_blocked_cidrs(&cfg.extra_blocked_cidrs)
+            .map_err(|e| format!("outbound_filter.extra_blocked_cidrs: {e}"))?;
+    }
+    info!(
+        replace_blocklist = cfg.replace_default_blocklist,
+        extra_cidrs = cfg.extra_blocked_cidrs.len(),
+        extra_ports = cfg.extra_ports.len(),
+        "outbound destination filter configured"
+    );
+    Ok(Some(Arc::new(policy)))
+}
+
 fn build_firewall_from_cfg(
     cfg: &config::FirewallCfg,
 ) -> Result<proteus_transport_alpha::firewall::Firewall, String> {

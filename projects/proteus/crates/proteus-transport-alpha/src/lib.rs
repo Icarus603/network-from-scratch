@@ -33,6 +33,7 @@ pub mod error;
 pub mod firewall;
 pub mod metrics;
 pub mod metrics_http;
+pub mod outbound_filter;
 pub mod pow;
 pub mod rate_limit;
 pub mod server;

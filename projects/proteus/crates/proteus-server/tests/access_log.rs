@@ -78,6 +78,7 @@ async fn access_log_emits_one_record_per_session() {
         access_log: Some(Arc::new(logger)),
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        outbound_filter: None,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

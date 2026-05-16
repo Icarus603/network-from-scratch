@@ -116,6 +116,16 @@ pub struct ServerConfig {
     #[serde(default)]
     pub access_log: Option<PathBuf>,
 
+    /// Outbound destination filter (SSRF defense). When set, every
+    /// upstream CONNECT is resolved + checked against this policy
+    /// before dialing. When `None`, the binary auto-installs the
+    /// production default (ports 80/443, all SSRF CIDRs blocked).
+    /// To explicitly disable (testing / trusted-LAN only) set:
+    ///   outbound_filter:
+    ///     disabled: true
+    #[serde(default)]
+    pub outbound_filter: Option<OutboundFilterCfg>,
+
     /// Optional anomaly detector for per-user byte-budget abuse.
     /// When the same `user_id` triggers `close_reason =
     /// "byte_budget_exhausted"` `threshold` times within `window_secs`,
@@ -179,6 +189,35 @@ pub struct ServerConfig {
     /// `nofile` ulimit (one connection ≈ one FD).
     #[serde(default)]
     pub max_connections: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct OutboundFilterCfg {
+    /// When true, run the relay with NO outbound filter. Default is
+    /// false (filter active). Operators must opt into the unfiltered
+    /// path — leaving the field unset means "production defaults".
+    #[serde(default)]
+    pub disabled: bool,
+    /// Replace the default allow-listed ports `[80, 443]`. Empty Vec
+    /// means "no port restriction" (still subject to CIDR blocks).
+    /// Use `extra_ports` to ADD without replacing the default.
+    #[serde(default)]
+    pub allowed_ports: Option<Vec<u16>>,
+    /// Add ports on top of the default `[80, 443]`. Use this for
+    /// extra ports the operator wants to allow (e.g. SMTP 587,
+    /// IMAPS 993, DoT 853).
+    #[serde(default)]
+    pub extra_ports: Vec<u16>,
+    /// Append additional CIDRs to the SSRF default blocklist. e.g.
+    /// the operator's own VPC range, internal corp networks.
+    #[serde(default)]
+    pub extra_blocked_cidrs: Vec<String>,
+    /// When true, replace the SSRF default blocklist entirely with
+    /// `extra_blocked_cidrs`. Default false — operator MUST opt out
+    /// of the SSRF defaults explicitly. Don't set this unless you
+    /// know what you're doing.
+    #[serde(default)]
+    pub replace_default_blocklist: bool,
 }
 
 #[derive(Debug, Deserialize, Default)]
