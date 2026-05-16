@@ -27,7 +27,6 @@ use tracing_subscriber::EnvFilter;
 mod config;
 mod gencert;
 mod keygen;
-mod metrics_http;
 mod relay;
 
 use config::{load_server_keys, ServerConfig};
@@ -143,7 +142,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     if let Some(metrics_addr) = cfg.metrics_listen.clone() {
         let metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
-            if let Err(e) = metrics_http::serve(&metrics_addr, metrics).await {
+            if let Err(e) =
+                proteus_transport_alpha::metrics_http::serve(&metrics_addr, metrics).await
+            {
                 error!(error = %e, "metrics endpoint exited");
             }
         });
