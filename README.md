@@ -65,7 +65,7 @@
 <tr><td rowspan="6" align="center"><strong>築<br/>基</strong></td>
     <td><code>0</code></td><td>定向、方法、文獻地圖</td><td align="center">5</td></tr>
 <tr><td><code>1</code></td><td>網路：從電晶體到 BGP</td><td align="center">18</td></tr>
-<tr><td><code>2</code></td><td>高效能 I/O 與 kernel 網路</td><td align="center">14</td></tr>
+<tr><td><code>2</code></td><td>高效能 I/O 與 kernel 網路</td><td align="center">15</td></tr>
 <tr><td><code>3</code></td><td>密碼學：從數論到後量子</td><td align="center">16</td></tr>
 <tr><td><code>4</code></td><td>TLS / QUIC 內部完全解剖</td><td align="center">12</td></tr>
 <tr><td><code>5</code></td><td>形式化方法</td><td align="center">8</td></tr>

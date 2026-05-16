@@ -458,8 +458,56 @@
 ### USO / TSO / GSO / GRO (NIC Offload)
 **中文**：UDP/TCP 分片卸載
 **所屬層**：NIC + kernel
-**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)（提及）；[1.11](lessons/part-1-networking/1.11-tcp-advanced.md) 深入
+**首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)（提及）；[1.11](lessons/part-1-networking/1.11-tcp-advanced.md) 深入；[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md) UDP 端深入
 **一句話**：TSO/GSO 把大 SKB 切成 MTU-size packet 由 NIC 或 kernel 處理；USO（Linux 4.18+）為 UDP/QUIC 同類功能，對 QUIC throughput +10× 級；GRO 為接收側合併；G6 server production 必須啟用。
+
+### UDP_SEGMENT (UDP GSO socket option)
+**中文**：UDP 分段卸載 socket 選項
+**所屬層**：kernel UDP（kernel 4.18+）
+**首次出現**：[2.15 UDP 高效能路徑](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：`setsockopt(fd, SOL_UDP, UDP_SEGMENT, &gso_size, ...)` 或 cmsg；單次 sendmsg 最多 64 KB / 64 segments；kernel 自動切成獨立完整 UDP datagram（**非** IP fragments）；commit `bec1f6f697` (de Bruijn)。
+
+### UDP_GRO (UDP GRO socket option)
+**中文**：UDP 接收合併 socket 選項
+**所屬層**：kernel UDP（kernel 5.0+）
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：`setsockopt(fd, SOL_UDP, UDP_GRO, &one, ...)`；同 5-tuple、TTL、IP option 的連續 UDP 包合併入單個 skb，recvmsg 帶 cmsg 告訴 app segment 切點；commit `e20cf8d3f1f7` (Abeni)。
+
+### sendmmsg / recvmmsg
+**中文**：批次 datagram 收發 syscall
+**所屬層**：kernel socket syscall（Linux 3.0+ sendmmsg / 2.6.33+ recvmmsg）
+**首次出現**：[2.2 io_uring](lessons/part-2-high-perf-io/2.2-io-uring.md)（提及）；[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md) 深入
+**一句話**：一次 syscall 收/發多個 datagram（含目的地不同的多 peer），與 UDP_SEGMENT 兩層批次疊加是 QUIC 跑滿 10 Gbps 的標準配方。
+
+### EDT (Earliest Departure Time) pacing model
+**中文**：最早出發時戳 pacing 模型
+**所屬層**：kernel sch_fq + app（Linux 4.20+）
+**首次出現**：[2.13 tc/netem](lessons/part-2-high-perf-io/2.13-tc-netem.md)（提及）；[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md) 深入
+**一句話**：應用層用 `SO_TXTIME` + `SCM_TXTIME` cmsg 給每個 packet 標未來時戳，sch_fq 按時戳出隊；把 pacing 計算從 kernel 推回 app（讓 app 端 BBR 直接精控）；Dumazet & Jacobson 2018 (LWN-752184)。
+
+### SO_TXTIME / SCM_TXTIME
+**中文**：發送時戳 socket option
+**所屬層**：kernel socket / cmsg
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：EDT model 的 user-space API；clockid 通常 `CLOCK_TAI`；G6 pacing 設計的硬性 API 對齊目標。
+
+### BQL (Byte Queue Limits)
+**中文**：驅動發送隊列字節限制
+**所屬層**：kernel NIC driver（Linux 3.3+）
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：動態限制 driver 向 NIC TX ring push 的字節數，把 TX ring bufferbloat 從 5 ms 壓到 ~200 μs；BBR-style CC 在無 BQL 環境下 RTT measure 失真、bottleneck bandwidth 估錯；Tom Herbert 2011。
+
+### AF_PACKET + PACKET_MMAP / TPACKET_V3
+**中文**：高效能 user-space raw packet capture / inject
+**所屬層**：kernel L2 / user-space
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：mmap-based 環狀緩衝把 packet 從 kernel 零拷貝給 user，比 libpcap default backend 快 ~10×；G6 evaluation 用來抓「未被 app buffer 模糊」的真實時序給 DPI mock。
+
+### CID-aware reuseport BPF
+**中文**：連線標識感知的 SO_REUSEPORT 分發 BPF 程式
+**所屬層**：socket layer (sk_reuseport BPF program type)
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
+**一句話**：QUIC 因 NAT 換 port 會使 5-tuple hash 漂移、worker 切換破壞 state；解法是用 sk_reuseport eBPF 解析 QUIC short header 取 CID 做分發；G6 server 多核擴展必備、且收窄了我們 CID 結構設計（前 8B 必須 routing-stable）。
 
 ### UDP (RFC 768) + UDP Usage Guidelines (RFC 8085)
 **中文**：用戶資料報協議與其應用準則

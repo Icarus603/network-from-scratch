@@ -218,7 +218,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 ---
 
-## Part 2 — 高效能 I/O 與 kernel 網路（14 堂）
+## Part 2 — 高效能 I/O 與 kernel 網路（15 堂）
 
 > **深度準繩**：學完能寫一個 1M qps 的 echo server；能用 eBPF 做 packet-level 監控；能解釋 io_uring 的 submission queue / completion queue 設計。
 
@@ -289,6 +289,15 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 ### 2.14 高效能網路的最終 picture ✅
 把上面 13 堂串起來：一個 packet 從 NIC（DMA + AF_XDP）到 user space（io_uring + zero-copy）到應用程式（協議邏輯）的完整最佳化路徑圖。
+
+### 2.15 UDP 高效能路徑：GSO/GRO + sendmmsg batching ✅
+- `UDP_SEGMENT` (Linux 4.18, de Bruijn) / `UDP_GRO` (Linux 5.0, Abeni)
+- sendmmsg + UDP_SEGMENT 兩層批次疊加：Cloudflare quiche 80 MB/s → 2.4 GB/s 的真正原因
+- EDT pacing model（SO_TXTIME + sch_fq）、BQL
+- SO_REUSEPORT + CID-aware BPF dispatch、AF_PACKET TPACKET_V3
+- io_uring NAPI 2026 stretch path
+- **commit**：`bec1f6f697` (UDP GSO) / `e20cf8d3f1f7` (UDP GRO)；**LWN-752184** (EDT)
+- **對我們的意義**：Hysteria2 / TUIC-v5-grade speed 命脈；server-side Linux 5.10+ 的硬性根據
 
 ---
 
