@@ -312,16 +312,37 @@ pub async fn connect_with_timeout_and_perf(
     // QUIC Initial arrives as the SECOND datagram on that 4-tuple
     // and never gets inspected.
     //
-    // Payload: 16 random bytes (any garbage works — the GFW just
-    // fails to parse it as a QUIC Initial header and stops looking).
-    // 16 bytes is short enough that the prefix doesn't itself look
-    // like meaningful traffic, long enough that any UDP packet under
-    // it would be too tiny to be a legitimate protocol (most UDP
-    // payloads are ≥20 bytes).
+    // ### Why the first byte is shaped, not pure random
+    //
+    // A fully random 16-byte payload has ~50 % chance of setting
+    // the long-header bit (`0x80`) — which is the GFW inspector's
+    // entry condition. With a non-trivial probability the random
+    // bytes that follow happen to encode `(version=0x00000001,
+    // dcil≤20, scil≤20)`, at which point the inspector treats the
+    // noise itself as a parseable QUIC v1 Initial and *will* try
+    // to extract SNI from it. The inspector then fails (random
+    // payload doesn't AEAD-decrypt), but the flow has now been
+    // FLAGGED, and the inspector's next-packet policy is unclear
+    // — at minimum we burn the evasion budget on a payload that
+    // wasn't even ours.
+    //
+    // Defense: force the first byte's long-header bit (0x80) to
+    // 0. This makes the byte look like a SHORT-header QUIC packet
+    // — and the GFW's Initial-only inspector explicitly skips
+    // short-header packets (they cannot carry SNI; SNI lives in
+    // the CRYPTO frame inside the Initial). The remaining 15
+    // bytes stay random so the noise is still indistinguishable
+    // from arbitrary UDP padding.
+    //
+    // Payload: 16 bytes total. Bit-0 of byte 0 cleared (short-
+    // header form); the rest fully random.
     {
         let mut noise = [0u8; 16];
         use rand_core::RngCore;
         rand_core::OsRng.fill_bytes(&mut noise);
+        // Clear the long-header bit so the inspector can't even
+        // classify this as a candidate Initial packet.
+        noise[0] &= 0x7f;
         // Best-effort: if this send fails (e.g. ICMP unreachable on
         // a closed UDP path), we ignore and let quinn do its
         // own retransmit. The evasion is a probabilistic optimization

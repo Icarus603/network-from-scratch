@@ -164,6 +164,24 @@ async fn beta_client_emits_noise_before_quic_initial() {
         &payload0[..payload0.len().min(8)],
     );
 
+    // PROPERTY 2b: byte 0 of the noise MUST have the long-header
+    // bit (0x80) cleared. This is the shaped-noise hardening: a
+    // pure-random first byte would set the long-header bit ~50 %
+    // of the time and let the GFW's inspector classify the noise
+    // as a candidate Initial. With bit 0x80 cleared, the inspector
+    // sees a short-header form and SKIPS the packet entirely
+    // (short-header packets cannot carry SNI). This must hold
+    // every run — if it ever fires, the shaping in client.rs was
+    // reverted.
+    assert_eq!(
+        payload0[0] & 0x80,
+        0,
+        "prefix-noise byte 0 has long-header bit set ({:#04x}) — \
+         the shaping in client.rs that clears bit 0x80 has regressed. \
+         GFW inspector will treat noise as a candidate Initial packet.",
+        payload0[0],
+    );
+
     // PROPERTY 3: second datagram IS a valid QUIC v1 Initial.
     assert!(
         looks_like_quic_v1_initial(payload1),
