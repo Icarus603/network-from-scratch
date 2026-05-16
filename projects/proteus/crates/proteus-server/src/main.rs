@@ -141,24 +141,27 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
              accept-flood OOM. Set max_connections in server.yaml."
         );
     }
+    // Build a ReloadableFirewall up front (even when no rules are
+    // configured) so SIGHUP can later install rules without a
+    // restart. We hold a handle for the SIGHUP task below.
+    let firewall_handle = proteus_transport_alpha::firewall::ReloadableFirewall::default();
     if let Some(fw_cfg) = cfg.firewall.as_ref() {
-        let mut fw = proteus_transport_alpha::firewall::Firewall::new();
-        if let Err(e) = fw.extend_allow(&fw_cfg.allow) {
-            return Err(format!("firewall.allow parse error: {e}").into());
-        }
-        if let Err(e) = fw.extend_deny(&fw_cfg.deny) {
-            return Err(format!("firewall.deny parse error: {e}").into());
-        }
-        if fw.is_active() {
-            info!(
-                rules = fw.rule_count(),
-                allow_count = fw_cfg.allow.len(),
-                deny_count = fw_cfg.deny.len(),
-                "CIDR firewall configured"
-            );
-            ctx = ctx.with_firewall(fw);
+        match build_firewall_from_cfg(fw_cfg) {
+            Ok(fw) => {
+                if fw.is_active() {
+                    info!(
+                        rules = fw.rule_count(),
+                        allow_count = fw_cfg.allow.len(),
+                        deny_count = fw_cfg.deny.len(),
+                        "CIDR firewall configured"
+                    );
+                }
+                firewall_handle.reload(fw);
+            }
+            Err(e) => return Err(e.into()),
         }
     }
+    ctx = ctx.with_reloadable_firewall(firewall_handle.clone());
 
     // Server-aggregated metrics — wire into ctx so the hot-path
     // increments the right counters.
@@ -246,11 +249,22 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
 
-    // SIGHUP — reload TLS cert chain + private key from disk. Used by
-    // certbot deploy-hooks after Let's Encrypt renewal. In-flight
-    // sessions are unaffected; the new cert takes effect on the very
-    // next accept().
-    if let (Some(tls_cfg), Some(reloadable)) = (cfg.tls.clone(), reloadable_acceptor.clone()) {
+    // SIGHUP — reload mutable runtime state from disk. Two independent
+    // reloads share this signal:
+    //
+    // 1. TLS cert chain + private key (certbot deploy-hooks after
+    //    Let's Encrypt renewal).
+    // 2. CIDR firewall allow/deny rules (the operator banned a fresh
+    //    abusive netblock in server.yaml).
+    //
+    // Each reload is independent: a parse failure on one does NOT
+    // skip the other. Both leave the existing in-memory state intact
+    // on failure so a typo can't brick the running process.
+    {
+        let reloadable_acceptor = reloadable_acceptor.clone();
+        let firewall_handle = firewall_handle.clone();
+        let config_path = config_path.to_path_buf();
+        let tls_cfg_path = cfg.tls.clone();
         tokio::spawn(async move {
             let mut sighup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -261,35 +275,61 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     }
                 };
             while sighup.recv().await.is_some() {
-                info!(cert = ?tls_cfg.cert_chain, "SIGHUP — reloading TLS cert chain");
-                let chain = match proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
+                info!("SIGHUP received — reloading TLS cert and firewall rules");
+
+                // ----- 1. TLS cert reload (if configured) -----
+                if let (Some(tls_cfg), Some(reloadable)) =
+                    (tls_cfg_path.as_ref(), reloadable_acceptor.as_ref())
                 {
-                    Ok(c) => c,
-                    Err(e) => {
-                        // Reload failed — keep the old acceptor and
-                        // log loudly. The operator can fix the file
-                        // and signal again.
-                        error!(error = %e, "TLS reload: cert chain load failed; keeping old cert");
-                        continue;
+                    match (
+                        proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain),
+                        proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key),
+                    ) {
+                        (Ok(chain), Ok(key)) => {
+                            match proteus_transport_alpha::tls::build_acceptor(chain, key) {
+                                Ok(new_acceptor) => {
+                                    reloadable.reload(new_acceptor);
+                                    info!(cert = ?tls_cfg.cert_chain, "TLS cert reloaded");
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "TLS reload: build_acceptor failed; keeping old cert");
+                                }
+                            }
+                        }
+                        (Err(e), _) => {
+                            error!(error = %e, "TLS reload: cert chain load failed; keeping old cert");
+                        }
+                        (_, Err(e)) => {
+                            error!(error = %e, "TLS reload: private key load failed; keeping old cert");
+                        }
                     }
-                };
-                let key = match proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key)
-                {
-                    Ok(k) => k,
+                }
+
+                // ----- 2. Firewall reload (re-read full YAML so the
+                //          new rules come from the operator's edit) -----
+                match config::ServerConfig::load(&config_path).await {
+                    Ok(fresh_cfg) => match fresh_cfg.firewall.as_ref() {
+                        Some(fw_cfg) => match build_firewall_from_cfg(fw_cfg) {
+                            Ok(new_fw) => {
+                                let rules = new_fw.rule_count();
+                                firewall_handle.reload(new_fw);
+                                info!(rules, "firewall rules reloaded");
+                            }
+                            Err(e) => {
+                                error!(error = %e, "firewall reload: parse error; keeping old rules");
+                            }
+                        },
+                        None => {
+                            // Config now has no firewall block — clear the rules.
+                            firewall_handle
+                                .reload(proteus_transport_alpha::firewall::Firewall::new());
+                            info!("firewall block removed from config; rules cleared");
+                        }
+                    },
                     Err(e) => {
-                        error!(error = %e, "TLS reload: private key load failed; keeping old cert");
-                        continue;
+                        error!(error = %e, "firewall reload: config re-read failed; keeping old rules");
                     }
-                };
-                let new_acceptor = match proteus_transport_alpha::tls::build_acceptor(chain, key) {
-                    Ok(a) => a,
-                    Err(e) => {
-                        error!(error = %e, "TLS reload: build_acceptor failed; keeping old cert");
-                        continue;
-                    }
-                };
-                reloadable.reload(new_acceptor);
-                info!("TLS cert reloaded successfully");
+                }
             }
         });
     }
@@ -400,4 +440,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     }
 
     Ok(())
+}
+
+/// Build a [`proteus_transport_alpha::firewall::Firewall`] from a
+/// config block. Returns a human-readable error on the first
+/// invalid CIDR (so the operator's typo doesn't silently downgrade
+/// to "no firewall").
+fn build_firewall_from_cfg(
+    cfg: &config::FirewallCfg,
+) -> Result<proteus_transport_alpha::firewall::Firewall, String> {
+    let mut fw = proteus_transport_alpha::firewall::Firewall::new();
+    fw.extend_allow(&cfg.allow)
+        .map_err(|e| format!("firewall.allow parse error: {e}"))?;
+    fw.extend_deny(&cfg.deny)
+        .map_err(|e| format!("firewall.deny parse error: {e}"))?;
+    Ok(fw)
 }

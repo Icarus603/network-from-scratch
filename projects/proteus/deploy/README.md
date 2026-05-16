@@ -220,6 +220,33 @@ sudo journalctl -u proteus-server -n 5 | grep 'TLS cert'
 # May 16 12:34:56 vps proteus-server[1234]: INFO ... TLS cert reloaded successfully
 ```
 
+## Firewall hot-reload (SIGHUP)
+
+The **same** SIGHUP that hot-reloads the TLS cert also re-reads the
+full `server.yaml` and atomically swaps in the new `firewall:` block.
+Add or remove allow/deny rules without restarting the binary:
+
+```bash
+sudoedit /etc/proteus/server.yaml         # edit firewall.allow / firewall.deny
+sudo systemctl kill --signal=HUP proteus-server
+sudo journalctl -u proteus-server -n 5 | grep 'firewall'
+# INFO ... firewall rules reloaded rules=4
+```
+
+Reload semantics:
+
+- The cert reload and the firewall reload are **independent**: a YAML
+  parse error on one does not abort the other. Both leave the
+  in-memory state intact if their respective reload fails.
+- **In-flight sessions are not affected.** The firewall is evaluated
+  at `accept()`, not per-record, so an existing session admitted under
+  the old rules keeps running even if its source IP is now in the new
+  denylist. (If you need to terminate an existing session, restart
+  the binary or kill the specific connection via `ss --kill`.)
+- Removing the `firewall:` block entirely (or commenting it out)
+  followed by SIGHUP clears the rules — the next accept admits
+  everything subject only to rate-limit / max-connections.
+
 ## Security checklist before going live
 
 - [ ] `proteus-server keygen` ran on the **server itself** (never copy

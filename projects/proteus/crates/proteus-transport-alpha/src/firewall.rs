@@ -200,6 +200,82 @@ impl Firewall {
     }
 }
 
+/// Reloadable wrapper around a [`Firewall`].
+///
+/// Production deployments must be able to ban abusive IPs without
+/// restarting the binary (every restart tears down every in-flight
+/// session). [`ReloadableFirewall`] swaps the underlying rule set
+/// atomically; the very next accept sees the new rules while every
+/// in-flight session keeps running.
+///
+/// Implementation: `Arc<std::sync::RwLock<Firewall>>`. Reads (the
+/// hot-path admission check) clone a tiny `Arc<Vec<CidrRule>>` worth
+/// of state via `Firewall::clone()` — cheap when rule counts are in
+/// the low thousands. The write path (SIGHUP) is rare and tolerates
+/// the brief write-lock contention.
+#[derive(Clone)]
+pub struct ReloadableFirewall {
+    inner: std::sync::Arc<std::sync::RwLock<Firewall>>,
+}
+
+impl ReloadableFirewall {
+    /// Wrap a [`Firewall`] in a reloadable handle.
+    #[must_use]
+    pub fn new(initial: Firewall) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(initial)),
+        }
+    }
+
+    /// Snapshot the current rules. Hot-path call; cheap clone.
+    #[must_use]
+    pub fn snapshot(&self) -> Firewall {
+        self.inner
+            .read()
+            .expect("ReloadableFirewall lock poisoned")
+            .clone()
+    }
+
+    /// Apply the policy against `peer` using the current snapshot.
+    /// Avoids the clone on the common-case "no rules" path.
+    #[must_use]
+    pub fn admit(&self, peer: IpAddr) -> bool {
+        self.inner
+            .read()
+            .expect("ReloadableFirewall lock poisoned")
+            .admit(peer)
+    }
+
+    /// True if the current snapshot has at least one rule.
+    #[must_use]
+    pub fn is_active(&self) -> bool {
+        self.inner
+            .read()
+            .expect("ReloadableFirewall lock poisoned")
+            .is_active()
+    }
+
+    /// Atomically replace the rule set with `new_rules`.
+    pub fn reload(&self, new_rules: Firewall) {
+        *self
+            .inner
+            .write()
+            .expect("ReloadableFirewall lock poisoned") = new_rules;
+    }
+}
+
+impl Default for ReloadableFirewall {
+    fn default() -> Self {
+        Self::new(Firewall::new())
+    }
+}
+
+impl From<Firewall> for ReloadableFirewall {
+    fn from(f: Firewall) -> Self {
+        Self::new(f)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

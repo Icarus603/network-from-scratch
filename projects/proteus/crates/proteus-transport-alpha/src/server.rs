@@ -103,7 +103,14 @@ pub enum ConnGate {
 /// 3. (Caller handles max_connections separately because it needs to
 ///    hold a permit through the spawned task.)
 fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
-    if ctx.firewall().is_active() && !ctx.firewall().admit(peer.ip()) {
+    // Single snapshot of the firewall — atomic across the is_active +
+    // admit pair so a concurrent SIGHUP reload can't observe us with a
+    // stale "active" flag and a fresh "admit" result. Cloning the
+    // ReloadableFirewall handle is one Arc::clone (cheap); reading the
+    // snapshot acquires the read-lock once.
+    let fw = ctx.firewall();
+    let fw_snap = fw.snapshot();
+    if fw_snap.is_active() && !fw_snap.admit(peer.ip()) {
         tracing::warn!(peer = %peer, "firewall denied; routing to cover");
         if let Some(m) = ctx.metrics() {
             m.firewall_denied
@@ -172,10 +179,12 @@ pub struct ServerCtx {
     /// flood that survives the rate limiter can still OOM the
     /// server by parking unbounded per-connection ML-KEM allocations.
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
-    /// Optional source-IP firewall (CIDR allow/deny). Evaluated
-    /// before the rate limiter. Inactive firewalls (zero rules) are
-    /// effectively a no-op on the hot path.
-    firewall: crate::firewall::Firewall,
+    /// Source-IP firewall (CIDR allow/deny). Evaluated before the
+    /// rate limiter. Wrapped in [`crate::firewall::ReloadableFirewall`]
+    /// so SIGHUP can swap in updated rules without disturbing
+    /// in-flight sessions. An empty firewall is a no-op on the hot
+    /// path (one RwLock read, then short-circuit return).
+    firewall: crate::firewall::ReloadableFirewall,
 }
 
 impl ServerCtx {
@@ -192,23 +201,36 @@ impl ServerCtx {
             pow_difficulty: 0,
             metrics: None,
             conn_limit: None,
-            firewall: crate::firewall::Firewall::new(),
+            firewall: crate::firewall::ReloadableFirewall::default(),
         }
     }
 
     /// Install a source-IP firewall (CIDR allow/deny). Evaluated
     /// before the rate limiter; denied connections are routed to
     /// cover so the deny path stays REALITY-grade indistinguishable.
+    /// Backed by a [`crate::firewall::ReloadableFirewall`] so the
+    /// rules can later be swapped at runtime.
     #[must_use]
     pub fn with_firewall(mut self, fw: crate::firewall::Firewall) -> Self {
+        self.firewall = crate::firewall::ReloadableFirewall::new(fw);
+        self
+    }
+
+    /// Install an already-wrapped [`crate::firewall::ReloadableFirewall`].
+    /// Use this when you need to hold a handle to call `.reload()`
+    /// from a SIGHUP task.
+    #[must_use]
+    pub fn with_reloadable_firewall(mut self, fw: crate::firewall::ReloadableFirewall) -> Self {
         self.firewall = fw;
         self
     }
 
-    /// Read the firewall. The accept loop uses this to gate every
-    /// connection. Non-public so the firewall stays owned by the ctx.
-    pub(crate) fn firewall(&self) -> &crate::firewall::Firewall {
-        &self.firewall
+    /// Read the firewall handle. The accept loop uses this to gate
+    /// every connection. Returns the cloneable handle, not a borrow,
+    /// because the internal type is itself `Arc`-shared.
+    #[must_use]
+    pub fn firewall(&self) -> crate::firewall::ReloadableFirewall {
+        self.firewall.clone()
     }
 
     /// Cap the maximum number of *in-flight* accepted connections.
