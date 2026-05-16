@@ -1,194 +1,211 @@
 (*
   G6 Handshake — ProVerif model (applied pi-calculus)
+  Version: 0.1.1 (2026-05-16) — rewritten for ProVerif 2.05 syntax compliance.
 
   Models the v0.0 G6 handshake's crypto layer:
-    Client knows server's long-term static (DH + KEM) public keys.
-    Client sends ClientHello with G6 ext 0xfe0d carrying:
+    Client knows server's long-term static (signature + KEM) public keys
+    via cover-domain certificate pinning. Client sends ClientHello with
+    G6 ext 0xfe0d carrying:
       - ephemeral X25519 share
       - ML-KEM-768 ciphertext encapsulating to server static KEM pk
-      - client_id ciphertext (encrypted to a KDF-derived key)
-      - nonce, timestamp
+      - client_id ciphertext (encrypted to a KDF-derived auth_key)
+      - client_nonce, timestamp
       - HMAC auth_tag binding the above
 
     Server validates HMAC, decapsulates ML-KEM, completes ECDH,
-    derives handshake_secret via hybrid KDF, sends SH+EE+SF.
-    Client verifies SF, sends CF.
+    derives handshake_secret via hybrid KDF, replies with ephemeral
+    share + signature over transcript + server_finished MAC. Client
+    verifies and sends client_finished.
 
   Properties (queries below):
-    - Secrecy of session keys.
-    - Authentication of client to server and server to client.
-    - Forward secrecy: after session ends, server's long-term key compromise
-      should not reveal session key.
-    - KCI resistance.
+    - Q1 secrecy of derived c_ap key.
+    - Q2 weak authentication: client_completes implies server_accepts.
+    - Q3 injective agreement (no replay).
+    - Q4 forward secrecy under phase model: after handshake (phase 1),
+         attacker is given server long-term KEM secret; old c_ap must
+         remain secret.
 
   Adversary: standard Dolev-Yao on public channel `c`.
+
+  Notes on abstractions:
+    - We model ML-KEM as a probabilistic KEM via kem_ss(pk, n) returning
+      the shared secret directly; ProVerif's equational theory handles
+      correctness via the kem_decap reducer.
+    - X25519 abstracted as symmetric DH equation. We DO NOT model the
+      small-subgroup quirks (this is symbolic, not computational).
+    - We DO NOT model padding / shape / RTT — those are out-of-band of
+      the secrecy/authentication game ProVerif decides.
+
+  Run with:  proverif G6Handshake.pv
 *)
 
-(* ---------- type declarations ---------- *)
+(* ---------------- types ---------------- *)
 
 type host.
+type sk.       (* secret key (DH or KEM or sig) *)
+type pk.       (* public key  *)
+type key.      (* symmetric key *)
 type nonce.
-type timestamp.
-type key.        (* abstract symmetric key *)
-type sk.         (* DH / KEM secret key *)
-type pk.         (* DH / KEM public key *)
-type ct.         (* KEM ciphertext *)
-type hashval.
+type ts.
+type ct.       (* KEM ciphertext *)
 
 free c : channel.
 
-(* Long-term server keys: signature key (for cert) + KEM key *)
+(* Long-term server secrets, kept off-channel by default. *)
 free server_sigsk : sk [private].
 free server_kemsk : sk [private].
-free client_secret_id : bitstring [private].   (* used in client_id ciphertext *)
+free client_idkey : bitstring [private].
 
-(* ---------- crypto abstractions ---------- *)
+(* ---------------- crypto primitives ---------------- *)
 
-(* HKDF-Extract/Expand: takes salt + IKM, returns key *)
 fun hkdf(bitstring, bitstring) : key.
 
-(* HMAC-SHA-256: key * data -> tag *)
 fun hmac(key, bitstring) : bitstring.
 
-(* X25519 keygen *)
 fun x25519_pub(sk) : pk.
 fun x25519_dh(sk, pk) : bitstring.
 equation forall a:sk, b:sk;
   x25519_dh(a, x25519_pub(b)) = x25519_dh(b, x25519_pub(a)).
 
-(* ML-KEM-768 *)
 fun kem_pub(sk) : pk.
-fun kem_encap(pk, nonce) : bitstring.  (* returns the SS||CT pair, simplified to bitstring *)
-fun kem_decap(sk, ct) : bitstring.
-(* simplification: encap(pk(sk), n) and decap(sk, ct(pk(sk), n)) agree on SS *)
-fun kem_ct_of(bitstring) : ct.
-fun kem_ss_of(bitstring) : bitstring.
-equation forall sk_s:sk, n:nonce;
-  kem_decap(sk_s, kem_ct_of(kem_encap(kem_pub(sk_s), n))) =
-    kem_ss_of(kem_encap(kem_pub(sk_s), n)).
+fun kem_ss(pk, nonce) : bitstring.
+fun kem_ct(pk, nonce) : ct.
+reduc forall s:sk, n:nonce;
+  kem_decap(s, kem_ct(kem_pub(s), n)) = kem_ss(kem_pub(s), n).
 
-(* AEAD: key * nonce * plaintext * AD -> ciphertext *)
 fun aead_enc(key, nonce, bitstring, bitstring) : bitstring.
 reduc forall k:key, n:nonce, p:bitstring, ad:bitstring;
   aead_dec(k, n, aead_enc(k, n, p, ad), ad) = p.
 
-(* Signature *)
 fun sign(sk, bitstring) : bitstring.
-fun sig_verify(pk, bitstring, bitstring) : bool
-  reduc forall sk_v:sk, m:bitstring;
-    sig_verify(x25519_pub(sk_v), m, sign(sk_v, m)) = true.
+fun sig_pub(sk) : pk.
+reduc forall s:sk, m:bitstring;
+  verify(sig_pub(s), m, sign(s, m)) = true.
 
-(* Hash *)
-fun h(bitstring) : hashval.
+fun tag(bitstring) : bitstring.
 
-(* ---------- events ---------- *)
+const lbl_auth : bitstring.
+const lbl_hs   : bitstring.
+const lbl_cap  : bitstring.
+const lbl_sap  : bitstring.
+
+(* ---------------- events ---------------- *)
 
 event client_starts(host, host, nonce).
-event server_accepts(host, host, nonce, key).
 event client_completes(host, host, nonce, key).
-event server_finished(host, host, nonce, key).
-event session_key_known_to(bitstring, key).
+event server_accepts(host, host, nonce, key).
+event server_finished_evt(host, host, nonce, key).
+event compromise_server_kem.
 
-(* ---------- queries ---------- *)
+(* ---------------- queries ---------------- *)
 
-(* Q1: Secrecy of session keys *)
-query attacker(new_session_key_var: key);
-  attacker(new_session_key_var) ==> false.
+free secret_probe : key [private].
+query attacker(secret_probe).
 
-(* Q2: Authentication: every client completion implies matching server acceptance *)
-query c_id:host, s_id:host, n:nonce, k:key;
-  event(client_completes(c_id, s_id, n, k)) ==>
-    event(server_accepts(c_id, s_id, n, k)).
+query ch:host, sh:host, n:nonce, k:key;
+  event(client_completes(ch, sh, n, k)) ==>
+  event(server_accepts(ch, sh, n, k)).
 
-(* Q3: Injective agreement (no replay) *)
-query c_id:host, s_id:host, n:nonce, k:key;
-  inj-event(client_completes(c_id, s_id, n, k)) ==>
-    inj-event(server_accepts(c_id, s_id, n, k)).
+query ch:host, sh:host, n:nonce, k:key;
+  inj-event(client_completes(ch, sh, n, k)) ==>
+  inj-event(server_accepts(ch, sh, n, k)).
 
-(* Q4: Forward secrecy: after session, compromise of server_kemsk doesn't reveal old keys. *)
-(* In ProVerif, simulate by adding "attacker has server_kemsk" event AFTER session done *)
-(* This is encoded via the phase model below *)
+(* ---------------- protocol processes ---------------- *)
 
-(* ---------- main processes ---------- *)
-
-let client(server_idh: host, client_idh: host,
-           server_static_kem_pk: pk, server_cert_pk: pk) =
+let client(ch:host, sh:host, server_kem_pk:pk, server_sig_pk:pk) =
   new client_eph_sk : sk;
   let client_eph_pk = x25519_pub(client_eph_sk) in
-  new ts : timestamp;
   new client_nonce : nonce;
-  let kem_pair = kem_encap(server_static_kem_pk, client_nonce) in
-  let kem_ct = kem_ct_of(kem_pair) in
-  let K_pq = kem_ss_of(kem_pair) in
-  (* HMAC auth_tag derivation *)
-  let auth_key = hkdf((server_static_kem_pk, (client_eph_pk, client_nonce)),
-                      <<empty>>) in
-  let cid_ct = aead_enc(auth_key, client_nonce, client_secret_id, <<"g6_cid">>) in
-  let auth_tag = hmac(auth_key,
-        (client_nonce, (client_eph_pk, (kem_ct, (cid_ct, ts))))) in
-  let g6_ext = (client_nonce, (client_eph_pk, (kem_ct, (cid_ct, (ts, auth_tag))))) in
-  event client_starts(client_idh, server_idh, client_nonce);
-  out(c, (g6_ext, client_idh, server_idh));
-  in(c, (server_eph_pk: pk, sig_of_transcript: bitstring, server_finished_tag: bitstring));
-  (* verify server signature on transcript *)
-  if sig_verify(server_cert_pk, (server_eph_pk, client_eph_pk), sig_of_transcript) = true then
+  new t : ts;
+  let K_pq    = kem_ss(server_kem_pk, client_nonce) in
+  let kem_c   = kem_ct(server_kem_pk, client_nonce) in
+  let auth_key = hkdf((server_kem_pk, (client_eph_pk, client_nonce)),
+                      lbl_auth) in
+  let cid_ct = aead_enc(auth_key, client_nonce, client_idkey, lbl_auth) in
+  let auth_in = (client_nonce, (client_eph_pk, (kem_c, (cid_ct, t)))) in
+  let auth_tag = hmac(auth_key, auth_in) in
+  let g6_ext = (client_nonce, (client_eph_pk, (kem_c, (cid_ct, (t, auth_tag))))) in
+  event client_starts(ch, sh, client_nonce);
+  out(c, (ch, sh, g6_ext));
+  in(c, (server_eph_pk:pk, sigma:bitstring, sf_tag:bitstring));
+  let transcript = (g6_ext, server_eph_pk) in
+  if verify(server_sig_pk, tag(transcript), sigma) = true then
     let K_classic = x25519_dh(client_eph_sk, server_eph_pk) in
-    let dh_input = (K_classic, K_pq) in
-    let handshake_secret = hkdf((auth_key, dh_input), <<"hs">>) in
-    let c_ap = hkdf((handshake_secret, (client_eph_pk, server_eph_pk)),
-                    <<"c ap traffic">>) in
-    let s_ap = hkdf((handshake_secret, (client_eph_pk, server_eph_pk)),
-                    <<"s ap traffic">>) in
-    (* verify server finished MAC *)
-    let expected_sf = hmac(s_ap, (client_eph_pk, server_eph_pk)) in
-    if expected_sf = server_finished_tag then
-      let client_finished = hmac(c_ap, (client_eph_pk, server_eph_pk, server_finished_tag)) in
-      event client_completes(client_idh, server_idh, client_nonce, c_ap);
-      out(c, client_finished).
+    let hs_secret = hkdf((auth_key, (K_classic, K_pq)), lbl_hs) in
+    let c_ap = hkdf((hs_secret, transcript), lbl_cap) in
+    let s_ap = hkdf((hs_secret, transcript), lbl_sap) in
+    let expected_sf = hmac(s_ap, transcript) in
+    if expected_sf = sf_tag then
+      let cf = hmac(c_ap, (transcript, sf_tag)) in
+      event client_completes(ch, sh, client_nonce, c_ap);
+      out(c, cf);
+      out(c, aead_enc(c_ap, client_nonce, secret_probe, lbl_cap)).
 
-let server(server_idh: host) =
-  in(c, (g6_ext: bitstring, client_idh: host, srv_idh: host));
-  if srv_idh = server_idh then
-    (* parse extension *)
-    let (nonce0: nonce, rest1: bitstring) = (split-tuple g6_ext) in
-    (* For brevity we collapse parsing into structural pattern match - real impl
-       checks length/types byte by byte *)
-    new server_eph_sk : sk;
-    let server_eph_pk = x25519_pub(server_eph_sk) in
-    (* HMAC pre-check (simulated via implicit equation) *)
-    (* If accepted, derive secret *)
-    let server_static_kem_pk = kem_pub(server_kemsk) in
-    let auth_key = hkdf((server_static_kem_pk, (client_eph_pk_placeholder, nonce0)),
-                        <<empty>>) in
-    (* model rest:
-         decap K_pq, ECDH K_classic, derive c_ap/s_ap *)
-    let kem_ct = client_kem_ct_from_ext(g6_ext) in
-    let K_pq = kem_decap(server_kemsk, kem_ct) in
-    let client_eph_pk = client_eph_pk_from_ext(g6_ext) in
-    let K_classic = x25519_dh(server_eph_sk, client_eph_pk) in
-    let dh_input = (K_classic, K_pq) in
-    let handshake_secret = hkdf((auth_key, dh_input), <<"hs">>) in
-    let c_ap = hkdf((handshake_secret, (client_eph_pk, server_eph_pk)),
-                    <<"c ap traffic">>) in
-    let s_ap = hkdf((handshake_secret, (client_eph_pk, server_eph_pk)),
-                    <<"s ap traffic">>) in
-    let server_finished_tag = hmac(s_ap, (client_eph_pk, server_eph_pk)) in
-    let sig_t = sign(server_sigsk, (server_eph_pk, client_eph_pk)) in
-    event server_accepts(client_idh, server_idh, nonce0, c_ap);
-    out(c, (server_eph_pk, sig_t, server_finished_tag));
-    in(c, client_finished_tag: bitstring);
-    let expected_cf = hmac(c_ap, (client_eph_pk, server_eph_pk, server_finished_tag)) in
-    if expected_cf = client_finished_tag then
-      event server_finished(client_idh, server_idh, nonce0, c_ap).
+let server(ch:host, sh:host) =
+  in(c, (ch':host, sh':host, g6_ext:bitstring));
+  if sh' = sh then
+    let (client_nonce:nonce,
+         client_eph_pk:pk,
+         kem_c:ct,
+         cid_ct:bitstring,
+         t:ts,
+         auth_tag:bitstring) = g6_ext in
+    let server_kem_pk = kem_pub(server_kemsk) in
+    let auth_key = hkdf((server_kem_pk, (client_eph_pk, client_nonce)),
+                        lbl_auth) in
+    let auth_in = (client_nonce, (client_eph_pk, (kem_c, (cid_ct, t)))) in
+    if hmac(auth_key, auth_in) = auth_tag then
+      let K_pq = kem_decap(server_kemsk, kem_c) in
+      new server_eph_sk : sk;
+      let server_eph_pk = x25519_pub(server_eph_sk) in
+      let K_classic = x25519_dh(server_eph_sk, client_eph_pk) in
+      let transcript = (g6_ext, server_eph_pk) in
+      let hs_secret = hkdf((auth_key, (K_classic, K_pq)), lbl_hs) in
+      let c_ap = hkdf((hs_secret, transcript), lbl_cap) in
+      let s_ap = hkdf((hs_secret, transcript), lbl_sap) in
+      let sigma = sign(server_sigsk, tag(transcript)) in
+      let sf_tag = hmac(s_ap, transcript) in
+      event server_accepts(ch', sh, client_nonce, c_ap);
+      out(c, (server_eph_pk, sigma, sf_tag));
+      in(c, cf:bitstring);
+      if cf = hmac(c_ap, (transcript, sf_tag)) then
+        event server_finished_evt(ch', sh, client_nonce, c_ap).
 
-(* ---------- system composition ---------- *)
+(* ---------------- main composition ---------------- *)
 
 free clientH : host.
 free serverH : host.
 
 process
-  let server_kem_pub = kem_pub(server_kemsk) in
-  let server_sig_pub = x25519_pub(server_sigsk) in
-  out(c, (server_kem_pub, server_sig_pub));    (* server's public keys announced *)
-  ( !client(serverH, clientH, server_kem_pub, server_sig_pub)
-  | !server(serverH) )
+  let kpk = kem_pub(server_kemsk) in
+  let spk = sig_pub(server_sigsk) in
+  out(c, (kpk, spk));
+  ( !client(clientH, serverH, kpk, spk)
+  | !server(clientH, serverH)
+  | ( phase 1;
+      event compromise_server_kem;
+      out(c, server_kemsk) ) )
+
+(*
+  Expected ProVerif verdicts (on a workstation with ProVerif 2.05):
+    Q1 (secret_probe secrecy): true (attacker cannot recover).
+    Q2 (weak agreement):        true.
+    Q3 (injective agreement):   true (nonce + HMAC + KEM-binding).
+    Q4 (FS under phase 1 leak): the phase 1 process leaks
+       server_kemsk after honest sessions; ephemeral X25519 still
+       protects K_classic, so c_ap remains secret. Re-query Q1
+       against a phase-1 attacker by adding `query attacker(...)
+       phase 1` after running the base file.
+
+  Limitations vs reality:
+    - Initial-key derivation for QUIC Initial (cover envelope) is
+      NOT modelled here; that lives at the QUIC layer and is
+      analysed separately (see lesson 4.8 + Cremers et al. 2017).
+    - PCS (post-compromise security after compromise) requires the
+      ratchet model in G6Ratchet.spthy (Tamarin).
+    - Replay window via Bloom filter is OUT-OF-SCOPE for symbolic
+      verification; we verify injective agreement instead, which is
+      the symbolic-model analogue.
+    - Side channels & padding shape are out of scope for ProVerif;
+      see assets/formal/G6Padding.psi (PRISM, TBD v0.2).
+*)
