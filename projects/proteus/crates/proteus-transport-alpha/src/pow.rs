@@ -49,22 +49,47 @@ pub fn leading_zero_bits(digest: &[u8]) -> u32 {
     count
 }
 
-/// Find a 7-byte solution that satisfies the given difficulty (client-side helper).
-/// Returns `None` if the search space is exhausted before finding one
-/// (impossible at reasonable difficulties).
+/// Find a 7-byte solution that satisfies the given difficulty.
+///
+/// Returns `None` if the search space is exhausted (impossible at
+/// reasonable difficulties) **or** if the wall-clock deadline elapses
+/// before a solution is found.
 ///
 /// Production clients prefer to receive `difficulty=0` (no work) and
-/// only solve a puzzle on retry after an explicit reject from the server.
+/// only solve a puzzle on retry after an explicit reject from the
+/// server. Even so, an unlucky tail at d=24 can take ~30 s of CPU;
+/// the deadline parameter lets callers cap UX latency and surface
+/// the failure cleanly instead of hanging.
 #[must_use]
 pub fn solve(
     server_pq_fingerprint: &[u8; 32],
     client_nonce: &[u8; 16],
     difficulty: u8,
 ) -> Option<[u8; 7]> {
+    solve_with_deadline(
+        server_pq_fingerprint,
+        client_nonce,
+        difficulty,
+        std::time::Duration::from_secs(60),
+    )
+}
+
+/// As [`solve`] but with an explicit wall-clock deadline. Returns
+/// `None` if the deadline elapses before a solution is found.
+#[must_use]
+pub fn solve_with_deadline(
+    server_pq_fingerprint: &[u8; 32],
+    client_nonce: &[u8; 16],
+    difficulty: u8,
+    deadline: std::time::Duration,
+) -> Option<[u8; 7]> {
     if difficulty == 0 {
         return Some([0u8; 7]);
     }
-    // 7 bytes = 2^56 search space. For d ≤ 24 this terminates quickly.
+    let start = std::time::Instant::now();
+    // Check the clock every CHECK_INTERVAL hashes so we don't pay
+    // `Instant::now()` cost on every iteration.
+    const CHECK_INTERVAL: u64 = 4096;
     let mut sol = [0u8; 7];
     let mut counter: u64 = 0;
     loop {
@@ -74,6 +99,9 @@ pub fn solve(
         }
         counter = counter.checked_add(1)?;
         if counter > (1u64 << 56) {
+            return None;
+        }
+        if counter.is_multiple_of(CHECK_INTERVAL) && start.elapsed() > deadline {
             return None;
         }
     }
@@ -119,6 +147,22 @@ mod tests {
         assert!(verify(&fp, &n1, 4, &sol));
         // The same solution against a different nonce almost certainly fails.
         assert!(!verify(&fp, &n2, 4, &sol));
+    }
+
+    #[test]
+    fn solve_with_deadline_caps_runtime_under_impossible_difficulty() {
+        // Difficulty 64 (impossibly high — 2^64 expected hashes) MUST
+        // return None within the deadline rather than hanging forever.
+        let fp = [0u8; 32];
+        let nonce = [0u8; 16];
+        let start = std::time::Instant::now();
+        let result = solve_with_deadline(&fp, &nonce, 64, std::time::Duration::from_millis(200));
+        let elapsed = start.elapsed();
+        assert!(result.is_none(), "impossible difficulty must surface None");
+        assert!(
+            elapsed < std::time::Duration::from_millis(800),
+            "deadline overshoot: {elapsed:?}"
+        );
     }
 
     #[test]
