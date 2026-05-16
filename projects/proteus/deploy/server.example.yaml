@@ -1,0 +1,66 @@
+# Proteus α-profile server config example.
+# Copy to /etc/proteus/server.yaml and edit.
+
+# TCP listen address. For production, bind to :443 and run as a user with
+# CAP_NET_BIND_SERVICE (see systemd unit).
+listen_alpha: "0.0.0.0:8443"
+
+# Prometheus exposition listener (optional). Bind to a private address;
+# the endpoint has no authentication. Comment out to disable.
+metrics_listen: "127.0.0.1:9090"
+
+# Per-source-IP token-bucket rate limit. Burst = max handshakes that may
+# arrive instantaneously from one IP; refill = steady-state rate. With
+# the defaults below a single client gets 10 burst handshakes, then 5/s
+# steady. Excess connections are routed to the cover endpoint so the
+# attacker cannot distinguish "rate-limited" from a generic HTTPS proxy.
+rate_limit:
+  burst: 10.0
+  refill_per_sec: 5.0
+
+# Per-handshake wall-clock deadline (slowloris defense). Default 15s.
+handshake_deadline_secs: 15
+
+# TCP keepalive interval (idle-session reaper). Default 30s.
+tcp_keepalive_secs: 30
+
+# Anti-DoS proof-of-work (spec §8.3). Difficulty in leading-zero bits
+# of SHA-256(server_pq_fingerprint || client_nonce || solution). 0 =
+# disabled. Sensible production values:
+#   - 0   (normal operations)
+#   - 8   (under modest DoS — ~256 hashes per client)
+#   - 16  (under heavy DoS — ~65k hashes per client, sub-second on phone)
+#   - 24  (under sustained DoS — ~16M hashes, ~1s on a laptop)
+# Bump on alert; restore to 0 when traffic normalizes. Mismatched
+# difficulty between client and server routes to cover.
+pow_difficulty: 0
+
+# Outer TLS 1.3 wrapper (spec §4.2). PRODUCTION REQUIRED — without this
+# block the server runs plain TCP and passive DPI immediately identifies
+# the protocol. Point `cert_chain` at a real Let's Encrypt full-chain
+# PEM and `private_key` at the matching PKCS8 private key.
+tls:
+  cert_chain: /etc/proteus/keys/tls/fullchain.pem
+  private_key: /etc/proteus/keys/tls/privkey.pem
+
+# Cover endpoint for auth-fail forwarding (spec §7.5). The server pipes
+# byte-verbatim to this endpoint on any handshake failure, making the
+# server indistinguishable from a generic HTTPS proxy fronting this
+# upstream. Use a real, popular HTTPS site to maximize cover.
+cover_endpoint: "www.cloudflare.com:443"
+
+# Server long-term keys (generated via `proteus-server keygen`).
+keys:
+  mlkem_pk: /etc/proteus/keys/server_lt.mlkem768.pk
+  mlkem_sk: /etc/proteus/keys/server_lt.mlkem768.sk
+  x25519_pk: /etc/proteus/keys/server_lt.x25519.pk
+  x25519_sk: /etc/proteus/keys/server_lt.x25519.sk
+
+# Authorized clients. The server only accepts handshakes from clients
+# whose Ed25519 verifying key appears here. If the list is empty, the
+# server accepts any client (NOT recommended for production).
+client_allowlist:
+  - user_id: "alice001"
+    ed25519_pk: /etc/proteus/keys/clients/alice.ed25519.pk
+  - user_id: "bob00001"
+    ed25519_pk: /etc/proteus/keys/clients/bob.ed25519.pk

@@ -1,0 +1,32 @@
+# Proteus α-profile client config example.
+# Copy to /etc/proteus/client.yaml or run with `--config ./client.yaml`.
+
+# Remote Proteus server `host:port`.
+server_endpoint: "vps.example.com:8443"
+
+# Local SOCKS5 inbound. Point your browser / curl / sing-box at this.
+socks_listen: "127.0.0.1:1080"
+
+# Your user ID — must match an entry in the server's `client_allowlist`.
+user_id: "alice001"
+
+# Keys distributed by the server admin.
+keys:
+  server_mlkem_pk: ./keys/server_lt.mlkem768.pk
+  server_x25519_pk: ./keys/server_lt.x25519.pk
+  server_pq_fingerprint: ./keys/server_lt.pq.fingerprint
+  client_ed25519_sk: ./keys/client/client.ed25519.sk
+
+# Outer TLS 1.3 wrapper (must match server's `tls:` block).
+# - `server_name` is the SAN on the server's certificate.
+# - `trusted_ca` is optional: only set it when the server uses a
+#   self-signed cert. Production with Let's Encrypt: leave commented out
+#   and the client trusts webpki-roots automatically.
+tls:
+  server_name: vps.example.com
+  # trusted_ca: ./keys/tls/self-signed-ca.pem
+
+# Server-advertised anti-DoS difficulty (must match server's setting).
+# When the server raises this, update the client config too; mismatched
+# values lead to handshake reject (silent route to cover).
+pow_difficulty: 0

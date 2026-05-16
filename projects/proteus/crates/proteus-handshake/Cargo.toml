@@ -1,0 +1,24 @@
+[package]
+name = "proteus-handshake"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus handshake state machine + anti-replay window (skeleton; full key schedule wired in M1)"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+proteus-wire = { path = "../proteus-wire" }
+proteus-crypto = { path = "../proteus-crypto" }
+sha2.workspace = true
+hmac.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

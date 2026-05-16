@@ -124,6 +124,9 @@ vendor/
 target/
 **/*.rs.bk
 Cargo.lock        # 對 binary 該保留、對 library 該擋；學習用統一擋掉
+# Proteus is a binary workspace — Cargo.lock MUST be tracked for
+# reproducible production builds (CI build = release tag = users' build).
+!projects/proteus/Cargo.lock
 
 # Python
 __pycache__/

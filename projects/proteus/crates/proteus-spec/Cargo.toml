@@ -1,0 +1,14 @@
+[package]
+name = "proteus-spec"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus protocol constants — direct mirror of assets/spec/proteus-v1.0.md §4 / §6 / §26"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

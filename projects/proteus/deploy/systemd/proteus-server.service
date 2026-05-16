@@ -1,0 +1,63 @@
+[Unit]
+Description=Proteus α-profile server
+Documentation=https://github.com/Icarus603/network-from-scratch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=proteus
+Group=proteus
+
+# Read keys + config from /etc/proteus.
+ExecStart=/usr/local/bin/proteus-server run --config /etc/proteus/server.yaml
+Restart=on-failure
+RestartSec=2s
+TimeoutStopSec=10s
+
+# --- Security hardening ---
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug @mount @cpu-emulation @obsolete
+
+# Need TCP listen — give CAP_NET_BIND_SERVICE so we can use 443 as non-root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Read-only access to keys, read-write to logs.
+ReadOnlyPaths=/etc/proteus
+ReadWritePaths=/var/log/proteus
+
+# Network exposure.
+IPAddressAllow=any
+SocketBindAllow=tcp:443
+SocketBindAllow=tcp:8443
+
+# Resource caps.
+LimitNOFILE=1048576
+LimitNPROC=4096
+
+# Logging.
+Environment=RUST_LOG=proteus_server=info,proteus_transport_alpha=info
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

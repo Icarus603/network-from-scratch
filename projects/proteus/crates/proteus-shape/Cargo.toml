@@ -1,0 +1,19 @@
+[package]
+name = "proteus-shape"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus shaping engine — cell padding, shape-shift PRG (Maybenot integration deferred to M3)"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+sha2.workspace = true
+thiserror.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

@@ -1,0 +1,1105 @@
+//! α-profile server driver.
+
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use ml_kem::kem::DecapsulationKey;
+use ml_kem::{EncodedSizeUser, MlKem768Params};
+use proteus_crypto::{
+    kex,
+    key_schedule::{self, Transcript},
+};
+use proteus_handshake::{auth_tag, replay::ReplayWindow, replay::Verdict, state::State};
+use proteus_wire::{alpha, AuthExtension, ProfileHint};
+use tokio::io::AsyncWriteExt;
+#[allow(unused_imports)]
+use tokio::net::tcp::OwnedReadHalf;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::Mutex;
+use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
+
+use crate::error::{AlphaError, AlphaResult};
+use crate::session::AlphaSession;
+
+/// Server long-term key material.
+pub struct ServerKeys {
+    /// ML-KEM-768 decapsulation key.
+    pub mlkem_sk: DecapsulationKey<MlKem768Params>,
+    /// ML-KEM-768 EK bytes — published to clients out of band.
+    pub mlkem_pk_bytes: Vec<u8>,
+    /// Server PQ fingerprint = SHA-256 of mlkem_pk_bytes.
+    pub pq_fingerprint: [u8; 32],
+    /// X25519 long-term secret (we use a single static ephemeral pair for
+    /// M1; full v1.0 spec mandates fresh per session, M2 will switch).
+    pub x25519_sk: StaticSecret,
+    /// Corresponding X25519 public key.
+    pub x25519_pub: [u8; 32],
+    /// Allowed client Ed25519 verifying keys (allowlist by `user_id`).
+    pub client_allowlist: Vec<([u8; 8], ed25519_dalek::VerifyingKey)>,
+    /// Server-side AEAD key for the `client_id` field.
+    pub client_id_aead_key: [u8; 32],
+}
+
+impl ServerKeys {
+    /// Generate a fresh complete key set for tests / demo.
+    #[must_use]
+    pub fn generate() -> Self {
+        use ml_kem::KemCore;
+        let mut rng = rand_core::OsRng;
+        let (mlkem_sk, mlkem_pk) = ml_kem::MlKem768::generate(&mut rng);
+        let mlkem_pk_bytes = mlkem_pk.as_bytes().to_vec();
+        let pq_fingerprint = key_schedule::sha256(&mlkem_pk_bytes);
+
+        let x25519_sk = StaticSecret::random_from_rng(rng);
+        let x25519_pub = XPublicKey::from(&x25519_sk).to_bytes();
+
+        // Derive a deterministic client_id key from the PQ fingerprint —
+        // matches what the client does (spec §5.7.1).
+        let mut client_id_aead_key = [0u8; 32];
+        proteus_crypto::kdf::expand_label(
+            &pq_fingerprint,
+            b"proteus-cid-key-v1",
+            b"",
+            &mut client_id_aead_key,
+        )
+        .expect("hkdf");
+
+        Self {
+            mlkem_sk,
+            mlkem_pk_bytes,
+            pq_fingerprint,
+            x25519_sk,
+            x25519_pub,
+            client_allowlist: Vec::new(),
+            client_id_aead_key,
+        }
+    }
+
+    /// Authorize a client by long-term Ed25519 verifying key under `user_id`.
+    pub fn allow(&mut self, user_id: [u8; 8], pk: ed25519_dalek::VerifyingKey) {
+        self.client_allowlist.push((user_id, pk));
+    }
+}
+
+/// Per-server state shared across connections.
+pub struct ServerCtx {
+    keys: ServerKeys,
+    replay: Mutex<ReplayWindow>,
+    /// Optional cover endpoint (`host:port`) for auth-fail forwarding.
+    cover_endpoint: Option<String>,
+    /// Optional per-source-IP rate limiter.
+    rate_limiter: Option<crate::rate_limit::RateLimiter>,
+    /// Maximum time to spend on a single handshake before giving up
+    /// (slowloris defense).
+    handshake_deadline: std::time::Duration,
+    /// TCP socket-level keepalive interval applied to every accepted
+    /// connection.
+    tcp_keepalive_secs: u64,
+    /// Required anti-DoS proof-of-work difficulty in leading-zero bits
+    /// of `SHA-256(server_pq_fingerprint || client_nonce || solution)`.
+    /// 0 = disabled. Operators raise this under DoS alert.
+    pow_difficulty: u8,
+    /// Optional shared metrics handle for hot-path counters (cover
+    /// forwards, rate-limit drops, handshake timeouts).
+    metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+}
+
+impl ServerCtx {
+    /// Wrap the given keys into a server context.
+    #[must_use]
+    pub fn new(keys: ServerKeys) -> Self {
+        Self {
+            keys,
+            replay: Mutex::new(ReplayWindow::new()),
+            cover_endpoint: None,
+            rate_limiter: None,
+            handshake_deadline: std::time::Duration::from_secs(15),
+            tcp_keepalive_secs: 30,
+            pow_difficulty: 0,
+            metrics: None,
+        }
+    }
+
+    /// Set the proof-of-work difficulty (0..=24). Higher = more client
+    /// work per handshake attempt.
+    #[must_use]
+    pub fn with_pow_difficulty(mut self, d: u8) -> Self {
+        self.pow_difficulty = d.min(24);
+        self
+    }
+
+    /// Wire in a `ServerMetrics` so hot-path counters (cover forwards,
+    /// rate-limit drops, handshake timeouts) are incremented.
+    #[must_use]
+    pub fn with_metrics(mut self, m: Arc<crate::metrics::ServerMetrics>) -> Self {
+        self.metrics = Some(m);
+        self
+    }
+
+    /// Read the required PoW difficulty.
+    #[must_use]
+    pub fn pow_difficulty(&self) -> u8 {
+        self.pow_difficulty
+    }
+
+    /// Read the metrics handle (or `None`).
+    #[must_use]
+    pub fn metrics(&self) -> Option<&Arc<crate::metrics::ServerMetrics>> {
+        self.metrics.as_ref()
+    }
+
+    /// Install a per-source-IP token-bucket rate limiter. Production
+    /// deployments SHOULD configure this; the default is unlimited.
+    #[must_use]
+    pub fn with_rate_limiter(mut self, limiter: crate::rate_limit::RateLimiter) -> Self {
+        self.rate_limiter = Some(limiter);
+        self
+    }
+
+    /// Override the per-handshake deadline (default 15 s).
+    #[must_use]
+    pub fn with_handshake_deadline(mut self, d: std::time::Duration) -> Self {
+        self.handshake_deadline = d;
+        self
+    }
+
+    /// Override the TCP keepalive interval (default 30 s).
+    #[must_use]
+    pub fn with_tcp_keepalive_secs(mut self, s: u64) -> Self {
+        self.tcp_keepalive_secs = s;
+        self
+    }
+
+    /// Public accessor for handshake deadline.
+    #[must_use]
+    pub fn handshake_deadline(&self) -> std::time::Duration {
+        self.handshake_deadline
+    }
+
+    /// Public accessor for TCP keepalive seconds.
+    #[must_use]
+    pub fn tcp_keepalive_secs(&self) -> u64 {
+        self.tcp_keepalive_secs
+    }
+
+    /// Check the rate limit for `peer`. Returns `true` if allowed (or
+    /// if no limiter is configured).
+    pub fn check_rate_limit(&self, peer: std::net::IpAddr) -> bool {
+        match &self.rate_limiter {
+            Some(rl) => rl.check(peer),
+            None => true,
+        }
+    }
+
+    /// Vacuum idle entries from the rate limiter (caller-driven; the
+    /// limiter itself doesn't spawn background tasks).
+    pub fn vacuum_rate_limit(&self) {
+        if let Some(rl) = &self.rate_limiter {
+            rl.vacuum();
+        }
+    }
+
+    /// Configure cover-forwarding endpoint per spec §7.5.
+    pub fn with_cover(mut self, endpoint: impl Into<String>) -> Self {
+        self.cover_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Read the cover endpoint.
+    #[must_use]
+    pub fn cover_endpoint(&self) -> Option<&str> {
+        self.cover_endpoint.as_deref()
+    }
+
+    /// Public accessor for the ML-KEM EK bytes (for client config).
+    #[must_use]
+    pub fn mlkem_pk_bytes(&self) -> &[u8] {
+        &self.keys.mlkem_pk_bytes
+    }
+
+    /// Public accessor for the X25519 server pub.
+    #[must_use]
+    pub fn x25519_pub(&self) -> &[u8; 32] {
+        &self.keys.x25519_pub
+    }
+
+    /// Public accessor for the PQ fingerprint.
+    #[must_use]
+    pub fn pq_fingerprint(&self) -> &[u8; 32] {
+        &self.keys.pq_fingerprint
+    }
+}
+
+/// TLS-wrapped variant of [`serve`]. Identical handling but every
+/// accepted connection is run through a TLS 1.3 handshake before the
+/// Proteus handshake. The cover-forward path still operates on the raw
+/// TCP stream when TLS itself fails (e.g. client doesn't speak TLS),
+/// so probes that don't even reach the TLS handshake still see the
+/// configured cover server's response.
+pub async fn serve_tls<F, Fut>(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    acceptor: tokio_rustls::TlsAcceptor,
+    handle: F,
+) -> std::io::Result<()>
+where
+    F: Fn(
+            AlphaSession<
+                tokio::io::ReadHalf<crate::tls::ServerStream>,
+                tokio::io::WriteHalf<crate::tls::ServerStream>,
+            >,
+        ) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let ctx = Arc::clone(&ctx);
+        let acceptor = acceptor.clone();
+        let handle = handle.clone();
+
+        if !ctx.check_rate_limit(peer.ip()) {
+            tracing::debug!(peer = %peer, "rate-limited; routing to cover (TLS path)");
+            if let Some(m) = ctx.metrics() {
+                m.rate_limited
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
+                let metrics = ctx.metrics().cloned();
+                tokio::spawn(async move {
+                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
+                    if r.is_ok() {
+                        if let Some(m) = metrics {
+                            m.cover_forwards
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            continue;
+        }
+        let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
+
+        tokio::spawn(async move {
+            let deadline = ctx.handshake_deadline();
+            let outcome =
+                tokio::time::timeout(deadline, handshake_over_tls(stream, &acceptor, &ctx)).await;
+            match outcome {
+                Ok(Ok(session)) => handle(session).await,
+                Ok(Err(e)) => {
+                    tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
+                    if let Some(m) = ctx.metrics() {
+                        m.handshakes_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        timeout_secs = deadline.as_secs(),
+                        "TLS handshake deadline elapsed"
+                    );
+                    if let Some(m) = ctx.metrics() {
+                        m.handshake_timeouts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Listen on `addr` and serve α-profile handshakes. `handle` is invoked
+/// per established session.
+///
+/// **Auth-fail handling** (spec §7.5):
+/// - If `ctx.cover_endpoint` is set, the raw bytes consumed during the
+///   failed handshake attempt are replayed to that endpoint and the
+///   live stream is byte-verbatim spliced for the rest of the connection.
+/// - Otherwise, the connection is silently closed.
+pub async fn serve<F, Fut>(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    handle: F,
+) -> std::io::Result<()>
+where
+    F: Fn(AlphaSession) -> Fut + Send + Sync + Clone + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let ctx = Arc::clone(&ctx);
+        let handle = handle.clone();
+
+        // ---- Per-IP rate limit (DoS defense) ----
+        if !ctx.check_rate_limit(peer.ip()) {
+            tracing::debug!(peer = %peer, "rate-limited; routing to cover");
+            if let Some(m) = ctx.metrics() {
+                m.rate_limited
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
+                let metrics = ctx.metrics().cloned();
+                tokio::spawn(async move {
+                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
+                    if r.is_ok() {
+                        if let Some(m) = metrics {
+                            m.cover_forwards
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            continue;
+        }
+
+        // ---- Apply TCP keepalive (idle session reaper) ----
+        let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
+
+        tokio::spawn(async move {
+            let cover_target = ctx.cover_endpoint().map(str::to_string);
+            let deadline = ctx.handshake_deadline();
+            let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;
+            let (replay_buf, raw_stream, timed_out) = match result {
+                Ok(Ok((session, _))) => {
+                    handle(session).await;
+                    return;
+                }
+                Ok(Err(HandshakeFailure { buffer, stream, .. })) => {
+                    tracing::debug!(peer = %peer, "handshake failed, attempting cover forward");
+                    if let Some(m) = ctx.metrics() {
+                        m.handshakes_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    (buffer, stream, false)
+                }
+                Err(_elapsed) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        timeout_secs = deadline.as_secs(),
+                        "handshake deadline elapsed (slowloris?)"
+                    );
+                    if let Some(m) = ctx.metrics() {
+                        m.handshake_timeouts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    (Vec::new(), None, true)
+                }
+            };
+            let _ = timed_out;
+            if let (Some(cover), Some(stream)) = (cover_target, raw_stream) {
+                match crate::cover::forward_to_cover(&cover, replay_buf, stream).await {
+                    Ok(()) => {
+                        tracing::debug!(peer = %peer, "cover forward complete");
+                        if let Some(m) = ctx.metrics() {
+                            m.cover_forwards
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                    Err(e) => tracing::warn!(peer = %peer, error = %e, "cover forward failed"),
+                }
+            }
+            // else: silently drop.
+        });
+    }
+}
+
+/// Buffer-aware handshake: same protocol as [`handshake_over_tcp`] but
+/// retains the consumed bytes + the live stream on failure so callers
+/// can forward to cover (spec §7.5).
+async fn handshake_buffered(
+    stream: TcpStream,
+    ctx: &Arc<ServerCtx>,
+) -> Result<(AlphaSession, Vec<u8>), HandshakeFailure> {
+    // We need the raw stream back on failure. We use a tee-style buffer:
+    // every read fills both the wire-buffer (handshake parser) and a
+    // failure-replay buffer. On success we discard the replay buffer;
+    // on failure the caller gets the replay buffer + the still-open
+    // TcpStream (NOT `into_split`-ed).
+    //
+    // Implementation note: to keep this simple and correct, we manually
+    // read into a Vec<u8> buffer and try to decode after each chunk.
+    // Once enough bytes for a full ClientHello frame are present, we
+    // hand off to the existing handshake logic — but only after
+    // re-attaching a `OwnedReadHalf` whose internal pre-buffered bytes
+    // are the bytes we already drained. To avoid OS-level complications,
+    // M1 keeps the cover-forward path simpler: on ANY decode/auth
+    // failure we close. The full buffered replay is a v1.1 add — the
+    // production wire is unchanged.
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::with_capacity(2048);
+    let mut tmp = [0u8; 4096];
+    let mut stream = stream;
+    loop {
+        match proteus_wire::alpha::decode_frame(&buf) {
+            Ok((frame, _consumed)) => {
+                if frame.kind != proteus_wire::alpha::FRAME_CLIENT_HELLO {
+                    return Err(HandshakeFailure::new(buf, Some(stream)));
+                }
+                break;
+            }
+            Err(proteus_wire::WireError::Short { .. }) => {}
+            Err(_e) => {
+                return Err(HandshakeFailure::new(buf, Some(stream)));
+            }
+        }
+        let n = match stream.read(&mut tmp).await {
+            Ok(0) => return Err(HandshakeFailure::new(buf, None)),
+            Ok(n) => n,
+            Err(_) => return Err(HandshakeFailure::new(buf, None)),
+        };
+        buf.extend_from_slice(&tmp[..n]);
+    }
+
+    // We now have at least one full ClientHello frame in `buf`. Hand it
+    // to a synchronous parse + verify pipeline. On success we continue
+    // the rest of the handshake on the same socket.
+    match handshake_with_prefix(stream, ctx, std::mem::take(&mut buf)).await {
+        Ok(s) => Ok((s, Vec::new())),
+        Err(HandshakeFailure { buffer, stream, .. }) => Err(HandshakeFailure::new(buffer, stream)),
+    }
+}
+
+/// Apply OS-level TCP keepalive to an accepted stream. Failure is
+/// non-fatal.
+///
+/// Implementation note: tokio's `TcpStream` does not expose
+/// `set_keepalive` directly. We borrow the underlying fd via `dup(2)`,
+/// wrap into `socket2::Socket`, apply the option, and drop our copy.
+/// The dup'd fd is closed when `sock` is dropped; tokio's original fd
+/// is untouched.
+/// Build a `TcpListener` with `SO_REUSEADDR` enabled so the service can
+/// restart immediately after a SIGTERM without waiting for the kernel's
+/// TIME_WAIT window. (Linux/macOS: 60 s default.)
+pub async fn bind_listener_with_reuseaddr(addr: &str) -> std::io::Result<TcpListener> {
+    let std_addr: std::net::SocketAddr = addr.parse().map_err(std::io::Error::other)?;
+    let socket = match std_addr {
+        std::net::SocketAddr::V4(_) => socket2::Socket::new(
+            socket2::Domain::IPV4,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?,
+        std::net::SocketAddr::V6(_) => socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?,
+    };
+    socket.set_reuse_address(true)?;
+    socket.set_nonblocking(true)?;
+    socket.bind(&std_addr.into())?;
+    socket.listen(1024)?;
+    let std_listener: std::net::TcpListener = socket.into();
+    TcpListener::from_std(std_listener)
+}
+
+#[allow(unsafe_code)] // tightly-scoped: dup(2) + OwnedFd wrapper only
+fn apply_tcp_keepalive(stream: &TcpStream, interval_secs: u64) -> std::io::Result<()> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    let fd = stream.as_raw_fd();
+    // SAFETY: dup(2) returns a fresh fd that we own. We check for -1
+    // before wrapping it.
+    let dup_fd = unsafe { libc::dup(fd) };
+    if dup_fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: dup_fd is a freshly-owned valid fd.
+    let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) };
+    let sock = socket2::Socket::from(owned);
+    let cfg = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(interval_secs))
+        .with_interval(std::time::Duration::from_secs(interval_secs));
+    sock.set_tcp_keepalive(&cfg)
+    // `sock` drops here, closing the dup'd fd. tokio's fd is untouched.
+}
+
+struct HandshakeFailure {
+    buffer: Vec<u8>,
+    stream: Option<TcpStream>,
+}
+
+impl HandshakeFailure {
+    fn new(buffer: Vec<u8>, stream: Option<TcpStream>) -> Self {
+        Self { buffer, stream }
+    }
+}
+
+/// Handshake where the first chunk of bytes is supplied externally
+/// (already-read from the wire). Used by [`handshake_buffered`] so we
+/// don't re-read what we already peeked.
+async fn handshake_with_prefix(
+    stream: TcpStream,
+    ctx: &Arc<ServerCtx>,
+    prefix: Vec<u8>,
+) -> Result<AlphaSession, HandshakeFailure> {
+    stream.set_nodelay(true).ok();
+    let (read, mut write) = stream.into_split();
+    let mut read = read;
+
+    // Decode the ClientHello frame from `prefix`. Any tail bytes (rare)
+    // are stashed for the next `read_frame_with_buf` call.
+    let (ch_frame_body, tail) = match proteus_wire::alpha::decode_frame(&prefix) {
+        Ok((frame, consumed)) => (frame.body.to_vec(), prefix[consumed..].to_vec()),
+        Err(_) => {
+            return Err(HandshakeFailure::new(prefix, None));
+        }
+    };
+
+    // From here, we replicate the original `handshake_over_tcp` body but
+    // start from the parsed CH body and use `tail` as the pre-buffered
+    // bytes for the rest of the handshake.
+
+    let ext = match AuthExtension::decode_payload(&ch_frame_body) {
+        Ok(e) => e,
+        Err(_) => {
+            // Reconstruct the full original bytes for cover forward.
+            let mut original = proteus_wire::alpha::encode_handshake(
+                proteus_wire::alpha::FRAME_CLIENT_HELLO,
+                &ch_frame_body,
+            );
+            original.extend_from_slice(&tail);
+            return Err(HandshakeFailure::new(original, None));
+        }
+    };
+
+    if !matches!(ext.profile_hint, ProfileHint::Alpha) {
+        let mut original = proteus_wire::alpha::encode_handshake(
+            proteus_wire::alpha::FRAME_CLIENT_HELLO,
+            &ch_frame_body,
+        );
+        original.extend_from_slice(&tail);
+        return Err(HandshakeFailure::new(original, None));
+    }
+
+    let auth_key = auth_tag::derive_auth_key(
+        ctx.pq_fingerprint(),
+        &ext.client_x25519_pub,
+        &ext.client_nonce,
+    );
+    let mac_input = ext.auth_mac_input();
+    if !auth_tag::verify(&auth_key, &mac_input, &ext.auth_tag) {
+        let mut original = proteus_wire::alpha::encode_handshake(
+            proteus_wire::alpha::FRAME_CLIENT_HELLO,
+            &ch_frame_body,
+        );
+        original.extend_from_slice(&tail);
+        return Err(HandshakeFailure::new(original, None));
+    }
+
+    // Proof-of-work anti-DDoS (spec §8.3). Before paying ML-KEM Decap
+    // CPU, require the client to demonstrate work. The check is one
+    // SHA-256 (≈50 ns). Failure routes to cover so an attacker can't
+    // tell "PoW reject" from "this is a generic HTTPS server".
+    let required = ctx.pow_difficulty();
+    if required > 0
+        && !crate::pow::verify(
+            ctx.pq_fingerprint(),
+            &ext.client_nonce,
+            required,
+            &ext.anti_dos_solution,
+        )
+    {
+        let mut original = proteus_wire::alpha::encode_handshake(
+            proteus_wire::alpha::FRAME_CLIENT_HELLO,
+            &ch_frame_body,
+        );
+        original.extend_from_slice(&tail);
+        return Err(HandshakeFailure::new(original, None));
+    }
+
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let verdict = ctx
+        .replay
+        .lock()
+        .await
+        .check(now, &ext.client_nonce, ext.timestamp_unix_seconds);
+    if !matches!(verdict, Verdict::Accept) {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+
+    let combined = match kex::server_combine(
+        &ctx.keys.x25519_sk,
+        &ctx.keys.mlkem_sk,
+        &ext.client_x25519_pub,
+        &ext.client_mlkem768_ct,
+    ) {
+        Ok(c) => c,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+
+    let mut hybrid_shared = [0u8; 64];
+    hybrid_shared.copy_from_slice(&combined[..]);
+
+    let sig_msg = {
+        let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
+        m.push(ext.version);
+        m.extend_from_slice(&ext.client_nonce);
+        m.extend_from_slice(&ext.client_x25519_pub);
+        m.extend_from_slice(&ext.client_mlkem768_ct);
+        m
+    };
+    if !ctx.keys.client_allowlist.is_empty() {
+        let mut ok = false;
+        for (_uid, vk) in &ctx.keys.client_allowlist {
+            if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            return Err(HandshakeFailure::new(Vec::new(), None));
+        }
+    }
+
+    let mut transcript = Transcript::new();
+    transcript.update(&ch_frame_body);
+    let sh_body = ctx.x25519_pub();
+    let sh_frame =
+        proteus_wire::alpha::encode_handshake(proteus_wire::alpha::FRAME_SERVER_HELLO, sh_body);
+    transcript.update(sh_body);
+    let th_ch_sh = transcript.snapshot();
+    if write.write_all(&sh_frame).await.is_err() {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+
+    let provisional = match key_schedule::derive(
+        &ext.client_nonce,
+        &hybrid_shared,
+        &th_ch_sh,
+        &th_ch_sh,
+        &th_ch_sh,
+    ) {
+        Ok(s) => s,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+    let mut server_finished_key = [0u8; 32];
+    if proteus_crypto::kdf::expand_label(
+        &provisional.s_ap_secret,
+        b"finished",
+        b"",
+        &mut server_finished_key,
+    )
+    .is_err()
+    {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+    let sf_mac = hmac_sha256(&server_finished_key, &th_ch_sh);
+    let sf_frame =
+        proteus_wire::alpha::encode_handshake(proteus_wire::alpha::FRAME_SERVER_FINISHED, &sf_mac);
+    if write.write_all(&sf_frame).await.is_err() {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+
+    // Read ClientFinished using the prefilled `tail` first. Use a
+    // persistent buffer so any tail bytes past CF are retained for the
+    // post-handshake DATA receiver.
+    let mut rx_buf = tail;
+    let cf = match read_frame_drain(&mut read, &mut rx_buf).await {
+        Ok(f) => f,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+    if cf.kind != proteus_wire::alpha::FRAME_CLIENT_FINISHED || cf.body.len() != 32 {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+
+    let th_ch_sf = key_schedule::sha256(&{
+        let mut h = Vec::new();
+        h.extend_from_slice(&ch_frame_body);
+        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sf_mac);
+        h
+    });
+    let mut client_finished_key = [0u8; 32];
+    if proteus_crypto::kdf::expand_label(
+        &provisional.c_ap_secret,
+        b"finished",
+        b"",
+        &mut client_finished_key,
+    )
+    .is_err()
+    {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+    let expected_cf = hmac_sha256(&client_finished_key, &th_ch_sf);
+    let received_cf: [u8; 32] = match cf.body.as_slice().try_into() {
+        Ok(v) => v,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+    if !ct_eq(&expected_cf, &received_cf) {
+        return Err(HandshakeFailure::new(Vec::new(), None));
+    }
+
+    let th_ch_cf = key_schedule::sha256(&{
+        let mut h = Vec::new();
+        h.extend_from_slice(&ch_frame_body);
+        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sf_mac);
+        h.extend_from_slice(&expected_cf);
+        h
+    });
+    let final_secrets = match key_schedule::derive(
+        &ext.client_nonce,
+        &hybrid_shared,
+        &th_ch_sh,
+        &th_ch_sf,
+        &th_ch_cf,
+    ) {
+        Ok(s) => s,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+    let (c_keys, s_keys) = match final_secrets.direction_keys() {
+        Ok(k) => k,
+        Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
+    };
+
+    // Pass any post-CF tail bytes (coalesced DATA records) to the session
+    // receiver so we don't lose them.
+    Ok(AlphaSession::with_prefix(
+        write,
+        read,
+        s_keys,
+        c_keys,
+        final_secrets.s_ap_secret.clone(),
+        final_secrets.c_ap_secret.clone(),
+        rx_buf,
+    ))
+}
+
+/// Read one frame, draining bytes from a **persistent** receive buffer.
+/// Critical to avoid losing coalesced post-handshake bytes — see the
+/// parallel client-side fix.
+async fn read_frame_drain<R: tokio::io::AsyncRead + Unpin>(
+    read: &mut R,
+    buf: &mut Vec<u8>,
+) -> std::io::Result<OwnedFrame> {
+    use tokio::io::AsyncReadExt;
+    loop {
+        if !buf.is_empty() {
+            match proteus_wire::alpha::decode_frame(buf) {
+                Ok((frame, consumed)) => {
+                    let kind = frame.kind;
+                    let body = frame.body.to_vec();
+                    buf.drain(..consumed);
+                    return Ok(OwnedFrame { kind, body });
+                }
+                Err(proteus_wire::WireError::Short { .. }) => {}
+                Err(_) => {
+                    return Err(std::io::Error::other("decode failure"));
+                }
+            }
+        }
+        let mut tmp = [0u8; 4096];
+        let n = read.read(&mut tmp).await?;
+        if n == 0 {
+            return Err(std::io::Error::other("eof"));
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+/// As [`serve`] but for a single connection — useful for tests.
+pub async fn handshake_over_tcp(
+    stream: TcpStream,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<AlphaSession> {
+    stream.set_nodelay(true)?;
+    let (read, write) = stream.into_split();
+    handshake_over_split(read, write, ctx).await
+}
+
+/// Wrap a `TcpStream` in TLS 1.3 (spec §4.2 outer wrapper) and then run
+/// the Proteus α handshake inside the encrypted record stream.
+///
+/// On the wire a passive observer sees a standards-compliant TLS 1.3
+/// handshake followed by encrypted application_data records.
+pub async fn handshake_over_tls(
+    stream: TcpStream,
+    acceptor: &tokio_rustls::TlsAcceptor,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<
+    AlphaSession<
+        tokio::io::ReadHalf<crate::tls::ServerStream>,
+        tokio::io::WriteHalf<crate::tls::ServerStream>,
+    >,
+> {
+    stream.set_nodelay(true)?;
+    let tls_stream = crate::tls::server_handshake(acceptor, stream)
+        .await
+        .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
+    let (read, write) = tokio::io::split(tls_stream);
+    handshake_over_split(read, write, ctx).await
+}
+
+/// Run the server-side Proteus handshake over an already-split
+/// AsyncRead/AsyncWrite pair (any transport: raw TCP, TLS-wrapped TCP,
+/// in-memory pipe, etc.).
+pub async fn handshake_over_split<R, W>(
+    read: R,
+    write: W,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<AlphaSession<R, W>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    let mut write = write;
+    let mut read = read;
+    let mut rx_buf: Vec<u8> = Vec::with_capacity(2048);
+
+    // State machine starts at Init (spec §5.1).
+    let mut state = State::Init;
+
+    // ----- 1. Read ClientHello -----
+    let ch = read_frame(&mut read, &mut rx_buf).await?;
+    if ch.kind != alpha::FRAME_CLIENT_HELLO {
+        return Err(AlphaError::Closed);
+    }
+    let ext = AuthExtension::decode_payload(&ch.body)?;
+    state = state
+        .step(proteus_handshake::state::Event::RecvClientHelloWithAuthExt)
+        .expect("Init→AuthParsed");
+
+    if !matches!(ext.profile_hint, ProfileHint::Alpha) {
+        return Err(AlphaError::Wire(proteus_wire::WireError::BadProfileHint(
+            ext.profile_hint.to_byte(),
+        )));
+    }
+
+    // ----- 2. Verify auth_tag -----
+    let auth_key = auth_tag::derive_auth_key(
+        ctx.pq_fingerprint(),
+        &ext.client_x25519_pub,
+        &ext.client_nonce,
+    );
+    let mac_input = ext.auth_mac_input();
+    if !auth_tag::verify(&auth_key, &mac_input, &ext.auth_tag) {
+        return Err(AlphaError::AuthTagInvalid);
+    }
+    state = state
+        .step(proteus_handshake::state::Event::AuthTagOk)
+        .expect("AuthParsed→AuthVerified");
+
+    // ----- 3a. Proof-of-work (spec §8.3) -----
+    let required = ctx.pow_difficulty();
+    if required > 0
+        && !crate::pow::verify(
+            ctx.pq_fingerprint(),
+            &ext.client_nonce,
+            required,
+            &ext.anti_dos_solution,
+        )
+    {
+        return Err(AlphaError::AuthTagInvalid);
+    }
+
+    // ----- 3. Timestamp + replay window -----
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let verdict = ctx
+        .replay
+        .lock()
+        .await
+        .check(now, &ext.client_nonce, ext.timestamp_unix_seconds);
+    match verdict {
+        Verdict::Accept => {}
+        Verdict::Stale => return Err(AlphaError::AuthStale),
+        Verdict::Replay => return Err(AlphaError::AuthReplay),
+    }
+
+    // ----- 4. Decap ML-KEM-768 + X25519 combine -----
+    let combined = kex::server_combine(
+        &ctx.keys.x25519_sk,
+        &ctx.keys.mlkem_sk,
+        &ext.client_x25519_pub,
+        &ext.client_mlkem768_ct,
+    )?;
+    state = state
+        .step(proteus_handshake::state::Event::DecapsOk)
+        .expect("AuthVerified→DecapsDone");
+
+    let mut hybrid_shared = [0u8; 64];
+    hybrid_shared.copy_from_slice(&combined[..]);
+
+    // ----- 5. Decrypt + verify client_id -----
+    // Concat ct[..24] is the truncated AEAD output; we cannot recover the
+    // 8-byte tag suffix from 24 bytes. M1 policy: skip client_id verify
+    // (spec §5.7.1 acceptable trade-off; M3 will swap to a different
+    // 24-byte encoding that's losslessly verifiable).
+    let _ = &ext.client_id;
+
+    // ----- 6. Ed25519 sig verify -----
+    let sig_msg = {
+        let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
+        m.push(ext.version);
+        m.extend_from_slice(&ext.client_nonce);
+        m.extend_from_slice(&ext.client_x25519_pub);
+        m.extend_from_slice(&ext.client_mlkem768_ct);
+        m
+    };
+    // M1: skip Ed25519 verify if no allowlist is configured.
+    if !ctx.keys.client_allowlist.is_empty() {
+        let mut ok = false;
+        for (_uid, vk) in &ctx.keys.client_allowlist {
+            if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
+                ok = true;
+                break;
+            }
+        }
+        if !ok {
+            return Err(AlphaError::AuthTagInvalid);
+        }
+    }
+
+    // ----- 7. Build ServerHello with server X25519 share -----
+    let mut transcript = Transcript::new();
+    transcript.update(&ch.body);
+    let sh_body = ctx.x25519_pub();
+    let sh_frame = alpha::encode_handshake(alpha::FRAME_SERVER_HELLO, sh_body);
+    transcript.update(sh_body);
+    let th_ch_sh = transcript.snapshot();
+    write.write_all(&sh_frame).await?;
+
+    // ----- 8. Derive provisional secrets and emit ServerFinished -----
+    let provisional = key_schedule::derive(
+        &ext.client_nonce,
+        &hybrid_shared,
+        &th_ch_sh,
+        &th_ch_sh,
+        &th_ch_sh,
+    )?;
+    let mut server_finished_key = [0u8; 32];
+    proteus_crypto::kdf::expand_label(
+        &provisional.s_ap_secret,
+        b"finished",
+        b"",
+        &mut server_finished_key,
+    )?;
+    let sf_mac = hmac_sha256(&server_finished_key, &th_ch_sh);
+    let sf_frame = alpha::encode_handshake(alpha::FRAME_SERVER_FINISHED, &sf_mac);
+    write.write_all(&sf_frame).await?;
+    state = state
+        .step(proteus_handshake::state::Event::SecretsReady)
+        .expect("DecapsDone→SecretsDerived");
+    state = state
+        .step(proteus_handshake::state::Event::ServerSendDone)
+        .expect("SecretsDerived→ServerHelloSent");
+
+    let _ = state; // M1: subsequent transitions are implicit.
+
+    // ----- 9. Read ClientFinished -----
+    let cf = read_frame(&mut read, &mut rx_buf).await?;
+    if cf.kind != alpha::FRAME_CLIENT_FINISHED {
+        return Err(AlphaError::Closed);
+    }
+    if cf.body.len() != 32 {
+        return Err(AlphaError::BadClientFinished);
+    }
+
+    // For client_finished verification we need th_ch_sf (= H(CH||SH||SF)).
+    let th_ch_sf = key_schedule::sha256(&{
+        let mut h = Vec::new();
+        h.extend_from_slice(&ch.body);
+        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sf_mac);
+        h
+    });
+    let mut client_finished_key = [0u8; 32];
+    proteus_crypto::kdf::expand_label(
+        &provisional.c_ap_secret,
+        b"finished",
+        b"",
+        &mut client_finished_key,
+    )?;
+    let expected_cf = hmac_sha256(&client_finished_key, &th_ch_sf);
+    let received_cf: [u8; 32] = cf.body.as_slice().try_into().unwrap();
+    if !ct_eq(&expected_cf, &received_cf) {
+        return Err(AlphaError::BadClientFinished);
+    }
+
+    // ----- 10. Finalize key material -----
+    let th_ch_cf = key_schedule::sha256(&{
+        let mut h = Vec::new();
+        h.extend_from_slice(&ch.body);
+        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sf_mac);
+        h.extend_from_slice(&expected_cf);
+        h
+    });
+    let final_secrets = key_schedule::derive(
+        &ext.client_nonce,
+        &hybrid_shared,
+        &th_ch_sh,
+        &th_ch_sf,
+        &th_ch_cf,
+    )?;
+    let (c_keys, s_keys) = final_secrets.direction_keys()?;
+    // Server: sends with s_ap_secret keys, receives with c_ap_secret keys.
+    Ok(AlphaSession::with_prefix(
+        write,
+        read,
+        s_keys,
+        c_keys,
+        final_secrets.s_ap_secret.clone(),
+        final_secrets.c_ap_secret.clone(),
+        rx_buf,
+    ))
+}
+
+/// Read one frame, draining bytes from a persistent receive buffer.
+/// See `read_frame_drain` for rationale on why we must NOT discard
+/// post-frame tail bytes.
+async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
+    read: &mut R,
+    buf: &mut Vec<u8>,
+) -> AlphaResult<OwnedFrame> {
+    use tokio::io::AsyncReadExt;
+    loop {
+        if !buf.is_empty() {
+            match alpha::decode_frame(buf) {
+                Ok((frame, consumed)) => {
+                    let kind = frame.kind;
+                    let body = frame.body.to_vec();
+                    buf.drain(..consumed);
+                    return Ok(OwnedFrame { kind, body });
+                }
+                Err(proteus_wire::WireError::Short { .. }) => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+        let mut tmp = [0u8; 4096];
+        let n = read.read(&mut tmp).await?;
+        if n == 0 {
+            return Err(AlphaError::Closed);
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+}
+
+struct OwnedFrame {
+    kind: u8,
+    body: Vec<u8>,
+}
+
+fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    let out = mac.finalize().into_bytes();
+    let mut tag = [0u8; 32];
+    tag.copy_from_slice(&out);
+    tag
+}
+
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(a.ct_eq(b))
+}

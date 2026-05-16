@@ -1,0 +1,31 @@
+[package]
+name = "proteus-crypto"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus crypto primitives: hybrid X25519+ML-KEM KEX, Ed25519 sig, ChaCha20-Poly1305 AEAD, HKDF, asymmetric DH ratchet"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+ml-kem.workspace = true
+chacha20poly1305.workspace = true
+sha2.workspace = true
+hkdf.workspace = true
+hmac.workspace = true
+rand_core.workspace = true
+subtle.workspace = true
+zeroize.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rand_core = { workspace = true, features = ["getrandom"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

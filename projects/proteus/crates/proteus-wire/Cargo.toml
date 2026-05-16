@@ -1,0 +1,19 @@
+[package]
+name = "proteus-wire"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Byte-exact encoders/decoders for the Proteus wire format (spec §4)"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+thiserror.workspace = true
+zeroize.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

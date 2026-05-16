@@ -1,0 +1,37 @@
+[package]
+name = "proteus-client"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus α-profile client binary — SOCKS5 inbound → Proteus tunnel"
+
+[[bin]]
+name = "proteus-client"
+path = "src/main.rs"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+proteus-wire = { path = "../proteus-wire" }
+proteus-crypto = { path = "../proteus-crypto" }
+proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+
+ed25519-dalek.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+thiserror.workspace = true
+
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_yaml = "0.9"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

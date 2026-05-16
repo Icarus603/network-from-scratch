@@ -1,0 +1,29 @@
+services:
+  proteus-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: server
+    image: proteus/server:0.1.0
+    container_name: proteus-server
+    restart: unless-stopped
+    network_mode: host  # use host networking so cover-forward p99 stays low
+    volumes:
+      - ./server.yaml:/etc/proteus/server.yaml:ro
+      - ./keys:/etc/proteus/keys:ro
+      - proteus_logs:/var/log/proteus
+    environment:
+      RUST_LOG: "proteus_server=info,proteus_transport_alpha=info"
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    security_opt:
+      - no-new-privileges:true
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+
+volumes:
+  proteus_logs:
