@@ -69,8 +69,8 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 | I | **5** | 形式化方法 | 8 | TLA+ / ProVerif / Tamarin 入門 |
 | II | **6** | 真 VPN 協議精讀 + 原始碼 | 10 | 通讀 wireguard-go，能寫 PR |
 | II | **7** | 翻牆協議完整演化史與每個協議精讀 | 16 | SS / VMess / Trojan / VLESS / REALITY 逐行讀完 |
-| II | **8** | QUIC 系協議深度 | 10 | Hysteria2 / TUIC / 自己 fork quic-go |
-| II | **9** | 審查對抗：GFW 完整研究綜述 + 自建測試平台 | 14 | 能複現 GFW.report 所有實驗 |
+| II | **8** | QUIC 系協議深度 | 12 | Hysteria2 / TUIC / 自己 fork quic-go / BBRv3 / MASQUE wire binding |
+| II | **9** | 審查對抗：GFW 完整研究綜述 + 自建測試平台 + 2025 ledger | 15 | 能複現 GFW.report 所有實驗 + 跟上 2025 後變化 |
 | III | **10** | 對抗式流量分析與反制 | 12 | 跑通 Beauty / FlowPrint，能設計反制 |
 | III | **11** | 設計階段：威脅模型、spec、形式化驗證 | 14 | 產出 RFC 級規格書與形式化證明 |
 | III | **12** | 實作、評測、發表 | 24 | Go/Rust 實作、對抗測試、論文初稿 |
@@ -655,9 +655,15 @@ TCP-over-TCP、TCP-over-everything 的問題。
 ### 8.10 QUIC 系給我們的啟示 ✅
 作為協議設計者，速度方向我們從這裡學到什麼。
 
+### 8.11 BBRv3 模式與 packet pacing：spec §6 的硬性根據 ✅
+（新增於 2026-05-16 audit）BBRv3 四 mode、quic-go pacer、Linux SO_TXTIME + sch_fq EDT pacing、ProbeRTT 期間 padding pause；Brutal CC 對照。
+
+### 8.12 G6 在 MASQUE 上的 wire-format mapping：實作藍圖 ✅
+（新增於 2026-05-16 audit）spec §4 wire format 怎麼塞進 RFC 9297 HTTP Datagram / RFC 9298 CONNECT-UDP / 1280-byte cell；γ/β/α 三 profile 的位元順序。
+
 ---
 
-## Part 9 — 審查對抗：GFW 完整研究綜述 + 自建測試平台（14 堂）
+## Part 9 — 審查對抗：GFW 完整研究綜述 + 自建測試平台 + 2025 ledger（15 堂）
 
 ### 9.1 GFW 架構與能力綜述 ✅
 - 旁路 vs in-path
@@ -709,6 +715,9 @@ nDPI 識別器的部署與規則寫法。
 
 ### 9.14 GFW 給我們的啟示 ✅
 作為協議設計者，威脅模型要包含哪些對手能力。
+
+### 9.15 2025–2026 GFW 重大事件與區域審查浮現 ✅
+（新增於 2026-05-16 audit）Wu et al. *A Wall Behind A Wall* S&P 2025（Henan firewall）、2025-08-20 unconditional TCP/443 RST 事件、Russian TSPU 2025-2026 15-20 KB freeze 與 CIDR whitelist、Zohaib disclosure 後 GFW 反應時程；對 G6 capability table 增 C14（regional）+ C15（transient blanket）。
 
 ---
 

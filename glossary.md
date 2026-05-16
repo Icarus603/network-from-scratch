@@ -3610,3 +3610,51 @@
 **所屬層**：學科總結
 **首次出現**：[7.13](lessons/part-7-proxy-protocols/7.13-misc-protocols.md) / [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)
 **一句話**：mimicry → fully-encrypted → HTTPS-shaped → borrow-real (REALITY)；G6 目標是第 5 代 (handshake + traffic 同時解)。
+
+### Henan Firewall (HenanFW)
+**中文**：河南省級防火牆
+**所屬層**：審查基礎設施 (regional)
+**首次出現**：[9.15](lessons/part-9-gfw-research/9.15-gfw-2025-ledger.md) ([[wu-henan-sp25]])
+**一句話**：S&P 2025 首次量測的省級審查層，僅對 egress、hop 5、blocklist 累計 4.2M 域名（GFW 同期約 0.74M）、無 TCP 重組、只阻 20-byte TCP 標頭封包、單包 RST 注入含 `01 02 ... 09 00` 10-byte 簽名。
+
+### TSPU (Технические средства противодействия угрозам)
+**中文**：俄羅斯威脅對抗技術手段
+**所屬層**：審查基礎設施 (Russia)
+**首次出現**：[9.15](lessons/part-9-gfw-research/9.15-gfw-2025-ledger.md)
+**一句話**：俄羅斯 ISP 級 DPI 系統；2025-2026 起對 TLS 1.3 流量採用 15-20 KB freeze（無 RST，連線停接收）+ CIDR 白名單；尚無 peer-reviewed paper，社群觀察為主。
+
+### Capability C14 / C15（G6 威脅模型升級）
+**中文**：區域審查能力 / 全域阻斷能力
+**所屬層**：threat model
+**首次出現**：[9.15](lessons/part-9-gfw-research/9.15-gfw-2025-ledger.md)
+**一句話**：C14 = sub-national regional censor with own blocklist；C15 = transient blanket port block (e.g. 2025-08-20 TCP/443 74 min 全域 RST)；G6 spec §1.3 capability table v2 必含。
+
+### EDT pacing (SO_TXTIME + sch_fq)
+**中文**：預定到達時間-基底 pacing
+**所屬層**：Linux kernel networking
+**首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)、[8.11](lessons/part-8-quic-protocols/8.11-bbrv3-and-pacing.md)
+**一句話**：應用層用 cmsg SO_TXTIME 告訴 kernel「此 packet 應於某 ns 發」，sch_fq qdisc 在 NIC 上排程；使 quic-go 突破 user-space pacer 在 10 Gbps 上的 sleeper-granularity 限制。
+
+### ProbeRTT padding pause
+**中文**：BBR ProbeRTT 期間暫停 padding emission
+**所屬層**：G6 implementation requirement
+**首次出現**：[8.11](lessons/part-8-quic-protocols/8.11-bbrv3-and-pacing.md)
+**一句話**：BBRv3 ProbeRTT 期間 inflight 限 4 packet，G6 padding cell 在此 200 ms 視窗 MUST 暫停 emission；spec §9 padding budget α 仍滿足（10 s 滑動窗）。
+
+### Cover forward pool
+**中文**：cover-server 預熱連線池
+**所屬層**：G6 server architecture
+**首次出現**：[8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)、[12.7](lessons/part-12-implement-evaluate/12.7-server-panel-fallback.md)
+**一句話**：為達 spec §7 < 1ms p99 forward inflation，G6 server 預先維持到 cover_url 的 long-lived TCP/QUIC connection pool；冷啟 50-150ms → 立即 fingerprint，必須 hot pool。
+
+### G6InnerHeader（12-byte inner framing）
+**中文**：G6 內層封包標頭
+**所屬層**：G6 wire format (spec §4.2)
+**首次出現**：[11.5](lessons/part-11-design/11.5-spec-wire-format.md)、深入見 [8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)
+**一句話**：12 byte（type uint8 + flags uint8 + reserved uint16 + seqnum uint64）；γ profile 嵌於 RFC 9298 CONNECT-UDP payload，β profile 嵌於 QUIC DATAGRAM frame；1280-byte UDP cell 內可有多個 G6InnerHeader。
+
+### Quarter Stream ID (RFC 9297)
+**中文**：HTTP Datagram 中的 1/4 stream-ID 編碼
+**所屬層**：MASQUE / HTTP/3 wire
+**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)、[8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)
+**一句話**：H/3 client-initiated bidi stream ID 都是 4k → 除以 4 後 varint 壓更短；HTTP Datagram payload 用此識別所屬 associated stream。
