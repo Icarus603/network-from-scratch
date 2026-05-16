@@ -554,65 +554,65 @@ device.go、send.go、receive.go。
 
 ## Part 7 — 翻牆協議完整演化史（16 堂）
 
-### 7.1 SOCKS / HTTP CONNECT：祖宗（RFC 1928 精讀）
+### 7.1 SOCKS / HTTP CONNECT：祖宗（RFC 1928 精讀） ✅
 完整握手狀態機。
 
-### 7.2 Shadowsocks 第一代（2012~2017）
+### 7.2 Shadowsocks 第一代（2012~2017） ✅
 - 流加密 + 無認證的設計
 - 為什麼被 GFW 主動探測打爆
 - **論文**：How China Detects and Blocks Shadowsocks (IMC 2020)
 
-### 7.3 Shadowsocks AEAD（2017~2022）
+### 7.3 Shadowsocks AEAD（2017~2022） ✅
 為什麼這個改版 + 改了什麼還不夠。
 
-### 7.4 Shadowsocks 2022（SS-2022）
+### 7.4 Shadowsocks 2022（SS-2022） ✅
 - Spec：https://shadowsocks.org/doc/sip022.html 精讀
 - 固定金鑰 + 防重放 + user-key 分離
 
-### 7.5 V2Ray VMess 完整解剖
+### 7.5 V2Ray VMess 完整解剖 ✅
 - 報文格式
 - alterID 為什麼後來廢除
 - 設計缺陷史
 
-### 7.6 V2Ray 傳輸層抽象
+### 7.6 V2Ray 傳輸層抽象 ✅
 - TCP / mKCP / WebSocket / HTTP/2 / gRPC / QUIC
 - 各自的隱藏特徵
 
-### 7.7 Trojan 完整解剖
+### 7.7 Trojan 完整解剖 ✅
 - 哲學：偽裝成 HTTPS
 - fallback 設計
 - 對主動探測的天然抗性
 
-### 7.8 VLESS 完整解剖
+### 7.8 VLESS 完整解剖 ✅
 - 為什麼把 VMess 的加密層去掉
 - 報文格式逐 byte
 
-### 7.9 XTLS-Vision 完整解剖
+### 7.9 XTLS-Vision 完整解剖 ✅
 - 內層 TLS 直通的設計
 - 為什麼能省一層加密還安全
 - **原始碼**：Xray-core `proxy/vless/encoding/encoding.go`
 
-### 7.10 REALITY 完整解剖（一）：威脅模型
+### 7.10 REALITY 完整解剖（一）：威脅模型 ✅
 為什麼自簽證書時代結束、為什麼必須借真實網站。
 
-### 7.11 REALITY 完整解剖（二）：協議細節
+### 7.11 REALITY 完整解剖（二）：協議細節 ✅
 - 借用 TLS 握手的精確機制
 - short-id 的設計
 - **原始碼**：Xray-core `transport/internet/reality/`
 
-### 7.12 REALITY 完整解剖（三）：限制與已知攻擊
+### 7.12 REALITY 完整解剖（三）：限制與已知攻擊 ✅
 社群討論過的所有 REALITY 潛在弱點與作者回應。
 
-### 7.13 Naïve / Snell / 其他小眾
+### 7.13 Naïve / Snell / 其他小眾 ✅
 快速掃過，知道生態還有什麼。
 
-### 7.14 Xray-core 原始碼總覽
+### 7.14 Xray-core 原始碼總覽 ✅
 inbound/outbound/router 三段架構，讀路由匹配引擎。
 
-### 7.15 sing-box 原始碼總覽
+### 7.15 sing-box 原始碼總覽 ✅
 與 Xray 的設計差異，為什麼 sing-box 更模組化。
 
-### 7.16 mihomo (Clash.Meta) 原始碼總覽
+### 7.16 mihomo (Clash.Meta) 原始碼總覽 ✅
 規則引擎深度、與 sing-box 的對比。
 
 ---

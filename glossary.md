@@ -3389,3 +3389,224 @@
 **所屬層**：engineering practice
 **首次出現**：[12.1](lessons/part-12-implement-evaluate/12.1-implementation-language-choice.md)
 **一句話**：對重大設計決策寫 1-2 page 紀錄（context / decision / consequence）；對 review / future maintainer / 自己未來 reference 都關鍵。
+### SOCKS / SOCKS5
+**中文**：應用層代理協議祖宗
+**所屬層**：L5 explicit-proxy ABI
+**首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)（RFC 1928, 1996）
+**一句話**：binary 5-byte greeting + TCP CONNECT/BIND/UDP_ASSOCIATE 三命令；現代仍是所有 client（browser、curl、Clash）說「我要 proxy」的唯一 ABI；G6 north-bound interface 必選。
+
+### HTTP CONNECT
+**中文**：HTTP 端的 proxy 動詞
+**所屬層**：L7 application-layer tunneling
+**首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)（RFC 7230 / RFC 9110 §9.3.6）
+**一句話**：`CONNECT host:port HTTP/1.1` 後 200 = 透明 TCP pipe；HTTP/2 變 stream-level；HTTP/3 + extended CONNECT 通往 MASQUE。
+
+### MASQUE (Multiplexed Application Substrate over QUIC Encryption)
+**中文**：IETF 把 proxy 系列搬到 HTTP/3 上的工作群
+**所屬層**：proxy-over-QUIC
+**首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)（IETF MASQUE WG, 2020-）
+**一句話**：CONNECT-UDP (RFC 9298) + CONNECT-IP (RFC 9484)；Apple iCloud Private Relay、Cloudflare WARP、Chrome IP Protection 已部署；G6 對齊與否是 Part 11.6 主要 trade-off。
+
+### UDP ASSOCIATE
+**中文**：SOCKS5 的 UDP relay 命令
+**所屬層**：SOCKS5 §7
+**首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)
+**一句話**：TCP 控制連線 + side-channel UDP relay；FRAG 幾乎沒人實作；NAT/source-pinning 是大多數壞 SOCKS5 server 跌倒處；Hysteria/TUIC 出現後才被迫做 production-grade。
+
+### Explicit Proxy / Transparent Proxy
+**中文**：顯式代理 vs 透明代理
+**所屬層**：proxy 部署形態
+**首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)
+**一句話**：explicit = client 知情並設定（SOCKS5、HTTP CONNECT）；transparent = NAT/iptables redirect 攔截（Squid intercept、tproxy）；G6 客戶端是 explicit，TUN/redir 模式靠 sing-box 等 wrapper。
+
+### Shadowsocks (SS, 第一代)
+**中文**：clowwindy 2012 設計的最簡 stream-cipher proxy
+**所屬層**：L5 application-layer encrypted proxy
+**首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
+**一句話**：IV+stream-cipher+SOCKS5-style header；無 MAC 無 anti-replay；IMC 2020 完整剖析其偵測；G6 視為「不能犯的錯誤」教科書。
+
+### EVP_BytesToKey
+**中文**：OpenSSL 從 password 推 key/IV 的函數
+**所屬層**：crypto KDF (反例)
+**首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
+**一句話**：MD5-based、無 salt、無 iteration count；SS 第一代繼承的歷史罪；現代設計絕不沿用。
+
+### Stream Cipher（無 MAC）反例
+**中文**：CFB / CTR / Salsa20 / ChaCha20 流加密，無認證
+**所屬層**：crypto mode
+**首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
+**一句話**：CCA-broken；malleability + active probing 攻擊面；SS 第一代用過後 G6 永不採。
+
+### Active Probing
+**中文**：主動探測
+**所屬層**：對手能力
+**首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)（Ensafi NDSS 2015 / 「Alice in Wonderland」IMC 2020）
+**一句話**：審查者主動連可疑 server 觀察行為差異；對 SS 第一代致命；現代 G6 必須通過此測試。
+
+### Replay Attack（協議層）
+**中文**：重放攻擊
+**所屬層**：對手能力 / 協議性質
+**首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
+**一句話**：審查者錄下 client 流量重送到 server，觀察 server 行為以判定協議；SS-AEAD 用 bloom filter 補；SS-2022 spec 強制 anti-replay。
+
+### SS-AEAD / SIP004
+**中文**：Shadowsocks AEAD wire format
+**所屬層**：L5 應用層加密 proxy
+**首次出現**：[7.3](lessons/part-7-proxy-protocols/7.3-shadowsocks-aead.md)（shadowsocks-org wiki, 2017）
+**一句話**：salt + chunked AEAD records（length+tag, payload+tag）；密碼學等級 OK 但 wire-format fingerprint 不變；2019+ 仍被 GFW 屠殺。
+
+### SS-2022 / SIP022
+**中文**：Shadowsocks 2022 重寫 wire format
+**所屬層**：L5 應用層加密 proxy
+**首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（@database64128, 2022-01）
+**一句話**：BLAKE3 derive_key + 32B PSK + UDP session ID + EIH 多用戶 + replay window；密碼學工程 SOTA；但 outer obfuscation 仍必須（shadow-tls）。
+
+### EIH (Extensible Identity Headers)
+**中文**：SIP022-2 多用戶單 port 的 identity 層疊
+**所屬層**：proxy multi-tenancy
+**首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)
+**一句話**：salt 之後插入 AES-ECB 加密的 identity header，server O(1) hash lookup 找 user；UDP 場景需 session_id ⊕ packet_id XOR 避 ECB chosen-plaintext 風險。
+
+### BLAKE3 derive_key
+**中文**：BLAKE3 的領域分隔 KDF 模式
+**所屬層**：crypto KDF
+**首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（O'Connor et al., 2020）
+**一句話**：context string 編進 internal IV；不同 context 推出的 key 永遠不同；比 HKDF info 更難用錯；G6 KDF 首選。
+
+### Channel Binding
+**中文**：通道綁定
+**所屬層**：協議安全
+**首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（RFC 5056；TLS 1.3 transcript hash 為現代範例）
+**一句話**：上層協議綁定下層通道身份（如 SIP022 response 嵌入 request salt）防 cross-session replay。
+
+### Sliding Window Replay Protection
+**中文**：滑動視窗重放防護
+**所屬層**：協議實作技術
+**首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（IPsec ESP RFC 4303 §3.4.3 起源；WireGuard `replay.c` 為現代教科書實作）
+**一句話**：bitmap 記住最近 N 個 packet ID 哪些見過；O(1) bit ops；無 false positive；G6 必抄。
+
+### Fully-Encrypted Protocol (FEP)
+**中文**：全加密協議
+**所屬層**：學界對 SS/Trojan/VMess 的統稱
+**首次出現**：[7.3](lessons/part-7-proxy-protocols/7.3-shadowsocks-aead.md)（Wu et al., USENIX Security 2023）
+**一句話**：第一個 byte 起就是高 entropy 密文；GFW 能用 5 條 entropy + ASCII 規則直接識別；G6 必須通過此測試。
+
+### VMess (legacy + AEAD)
+**中文**：V2Ray 自有 inner protocol
+**所屬層**：L5 應用層加密 proxy
+**首次出現**：[7.5](lessons/part-7-proxy-protocols/7.5-vmess.md)
+**一句話**：UUID + EAuID + AES-GCM header；2020 active-probe 後升級 AEAD；alterID 死；G6 視為「分層 KDF + multi-user」設計教材。
+
+### alterID（VMess legacy 反例）
+**中文**：rotating identifier 集合
+**所屬層**：anti-replay (失敗)
+**首次出現**：[7.5](lessons/part-7-proxy-protocols/7.5-vmess.md)
+**一句話**：每 user N+1 個 HMAC-derived ID 隨機選；server 端 RAM 爆炸 + multi-user lookup O(M×U)；2021 deprecated；G6 採 stateless single-AuthID。
+
+### V2Ray streamSettings
+**中文**：outer transport + outer crypto 抽象
+**所屬層**：proxy architecture
+**首次出現**：[7.6](lessons/part-7-proxy-protocols/7.6-v2ray-transports.md)
+**一句話**：把 outer transport (TCP/TLS/WS/H2/gRPC/QUIC) 與 inner protocol (VMess/VLESS) 解耦；可換代抗審查但每 2-3 年強制升級。
+
+### TLS-in-TLS pattern
+**中文**：嵌套 TLS 識別
+**所屬層**：traffic-analysis attack
+**首次出現**：[7.7](lessons/part-7-proxy-protocols/7.7-trojan.md)（Frolov-Wustrow NDSS 2019）
+**一句話**：outer TLS record size 序列 ≈ inner TLS handshake size 序列 → identifies any "outer TLS + inner TLS" proxy；XTLS-Vision 用 splice 解。
+
+### Trojan
+**中文**：HTTPS-shaped proxy（第 3 代）
+**所屬層**：L5 應用層
+**首次出現**：[7.7](lessons/part-7-proxy-protocols/7.7-trojan.md)（trojan-gfw 2018）
+**一句話**：56-byte SHA224 hex auth + SOCKS5-style request + fallback to nginx；極簡 spec；2024+ 因 TLS-in-TLS 與 cert pinning 衰退。
+
+### Cover Site / Fallback Redirect
+**中文**：偽裝站 / 回退轉發
+**所屬層**：anti-probing 設計
+**首次出現**：[7.7](lessons/part-7-proxy-protocols/7.7-trojan.md)（Trojan 2018, REALITY 2023 升級）
+**一句話**：proxy server 對 auth 失敗的連線**真的轉發到合法 cover service**；fail-indistinguishable 比 fail-uniform 更強。
+
+### VLESS
+**中文**：VMess 的密碼學拔光版
+**所屬層**：L5 應用層
+**首次出現**：[7.8](lessons/part-7-proxy-protocols/7.8-vless.md)（XTLS @RPRX 2020）
+**一句話**：UUID + addons (ProtoBuf) + addr + payload；無 inner crypto, stateless, 0-RTT；強假設 outer = TLS/REALITY；G6 inner 設計 baseline。
+
+### XTLS-Vision
+**中文**：消滅 TLS-in-TLS pattern 的 splice 機制
+**所屬層**：transport-level optimization
+**首次出現**：[7.9](lessons/part-7-proxy-protocols/7.9-xtls-vision.md)（XTLS @RPRX 2022）
+**一句話**：前 5 packet padding 抹平 inner TLS 握手 length，之後切 splice mode（inner app data 不經 outer 加密）；CSCSC pattern 仍未解。
+
+### Splice Mode（zero-copy proxy）
+**中文**：kernel zero-copy forward
+**所屬層**：proxy implementation
+**首次出現**：[7.9](lessons/part-7-proxy-protocols/7.9-xtls-vision.md)
+**一句話**：用 splice(2) syscall 直接把兩個 socket 的 byte stream 串起來，無 user-space copy/crypto；XTLS-Vision 主機制；G6 對 QUIC 內部 stream 也應抄。
+
+### REALITY
+**中文**：借真網站 ServerHello/cert 的第 4 代範式
+**所屬層**：L5+L6 (handshake-level indistinguishability)
+**首次出現**：[7.10](lessons/part-7-proxy-protocols/7.10-reality-threat-model.md)（XTLS @RPRX 2023）
+**一句話**：把 ECDH auth 藏進 ClientHello SessionID，server fork 失敗連線到真站；2026 production SOTA；handshake-level 解，traffic-level 仍 open。
+
+### SpiderX
+**中文**：MITM 後 client 啟動的爬蟲偽裝
+**所屬層**：REALITY 子機制
+**首次出現**：[7.11](lessons/part-7-proxy-protocols/7.11-reality-protocol.md)
+**一句話**：client 收到「無 REALITY HMAC 的真站 cert」（MITM redirect 跡象）→ 啟動 SpiderX 爬幾頁假裝真實 user；自身 fingerprint 仍是已知 limit。
+
+### ShortId（REALITY multi-user）
+**中文**：8-byte 用戶區分 ID
+**所屬層**：REALITY config
+**首次出現**：[7.11](lessons/part-7-proxy-protocols/7.11-reality-protocol.md)
+**一句話**：藏在 SessionID plaintext 內，server O(1) hash lookup 找對應 user；比 VMess multi-user trial decryption 更高效。
+
+### NaïveProxy
+**中文**：用 Chromium TLS stack 規避指紋
+**所屬層**：long-tail proxy
+**首次出現**：[7.13](lessons/part-7-proxy-protocols/7.13-misc-protocols.md)（klzgrad 2019）
+**一句話**：client = Chromium fork → ClientHello 與真 Chrome 一字不差；deployment 門檻高，TLS-in-TLS 仍中招；implementation-level mimicry 典範。
+
+### ShadowTLS (v3)
+**中文**：SS-2022 的 outer obfuscation 標配
+**所屬層**：outer obfuscation wrapper
+**首次出現**：[7.13](lessons/part-7-proxy-protocols/7.13-misc-protocols.md)（@ihciah 2021-2023）
+**一句話**：把 SS-2022 wire 包進真 TLS 1.3 handshake；v3 直接 forward 真站 ClientHello/ServerHello；與 REALITY 並行的兩條 SOTA 路線。
+
+### Inbound / Router / Outbound 三段架構
+**中文**：proxy 軟體標準架構
+**所屬層**：proxy software architecture
+**首次出現**：[7.14](lessons/part-7-proxy-protocols/7.14-xray-source-overview.md)
+**一句話**：xray、sing-box、mihomo 共識架構；inbound 解 wire + 提取 dest，router 純 metadata 決路由，outbound 包 wire 出去；G6 reference impl 必抄。
+
+### Rule-Set / Rule-Provider
+**中文**：路由規則的預編譯 / 動態 fetch
+**所屬層**：proxy routing
+**首次出現**：[7.15](lessons/part-7-proxy-protocols/7.15-singbox-source-overview.md)（sing-box .srs）/ [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（mihomo provider）
+**一句話**：sing-box `.srs` binary trie 高效；mihomo text format 易寫但 lookup 慢；G6 直接整合而非自寫。
+
+### TUN Mode（client-side）
+**中文**：用戶態虛擬網卡接管全流量
+**所屬層**：OS interception
+**首次出現**：[7.15](lessons/part-7-proxy-protocols/7.15-singbox-source-overview.md)（sing-tun）/ [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（mihomo TUN）
+**一句話**：OS 把全流量送 proxy；應用無需配 SOCKS5；system mode（OS NAT）vs gVisor mode（user-space stack）；現代 mobile/desktop 標配。
+
+### Fake-IP（DNS hijack 機制）
+**中文**：DNS-NAT 機制
+**所屬層**：proxy DNS engine
+**首次出現**：[7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（Clash/mihomo）
+**一句話**：proxy hijack DNS，回傳 198.18.0.0/15 偽 IP；TUN 端 IP→domain 還原；解 DNS pollution 但對 IP-direct app / 應用層 DoH 失效。
+
+### Provider Model（client subscription）
+**中文**：proxy/rule 訂閱模式
+**所屬層**：client UX
+**首次出現**：[7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（Clash 創立, mihomo 主導）
+**一句話**：subscription URL 動態 fetch proxy/rule + health-check + auto-fallback；G6 client SDK 必須支援。
+
+### Censorship Resistance 4 代範式
+**中文**：循環演化軌跡
+**所屬層**：學科總結
+**首次出現**：[7.13](lessons/part-7-proxy-protocols/7.13-misc-protocols.md) / [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)
+**一句話**：mimicry → fully-encrypted → HTTPS-shaped → borrow-real (REALITY)；G6 目標是第 5 代 (handshake + traffic 同時解)。
