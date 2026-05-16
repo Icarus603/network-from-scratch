@@ -58,6 +58,78 @@ pub struct BetaClientSession {
     pub connection: quinn::Connection,
     /// The quinn endpoint. Same — held to keep the UDP socket open.
     pub endpoint: quinn::Endpoint,
+    /// Server address — retained so `migrate()` can preserve the
+    /// destination port for the source-port-evasion heuristic
+    /// (USENIX 25 #1) when picking a new local source port.
+    server_addr: SocketAddr,
+}
+
+impl BetaClientSession {
+    /// Trigger a QUIC connection migration — rebinds the local UDP
+    /// socket to a fresh source port and lets quinn negotiate the
+    /// new path with the server (RFC 9000 §9). All in-flight records
+    /// continue without interruption; the session-layer state is
+    /// untouched (same AEAD keys, same Proteus session secrets,
+    /// same channel binding).
+    ///
+    /// ## GFW evasion (USENIX Security '25 #4)
+    ///
+    /// When the GFW detects a forbidden QUIC connection it triggers
+    /// a 180-second 5-tuple drop — every packet on
+    /// `(src_ip, dst_ip, src_port, dst_port)` is dropped for 3 min.
+    /// QUIC connection migration escapes the drop: pick a new
+    /// local source port → new 4-tuple → not in the GFW's drop
+    /// table → packets flow again.
+    ///
+    /// This is **opt-in** for now. Automatic migration on a timer
+    /// would itself be a fingerprint (no legitimate QUIC client
+    /// rebinds periodically). Operators trigger it via the admin
+    /// CLI or on a detected throughput collapse.
+    ///
+    /// Returns the new local socket address on success.
+    pub fn migrate(&mut self) -> std::io::Result<SocketAddr> {
+        // Reuse the same source-port evasion logic: walk down from
+        // dst_port through the [max(1024, dst-7) ..= dst] window,
+        // fall back to ephemeral if all candidates are in use.
+        let dst_port = self.server_addr.port();
+        let new_socket = {
+            let lo = dst_port.saturating_sub(7).max(1024);
+            let mut last_err: Option<std::io::Error> = None;
+            let mut chosen: Option<std::net::UdpSocket> = None;
+            for src in (lo..=dst_port).rev() {
+                let bind: SocketAddr = match self.server_addr {
+                    SocketAddr::V4(_) => format!("0.0.0.0:{src}").parse().unwrap(),
+                    SocketAddr::V6(_) => format!("[::]:{src}").parse().unwrap(),
+                };
+                match std::net::UdpSocket::bind(bind) {
+                    Ok(s) => {
+                        chosen = Some(s);
+                        break;
+                    }
+                    Err(e) => last_err = Some(e),
+                }
+            }
+            // Fallback to ephemeral if no low-source-port slot is free.
+            // We accept this because the alternative is the migration
+            // failing entirely — and even ephemeral migration escapes
+            // the 180-second 5-tuple drop. The source-port evasion is
+            // a best-effort layered on top.
+            if chosen.is_none() {
+                let fallback: SocketAddr = match self.server_addr {
+                    SocketAddr::V4(_) => "0.0.0.0:0".parse().unwrap(),
+                    SocketAddr::V6(_) => "[::]:0".parse().unwrap(),
+                };
+                chosen = Some(std::net::UdpSocket::bind(fallback)?);
+            }
+            let s = chosen.ok_or_else(|| {
+                last_err.unwrap_or_else(|| std::io::Error::other("migrate: no socket bound"))
+            })?;
+            s.set_nonblocking(true)?;
+            s
+        };
+        self.endpoint.rebind(new_socket)?;
+        self.endpoint.local_addr()
+    }
 }
 
 /// Open a β QUIC connection to `target`, run the Proteus handshake,
@@ -279,5 +351,6 @@ pub async fn connect_with_timeout(
         session,
         connection: conn,
         endpoint,
+        server_addr,
     })
 }
