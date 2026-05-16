@@ -15,6 +15,12 @@ pub struct SessionMetrics {
     pub ratchets: AtomicU64,
     pub close_sent: AtomicU64,
     pub close_recv: AtomicU64,
+    /// Heartbeat / cover-traffic cells sent by us (plaintext-flagged
+    /// HEARTBEAT, indistinguishable from a normal cell on the wire).
+    pub heartbeats_sent: AtomicU64,
+    /// Heartbeat cells received and silently consumed (the receiver
+    /// did NOT surface them to the caller of `recv_record`).
+    pub heartbeats_recv: AtomicU64,
 }
 
 impl SessionMetrics {
@@ -50,6 +56,16 @@ impl SessionMetrics {
         self.close_recv.fetch_add(1, Ordering::Relaxed);
     }
 
+    /// A heartbeat cell was emitted on the send side.
+    pub fn record_heartbeat_sent(&self) {
+        self.heartbeats_sent.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A heartbeat cell was received and silently consumed.
+    pub fn record_heartbeat_recv(&self) {
+        self.heartbeats_recv.fetch_add(1, Ordering::Relaxed);
+    }
+
     /// Snapshot all counters into a plain struct.
     #[must_use]
     pub fn snapshot(&self) -> SessionMetricsSnapshot {
@@ -62,6 +78,8 @@ impl SessionMetrics {
             ratchets: self.ratchets.load(Ordering::Relaxed),
             close_sent: self.close_sent.load(Ordering::Relaxed),
             close_recv: self.close_recv.load(Ordering::Relaxed),
+            heartbeats_sent: self.heartbeats_sent.load(Ordering::Relaxed),
+            heartbeats_recv: self.heartbeats_recv.load(Ordering::Relaxed),
         }
     }
 }
@@ -117,6 +135,8 @@ pub struct SessionMetricsSnapshot {
     pub ratchets: u64,
     pub close_sent: u64,
     pub close_recv: u64,
+    pub heartbeats_sent: u64,
+    pub heartbeats_recv: u64,
 }
 
 /// Aggregate metrics across multiple sessions, e.g. on the server.
@@ -366,6 +386,8 @@ mod tests {
             ratchets: 0,
             close_sent: 0,
             close_recv: 0,
+            heartbeats_sent: 0,
+            heartbeats_recv: 0,
         };
         server.merge_session(&session);
         server.merge_session(&session);

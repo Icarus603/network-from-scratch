@@ -118,6 +118,21 @@ const DH_RATCHET_LABEL: &[u8] = b"proteus dh-ratchet v1";
 /// per-cell chunk size is 65 531 bytes — far below 4 GiB).
 const CONTINUATION_SENTINEL: u32 = 0xffff_ffff;
 
+/// Sentinel placed in a cell's 4-byte length prefix to mark a
+/// heartbeat / cover-traffic cell. The receiver silently consumes
+/// these and does NOT surface them to the application.
+///
+/// Wire indistinguishability: same record-type byte (`0x13`), same
+/// total wire length (`pad_quantum + 16`), same AEAD key + nonce
+/// scheme as a real data cell. A passive observer counting cells
+/// per-second sees a uniform stream and cannot tell active bulk
+/// transfer apart from interactive RPC apart from pure cover.
+///
+/// `0xffff_fffe` chosen for symmetry with `CONTINUATION_SENTINEL`
+/// (one below the max u32 value), and because no legitimate payload
+/// length can match it (max chunk_max is well under 65 KiB).
+const HEARTBEAT_SENTINEL: u32 = 0xffff_fffe;
+
 use crate::error::{AlphaError, AlphaResult};
 use crate::metrics::SessionMetrics;
 
@@ -475,6 +490,58 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         Ok(())
     }
 
+    /// Send a heartbeat / cover-traffic cell. Requires `pad_quantum > 0`
+    /// (cell mode). On the wire this is byte-indistinguishable from a
+    /// normal data cell: same record-type byte (`0x13` =
+    /// `RECORD_DATA_PADDED`), same total length (`pad_quantum + 16`
+    /// bytes ciphertext), same AEAD key + nonce progression. Only the
+    /// plaintext-after-decrypt length prefix distinguishes it — and
+    /// only the legitimate session endpoints can decrypt.
+    ///
+    /// Threat model: a passive observer (DPI / ML classifier) measuring
+    /// the per-second cell arrival rate sees a uniform stream. They
+    /// cannot distinguish:
+    ///   - active bulk transfer (every cell carries data)
+    ///   - idle session being kept alive by heartbeats
+    ///   - interactive RPC at low cells/sec
+    ///   - pure cover traffic with no real payload
+    ///
+    /// Returns `Err(AlphaError::Closed)` if `pad_quantum == 0` — cover
+    /// traffic in non-cell mode would be a distinguishable record type
+    /// and so is disallowed.
+    pub async fn send_heartbeat(&mut self) -> AlphaResult<()> {
+        if self.pad_quantum == 0 {
+            return Err(AlphaError::Closed);
+        }
+        self.ensure_ratchet().await?;
+
+        let quantum = self.pad_quantum as usize;
+        let mut pt_buf = vec![0u8; quantum];
+        pt_buf[..4].copy_from_slice(&HEARTBEAT_SENTINEL.to_be_bytes());
+        // The rest is zero-pad (same shape as a terminal cell with
+        // real_len=0, but the sentinel tells the receiver to drop it
+        // silently instead of returning Ok(Some(empty))).
+
+        let combined = self.combined();
+        let aad = combined.to_be_bytes();
+        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
+        let frame = alpha::encode_record(alpha::RECORD_DATA_PADDED, &ct);
+        self.write.write_all(&frame).await?;
+        // Don't flush here — the caller drives flush cadence
+        // independently. A heartbeat task that flushes every cell would
+        // emit smaller TCP segments than a real bulk sender, which
+        // itself is a fingerprint.
+
+        self.seqnum = self.seqnum.saturating_add(1);
+        self.records_in_epoch = self.records_in_epoch.saturating_add(1);
+        // bytes_in_epoch is NOT incremented (no application bytes) —
+        // heartbeats should not consume the ratchet byte budget. But
+        // records_in_epoch IS incremented so the record-count budget
+        // still triggers correctly.
+        self.metrics.record_heartbeat_sent();
+        Ok(())
+    }
+
     /// Send a CLOSE record, flush, then shut down the write half.
     ///
     /// `error_code` follows spec §26.1. `reason` is opaque-bytes (truncated
@@ -627,6 +694,20 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                         u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
                                     self.next_seqnum = self.next_seqnum.saturating_add(1);
 
+                                    if len_prefix == HEARTBEAT_SENTINEL {
+                                        // Cover-traffic cell. The peer
+                                        // emitted this purely to keep the
+                                        // wire-level cell-arrival rate
+                                        // indistinguishable across active /
+                                        // idle / RPC sessions. Drop it
+                                        // silently — do NOT surface to the
+                                        // caller, do NOT touch `pending`
+                                        // (heartbeats sit between data
+                                        // cells but never interrupt a
+                                        // continuation chain).
+                                        self.metrics.record_heartbeat_recv();
+                                        continue;
+                                    }
                                     if len_prefix == CONTINUATION_SENTINEL {
                                         // Continuation cell: append the full
                                         // post-prefix region to `pending` and
