@@ -64,6 +64,13 @@ pub struct ServerConfig {
     /// bits). 0 = disabled. Bump under DoS alert. spec §8.3.
     #[serde(default)]
     pub pow_difficulty: Option<u8>,
+
+    /// SIGTERM/SIGINT drain window in seconds. After receiving the
+    /// signal the server stops accepting new connections and waits
+    /// this long for in-flight sessions to flush before exiting.
+    /// Default 30s; systemd's `TimeoutStopSec` should be ≥ this + 5s.
+    #[serde(default)]
+    pub drain_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

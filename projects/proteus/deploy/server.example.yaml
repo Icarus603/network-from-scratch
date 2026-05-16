@@ -24,6 +24,12 @@ handshake_deadline_secs: 15
 # TCP keepalive interval (idle-session reaper). Default 30s.
 tcp_keepalive_secs: 30
 
+# SIGTERM/SIGINT drain window. After the signal the server stops
+# accepting new connections and waits this long for in-flight sessions
+# to flush before exiting. Match `TimeoutStopSec` in the systemd unit
+# (set to drain_secs + 5s for a safety margin). Default 30s.
+drain_secs: 30
+
 # Anti-DoS proof-of-work (spec §8.3). Difficulty in leading-zero bits
 # of SHA-256(server_pq_fingerprint || client_nonce || solution). 0 =
 # disabled. Sensible production values:

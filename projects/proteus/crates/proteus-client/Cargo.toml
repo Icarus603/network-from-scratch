@@ -21,7 +21,7 @@ ed25519-dalek.workspace = true
 rand_core = { workspace = true, features = ["getrandom"] }
 thiserror.workspace = true
 
-tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"
@@ -29,6 +29,13 @@ base64 = "0.22"
 clap = { version = "4", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+proteus-spec = { path = "../proteus-spec" }
+proteus-crypto = { path = "../proteus-crypto" }
+proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+rand_core = { workspace = true, features = ["getrandom"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 [lints.rust]
 unsafe_code = "forbid"

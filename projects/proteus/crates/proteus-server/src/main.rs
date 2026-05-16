@@ -259,11 +259,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         }
         () = shutdown => {
-            info!("draining outstanding sessions for up to 30s");
-            // tokio::spawn'd session tasks are detached; we just give
-            // them a window to flush. Production deployment can
-            // increase this via systemd TimeoutStopSec.
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let drain_secs = cfg.drain_secs.unwrap_or(30);
+            info!(secs = drain_secs, "draining outstanding sessions");
+            // tokio::spawn'd session tasks are detached; we give them
+            // a window to flush. Production deployment should set
+            // systemd's `TimeoutStopSec` to drain_secs + 5s of margin.
+            tokio::time::sleep(std::time::Duration::from_secs(drain_secs)).await;
             info!("proteus-server exiting");
         }
     }

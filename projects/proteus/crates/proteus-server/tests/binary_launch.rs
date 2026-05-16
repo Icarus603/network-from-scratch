@@ -99,6 +99,7 @@ async fn binary_run_handshake_and_relay() {
         &server_yaml,
         format!(
             "listen_alpha: \"127.0.0.1:{port}\"\n\
+             drain_secs: 1\n\
              keys:\n  \
                  mlkem_pk: {keys_dir}/server_lt.mlkem768.pk\n  \
                  mlkem_sk: {keys_dir}/server_lt.mlkem768.sk\n  \
@@ -202,7 +203,8 @@ async fn binary_run_handshake_and_relay() {
     //    binary and verify it exits within the 30 s drain window.
     let _ = timeout(STEP, session.sender.shutdown()).await;
     send_sigterm(&server);
-    let wait_status = wait_with_timeout(&mut server, Duration::from_secs(35));
+    // drain_secs: 1 in yaml → server should exit within 5s.
+    let wait_status = wait_with_timeout(&mut server, Duration::from_secs(5));
     assert!(wait_status.is_some(), "server failed to drain on SIGTERM");
 
     let _ = std::fs::remove_dir_all(&tmp);
