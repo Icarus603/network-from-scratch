@@ -24,12 +24,14 @@ use proteus_transport_alpha::server::{self, ServerCtx};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-mod config;
 mod gencert;
 mod keygen;
-mod relay;
+
+use proteus_server::config;
+use proteus_server::relay;
 
 use config::{load_server_keys, ServerConfig};
+use proteus_server::startup;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Proteus α-profile server")]
@@ -257,6 +259,18 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             None
         }
     };
+
+    // One canonical startup-config banner so operators can verify
+    // their YAML edit took effect via a single `journalctl` grep.
+    // Emitted before listener bind so the banner is in the journal
+    // even if bind fails (e.g. EADDRINUSE).
+    let summary = startup::StartupSummary::from_config(&cfg);
+    for line in summary.to_string().lines() {
+        info!(target: "proteus_server::startup", "{line}");
+    }
+    for w in summary.warnings() {
+        warn!(target: "proteus_server::startup", "{w}");
+    }
 
     let listener =
         proteus_transport_alpha::server::bind_listener_with_reuseaddr(&cfg.listen_alpha).await?;
