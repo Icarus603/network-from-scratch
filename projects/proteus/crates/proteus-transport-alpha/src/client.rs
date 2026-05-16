@@ -390,6 +390,27 @@ pub fn fresh_shape_params<R: rand_core::RngCore>(rng: &mut R) -> (u32, u16) {
     (shape_seed, cover_profile_id)
 }
 
+fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(data);
+    let out = mac.finalize().into_bytes();
+    let mut tag = [0u8; 32];
+    tag.copy_from_slice(&out);
+    tag
+}
+
+fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    use subtle::ConstantTimeEq;
+    bool::from(a.ct_eq(b))
+}
+
+// Glue: pull in hmac/sha2 here even though they're only used by helpers.
+use hmac as _;
+use sha2 as _;
+use subtle as _;
+
 #[cfg(test)]
 mod tests {
     use super::fresh_shape_params;
@@ -434,24 +455,3 @@ mod tests {
         );
     }
 }
-
-fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
-    use hmac::{Hmac, Mac};
-    use sha2::Sha256;
-    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
-    mac.update(data);
-    let out = mac.finalize().into_bytes();
-    let mut tag = [0u8; 32];
-    tag.copy_from_slice(&out);
-    tag
-}
-
-fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    use subtle::ConstantTimeEq;
-    bool::from(a.ct_eq(b))
-}
-
-// Glue: pull in hmac/sha2 here even though they're only used by helpers.
-use hmac as _;
-use sha2 as _;
-use subtle as _;

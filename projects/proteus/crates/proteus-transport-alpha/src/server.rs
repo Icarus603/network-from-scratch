@@ -517,6 +517,47 @@ impl ServerCtx {
         }
     }
 
+    /// Hot-swap the per-IP rate-limit parameters. Returns `true` if a
+    /// limiter is configured and the swap took effect, `false` if no
+    /// limiter is installed (in which case the caller must rebuild the
+    /// ServerCtx — which costs a binary restart). Called from the
+    /// SIGHUP handler when the operator edits `rate_limit` in
+    /// `server.yaml`. Bucket state is preserved across the swap, so
+    /// in-flight clients are not penalized.
+    pub fn reload_rate_limit(&self, capacity: f64, refill_per_sec: f64) -> bool {
+        match &self.rate_limiter {
+            Some(rl) => {
+                rl.set_params(capacity, refill_per_sec);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Hot-swap the per-user rate-limit parameters. Same semantics as
+    /// `reload_rate_limit` for the user-id-keyed limiter.
+    pub fn reload_user_rate_limit(&self, capacity: f64, refill_per_sec: f64) -> bool {
+        match &self.user_limiter {
+            Some(l) => {
+                l.set_params(capacity, refill_per_sec);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Hot-swap the global handshake-budget parameters. Same semantics
+    /// as the other reload helpers.
+    pub fn reload_handshake_budget(&self, capacity: f64, refill_per_sec: f64) -> bool {
+        match &self.handshake_budget {
+            Some(b) => {
+                b.set_params(capacity, refill_per_sec);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Vacuum idle entries from the rate limiter (caller-driven; the
     /// limiter itself doesn't spawn background tasks).
     pub fn vacuum_rate_limit(&self) {

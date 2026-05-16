@@ -33,9 +33,17 @@ struct Bucket {
 }
 
 /// Per-IP token-bucket rate limiter.
+///
+/// `capacity` and `refill_per_sec` are stored as `AtomicU64` (raw f64
+/// bits) so an operator-triggered SIGHUP can swap them at runtime via
+/// [`Self::set_params`] without taking the bucket-state mutex or
+/// disturbing the existing per-IP token counts. The hot-path `check()`
+/// reloads both values via `Relaxed` atomics — safe because a momentary
+/// mismatch (a check that sees old capacity + new refill) is bounded
+/// to one bucket-tick and self-corrects on the next call.
 pub struct RateLimiter {
-    capacity: f64,
-    refill_per_sec: f64,
+    capacity: AtomicU64,
+    refill_per_sec: AtomicU64,
     buckets: Mutex<HashMap<IpAddr, Bucket>>,
     /// Cap on how many distinct IPs we track. Prevents memory blow-up
     /// under random-source-IP flood (which spoofed UDP could do but
@@ -50,19 +58,47 @@ impl RateLimiter {
     #[must_use]
     pub fn new(capacity: f64, refill_per_sec: f64) -> Self {
         Self {
-            capacity,
-            refill_per_sec,
+            capacity: AtomicU64::new(capacity.to_bits()),
+            refill_per_sec: AtomicU64::new(refill_per_sec.to_bits()),
             buckets: Mutex::new(HashMap::new()),
             max_buckets: 1 << 16, // 64 K distinct source IPs
         }
     }
 
+    /// Hot-swap the bucket parameters. Existing per-IP token counts are
+    /// preserved; the new rate takes effect on the next `check()` call.
+    /// Called by the server binary's SIGHUP handler when the operator
+    /// edits `rate_limit` in `server.yaml`.
+    pub fn set_params(&self, capacity: f64, refill_per_sec: f64) {
+        // Order: write capacity first so a concurrent check() that
+        // sees the new refill cannot temporarily exceed the old
+        // capacity. Both relaxed is fine — the worst case is a single
+        // tick at the old rate, which is operationally invisible.
+        self.capacity.store(capacity.to_bits(), Ordering::Relaxed);
+        self.refill_per_sec
+            .store(refill_per_sec.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Current burst capacity.
+    #[must_use]
+    pub fn capacity(&self) -> f64 {
+        f64::from_bits(self.capacity.load(Ordering::Relaxed))
+    }
+
+    /// Current refill rate (tokens per second).
+    #[must_use]
+    pub fn refill_per_sec(&self) -> f64 {
+        f64::from_bits(self.refill_per_sec.load(Ordering::Relaxed))
+    }
+
     /// Try to consume one token for `ip`. Returns `true` if allowed.
     pub fn check(&self, ip: IpAddr) -> bool {
+        let capacity = self.capacity();
+        let refill = self.refill_per_sec();
         let mut buckets = self.buckets.lock().expect("rate-limit mutex");
         if buckets.len() >= self.max_buckets {
             // Garbage-collect: drop full buckets (idle senders).
-            buckets.retain(|_, b| b.tokens < self.capacity);
+            buckets.retain(|_, b| b.tokens < capacity);
             if buckets.len() >= self.max_buckets {
                 // Still full — fall back to deny everything.
                 return false;
@@ -70,11 +106,11 @@ impl RateLimiter {
         }
         let now = Instant::now();
         let entry = buckets.entry(ip).or_insert(Bucket {
-            tokens: self.capacity,
+            tokens: capacity,
             last_refill: now,
         });
         let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
-        entry.tokens = (entry.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        entry.tokens = (entry.tokens + elapsed * refill).min(capacity);
         entry.last_refill = now;
         if entry.tokens >= 1.0 {
             entry.tokens -= 1.0;
@@ -89,9 +125,9 @@ impl RateLimiter {
     /// memory.
     pub fn vacuum(&self) {
         let now = Instant::now();
+        let cap = self.capacity();
+        let refill = self.refill_per_sec();
         let mut buckets = self.buckets.lock().expect("rate-limit mutex");
-        let cap = self.capacity;
-        let refill = self.refill_per_sec;
         buckets.retain(|_, b| {
             let elapsed = now.duration_since(b.last_refill).as_secs_f64();
             let projected_tokens = (b.tokens + elapsed * refill).min(cap);
@@ -120,8 +156,8 @@ impl RateLimiter {
 ///   as the global `max_handshakes_per_minute` cap. The unit-keyed
 ///   variant amortizes to one HashMap entry forever.
 pub struct KeyedRateLimiter<K: Hash + Eq + Clone> {
-    capacity: f64,
-    refill_per_sec: f64,
+    capacity: AtomicU64,
+    refill_per_sec: AtomicU64,
     buckets: Mutex<HashMap<K, Bucket>>,
     max_buckets: usize,
     /// Monotonic counter of `check()` calls that returned `false`.
@@ -136,12 +172,32 @@ impl<K: Hash + Eq + Clone> KeyedRateLimiter<K> {
     #[must_use]
     pub fn new(capacity: f64, refill_per_sec: f64, max_buckets: usize) -> Self {
         Self {
-            capacity,
-            refill_per_sec,
+            capacity: AtomicU64::new(capacity.to_bits()),
+            refill_per_sec: AtomicU64::new(refill_per_sec.to_bits()),
             buckets: Mutex::new(HashMap::new()),
             max_buckets,
             rejections: AtomicU64::new(0),
         }
+    }
+
+    /// Hot-swap the bucket parameters. See [`RateLimiter::set_params`]
+    /// for the orderliness story.
+    pub fn set_params(&self, capacity: f64, refill_per_sec: f64) {
+        self.capacity.store(capacity.to_bits(), Ordering::Relaxed);
+        self.refill_per_sec
+            .store(refill_per_sec.to_bits(), Ordering::Relaxed);
+    }
+
+    /// Current burst capacity.
+    #[must_use]
+    pub fn capacity(&self) -> f64 {
+        f64::from_bits(self.capacity.load(Ordering::Relaxed))
+    }
+
+    /// Current refill rate (tokens per second).
+    #[must_use]
+    pub fn refill_per_sec(&self) -> f64 {
+        f64::from_bits(self.refill_per_sec.load(Ordering::Relaxed))
     }
 
     /// Try to consume one token for `key`. Returns `true` if allowed.
@@ -156,21 +212,23 @@ impl<K: Hash + Eq + Clone> KeyedRateLimiter<K> {
     }
 
     fn check_inner(&self, key: &K) -> bool {
+        let capacity = self.capacity();
+        let refill = self.refill_per_sec();
         let mut buckets = self.buckets.lock().expect("keyed rate-limit mutex");
         if buckets.len() >= self.max_buckets && !buckets.contains_key(key) {
             // GC: drop fully-refilled idle buckets first.
-            buckets.retain(|_, b| b.tokens < self.capacity);
+            buckets.retain(|_, b| b.tokens < capacity);
             if buckets.len() >= self.max_buckets {
                 return false;
             }
         }
         let now = Instant::now();
         let entry = buckets.entry(key.clone()).or_insert(Bucket {
-            tokens: self.capacity,
+            tokens: capacity,
             last_refill: now,
         });
         let elapsed = now.duration_since(entry.last_refill).as_secs_f64();
-        entry.tokens = (entry.tokens + elapsed * self.refill_per_sec).min(self.capacity);
+        entry.tokens = (entry.tokens + elapsed * refill).min(capacity);
         entry.last_refill = now;
         if entry.tokens >= 1.0 {
             entry.tokens -= 1.0;
@@ -183,9 +241,9 @@ impl<K: Hash + Eq + Clone> KeyedRateLimiter<K> {
     /// Drop entries that have refilled to capacity (idle).
     pub fn vacuum(&self) {
         let now = Instant::now();
+        let cap = self.capacity();
+        let refill = self.refill_per_sec();
         let mut buckets = self.buckets.lock().expect("keyed rate-limit mutex");
-        let cap = self.capacity;
-        let refill = self.refill_per_sec;
         buckets.retain(|_, b| {
             let elapsed = now.duration_since(b.last_refill).as_secs_f64();
             let projected_tokens = (b.tokens + elapsed * refill).min(cap);
@@ -359,5 +417,92 @@ mod tests {
         assert!(!lim.check(&k));
         thread::sleep(Duration::from_millis(50));
         assert!(lim.check(&k));
+    }
+
+    // ----- Hot-swap params (SIGHUP reload) -----
+
+    #[test]
+    fn set_params_changes_capacity_for_new_buckets() {
+        let lim = RateLimiter::new(1.0, 0.001);
+        assert!(lim.check(ip("203.0.113.30")));
+        assert!(!lim.check(ip("203.0.113.30"))); // burst=1 exhausted
+
+        // Operator pushes burst up to 5.0 via SIGHUP.
+        lim.set_params(5.0, 0.001);
+        // A fresh IP gets the new capacity.
+        let fresh = ip("203.0.113.31");
+        for _ in 0..5 {
+            assert!(lim.check(fresh));
+        }
+        assert!(!lim.check(fresh));
+        assert!((lim.capacity() - 5.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn set_params_does_not_punish_in_flight_clients() {
+        // Critical anti-incident property: tightening the limit must
+        // not retroactively bankrupt an existing well-behaved client.
+        let lim = RateLimiter::new(10.0, 0.001);
+        let ip_a = ip("203.0.113.40");
+        // Alice has consumed 5 tokens; she has 5 left.
+        for _ in 0..5 {
+            assert!(lim.check(ip_a));
+        }
+        // Operator squeezes the dial down to burst=2, refill=0.001.
+        lim.set_params(2.0, 0.001);
+        // Alice still has 5 tokens — should still pass on next check
+        // (her balance is preserved across the swap). Then she's
+        // capped to 2 because subsequent refills clamp to new cap.
+        // First check: balance was 5, consumes 1 → 4 left (clamped by
+        // min during refill, which lowers to 2 immediately).
+        // The semantics in code: tokens = min(tokens + elapsed*refill, cap),
+        // so the next call clamps to the new cap=2, then consumes.
+        let first = lim.check(ip_a);
+        assert!(
+            first,
+            "in-flight client must not be denied on the swap-tick"
+        );
+    }
+
+    #[test]
+    fn set_params_keyed_changes_for_new_keys() {
+        let lim: KeyedRateLimiter<u8> = KeyedRateLimiter::new(1.0, 0.001, 1024);
+        assert!(lim.check(&1));
+        assert!(!lim.check(&1));
+        lim.set_params(3.0, 0.001);
+        for _ in 0..3 {
+            assert!(lim.check(&2));
+        }
+        assert!(!lim.check(&2));
+    }
+
+    #[test]
+    fn set_params_concurrent_read_is_consistent() {
+        // Hammering set_params from one thread while another thread
+        // reads via check() must never panic, deadlock, or wedge.
+        use std::sync::Arc;
+        let lim = Arc::new(RateLimiter::new(10.0, 1.0));
+        let lim_writer = Arc::clone(&lim);
+        let writer = thread::spawn(move || {
+            for i in 0..1000 {
+                let burst = ((i % 50) + 1) as f64;
+                lim_writer.set_params(burst, burst / 10.0);
+            }
+        });
+        let lim_reader = Arc::clone(&lim);
+        let reader = thread::spawn(move || {
+            let mut total = 0;
+            for i in 0..1000 {
+                let ip_v: IpAddr = format!("198.51.100.{}", i % 250).parse().unwrap();
+                if lim_reader.check(ip_v) {
+                    total += 1;
+                }
+            }
+            total
+        });
+        writer.join().unwrap();
+        // We don't assert a specific count — just that the reader
+        // completed without panicking.
+        let _ = reader.join().unwrap();
     }
 }

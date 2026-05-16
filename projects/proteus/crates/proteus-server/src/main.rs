@@ -483,22 +483,37 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
 
-    // SIGHUP — reload mutable runtime state from disk. Two independent
-    // reloads share this signal:
+    // SIGHUP — reload mutable runtime state from disk. The following
+    // independent reloads share this signal:
     //
     // 1. TLS cert chain + private key (certbot deploy-hooks after
     //    Let's Encrypt renewal).
     // 2. CIDR firewall allow/deny rules (the operator banned a fresh
     //    abusive netblock in server.yaml).
+    // 3. Rate-limit parameters: per-IP, per-user, and global
+    //    handshake-budget burst/refill. Previously these required a
+    //    binary restart, which tore down every in-flight session.
+    //    Hot-reload preserves bucket state so already-good clients
+    //    are not punished by the operator turning the dial.
     //
     // Each reload is independent: a parse failure on one does NOT
-    // skip the other. Both leave the existing in-memory state intact
-    // on failure so a typo can't brick the running process.
+    // skip the others. Each leaves the existing in-memory state
+    // intact on failure so a typo can't brick the running process.
+    //
+    // Hot-reload can only re-configure limiters that were INSTALLED
+    // at startup (capacity > 0, refill > 0). Adding or removing a
+    // limiter entirely still requires a restart, because the
+    // ServerCtx field is `Option<...>` set at construction. The
+    // workaround is to install a near-infinite limiter at boot
+    // (e.g. burst=1e6, refill=1e6) and tighten it via SIGHUP — this
+    // matches the operator's typical workflow (start lax, tighten
+    // under attack).
     {
         let reloadable_acceptor = reloadable_acceptor.clone();
         let firewall_handle = firewall_handle.clone();
         let config_path = config_path.to_path_buf();
         let tls_cfg_path = cfg.tls.clone();
+        let ctx_for_reload = Arc::clone(&ctx);
         tokio::spawn(async move {
             let mut sighup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -539,29 +554,81 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     }
                 }
 
-                // ----- 2. Firewall reload (re-read full YAML so the
-                //          new rules come from the operator's edit) -----
+                // ----- 2. Firewall + rate-limit reload (re-read full
+                //          YAML so the new rules come from the
+                //          operator's edit) -----
                 match config::ServerConfig::load(&config_path).await {
-                    Ok(fresh_cfg) => match fresh_cfg.firewall.as_ref() {
-                        Some(fw_cfg) => match build_firewall_from_cfg(fw_cfg) {
-                            Ok(new_fw) => {
-                                let rules = new_fw.rule_count();
-                                firewall_handle.reload(new_fw);
-                                info!(rules, "firewall rules reloaded");
+                    Ok(fresh_cfg) => {
+                        // 2a. Firewall.
+                        match fresh_cfg.firewall.as_ref() {
+                            Some(fw_cfg) => match build_firewall_from_cfg(fw_cfg) {
+                                Ok(new_fw) => {
+                                    let rules = new_fw.rule_count();
+                                    firewall_handle.reload(new_fw);
+                                    info!(rules, "firewall rules reloaded");
+                                }
+                                Err(e) => {
+                                    error!(error = %e, "firewall reload: parse error; keeping old rules");
+                                }
+                            },
+                            None => {
+                                // Config now has no firewall block — clear the rules.
+                                firewall_handle
+                                    .reload(proteus_transport_alpha::firewall::Firewall::new());
+                                info!("firewall block removed from config; rules cleared");
                             }
-                            Err(e) => {
-                                error!(error = %e, "firewall reload: parse error; keeping old rules");
-                            }
-                        },
-                        None => {
-                            // Config now has no firewall block — clear the rules.
-                            firewall_handle
-                                .reload(proteus_transport_alpha::firewall::Firewall::new());
-                            info!("firewall block removed from config; rules cleared");
                         }
-                    },
+
+                        // 2b. Per-IP rate-limit hot-swap.
+                        if let Some(rl) = fresh_cfg.rate_limit.as_ref() {
+                            if ctx_for_reload.reload_rate_limit(rl.burst, rl.refill_per_sec) {
+                                info!(
+                                    burst = rl.burst,
+                                    refill = rl.refill_per_sec,
+                                    "per-IP rate limit hot-reloaded"
+                                );
+                            } else {
+                                warn!(
+                                    "rate_limit edit ignored — no per-IP limiter was \
+                                     installed at startup. Restart the binary to install one."
+                                );
+                            }
+                        }
+
+                        // 2c. Per-user rate-limit hot-swap.
+                        if let Some(u) = fresh_cfg.user_rate_limit.as_ref() {
+                            if ctx_for_reload.reload_user_rate_limit(u.burst, u.refill_per_sec) {
+                                info!(
+                                    burst = u.burst,
+                                    refill = u.refill_per_sec,
+                                    "per-user rate limit hot-reloaded"
+                                );
+                            } else {
+                                warn!(
+                                    "user_rate_limit edit ignored — no per-user limiter \
+                                     was installed at startup. Restart to install one."
+                                );
+                            }
+                        }
+
+                        // 2d. Global handshake-budget hot-swap.
+                        if let Some(b) = fresh_cfg.handshake_budget.as_ref() {
+                            if ctx_for_reload.reload_handshake_budget(b.burst, b.refill_per_sec) {
+                                info!(
+                                    burst = b.burst,
+                                    refill = b.refill_per_sec,
+                                    "global handshake budget hot-reloaded"
+                                );
+                            } else {
+                                warn!(
+                                    "handshake_budget edit ignored — no global limiter \
+                                     was installed at startup. Restart to install one."
+                                );
+                            }
+                        }
+                    }
                     Err(e) => {
-                        error!(error = %e, "firewall reload: config re-read failed; keeping old rules");
+                        error!(error = %e, "config re-read failed; keeping old firewall + rate-limit state");
                     }
                 }
             }
