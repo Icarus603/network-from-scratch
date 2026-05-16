@@ -15,21 +15,27 @@
 //! stream bidirectionally. Subsequent client records are forwarded to the
 //! upstream; upstream replies are wrapped in records back to the client.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use proteus_transport_alpha::metrics::ServerMetrics;
 use proteus_transport_alpha::session::AlphaSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 /// Hold the per-session knobs the relay needs from the binary.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct RelayConfig {
     /// Per-direction idle timeout. `None` = no timeout (default).
     /// When set, a session that goes this long without any record
     /// arriving on a given direction is terminated and its FD
     /// released.
     pub idle_timeout: Option<Duration>,
+    /// Optional server-wide metrics handle so the relay can increment
+    /// `session_idle_reaped` when the timeout fires. The binary wires
+    /// this in; standalone tests may leave it as None.
+    pub metrics: Option<Arc<ServerMetrics>>,
 }
 
 pub async fn handle_session<R, W>(
@@ -40,6 +46,7 @@ where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
+    let metrics = cfg.metrics.clone();
     let AlphaSession {
         mut sender,
         mut receiver,
@@ -88,6 +95,7 @@ where
     // window shuts itself down (which causes the joined task to
     // finish, releasing the session's FDs and crypto state).
     let idle = cfg.idle_timeout;
+    let metrics_c2u = metrics.clone();
     let client_to_upstream = async {
         loop {
             let recv = receiver.recv_record();
@@ -96,6 +104,10 @@ where
                     Ok(r) => r,
                     Err(_) => {
                         warn!(idle_secs = d.as_secs(), "client→upstream idle timeout");
+                        if let Some(m) = metrics_c2u.as_ref() {
+                            m.session_idle_reaped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         break;
                     }
                 },
@@ -113,6 +125,7 @@ where
         }
         let _ = up_w.shutdown().await;
     };
+    let metrics_u2c = metrics.clone();
     let upstream_to_client = async {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -123,6 +136,10 @@ where
                     Ok(Ok(n)) => n,
                     Err(_) => {
                         warn!(idle_secs = d.as_secs(), "upstream→client idle timeout");
+                        if let Some(m) = metrics_u2c.as_ref() {
+                            m.session_idle_reaped
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
                         break;
                     }
                 },

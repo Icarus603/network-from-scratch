@@ -300,6 +300,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             0 => None,
             n => Some(std::time::Duration::from_secs(n)),
         },
+        metrics: Some(Arc::clone(&metrics)),
     };
     if let Some(d) = relay_cfg.idle_timeout {
         info!(secs = d.as_secs(), "session idle timeout configured");
@@ -311,10 +312,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
     > = {
         let metrics_tcp = Arc::clone(&metrics);
-        let relay_cfg_tcp = relay_cfg;
+        let relay_cfg_tcp = relay_cfg.clone();
         let on_session_tcp = move |session: proteus_transport_alpha::session::AlphaSession| {
             let metrics = Arc::clone(&metrics_tcp);
-            let relay_cfg = relay_cfg_tcp;
+            let relay_cfg = relay_cfg_tcp.clone();
             async move {
                 metrics
                     .sessions_accepted
@@ -322,30 +323,30 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 metrics
                     .handshakes_succeeded
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                metrics
-                    .in_flight_sessions
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // RAII guard: increments in_flight_sessions; decrements
+                // AND merges per-session totals on drop, even if the
+                // handler future panics.
                 let snap = session.metrics.snapshot();
+                let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
+                    Arc::clone(&metrics),
+                    snap,
+                );
                 if let Err(e) = relay::handle_session(session, relay_cfg).await {
                     warn!(error = %e, "session terminated");
                 }
-                metrics.merge_session(&snap);
-                metrics
-                    .in_flight_sessions
-                    .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
         match reloadable_acceptor.clone() {
             Some(acceptor) => {
                 let metrics = Arc::clone(&metrics);
-                let relay_cfg_tls = relay_cfg;
+                let relay_cfg_tls = relay_cfg.clone();
                 let on_session_tls =
                     move |session: proteus_transport_alpha::session::AlphaSession<
                         tokio::io::ReadHalf<proteus_transport_alpha::tls::ServerStream>,
                         tokio::io::WriteHalf<proteus_transport_alpha::tls::ServerStream>,
                     >| {
                         let metrics = Arc::clone(&metrics);
-                        let relay_cfg = relay_cfg_tls;
+                        let relay_cfg = relay_cfg_tls.clone();
                         async move {
                             metrics
                                 .sessions_accepted
@@ -353,17 +354,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            metrics
-                                .in_flight_sessions
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let snap = session.metrics.snapshot();
+                            let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
+                                Arc::clone(&metrics),
+                                snap,
+                            );
                             if let Err(e) = relay::handle_session(session, relay_cfg).await {
                                 warn!(error = %e, "TLS session terminated");
                             }
-                            metrics.merge_session(&snap);
-                            metrics
-                                .in_flight_sessions
-                                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     };
                 Box::pin(server::serve_tls_reloadable(

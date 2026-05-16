@@ -2,6 +2,7 @@
 //! can scrape for Prometheus-style exposition.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// Per-session metrics. All counters are monotonically increasing.
 #[derive(Default, Debug)]
@@ -65,6 +66,46 @@ impl SessionMetrics {
     }
 }
 
+/// RAII guard: increment `in_flight_sessions` on construct, decrement
+/// on drop. Holds a reference to a session's [`SessionMetricsSnapshot`]
+/// so the per-session totals are merged into the server-level counters
+/// on drop, **even if the handler panics**.
+///
+/// Previously the binary did this with explicit `fetch_add` /
+/// `fetch_sub` pairs around `relay::handle_session(...).await`. That
+/// pattern leaks the gauge upward forever if the handler ever panics
+/// (the decrement is unreachable). With a guard, the drop runs as
+/// part of panic unwinding, so the counter stays honest.
+pub struct InFlightGuard {
+    server: Arc<ServerMetrics>,
+    /// Snapshot taken at construction time. Merged into server totals
+    /// on drop. None means "do not merge" (used by tests that don't
+    /// want to mutate state).
+    snapshot: Option<SessionMetricsSnapshot>,
+}
+
+impl InFlightGuard {
+    /// Construct the guard. Increments `in_flight_sessions` immediately.
+    pub fn enter(server: Arc<ServerMetrics>, snapshot: SessionMetricsSnapshot) -> Self {
+        server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
+        Self {
+            server,
+            snapshot: Some(snapshot),
+        }
+    }
+}
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        if let Some(snap) = self.snapshot.take() {
+            self.server.merge_session(&snap);
+        }
+        self.server
+            .in_flight_sessions
+            .fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Immutable snapshot for export.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SessionMetricsSnapshot {
@@ -99,6 +140,9 @@ pub struct ServerMetrics {
     pub total_rx_bytes: AtomicU64,
     pub total_aead_drops: AtomicU64,
     pub total_ratchets: AtomicU64,
+    /// Sessions torn down by the relay's per-direction idle timeout.
+    /// Distinct from `handshake_timeouts` (which fires during setup).
+    pub session_idle_reaped: AtomicU64,
     /// In-flight session count (incremented on accept, decremented on
     /// session completion). Exported as a Prometheus gauge.
     pub in_flight_sessions: AtomicU64,
@@ -126,6 +170,7 @@ impl Default for ServerMetrics {
             total_rx_bytes: AtomicU64::new(0),
             total_aead_drops: AtomicU64::new(0),
             total_ratchets: AtomicU64::new(0),
+            session_idle_reaped: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             // Default to "not alive, not ready". The accept loop flips
             // alive→true once it binds; the operator flips ready→true
@@ -190,6 +235,9 @@ impl ServerMetrics {
              # HELP proteus_ratchets_total Key ratchets performed.\n\
              # TYPE proteus_ratchets_total counter\n\
              proteus_ratchets_total {}\n\
+             # HELP proteus_session_idle_reaped_total Sessions torn down by the per-direction idle timeout.\n\
+             # TYPE proteus_session_idle_reaped_total counter\n\
+             proteus_session_idle_reaped_total {}\n\
              # HELP proteus_in_flight_sessions In-flight sessions (gauge).\n\
              # TYPE proteus_in_flight_sessions gauge\n\
              proteus_in_flight_sessions {}\n\
@@ -211,6 +259,7 @@ impl ServerMetrics {
             s(&self.total_rx_bytes),
             s(&self.total_aead_drops),
             s(&self.total_ratchets),
+            s(&self.session_idle_reaped),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),
             u64::from(self.ready.load(Ordering::Relaxed)),
@@ -267,5 +316,61 @@ mod tests {
         server.merge_session(&session);
         assert_eq!(server.total_tx_bytes.load(Ordering::Relaxed), 20);
         assert_eq!(server.total_rx_bytes.load(Ordering::Relaxed), 40);
+    }
+
+    #[test]
+    fn in_flight_guard_normal_drop_decrements_and_merges() {
+        let server = Arc::new(ServerMetrics::default());
+        let snap = SessionMetricsSnapshot {
+            tx_bytes: 7,
+            rx_bytes: 11,
+            ..SessionMetricsSnapshot::default()
+        };
+        {
+            let _guard = InFlightGuard::enter(Arc::clone(&server), snap);
+            assert_eq!(server.in_flight_sessions.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(server.in_flight_sessions.load(Ordering::Relaxed), 0);
+        assert_eq!(server.total_tx_bytes.load(Ordering::Relaxed), 7);
+        assert_eq!(server.total_rx_bytes.load(Ordering::Relaxed), 11);
+    }
+
+    #[test]
+    fn in_flight_guard_decrements_on_panic_unwind() {
+        // Spawn a closure that panics while holding the guard. Drop
+        // runs as part of unwinding → the counter must end at 0.
+        let server = Arc::new(ServerMetrics::default());
+        let server_clone = Arc::clone(&server);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard =
+                InFlightGuard::enter(Arc::clone(&server_clone), SessionMetricsSnapshot::default());
+            assert_eq!(server_clone.in_flight_sessions.load(Ordering::Relaxed), 1);
+            panic!("simulated handler panic");
+        }));
+        assert!(r.is_err(), "panic should have propagated");
+        assert_eq!(
+            server.in_flight_sessions.load(Ordering::Relaxed),
+            0,
+            "InFlightGuard MUST decrement even when the handler panics"
+        );
+    }
+
+    #[test]
+    fn in_flight_guard_concurrent_enter_and_drop() {
+        // Stress: spawn 64 threads that each construct + drop a guard;
+        // the gauge must wind back to 0.
+        let server = Arc::new(ServerMetrics::default());
+        let mut handles = Vec::new();
+        for _ in 0..64 {
+            let s = Arc::clone(&server);
+            handles.push(std::thread::spawn(move || {
+                let _g = InFlightGuard::enter(s, SessionMetricsSnapshot::default());
+                std::thread::yield_now();
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+        assert_eq!(server.in_flight_sessions.load(Ordering::Relaxed), 0);
     }
 }

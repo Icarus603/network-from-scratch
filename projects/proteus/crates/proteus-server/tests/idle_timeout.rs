@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use proteus_server::relay::{self, encode_connect, RelayConfig};
 use proteus_transport_alpha::client::{self, ClientConfig};
+use proteus_transport_alpha::metrics::ServerMetrics;
 use proteus_transport_alpha::server::{self, ServerCtx, ServerKeys};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::{timeout, Instant};
@@ -59,17 +60,18 @@ async fn idle_session_reaps_within_deadline() {
     let proxy_addr = listener.local_addr().unwrap();
     let server_ctx = Arc::clone(&ctx);
 
+    let server_metrics = Arc::new(ServerMetrics::default());
     let relay_cfg = RelayConfig {
         idle_timeout: Some(Duration::from_millis(300)),
+        metrics: Some(Arc::clone(&server_metrics)),
     };
-    let server_task = tokio::spawn(server::serve(
-        listener,
-        server_ctx,
-        move |session| async move {
+    let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
+        let cfg = relay_cfg.clone();
+        async move {
             // Drive the binary's real relay logic with the short idle.
-            let _ = relay::handle_session(session, relay_cfg).await;
-        },
-    ));
+            let _ = relay::handle_session(session, cfg).await;
+        }
+    }));
 
     // ----- Proteus client -----
     let mut rng = rand_core::OsRng;
@@ -118,6 +120,27 @@ async fn idle_session_reaps_within_deadline() {
         "idle reaper fired suspiciously early: {elapsed:?}"
     );
 
+    // Give the server's pump tasks a moment to record the counter
+    // (they fire `session_idle_reaped` just after the timeout breaks
+    // out of the loop).
+    for _ in 0..50 {
+        if server_metrics
+            .session_idle_reaped
+            .load(std::sync::atomic::Ordering::Relaxed)
+            > 0
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let reaped = server_metrics
+        .session_idle_reaped
+        .load(std::sync::atomic::Ordering::Relaxed);
+    assert!(
+        reaped >= 1,
+        "session_idle_reaped_total must increment when idle fires; got {reaped}"
+    );
+
     server_task.abort();
 }
 
@@ -161,14 +184,14 @@ async fn active_session_not_killed_by_idle_timeout() {
     let server_ctx = Arc::clone(&ctx);
     let relay_cfg = RelayConfig {
         idle_timeout: Some(Duration::from_millis(300)),
+        metrics: None,
     };
-    let server_task = tokio::spawn(server::serve(
-        listener,
-        server_ctx,
-        move |session| async move {
-            let _ = relay::handle_session(session, relay_cfg).await;
-        },
-    ));
+    let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
+        let cfg = relay_cfg.clone();
+        async move {
+            let _ = relay::handle_session(session, cfg).await;
+        }
+    }));
 
     let mut rng = rand_core::OsRng;
     let client_id_sk = proteus_crypto::sig::generate(&mut rng);
