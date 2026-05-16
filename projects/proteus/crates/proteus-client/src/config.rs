@@ -33,6 +33,26 @@ pub struct ClientConfig {
     /// MUST match the server's `pow_difficulty`. Default 0 = disabled.
     #[serde(default)]
     pub pow_difficulty: Option<u8>,
+    /// Optional β-profile (QUIC) endpoint on the same server. When
+    /// set, the client uses the **happy-eyeballs-style** dual-stack
+    /// dialer: tries β first with a short timeout, falls back to α
+    /// if β times out / fails. Recommended for production
+    /// deployments where the server runs both carriers.
+    /// Example: `"vps.example.com:8443"` (server listens on
+    /// `:8443/udp` for β).
+    #[serde(default)]
+    pub server_endpoint_beta: Option<String>,
+    /// Optional override for the β QUIC handshake's SNI / TLS
+    /// server_name. Defaults to `tls.server_name` if unset (operators
+    /// usually use the same cert for both carriers).
+    #[serde(default)]
+    pub beta_server_name: Option<String>,
+    /// Per-connection timeout (seconds) for the β-first dial attempt
+    /// before falling back to α. Default 3s — short enough that an
+    /// EDNS-blocked client doesn't hang noticeably, long enough that
+    /// a slow QUIC handshake on a marginal path still wins.
+    #[serde(default)]
+    pub beta_first_timeout_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

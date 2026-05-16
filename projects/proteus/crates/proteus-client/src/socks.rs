@@ -95,8 +95,7 @@ pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Resu
         }
     };
 
-    // ----- Open Proteus session (TLS or plain TCP per cfg) -----
-    let hs_cfg = cfg.build_handshake_config()?;
+    // ----- Open Proteus session (β-first dual-stack, fallback to α) -----
     let target_bytes = {
         let mut v = Vec::with_capacity(1 + host.len() + 2);
         v.push(host.len() as u8);
@@ -104,6 +103,105 @@ pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Resu
         v.extend_from_slice(&port.to_be_bytes());
         v
     };
+
+    // Try β first when configured. Falls back to α on any failure
+    // (timeout, UDP blocked, peer doesn't support DATAGRAM, TLS
+    // cert mismatch). The fall-back path is the proven α route, so
+    // the worst-case latency penalty is `beta_first_timeout_secs`
+    // + the α handshake time — bounded.
+    if cfg.server_endpoint_beta.is_some() {
+        match try_beta(cfg, &target_bytes, &mut sock).await {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "β dial failed — falling back to α (TCP/TLS)"
+                );
+                // Fall through to α path below.
+            }
+        }
+    }
+
+    try_alpha(cfg, &target_bytes, &mut sock).await
+}
+
+/// Attempt a β-profile (QUIC) handshake to `cfg.server_endpoint_beta`,
+/// send the CONNECT target, and pump bytes. Returns Ok(()) on a
+/// fully-completed session, Err(_) on any failure that justifies
+/// falling back to α.
+async fn try_beta(
+    cfg: &Arc<ClientConfig>,
+    target_bytes: &[u8],
+    sock: &mut TcpStream,
+) -> Result<(), SocksError> {
+    let beta_endpoint = cfg
+        .server_endpoint_beta
+        .as_ref()
+        .ok_or(SocksError::Socks("server_endpoint_beta unset"))?;
+    let server_name = cfg
+        .beta_server_name
+        .as_deref()
+        .or_else(|| cfg.tls.as_ref().map(|t| t.server_name.as_str()))
+        .ok_or(SocksError::Socks(
+            "β requires beta_server_name or tls.server_name",
+        ))?;
+    let timeout = std::time::Duration::from_secs(cfg.beta_first_timeout_secs.unwrap_or(3));
+
+    // Resolve `host:port` to a concrete SocketAddr. quinn::connect
+    // needs an IP literal, not a hostname.
+    let server_addr = tokio::net::lookup_host(beta_endpoint.as_str())
+        .await?
+        .next()
+        .ok_or(SocksError::Socks("server_endpoint_beta did not resolve"))?;
+
+    // Build a β-flavored ClientConfig (profile_hint = Beta).
+    let mut hs_cfg = cfg.build_handshake_config()?;
+    hs_cfg.profile_hint = proteus_transport_alpha::ProfileHint::Beta;
+
+    // Optional extra-trust CA from the α TLS block (β reuses the
+    // same chain in the recommended deployment).
+    let extra_roots = match cfg.tls.as_ref().and_then(|t| t.trusted_ca.as_ref()) {
+        Some(ca) => proteus_transport_alpha::tls::load_cert_chain(ca)
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
+        None => Vec::new(),
+    };
+
+    let connect_fut =
+        proteus_transport_beta::client::connect(server_name, server_addr, extra_roots, hs_cfg);
+    let beta_client = tokio::time::timeout(timeout, connect_fut)
+        .await
+        .map_err(|_| SocksError::Socks("β handshake timed out"))?
+        .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+
+    let proteus_transport_alpha::session::AlphaSession {
+        mut sender,
+        mut receiver,
+        ..
+    } = beta_client.session;
+    sender.send_record(target_bytes).await?;
+    sender.flush().await?;
+    sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await?;
+    pump(sock, &mut sender, &mut receiver).await;
+
+    // Keep the endpoint + connection alive across the pump (they
+    // were moved into beta_client). Drop happens here when scope
+    // ends — at this point the session has finished and the close
+    // notification has already gone out via shutdown semantics.
+    drop(beta_client.connection);
+    drop(beta_client.endpoint);
+    Ok(())
+}
+
+/// Attempt the α-profile (TCP / TCP+TLS) path. Same logic as the
+/// pre-dual-stack version, factored out so try_beta's fall-back
+/// path can call it.
+async fn try_alpha(
+    cfg: &Arc<ClientConfig>,
+    target_bytes: &[u8],
+    sock: &mut TcpStream,
+) -> Result<(), SocksError> {
+    let hs_cfg = cfg.build_handshake_config()?;
 
     if let Some(tls_cfg) = cfg.tls.as_ref() {
         let connector = match tls_cfg.trusted_ca.as_ref() {
@@ -120,11 +218,11 @@ pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Resu
             mut receiver,
             ..
         } = session;
-        sender.send_record(&target_bytes).await?;
+        sender.send_record(target_bytes).await?;
         sender.flush().await?;
         sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
             .await?;
-        pump(&mut sock, &mut sender, &mut receiver).await;
+        pump(sock, &mut sender, &mut receiver).await;
         return Ok(());
     }
 
@@ -134,11 +232,11 @@ pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Resu
         mut receiver,
         ..
     } = session;
-    sender.send_record(&target_bytes).await?;
+    sender.send_record(target_bytes).await?;
     sender.flush().await?;
     sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
-    pump(&mut sock, &mut sender, &mut receiver).await;
+    pump(sock, &mut sender, &mut receiver).await;
     Ok(())
 }
 

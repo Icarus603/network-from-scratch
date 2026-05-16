@@ -17,11 +17,10 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
-mod config;
 mod keygen;
-mod socks;
 
-use config::ClientConfig;
+use proteus_client::config::ClientConfig;
+use proteus_client::socks;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Proteus α-profile client")]

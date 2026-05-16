@@ -16,6 +16,7 @@ proteus-spec = { path = "../proteus-spec" }
 proteus-wire = { path = "../proteus-wire" }
 proteus-crypto = { path = "../proteus-crypto" }
 proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+proteus-transport-beta = { path = "../proteus-transport-beta" }
 
 ed25519-dalek.workspace = true
 rand_core = { workspace = true, features = ["getrandom"] }
@@ -34,8 +35,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 proteus-spec = { path = "../proteus-spec" }
 proteus-crypto = { path = "../proteus-crypto" }
 proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+proteus-transport-beta = { path = "../proteus-transport-beta" }
 rand_core = { workspace = true, features = ["getrandom"] }
 tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs"] }
+rcgen = "0.13"
+rustls = { workspace = true }
+base64 = "0.22"
+ed25519-dalek.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"
