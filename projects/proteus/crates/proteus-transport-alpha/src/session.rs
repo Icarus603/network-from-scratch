@@ -109,6 +109,15 @@ use zeroize::Zeroizing;
 /// against the other.
 const DH_RATCHET_LABEL: &[u8] = b"proteus dh-ratchet v1";
 
+/// Sentinel value placed in a cell's 4-byte length prefix to indicate
+/// "this cell is a continuation; more cells follow as part of the
+/// same logical record". The terminal cell carries the actual
+/// remaining length (`0..=pad_quantum-4`); intermediate cells carry
+/// this sentinel. `0xffff_ffff` is chosen because no legitimate
+/// payload can be that large (`pad_quantum` is a `u16`, so the max
+/// per-cell chunk size is 65 531 bytes — far below 4 GiB).
+const CONTINUATION_SENTINEL: u32 = 0xffff_ffff;
+
 use crate::error::{AlphaError, AlphaResult};
 use crate::metrics::SessionMetrics;
 
@@ -278,41 +287,98 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// May trigger a ratchet before sending if the byte / record budget
     /// has been exhausted.
     ///
-    /// When `pad_quantum > 0`, the plaintext is wrapped as
-    /// `[4-byte BE real_len | real_payload | zero padding]` rounded up
-    /// to a multiple of the quantum. AEAD covers the entire padded
-    /// blob, so the wire ciphertext length only leaks
-    /// `ceil((4 + real_len) / quantum) * quantum`. A passive observer
-    /// sees uniform-width records within each bucket — sub-quantum
-    /// length signal is destroyed.
+    /// When `pad_quantum > 0`, the plaintext is wrapped as one or more
+    /// CELLs each padded to exactly `pad_quantum` bytes. A logical
+    /// record of length `L` produces `ceil((L + 4) / (pad_quantum - 4))`
+    /// cells on the wire, each AEAD-sealed individually. All
+    /// non-terminal cells carry the sentinel length prefix
+    /// `0xffff_ffff`; the terminal cell carries the actual remaining
+    /// length (`0..=pad_quantum-4`).
+    ///
+    /// Wire effect: every record on the wire is exactly
+    /// `pad_quantum + 16` bytes of AEAD ciphertext, regardless of the
+    /// logical payload size. A passive observer cannot distinguish a
+    /// 1-byte logical record from a 64-KiB one by record-length
+    /// shaping — they see a uniform stream of equally-sized cells.
+    /// This is exactly the §4.6 cell-padding model REALITY cannot
+    /// match.
+    ///
+    /// Returns the seqnum of the FIRST cell emitted. Each cell
+    /// consumes one seqnum and one record-counter slot, so a long
+    /// payload eats more of the per-epoch budget than a short one
+    /// (which is correct — the wire actually carries more bytes).
     pub async fn send_record(&mut self, payload: &[u8]) -> AlphaResult<u64> {
+        if self.pad_quantum == 0 {
+            // ---- Legacy unpadded path (RECORD_DATA) ----
+            self.ensure_ratchet().await?;
+            let combined = self.combined();
+            let aad = combined.to_be_bytes();
+            let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, payload)?;
+            let frame = alpha::encode_record(alpha::RECORD_DATA, &ct);
+            self.write.write_all(&frame).await?;
+            let used = self.seqnum;
+            self.seqnum = self.seqnum.saturating_add(1);
+            self.bytes_in_epoch = self.bytes_in_epoch.saturating_add(payload.len() as u64);
+            self.records_in_epoch = self.records_in_epoch.saturating_add(1);
+            self.metrics.record_tx(payload.len() as u64);
+            return Ok(used);
+        }
+
+        // ---- Cell-padded path (RECORD_DATA_PADDED), split into cells ----
+        let quantum = self.pad_quantum as usize;
+        debug_assert!(
+            quantum >= 8,
+            "pad_quantum must allow a 4-byte length prefix"
+        );
+        let chunk_max = quantum - 4; // space for plaintext after the length prefix
+        let first_seqnum = self.seqnum;
+        // The total number of cells is `ceil(payload.len() / chunk_max).max(1)`.
+        // A 0-byte payload still produces ONE terminal cell (real_len=0).
+        let total_cells = payload.len().div_ceil(chunk_max).max(1);
+
+        for cell_idx in 0..total_cells {
+            self.ensure_ratchet().await?;
+            let offset = cell_idx * chunk_max;
+            let is_last = cell_idx + 1 == total_cells;
+            let chunk = if is_last {
+                &payload[offset..]
+            } else {
+                &payload[offset..offset + chunk_max]
+            };
+            // Build the cell plaintext: [len_prefix | chunk | zero-pad].
+            let mut pt_buf = vec![0u8; quantum];
+            if is_last {
+                pt_buf[..4].copy_from_slice(&(chunk.len() as u32).to_be_bytes());
+            } else {
+                pt_buf[..4].copy_from_slice(&CONTINUATION_SENTINEL.to_be_bytes());
+            }
+            pt_buf[4..4 + chunk.len()].copy_from_slice(chunk);
+
+            let combined = self.combined();
+            let aad = combined.to_be_bytes();
+            let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
+            let frame = alpha::encode_record(alpha::RECORD_DATA_PADDED, &ct);
+            self.write.write_all(&frame).await?;
+
+            self.seqnum = self.seqnum.saturating_add(1);
+            self.records_in_epoch = self.records_in_epoch.saturating_add(1);
+        }
+        // Bytes accounting once per logical record (not once per cell)
+        // so the ratchet trigger reflects application-visible bandwidth.
+        self.bytes_in_epoch = self.bytes_in_epoch.saturating_add(payload.len() as u64);
+        self.metrics.record_tx(payload.len() as u64);
+        Ok(first_seqnum)
+    }
+
+    /// Ratchet-prep shared between the legacy + cell-mode paths.
+    async fn ensure_ratchet(&mut self) -> AlphaResult<()> {
         if self.should_ratchet() {
             self.send_ratchet_frame().await?;
         }
         if self.seqnum > SEQNUM_MAX {
-            // The 40-bit seqnum space inside one epoch was exhausted. Force a
-            // ratchet so the next packet starts at seqnum=0 of a new epoch.
             self.send_ratchet_frame().await?;
         }
-        let combined = self.combined();
-        let aad = combined.to_be_bytes();
-        let (rec_type, pt_buf) = if self.pad_quantum == 0 {
-            (alpha::RECORD_DATA, std::borrow::Cow::Borrowed(payload))
-        } else {
-            (
-                alpha::RECORD_DATA_PADDED,
-                std::borrow::Cow::Owned(pad_payload(payload, self.pad_quantum)?),
-            )
-        };
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
-        let frame = alpha::encode_record(rec_type, &ct);
-        self.write.write_all(&frame).await?;
-        let used = self.seqnum;
-        self.seqnum = self.seqnum.saturating_add(1);
-        self.bytes_in_epoch = self.bytes_in_epoch.saturating_add(payload.len() as u64);
-        self.records_in_epoch = self.records_in_epoch.saturating_add(1);
-        self.metrics.record_tx(payload.len() as u64);
-        Ok(used)
+        Ok(())
     }
 
     fn should_ratchet(&self) -> bool {
@@ -456,6 +522,13 @@ pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> 
     /// RATCHET we see from the peer; burned thereafter. Symmetric
     /// receiver-side counterpart of `AlphaSender::dh_sk`.
     dh_sk: Option<StaticSecret>,
+    /// Accumulator for cell-mode `RECORD_DATA_PADDED` continuations.
+    /// When the sender split a logical record into multiple cells
+    /// (each prefixed with the sentinel `0xffff_ffff` real_len meaning
+    /// "more follows"), we buffer their chunks here until the final
+    /// cell (with a real length prefix) arrives and we can return the
+    /// reassembled logical record.
+    pending: Vec<u8>,
 }
 
 impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
@@ -501,6 +574,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             last_close_code: None,
             last_close_reason: None,
             dh_sk: None,
+            pending: Vec::new(),
         }
     }
 
@@ -544,25 +618,45 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                             let aad = combined.to_be_bytes();
                             match aead::open(&self.keys.key, &self.keys.iv, combined, &aad, &body) {
                                 Ok(pt) => {
-                                    // Parse [4-byte BE real_len | real | zero-pad].
-                                    // Reject if length prefix points past pt
-                                    // — that's a corrupt sender or malicious
-                                    // peer trying to leak bytes outside the
-                                    // tagged region. Silent drop per §11.16.
                                     let raw = pt.as_slice();
                                     if raw.len() < 4 {
                                         self.metrics.record_aead_drop();
                                         continue;
                                     }
-                                    let real_len =
-                                        u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]])
-                                            as usize;
+                                    let len_prefix =
+                                        u32::from_be_bytes([raw[0], raw[1], raw[2], raw[3]]);
+                                    self.next_seqnum = self.next_seqnum.saturating_add(1);
+
+                                    if len_prefix == CONTINUATION_SENTINEL {
+                                        // Continuation cell: append the full
+                                        // post-prefix region to `pending` and
+                                        // keep reading. RX_BUF_HARD_CAP bounds
+                                        // the total accumulator so a malicious
+                                        // peer cannot OOM us with an unbounded
+                                        // continuation chain.
+                                        if self.pending.len() + (raw.len() - 4) > RX_BUF_HARD_CAP {
+                                            self.metrics.record_aead_drop();
+                                            return Err(AlphaError::Closed);
+                                        }
+                                        self.pending.extend_from_slice(&raw[4..]);
+                                        continue;
+                                    }
+
+                                    // Terminal cell: parse the real length,
+                                    // reassemble with any pending bytes.
+                                    let real_len = len_prefix as usize;
                                     if 4 + real_len > raw.len() {
                                         self.metrics.record_aead_drop();
                                         continue;
                                     }
-                                    self.next_seqnum = self.next_seqnum.saturating_add(1);
-                                    let bytes = raw[4..4 + real_len].to_vec();
+                                    let last_chunk = &raw[4..4 + real_len];
+                                    let bytes = if self.pending.is_empty() {
+                                        last_chunk.to_vec()
+                                    } else {
+                                        let mut out = std::mem::take(&mut self.pending);
+                                        out.extend_from_slice(last_chunk);
+                                        out
+                                    };
                                     self.metrics.record_rx(bytes.len() as u64);
                                     return Ok(Some(bytes));
                                 }
@@ -694,28 +788,6 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     }
 }
 
-/// Pad a payload to `quantum`-byte boundary with a 4-byte BE length
-/// prefix. The output is exactly
-/// `ceil((4 + payload.len()) / quantum) * quantum` bytes.
-/// Rejects payloads larger than `u32::MAX` (the length field cannot
-/// represent them) — Proteus already caps single records well under
-/// that via the upstream-chunk size, so this is a defense-in-depth
-/// limit.
-fn pad_payload(payload: &[u8], quantum: u16) -> AlphaResult<Vec<u8>> {
-    if payload.len() > u32::MAX as usize {
-        return Err(AlphaError::Closed);
-    }
-    let q = quantum as usize;
-    let total_unpadded = 4usize.saturating_add(payload.len());
-    // Round up to next multiple of `q`. quantum is u16 so q ≥ 1.
-    let padded_len = total_unpadded.div_ceil(q).saturating_mul(q);
-    let mut out = vec![0u8; padded_len];
-    out[..4].copy_from_slice(&(payload.len() as u32).to_be_bytes());
-    out[4..4 + payload.len()].copy_from_slice(payload);
-    // The tail bytes are already zero from `vec![0u8; padded_len]`.
-    Ok(out)
-}
-
 /// Symmetric ratchet step: `new = HKDF-Expand-Label(current, "proteus ratchet v1", "", 32)`.
 fn derive_ratchet_secret(current: &[u8; 32]) -> AlphaResult<Zeroizing<[u8; 32]>> {
     let mut next = Zeroizing::new([0u8; 32]);
@@ -732,6 +804,7 @@ impl<R: AsyncRead + Unpin> Drop for AlphaReceiver<R> {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.rx_buf.zeroize();
+        self.pending.zeroize();
         if let Some(reason) = self.last_close_reason.as_mut() {
             reason.zeroize();
         }

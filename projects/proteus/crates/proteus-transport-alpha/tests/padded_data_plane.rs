@@ -236,13 +236,15 @@ async fn on_wire_lengths_are_uniform_with_padding() {
         "sniffer captured zero RECORD_DATA_PADDED frames"
     );
     for n in &seen {
-        // Each captured frame body = AEAD ciphertext = padded_len + 16.
-        // padded_len must be a multiple of 256. Therefore body must be
-        // ≡ 16 (mod 256).
+        // Under cell-split mode every wire record is EXACTLY one cell
+        // (pad_quantum bytes plaintext + 16 bytes Poly1305 tag).
+        // Strict equality here, not just `body % 256 == 16`, because
+        // cell-mode forbids variable-size records.
         assert_eq!(
-            n % 256,
-            16,
-            "wire body length {n} is NOT (k*256 + 16) — length-uniformity broken"
+            *n,
+            256 + 16,
+            "wire body length {n} is NOT exactly cell_size+tag (256+16) — \
+             cell-split shaping broken"
         );
     }
 }
