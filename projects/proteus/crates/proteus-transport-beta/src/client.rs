@@ -179,21 +179,22 @@ pub async fn connect_with_timeout(
         out.push(fallback);
         out
     };
-    let mut endpoint = {
+
+    // Bind a std::net::UdpSocket ourselves so we can (a) send a
+    // prefix-noise datagram before quinn writes its QUIC Initial,
+    // and (b) hand the same socket to quinn::Endpoint::new() —
+    // which keeps the source port unchanged for the subsequent QUIC
+    // handshake.
+    let std_socket = {
         let mut last_err: Option<std::io::Error> = None;
-        let mut chosen: Option<quinn::Endpoint> = None;
+        let mut chosen: Option<std::net::UdpSocket> = None;
         for bind in &bind_attempts {
-            match quinn::Endpoint::client(*bind) {
-                Ok(ep) => {
-                    chosen = Some(ep);
+            match std::net::UdpSocket::bind(bind) {
+                Ok(s) => {
+                    chosen = Some(s);
                     break;
                 }
-                Err(e) => {
-                    // EADDRINUSE / permission denied — try the next
-                    // candidate. Quietly fall through to the
-                    // ephemeral fallback at the end of the list.
-                    last_err = Some(e);
-                }
+                Err(e) => last_err = Some(e),
             }
         }
         chosen.ok_or_else(|| {
@@ -203,6 +204,54 @@ pub async fn connect_with_timeout(
             )
         })?
     };
+
+    // ## GFW-evasion: prefix-noise datagram (USENIX Security '25 #2)
+    //
+    // The same USENIX 25 paper documents another optimization in the
+    // GFW's QUIC inspector: it only inspects the FIRST UDP datagram
+    // in a flow (`(src_ip, dst_ip, src_port, dst_port)` 4-tuple, 60-s
+    // timeout). By sending one random-payload datagram BEFORE quinn
+    // writes the QUIC Initial, the GFW classifies the first datagram
+    // as the "QUIC Initial" — finds no QUIC header, gives up — then
+    // marks the flow's first-packet quota as consumed. Our actual
+    // QUIC Initial arrives as the SECOND datagram on that 4-tuple
+    // and never gets inspected.
+    //
+    // Payload: 16 random bytes (any garbage works — the GFW just
+    // fails to parse it as a QUIC Initial header and stops looking).
+    // 16 bytes is short enough that the prefix doesn't itself look
+    // like meaningful traffic, long enough that any UDP packet under
+    // it would be too tiny to be a legitimate protocol (most UDP
+    // payloads are ≥20 bytes).
+    {
+        let mut noise = [0u8; 16];
+        use rand_core::RngCore;
+        rand_core::OsRng.fill_bytes(&mut noise);
+        // Best-effort: if this send fails (e.g. ICMP unreachable on
+        // a closed UDP path), we ignore and let quinn do its
+        // own retransmit. The evasion is a probabilistic optimization
+        // win, not a hard correctness requirement.
+        //
+        // We send while the socket is still in blocking mode so the
+        // datagram lands on the wire BEFORE quinn::Endpoint::new
+        // takes ownership and writes its QUIC Initial. The send is
+        // a single syscall and won't block in practice (UDP sndbuf
+        // accepts it immediately).
+        let _ = std_socket.send_to(&noise, server_addr);
+    }
+    // Tokio's `UdpSocket::from_std` (called by quinn's runtime
+    // adapter) requires the underlying std socket to be in
+    // non-blocking mode.
+    std_socket.set_nonblocking(true)?;
+
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| BetaError::Io(std::io::Error::other("no async runtime found")))?;
+    let mut endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        None, // client-only, no ServerConfig
+        std_socket,
+        runtime,
+    )?;
     endpoint.set_default_client_config(client_cfg);
 
     let conn = endpoint.connect(server_addr, server_name)?.await?;
