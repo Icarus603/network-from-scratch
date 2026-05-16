@@ -100,6 +100,14 @@ handshake_deadline_secs: 15
 # (`copytruncate` also works without SIGUSR1.) Unset = disabled.
 # access_log: /var/log/proteus/access.log
 
+# Per-session byte budget (tx + rx plaintext). Sessions whose total
+# bytes crosses this threshold are torn down with close_reason
+# "byte_budget_exhausted". Defends against a compromised credential
+# or one greedy user saturating upstream egress and starving other
+# sessions sharing the NIC. Recommended: ~50 GiB for streaming-heavy
+# users (53687091200). Unset = no cap.
+# max_session_bytes: 53687091200
+
 # Per-session idle timeout in seconds. A session that goes this long
 # without any inner record (either direction) is closed and its FD
 # released. Distinct from handshake_deadline_secs which only bounds

@@ -51,6 +51,9 @@ async fn every_advertised_counter_is_in_exposition() {
     metrics
         .session_idle_reaped
         .fetch_add(163, Ordering::Relaxed);
+    metrics
+        .session_byte_budget_exhausted
+        .fetch_add(179, Ordering::Relaxed);
     metrics.in_flight_sessions.fetch_add(7, Ordering::Relaxed);
     metrics.alive.store(true, Ordering::Relaxed);
     metrics.ready.store(true, Ordering::Relaxed);
@@ -100,6 +103,7 @@ async fn every_advertised_counter_is_in_exposition() {
         ("proteus_aead_drops_total", 151),
         ("proteus_ratchets_total", 157),
         ("proteus_session_idle_reaped_total", 163),
+        ("proteus_session_byte_budget_exhausted_total", 179),
         ("proteus_in_flight_sessions", 7),
         ("proteus_up", 1),
         ("proteus_ready", 1),

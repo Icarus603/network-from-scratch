@@ -42,6 +42,17 @@ pub struct RelayConfig {
     /// itself is cheap to clone (Arc<dyn LogSink>); we capture it
     /// once at session entry and emit at session exit.
     pub access_log: Option<AccessLogHandle>,
+    /// Optional cap on total bytes (tx + rx, plaintext) per session.
+    /// Once the cap is reached, the relay shuts the session down
+    /// with `close_reason = "byte_budget_exhausted"`. Without this,
+    /// one authenticated user (possibly with a compromised credential)
+    /// can saturate the server's upstream egress and starve every
+    /// other session sharing the NIC.
+    ///
+    /// Set to `None` (default) for unlimited; sensible production
+    /// value is "expected max per-session transfer × 2" — e.g.
+    /// 50 GiB for streaming-heavy users.
+    pub max_session_bytes: Option<u64>,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -50,6 +61,7 @@ impl std::fmt::Debug for RelayConfig {
             .field("idle_timeout", &self.idle_timeout)
             .field("metrics", &self.metrics.is_some())
             .field("access_log", &self.access_log.is_some())
+            .field("max_session_bytes", &self.max_session_bytes)
             .finish()
     }
 }
@@ -165,8 +177,16 @@ where
         }
     }
 
+    // Per-session byte budget. `bytes_used` is the cumulative
+    // plaintext byte count across BOTH directions; reaching `cap`
+    // tears down the whole session. Defaults to no limit.
+    let byte_cap = cfg.max_session_bytes;
+    let bytes_used: std::sync::Arc<std::sync::atomic::AtomicU64> =
+        std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+
     let metrics_c2u = metrics.clone();
     let reason_c2u = std::sync::Arc::clone(&reason_cell);
+    let bytes_c2u = std::sync::Arc::clone(&bytes_used);
     let client_to_upstream = async move {
         loop {
             let recv = receiver.recv_record();
@@ -187,9 +207,30 @@ where
             };
             match next {
                 Ok(Some(buf)) if !buf.is_empty() => {
+                    // Bump-then-check: even if the cap is exceeded
+                    // mid-write, we still finish this one buffer so the
+                    // upstream sees a consistent stream boundary, but
+                    // the next iteration tears down.
+                    let new_total = bytes_c2u
+                        .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed)
+                        + buf.len() as u64;
                     if up_w.write_all(&buf).await.is_err() {
                         set_reason(&reason_c2u, "upstream_write_fail");
                         break;
+                    }
+                    if let Some(cap) = byte_cap {
+                        if new_total >= cap {
+                            warn!(
+                                bytes = new_total,
+                                cap, "session byte budget exhausted (client→upstream)"
+                            );
+                            if let Some(m) = metrics_c2u.as_ref() {
+                                m.session_byte_budget_exhausted
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            set_reason(&reason_c2u, "byte_budget_exhausted");
+                            break;
+                        }
                     }
                 }
                 Ok(Some(_empty)) => {} // keepalive
@@ -207,6 +248,7 @@ where
     };
     let metrics_u2c = metrics.clone();
     let reason_u2c = std::sync::Arc::clone(&reason_cell);
+    let bytes_u2c = std::sync::Arc::clone(&bytes_used);
     let upstream_to_client = async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
@@ -244,6 +286,8 @@ where
                     Ok(n) => n,
                 },
             };
+            let new_total =
+                bytes_u2c.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed) + n as u64;
             if sender.send_record(&buf[..n]).await.is_err() {
                 set_reason(&reason_u2c, "client_send_err");
                 break;
@@ -251,6 +295,20 @@ where
             if sender.flush().await.is_err() {
                 set_reason(&reason_u2c, "client_send_err");
                 break;
+            }
+            if let Some(cap) = byte_cap {
+                if new_total >= cap {
+                    warn!(
+                        bytes = new_total,
+                        cap, "session byte budget exhausted (upstream→client)"
+                    );
+                    if let Some(m) = metrics_u2c.as_ref() {
+                        m.session_byte_budget_exhausted
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    set_reason(&reason_u2c, "byte_budget_exhausted");
+                    break;
+                }
             }
         }
         // Notify the peer that we are intentionally closing the inner

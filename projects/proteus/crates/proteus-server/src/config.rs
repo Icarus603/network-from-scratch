@@ -116,6 +116,16 @@ pub struct ServerConfig {
     #[serde(default)]
     pub access_log: Option<PathBuf>,
 
+    /// Optional cap on total bytes (tx + rx plaintext) per session.
+    /// When the cumulative byte count crosses this threshold the
+    /// session is torn down with close_reason = "byte_budget_exhausted".
+    /// Defends against a compromised credential or a single greedy
+    /// user saturating upstream egress and starving every other
+    /// session sharing the NIC. Sensible production value:
+    /// ~50 GiB (53687091200) for streaming-heavy users. Unset = no cap.
+    #[serde(default)]
+    pub max_session_bytes: Option<u64>,
+
     /// Per-session idle timeout in seconds. A session that goes this
     /// long without ANY inner traffic (either direction) is closed
     /// and its FD released. Distinct from `handshake_deadline_secs`

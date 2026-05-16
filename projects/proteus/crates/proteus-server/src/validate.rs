@@ -414,6 +414,18 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
         }
     }
 
+    // 18a. max_session_bytes must be at least 1 MiB.
+    // Anything smaller breaks even a single HTTP page load.
+    if let Some(cap) = cfg.max_session_bytes {
+        if cap < 1024 * 1024 {
+            r.push_warn(format!(
+                "max_session_bytes={cap} is below 1 MiB — most HTTP pages won't load. \
+                 Either set it to a sensible value (~50 GiB for streaming users, \
+                 53687091200) or unset it.",
+            ));
+        }
+    }
+
     // 18. cover_endpoint host == listen_alpha host: would loop
     // auth-fail traffic back into ourselves until both stack-bust.
     if let Some(cover) = cfg.cover_endpoint.as_ref() {
@@ -526,6 +538,7 @@ mod tests {
             session_idle_secs: None,
             firewall: None,
             max_connections: None,
+            max_session_bytes: None,
         }
     }
 
@@ -878,6 +891,39 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Check::Warn(m) if m.contains("matches listen_alpha host"))),
             "expected same-host-cover warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn tiny_max_session_bytes_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_session_bytes = Some(512); // < 1 MiB
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("below 1 MiB"))),
+            "expected tiny-cap warning: {report}"
+        );
+        assert!(!report.has_failures(), "should warn, not fail");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reasonable_max_session_bytes_does_not_warn() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_session_bytes = Some(50 * 1024 * 1024 * 1024); // 50 GiB
+        let report = preflight(&cfg);
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Warn(m) if m.contains("below 1 MiB"))),
+            "should not warn at 50 GiB: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

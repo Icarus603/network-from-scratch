@@ -65,6 +65,7 @@ async fn idle_session_reaps_within_deadline() {
         idle_timeout: Some(Duration::from_millis(300)),
         metrics: Some(Arc::clone(&server_metrics)),
         access_log: None,
+        max_session_bytes: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
         let cfg = relay_cfg.clone();
@@ -187,6 +188,7 @@ async fn active_session_not_killed_by_idle_timeout() {
         idle_timeout: Some(Duration::from_millis(300)),
         metrics: None,
         access_log: None,
+        max_session_bytes: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
         let cfg = relay_cfg.clone();

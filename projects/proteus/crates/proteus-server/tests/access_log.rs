@@ -76,6 +76,7 @@ async fn access_log_emits_one_record_per_session() {
         idle_timeout: Some(Duration::from_secs(5)),
         metrics: None,
         access_log: Some(Arc::new(logger)),
+        max_session_bytes: None,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

@@ -49,6 +49,7 @@ pub struct StartupSummary {
     pub handshake_deadline_secs: u64,
     pub tcp_keepalive_secs: u64,
     pub session_idle_secs: u64,
+    pub max_session_bytes: Option<u64>,
     pub drain_secs: u64,
     pub metrics_listen: Option<String>,
     pub metrics_auth: bool,
@@ -83,6 +84,7 @@ impl StartupSummary {
             handshake_deadline_secs: cfg.handshake_deadline_secs.unwrap_or(15),
             tcp_keepalive_secs: cfg.tcp_keepalive_secs.unwrap_or(30),
             session_idle_secs: cfg.session_idle_secs.unwrap_or(600),
+            max_session_bytes: cfg.max_session_bytes,
             drain_secs: cfg.drain_secs.unwrap_or(30),
             metrics_listen: cfg.metrics_listen.clone(),
             metrics_auth: cfg.metrics_token_file.is_some(),
@@ -228,6 +230,13 @@ impl fmt::Display for StartupSummary {
                 format!("{}s", self.session_idle_secs)
             }
         )?;
+        match self.max_session_bytes {
+            Some(n) => row!(
+                "max_session_bytes",
+                format_args!("{n} bytes ({})", human_bytes(n))
+            )?,
+            None => row!("max_session_bytes", "<unset>")?,
+        }
         row!("drain", format_args!("{}s", self.drain_secs))?;
         match &self.metrics_listen {
             Some(addr) => row!(
@@ -268,6 +277,26 @@ impl fmt::Display for StartupSummary {
     }
 }
 
+/// Render `n` as `"X.YZ unit"` (KiB / MiB / GiB / TiB). Display-only;
+/// numeric fields keep their raw byte counts.
+fn human_bytes(n: u64) -> String {
+    const KIB: u64 = 1024;
+    const MIB: u64 = 1024 * KIB;
+    const GIB: u64 = 1024 * MIB;
+    const TIB: u64 = 1024 * GIB;
+    if n >= TIB {
+        format!("{:.2} TiB", n as f64 / TIB as f64)
+    } else if n >= GIB {
+        format!("{:.2} GiB", n as f64 / GIB as f64)
+    } else if n >= MIB {
+        format!("{:.2} MiB", n as f64 / MIB as f64)
+    } else if n >= KIB {
+        format!("{:.2} KiB", n as f64 / KIB as f64)
+    } else {
+        format!("{n} B")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,6 +330,7 @@ mod tests {
             session_idle_secs: None,
             firewall: None,
             max_connections: None,
+            max_session_bytes: None,
         }
     }
 
@@ -424,6 +454,7 @@ mod tests {
             "handshake_deadline",
             "tcp_keepalive",
             "session_idle",
+            "max_session_bytes",
             "drain",
             "metrics_listen",
             "access_log",
@@ -452,6 +483,42 @@ mod tests {
         cfg.session_idle_secs = Some(0);
         let banner = StartupSummary::from_config(&cfg).to_string();
         assert!(banner.contains("<disabled>"), "got: {banner}");
+    }
+
+    #[test]
+    fn human_bytes_renders_units() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.00 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.00 MiB");
+        assert_eq!(human_bytes(1024 * 1024 * 1024), "1.00 GiB");
+        assert_eq!(human_bytes(50 * 1024 * 1024 * 1024), "50.00 GiB");
+        assert_eq!(human_bytes(1024_u64.pow(4)), "1.00 TiB");
+    }
+
+    #[test]
+    fn banner_includes_max_session_bytes_when_set() {
+        let mut cfg = empty_cfg();
+        cfg.max_session_bytes = Some(50 * 1024 * 1024 * 1024);
+        let banner = StartupSummary::from_config(&cfg).to_string();
+        assert!(
+            banner.contains("max_session_bytes"),
+            "missing label: {banner}"
+        );
+        assert!(
+            banner.contains("50.00 GiB"),
+            "missing human render: {banner}"
+        );
+    }
+
+    #[test]
+    fn banner_renders_max_session_bytes_unset() {
+        let cfg = empty_cfg();
+        let banner = StartupSummary::from_config(&cfg).to_string();
+        assert!(
+            banner.contains("max_session_bytes"),
+            "missing label: {banner}"
+        );
     }
 
     #[test]

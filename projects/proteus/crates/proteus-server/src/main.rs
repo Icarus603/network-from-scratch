@@ -473,7 +473,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         },
         metrics: Some(Arc::clone(&metrics)),
         access_log: access_log_handle,
+        max_session_bytes: cfg.max_session_bytes,
     };
+    if let Some(n) = relay_cfg.max_session_bytes {
+        info!(bytes = n, "per-session byte budget configured");
+    }
     if let Some(d) = relay_cfg.idle_timeout {
         info!(secs = d.as_secs(), "session idle timeout configured");
     } else {
