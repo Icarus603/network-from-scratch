@@ -389,18 +389,51 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
     // Optional structured access log — one JSON Lines record per
     // completed session. Init early so the spawn task is ready before
-    // the accept loop starts.
-    let access_log_handle: Option<proteus_transport_alpha::access_log::AccessLogHandle> =
-        match cfg.access_log.as_ref() {
-            Some(path) => {
-                let logger = proteus_transport_alpha::access_log::AccessLogger::spawn(path)
-                    .await
-                    .map_err(|e| format!("access log open {path:?}: {e}"))?;
-                info!(path = ?path, "access log enabled");
-                Some(Arc::new(logger))
+    // the accept loop starts. Keep both the concrete handle (for the
+    // SIGUSR1 reopen task) and a type-erased Arc<dyn LogSink> for the
+    // relay's `RelayConfig.access_log`.
+    let (access_log_concrete, access_log_handle): (
+        Option<proteus_transport_alpha::access_log::AccessLogger>,
+        Option<proteus_transport_alpha::access_log::AccessLogHandle>,
+    ) = match cfg.access_log.as_ref() {
+        Some(path) => {
+            let logger = proteus_transport_alpha::access_log::AccessLogger::spawn(path)
+                .await
+                .map_err(|e| format!("access log open {path:?}: {e}"))?;
+            info!(path = ?path, "access log enabled (SIGUSR1 triggers reopen)");
+            let arc: proteus_transport_alpha::access_log::AccessLogHandle =
+                Arc::new(logger.clone());
+            (Some(logger), Some(arc))
+        }
+        None => (None, None),
+    };
+
+    // SIGUSR1 — flush + reopen the access-log FD. logrotate-style:
+    //   /var/log/proteus/access.log {
+    //       daily
+    //       rotate 14
+    //       compress
+    //       postrotate
+    //           systemctl kill --signal=USR1 proteus-server
+    //       endscript
+    //   }
+    if let Some(logger) = access_log_concrete {
+        tokio::spawn(async move {
+            let mut sigusr1 =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(error = %e, "install SIGUSR1 handler failed");
+                        return;
+                    }
+                };
+            while sigusr1.recv().await.is_some() {
+                info!(path = ?logger.path(), "SIGUSR1 — reopening access log");
+                logger.reopen();
             }
-            None => None,
-        };
+        });
+    }
 
     // Per-session relay knobs. session_idle_secs=0 disables; default 600s.
     let relay_cfg = relay::RelayConfig {

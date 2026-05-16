@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
-use tracing::{error, warn};
+use tracing::{error, info, warn};
 
 /// One access-log record. All fields are optional from the emitter's
 /// perspective; serialization skips `None` fields.
@@ -202,6 +202,13 @@ fn epoch_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 #[derive(Clone)]
 pub struct AccessLogger {
     tx: mpsc::Sender<AccessLogRecord>,
+    /// Watch channel the writer task observes for reopen requests.
+    /// We use Arc<tokio::sync::Notify> rather than a watch channel
+    /// because all we need is "wake up and reopen now" — no payload.
+    reopen: Arc<tokio::sync::Notify>,
+    /// Path the writer reopens on signal. Stored so [`Self::reopen`]
+    /// can be called without re-passing the path.
+    path: Arc<std::path::PathBuf>,
 }
 
 impl AccessLogger {
@@ -210,12 +217,12 @@ impl AccessLogger {
     /// the process; closing the channel (drop-all-clones) makes it
     /// flush and exit.
     pub async fn spawn(path: &Path) -> std::io::Result<Self> {
-        let file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .await?;
+        let path = Arc::new(path.to_path_buf());
+        let file = open_append(&path).await?;
         let (tx, mut rx) = mpsc::channel::<AccessLogRecord>(1024);
+        let reopen = Arc::new(tokio::sync::Notify::new());
+        let reopen_task = Arc::clone(&reopen);
+        let path_task = Arc::clone(&path);
         tokio::spawn(async move {
             // Coalesce: drain everything available before flushing so
             // a burst of session completions emits one write + one
@@ -224,34 +231,57 @@ impl AccessLogger {
             // loop, then we flush before exiting).
             let mut buf = tokio::io::BufWriter::with_capacity(64 * 1024, file);
             'outer: loop {
-                let rec = match rx.recv().await {
-                    Some(r) => r,
-                    None => break 'outer,
-                };
-                let line = rec.to_json_line();
-                if let Err(e) = buf.write_all(line.as_bytes()).await {
-                    error!(error = %e, "access log write failed");
-                    break;
-                }
-                // Drain the rest of the channel non-blockingly so we
-                // batch bursty arrivals into one flush.
-                while let Ok(rec) = rx.try_recv() {
-                    let line = rec.to_json_line();
-                    if let Err(e) = buf.write_all(line.as_bytes()).await {
-                        error!(error = %e, "access log write failed");
-                        break 'outer;
+                tokio::select! {
+                    biased;
+                    // Reopen wakeups take priority over record drains
+                    // so a rotation tool waiting for us to drop the
+                    // old FD doesn't have to wait through a record
+                    // burst.
+                    () = reopen_task.notified() => {
+                        if let Err(e) = buf.flush().await {
+                            error!(error = %e, "access log flush before reopen failed");
+                        }
+                        match open_append(&path_task).await {
+                            Ok(new_file) => {
+                                buf = tokio::io::BufWriter::with_capacity(64 * 1024, new_file);
+                                info!(path = ?path_task, "access log reopened (SIGUSR1)");
+                            }
+                            Err(e) => {
+                                error!(error = %e, path = ?path_task, "access log reopen failed; keeping old FD");
+                            }
+                        }
                     }
-                }
-                if let Err(e) = buf.flush().await {
-                    error!(error = %e, "access log flush failed");
-                    break;
+                    maybe = rx.recv() => {
+                        let rec = match maybe {
+                            Some(r) => r,
+                            None => break 'outer,
+                        };
+                        let line = rec.to_json_line();
+                        if let Err(e) = buf.write_all(line.as_bytes()).await {
+                            error!(error = %e, "access log write failed");
+                            break 'outer;
+                        }
+                        // Drain the rest of the channel non-blockingly so we
+                        // batch bursty arrivals into one flush.
+                        while let Ok(rec) = rx.try_recv() {
+                            let line = rec.to_json_line();
+                            if let Err(e) = buf.write_all(line.as_bytes()).await {
+                                error!(error = %e, "access log write failed");
+                                break 'outer;
+                            }
+                        }
+                        if let Err(e) = buf.flush().await {
+                            error!(error = %e, "access log flush failed");
+                            break 'outer;
+                        }
+                    }
                 }
             }
             if let Err(e) = buf.flush().await {
                 error!(error = %e, "access log final flush failed");
             }
         });
-        Ok(Self { tx })
+        Ok(Self { tx, reopen, path })
     }
 
     /// Best-effort: enqueue a record. Returns `false` if the channel
@@ -268,6 +298,34 @@ impl AccessLogger {
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     }
+
+    /// Ask the writer to flush, close the current FD, and reopen
+    /// `path`. Called from a SIGUSR1 handler. Idempotent and safe to
+    /// call from any thread; the actual reopen happens inside the
+    /// writer task so there's no torn-write race.
+    ///
+    /// If the reopen fails (e.g. the new path is unwritable), the
+    /// writer logs an error and keeps using the OLD FD — production
+    /// keeps running, the operator gets a chance to fix the issue
+    /// and signal again.
+    pub fn reopen(&self) {
+        self.reopen.notify_one();
+    }
+
+    /// Return the path the writer is currently configured to reopen.
+    /// Used by tests to assert reopen semantics.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+async fn open_append(path: &Path) -> std::io::Result<tokio::fs::File> {
+    tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .await
 }
 
 /// Trait alias for a cloneable type the relay can use as an injected
@@ -406,6 +464,122 @@ mod tests {
             assert!(line.contains(&format!(r#""duration_ms":{i}"#)));
             assert!(line.contains(r#""close_reason":"upstream_eof""#));
         }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Logrotate-style scenario: a rotation tool renames the current
+    /// log file out from under us, then sends SIGUSR1. The writer
+    /// must reopen the original path (now a fresh empty file) and
+    /// continue writing to the NEW inode. The original file (now
+    /// renamed) must retain only the pre-reopen records.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_after_rename_writes_to_new_file() {
+        let dir = std::env::temp_dir().join(format!(
+            "proteus-acclog-reopen-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("access.log");
+        let rotated = dir.join("access.log.1");
+
+        let logger = AccessLogger::spawn(&path).await.unwrap();
+
+        // Write 2 records, wait for flush.
+        for i in 0..2u8 {
+            logger.log(AccessLogRecord {
+                user_id: Some(*b"pre_rotn"),
+                duration_ms: Some(u64::from(i)),
+                ..AccessLogRecord::default()
+            });
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // External rotation: rename current file aside.
+        std::fs::rename(&path, &rotated).unwrap();
+
+        // Without reopen, further writes would still hit the renamed
+        // inode. Signal reopen and wait briefly for the writer task
+        // to pick it up.
+        logger.reopen();
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        // Write 3 more records — these must land in the NEW file at `path`.
+        for i in 0..3u8 {
+            logger.log(AccessLogRecord {
+                user_id: Some(*b"post_rot"),
+                duration_ms: Some(u64::from(i + 10)),
+                ..AccessLogRecord::default()
+            });
+        }
+        drop(logger);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+        let new_body = std::fs::read_to_string(&path).unwrap();
+        let new_lines: Vec<_> = new_body.lines().collect();
+        assert_eq!(
+            new_lines.len(),
+            3,
+            "new file should hold exactly the post-rotation records, got: {new_body}"
+        );
+        for line in &new_lines {
+            assert!(
+                line.contains(r#""user_id":"post_rot""#),
+                "wrong record in new file: {line}"
+            );
+        }
+
+        let old_body = std::fs::read_to_string(&rotated).unwrap();
+        let old_lines: Vec<_> = old_body.lines().collect();
+        assert_eq!(
+            old_lines.len(),
+            2,
+            "rotated file should hold exactly the pre-rotation records, got: {old_body}"
+        );
+        for line in &old_lines {
+            assert!(
+                line.contains(r#""user_id":"pre_rotn""#),
+                "wrong record in rotated file: {line}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn reopen_is_idempotent_and_path_accessor_works() {
+        let dir = std::env::temp_dir().join(format!(
+            "proteus-acclog-idem-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("access.log");
+
+        let logger = AccessLogger::spawn(&path).await.unwrap();
+        assert_eq!(logger.path(), path.as_path());
+
+        // Multiple reopens in a row must not panic / deadlock.
+        for _ in 0..5 {
+            logger.reopen();
+        }
+        // Records still land.
+        logger.log(AccessLogRecord {
+            user_id: Some(*b"survives"),
+            ..AccessLogRecord::default()
+        });
+        drop(logger);
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains(r#""user_id":"survives""#));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -218,6 +218,38 @@ process exit via `zeroize`.
 For longer drain windows, raise both `drain_secs` in `server.yaml` and
 `TimeoutStopSec` in the systemd unit override.
 
+## Access log rotation (SIGUSR1)
+
+`proteus-server` opens the access log (`access_log: /var/log/...` in
+server.yaml) once at startup and keeps the FD for the lifetime of the
+process. For correct **rename-then-rotate** rotation (the standard
+logrotate flow), send SIGUSR1 after the rotation:
+
+```text
+/var/log/proteus/access.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    postrotate
+        systemctl kill --signal=USR1 proteus-server
+    endscript
+}
+```
+
+On SIGUSR1 the writer task flushes the current buffer, closes the old
+FD, and reopens the original path — which now points to a fresh
+file. If the new path is unwritable (permissions, missing parent
+dir), the writer logs an error and **keeps using the old FD** — the
+binary keeps running, the operator gets a chance to fix the issue
+and signal again. No scenario will brick the running process.
+
+`copytruncate` also works (the old FD remains valid; the file just
+gets truncated under us, so further appends start at the beginning
+of the file). SIGUSR1 + rename gives sharper rotation boundaries.
+
 ## TLS certificate hot-reload (SIGHUP)
 
 `proteus-server` installs a SIGHUP handler that re-reads the

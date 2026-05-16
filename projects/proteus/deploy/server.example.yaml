@@ -92,8 +92,12 @@ handshake_deadline_secs: 15
 # Structured access log (JSON Lines). One record per completed session.
 # Schema: {ts, user_id, peer, duration_ms, tx_bytes, rx_bytes, close_reason}
 # Ship to Loki / CloudWatch / OpenSearch / Datadog without further parsing.
-# Rotate externally via logrotate (use `copytruncate` — proteus-server
-# keeps the FD open). Unset = disabled.
+# Rotate externally via logrotate. The writer keeps its FD open across
+# the rotation, so the rotation hook MUST send SIGUSR1 after rename:
+#   postrotate
+#       systemctl kill --signal=USR1 proteus-server
+#   endscript
+# (`copytruncate` also works without SIGUSR1.) Unset = disabled.
 # access_log: /var/log/proteus/access.log
 
 # Per-session idle timeout in seconds. A session that goes this long
