@@ -132,8 +132,30 @@ where
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    // client_id = AEAD(K_cid, n=client_nonce[..12], ad="proteus-cid-v1", pt=user_id||flags)
-    // K_cid = HKDF-Expand(server_pq_fingerprint, "proteus-cid-key-v1", 32)
+    // client_id = AEAD(K_cid, n=client_nonce[..12], aad="proteus-cid-v1", pt=user_id)
+    // K_cid = HKDF-Expand-Label(server_pq_fingerprint, "proteus-cid-key-v1", 32)
+    //
+    // Plaintext is the 8-byte user_id; ChaCha20-Poly1305 over 8 plaintext
+    // bytes produces 8 ciphertext bytes + 16-byte tag = 24 bytes, exactly
+    // CLIENT_ID_LEN, with NO truncation — Poly1305 tag is fully
+    // verifiable on the server. The per-session nonce is derived from
+    // `client_nonce[..12]` so two sessions of the same user yield
+    // distinct ciphertexts (no linkability) and the keystream is fresh
+    // per session (no two-time-pad recovery attack).
+    //
+    // SECURITY HISTORY: the previous M1 encoding sealed `user_id || flags`
+    // (16 bytes) with a fixed all-zero nonce and truncated the result to
+    // 24 bytes. That was broken twice:
+    //   1. Two clients with the same user_id produced bit-identical
+    //      `client_id` ciphertexts — a permanent linkability oracle.
+    //      An observer on the path could cluster every session by user
+    //      without ever holding a key.
+    //   2. Two clients with different user_ids reused the same ChaCha20
+    //      keystream → XOR of the two ciphertexts cancels the keystream
+    //      → both plaintexts recoverable from passive observation.
+    //      Classic two-time-pad failure.
+    // The current encoding fixes both by using a per-session nonce and
+    // dropping the truncation.
     let mut client_nonce = [0u8; 16];
     rand_core::RngCore::fill_bytes(&mut rng, &mut client_nonce);
 
@@ -146,16 +168,17 @@ where
     )?;
     let mut cid_n = [0u8; 12];
     cid_n.copy_from_slice(&client_nonce[..12]);
-    let mut cid_pt = [0u8; 16];
-    cid_pt[..8].copy_from_slice(&config.user_id);
-    // flags zeroed (M1)
-    let cid_ct = aead::seal(&cid_key, &[0u8; 12], 0, b"proteus-cid-v1", &cid_pt)?;
-    // Truncate the 32-byte ciphertext to 24 bytes (spec §5.7.1).
-    let mut client_id = [0u8; 24];
-    client_id.copy_from_slice(&cid_ct[..24]);
-    // Silence unused-warning on cid_n (kept for future spec-strict use of
-    // a unique nonce per client).
-    let _ = cid_n;
+    // Plaintext = 8-byte user_id. No flags (M1 always-zero field
+    // eliminated; M3+ adds flags via a separate authenticated field
+    // outside `client_id`).
+    let cid_ct = aead::seal(&cid_key, &cid_n, 0, b"proteus-cid-v1", &config.user_id)?;
+    if cid_ct.len() != proteus_spec::CLIENT_ID_LEN {
+        return Err(AlphaError::Io(std::io::Error::other(
+            "client_id encoding length drift",
+        )));
+    }
+    let mut client_id = [0u8; proteus_spec::CLIENT_ID_LEN];
+    client_id.copy_from_slice(&cid_ct);
 
     // Build the signature over (version || nonce || x25519_pub || mlkem_ct).
     let mut sig_msg = Vec::with_capacity(1 + 16 + 32 + 1088);

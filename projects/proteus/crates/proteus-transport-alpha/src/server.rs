@@ -1126,17 +1126,87 @@ async fn handshake_with_prefix(
         m.extend_from_slice(&ext.client_mlkem768_ct);
         m
     };
+    // ----- Decrypt client_id → look up exactly one allowlist entry → 1 verify -----
+    //
+    // The pre-fix code did `for (uid, vk) in allowlist { sig::verify(...) }`
+    // until the first match, which is two CVEs in one:
+    //
+    //   1. Timing channel: position of the matching key in the allowlist
+    //      is observable through total-Ed25519-verify latency. An attacker
+    //      who can present a known (uid, sig) pair learns the index.
+    //   2. CPU DoS amplification: an unauthenticated peer with no
+    //      matching key forces N Ed25519 verifies (~100 µs each on
+    //      Apple Silicon, ~250 µs on a typical VPS). N = 1000 users
+    //      ⇒ 250 ms of server CPU per junk handshake.
+    //
+    // After this fix:
+    //   - We AEAD-decrypt `client_id` to recover the claimed user_id (8
+    //     bytes). This is a single ChaCha20-Poly1305 open (~1 µs).
+    //   - We look up the user in the allowlist (linear scan over the
+    //     8-byte uid is O(n) but the per-element cost is memcmp; an
+    //     attacker who succeeds in this lookup has already authenticated
+    //     the user_id via the AEAD tag, so this scan is not a timing
+    //     channel on identity).
+    //   - We do EXACTLY ONE Ed25519 verify against the matched key.
+    //
+    // The AEAD auth tag on `client_id` (16 bytes of Poly1305) is the
+    // first auth gate — forgery resistance is 2^-128. The Ed25519 over
+    // `(version || nonce || x25519_pub || mlkem_ct)` remains the
+    // primary identity proof. Both must succeed.
+    let cid_key = &ctx.keys.client_id_aead_key;
+    let mut cid_n = [0u8; 12];
+    cid_n.copy_from_slice(&ext.client_nonce[..12]);
+    let claimed_uid: [u8; 8] =
+        match proteus_crypto::aead::open(cid_key, &cid_n, 0, b"proteus-cid-v1", &ext.client_id) {
+            Ok(pt) => {
+                let s = pt.as_slice();
+                if s.len() != 8 {
+                    let mut original = proteus_wire::alpha::encode_handshake(
+                        proteus_wire::alpha::FRAME_CLIENT_HELLO,
+                        &ch_frame_body,
+                    );
+                    original.extend_from_slice(&tail);
+                    return Err(HandshakeFailure::new(original, None));
+                }
+                let mut uid = [0u8; 8];
+                uid.copy_from_slice(s);
+                uid
+            }
+            Err(_) => {
+                // client_id AEAD failed: this is the "no such user" path AND
+                // the "garbage handshake" path collapsed into one indistinguishable
+                // response. Cover-forward.
+                let mut original = proteus_wire::alpha::encode_handshake(
+                    proteus_wire::alpha::FRAME_CLIENT_HELLO,
+                    &ch_frame_body,
+                );
+                original.extend_from_slice(&tail);
+                return Err(HandshakeFailure::new(original, None));
+            }
+        };
+
     let mut matched_user_id: Option<[u8; 8]> = None;
     if !ctx.keys.client_allowlist.is_empty() {
-        for (uid, vk) in &ctx.keys.client_allowlist {
+        // Direct lookup by uid. O(n) for now (allowlist is a Vec); a
+        // future HashMap conversion brings this to O(1) but doesn't
+        // change the security story — uid is already authenticated by
+        // the AEAD tag above.
+        if let Some((uid, vk)) = ctx
+            .keys
+            .client_allowlist
+            .iter()
+            .find(|(uid, _)| uid == &claimed_uid)
+        {
             if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
                 matched_user_id = Some(*uid);
-                break;
             }
         }
         if matched_user_id.is_none() {
             return Err(HandshakeFailure::new(Vec::new(), None));
         }
+    } else {
+        // No allowlist configured (test mode): trust the AEAD-attested uid.
+        matched_user_id = Some(claimed_uid);
     }
 
     let mut transcript = Transcript::new();
@@ -1418,13 +1488,28 @@ where
     hybrid_shared.copy_from_slice(&combined[..]);
 
     // ----- 5. Decrypt + verify client_id -----
-    // Concat ct[..24] is the truncated AEAD output; we cannot recover the
-    // 8-byte tag suffix from 24 bytes. M1 policy: skip client_id verify
-    // (spec §5.7.1 acceptable trade-off; M3 will swap to a different
-    // 24-byte encoding that's losslessly verifiable).
-    let _ = &ext.client_id;
+    //
+    // The full 24-byte ChaCha20-Poly1305 output (8-byte ct + 16-byte
+    // tag) authenticates `user_id`. Decrypt fails on any tampering —
+    // we drop those without further work (no Ed25519 verify) so a
+    // garbage handshake cannot drain CPU. See the parallel comment
+    // in `handshake_with_cover` for the threat-model write-up.
+    let cid_key = &ctx.keys.client_id_aead_key;
+    let mut cid_n = [0u8; 12];
+    cid_n.copy_from_slice(&ext.client_nonce[..12]);
+    let claimed_uid: [u8; 8] = {
+        let pt = proteus_crypto::aead::open(cid_key, &cid_n, 0, b"proteus-cid-v1", &ext.client_id)
+            .map_err(|_| AlphaError::AuthTagInvalid)?;
+        let s = pt.as_slice();
+        if s.len() != 8 {
+            return Err(AlphaError::AuthTagInvalid);
+        }
+        let mut uid = [0u8; 8];
+        uid.copy_from_slice(s);
+        uid
+    };
 
-    // ----- 6. Ed25519 sig verify -----
+    // ----- 6. Ed25519 sig verify (exactly one verify, not N) -----
     let sig_msg = {
         let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
         m.push(ext.version);
@@ -1433,18 +1518,23 @@ where
         m.extend_from_slice(&ext.client_mlkem768_ct);
         m
     };
-    // M1: skip Ed25519 verify if no allowlist is configured.
     let mut matched_user_id: Option<[u8; 8]> = None;
     if !ctx.keys.client_allowlist.is_empty() {
-        for (uid, vk) in &ctx.keys.client_allowlist {
+        if let Some((uid, vk)) = ctx
+            .keys
+            .client_allowlist
+            .iter()
+            .find(|(uid, _)| uid == &claimed_uid)
+        {
             if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
                 matched_user_id = Some(*uid);
-                break;
             }
         }
         if matched_user_id.is_none() {
             return Err(AlphaError::AuthTagInvalid);
         }
+    } else {
+        matched_user_id = Some(claimed_uid);
     }
 
     // ----- 7. Build ServerHello with server X25519 share -----
