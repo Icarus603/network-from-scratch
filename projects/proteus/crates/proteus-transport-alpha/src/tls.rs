@@ -24,6 +24,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use rustls::crypto::CryptoProvider;
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
     ClientConfig, RootCertStore, ServerConfig,
@@ -32,6 +33,46 @@ use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
+
+/// Build a CryptoProvider whose `cipher_suites` list is ordered to
+/// approximate a Chrome 124 ClientHello.
+///
+/// Rationale: JA4 cipher_hash is computed over the SORTED cipher list,
+/// so the order on the wire doesn't move the hash by itself. BUT it
+/// also determines the visible cipher_count (count of non-GREASE
+/// ciphers in the ClientHello) — and we want that count to look like
+/// a real browser, NOT like the rustls default that DPI classifiers
+/// have learned. We use the maximal rustls cipher set (9 suites,
+/// matching what rustls 0.23 with TLS 1.2 fallback compiled in
+/// supports) ordered to match Chrome's preference for AEAD over
+/// AES-CBC, AES-GCM over CHACHA20-POLY1305 on AES-NI hardware, and
+/// ECDSA before RSA — exactly the rationale Chrome uses since 2019.
+///
+/// Wire-fingerprint goal: this is **one step** toward matching Chrome.
+/// Full uTLS-grade replay requires also matching extension order,
+/// signature_algorithms list, and grease injection — which need rustls
+/// patching. This is what we can achieve via the public rustls API.
+fn proteus_chrome_provider() -> CryptoProvider {
+    use rustls::crypto::ring::cipher_suite::*;
+    let mut p = rustls::crypto::ring::default_provider();
+    // Chrome 124's cipher preference: TLS 1.3 first (128 → 256 →
+    // CHACHA20), then TLS 1.2 ECDSA-before-RSA within each AEAD group.
+    // The workspace ships rustls with the `tls12` feature enabled
+    // (see top-level Cargo.toml), so all 9 cipher constants below
+    // resolve.
+    p.cipher_suites = vec![
+        TLS13_AES_128_GCM_SHA256,
+        TLS13_AES_256_GCM_SHA384,
+        TLS13_CHACHA20_POLY1305_SHA256,
+        TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+        TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+        TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+        TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+        TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+        TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+    ];
+    p
+}
 
 /// Server-side TLS-wrapped TCP stream.
 pub type ServerStream = ServerTlsStream<TcpStream>;
@@ -135,15 +176,28 @@ pub fn build_acceptor(
     Ok(TlsAcceptor::from(Arc::new(config)))
 }
 
+/// Build a `ClientConfig` with the Chrome-ordered cipher provider, TLS 1.3
+/// only, ALPN h2+http/1.1, and the given root store. This is the
+/// internal builder used by every public `build_connector_*` entry
+/// point so the wire-fingerprint stays consistent across deployment
+/// modes (webpki roots, pinned CA file, pinned CA DER).
+fn build_chrome_shaped_client_config(roots: RootCertStore) -> Result<ClientConfig, TlsError> {
+    let provider = Arc::new(proteus_chrome_provider());
+    let mut config = ClientConfig::builder_with_provider(provider)
+        .with_protocol_versions(&[&rustls::version::TLS13])
+        .map_err(|e| TlsError::BadServerName(format!("bad TLS provider config: {e}")))?
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(config)
+}
+
 /// Build a client-side TLS 1.3 connector trusting the webpki root CAs.
 pub fn build_connector_webpki_roots() -> Result<TlsConnector, TlsError> {
     install_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let config = build_chrome_shaped_client_config(roots)?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -156,10 +210,7 @@ pub fn build_connector_with_ca(ca_path: &Path) -> Result<TlsConnector, TlsError>
     for cert in chain {
         roots.add(cert)?;
     }
-    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let config = build_chrome_shaped_client_config(roots)?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -171,10 +222,7 @@ pub fn build_connector_with_ca_der(ca: CertificateDer<'static>) -> Result<TlsCon
     install_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.add(ca)?;
-    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    let config = build_chrome_shaped_client_config(roots)?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 

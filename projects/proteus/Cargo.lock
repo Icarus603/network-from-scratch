@@ -907,6 +907,7 @@ dependencies = [
 name = "proteus-fingerprint"
 version = "0.1.0"
 dependencies = [
+ "proteus-transport-alpha",
  "rcgen",
  "rustls",
  "sha2",

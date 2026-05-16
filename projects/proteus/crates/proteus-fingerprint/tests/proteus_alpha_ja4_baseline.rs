@@ -39,31 +39,40 @@
 
 use proteus_fingerprint::ja4::parse_client_hello;
 use rustls::pki_types::ServerName;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
-/// Build the exact same TLS connector Proteus α uses in production.
-fn build_proteus_alpha_connector() -> tokio_rustls::TlsConnector {
-    // Install the default crypto provider exactly once.
-    use std::sync::Once;
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+/// Pluck the wire-order cipher list out of a captured ClientHello.
+/// Mirrors the offset arithmetic in the JA4 parser but returns the
+/// ORIGINAL (unsorted) cipher IDs for direct wire-order assertions.
+fn extract_cipher_wire_order(record: &[u8]) -> Vec<u16> {
+    assert!(record.len() >= 5);
+    let hs = &record[5..];
+    assert!(hs.len() >= 4);
+    let hs_len = u32::from_be_bytes([0, hs[1], hs[2], hs[3]]) as usize;
+    let ch = &hs[4..4 + hs_len];
+    // legacy_version (2) + random (32) + sid_len (1) + sid
+    let mut pos = 2 + 32;
+    let sid_len = ch[pos] as usize;
+    pos += 1 + sid_len;
+    let ciphers_len = u16::from_be_bytes([ch[pos], ch[pos + 1]]) as usize;
+    pos += 2;
+    let ciphers_bytes = &ch[pos..pos + ciphers_len];
+    ciphers_bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_be_bytes([c[0], c[1]]))
+        .collect()
+}
 
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let mut config =
-        rustls::ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-    // EXACT same ALPN list Proteus α uses (see crates/proteus-transport-
-    // alpha/src/tls.rs::build_connector_webpki_roots).
-    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-    tokio_rustls::TlsConnector::from(Arc::new(config))
+/// Use the EXACT production connector Proteus α emits on the wire.
+/// Re-implementing the config here would let the test drift away from
+/// what actually ships — silent regression. Calling production code
+/// keeps the JA4 measurement faithful by construction.
+fn build_proteus_alpha_connector() -> tokio_rustls::TlsConnector {
+    proteus_transport_alpha::tls::build_connector_webpki_roots()
+        .expect("build_connector_webpki_roots")
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -162,6 +171,53 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
     assert!(
         ja4.ext_hash.chars().all(|c| c.is_ascii_hexdigit()),
         "ext_hash must be hex"
+    );
+
+    // ----- Wire-order cipher list assertion -----
+    //
+    // JA4 cipher_hash is over the SORTED cipher list, so reordering
+    // the wire bytes does NOT change cipher_hash by design (the JA4
+    // spec wanted order-invariance to defeat naive shuffle attacks).
+    //
+    // But JA3 (legacy MD5-based fingerprint) AND bespoke raw-byte
+    // classifiers DO see wire order. Proteus is configured with a
+    // custom CryptoProvider that puts TLS 1.3 suites first in
+    // Chrome's preferred order. This assertion verifies the wire
+    // bytes match — so even if JA4 looks like rustls, JA3 and
+    // raw-byte tools see a Chrome-shaped cipher prefix.
+    //
+    // Extracting the cipher list from the raw ClientHello bytes
+    // (we already parsed it for the JA4 fields; here we re-parse
+    // just the ciphers section).
+    let ciphers_wire = extract_cipher_wire_order(&raw);
+    eprintln!(
+        "  wire cipher order: [{}]",
+        ciphers_wire
+            .iter()
+            .map(|c| format!("0x{c:04x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    // First TLS 1.3 cipher MUST be TLS_AES_128_GCM_SHA256 (0x1301) —
+    // matches Chrome. The rustls default would put TLS_AES_256_GCM_SHA384
+    // (0x1302) first, which is what every JA3 classifier learned to
+    // associate with rustls.
+    assert_eq!(
+        ciphers_wire.first().copied(),
+        Some(0x1301),
+        "first cipher MUST be TLS_AES_128_GCM_SHA256 (0x1301, Chrome-ordered) — \
+         the rustls default would be 0x1302; if you see that, the custom \
+         CryptoProvider didn't take effect."
+    );
+    assert_eq!(
+        ciphers_wire.get(1).copied(),
+        Some(0x1302),
+        "second cipher MUST be TLS_AES_256_GCM_SHA384 (Chrome's #2)"
+    );
+    assert_eq!(
+        ciphers_wire.get(2).copied(),
+        Some(0x1303),
+        "third cipher MUST be TLS_CHACHA20_POLY1305_SHA256 (Chrome's #3)"
     );
 
     // ----- EXACT baseline assertion (regression guardrail) -----

@@ -71,6 +71,25 @@ pub struct ClientConfig {
     /// traffic-analysis resistance (i.e. anti-censorship use cases).
     #[serde(default)]
     pub pad_quantum: Option<u16>,
+    /// Maximum number of concurrent in-flight SOCKS5 sessions. When
+    /// reached, additional SOCKS5 inbound connections receive a clean
+    /// `0x05 0x01` (general failure) reply and the TCP connection is
+    /// dropped. Default: 1024.
+    ///
+    /// Production sizing: each in-flight session holds one upstream
+    /// Proteus session (16 MiB receive-buffer ceiling) plus one
+    /// SOCKS5 inbound socket. 1024 sessions ≈ 16 GiB worst-case
+    /// memory ceiling on the receive path. Tune for the deployment.
+    /// Set to 0 to disable the cap (NOT recommended in production —
+    /// any local-network attacker can OOM the client process).
+    #[serde(default)]
+    pub max_inflight_sessions: Option<usize>,
+    /// Graceful-shutdown drain window in seconds. After receiving
+    /// SIGTERM / SIGINT, the client stops accepting new SOCKS5
+    /// connections and waits up to this long for in-flight sessions
+    /// to flush their last records cleanly. Default: 15 s.
+    #[serde(default)]
+    pub drain_secs: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
