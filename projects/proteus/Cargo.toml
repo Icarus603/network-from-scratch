@@ -8,6 +8,7 @@ members = [
     "crates/proteus-handshake",
     "crates/proteus-transport-alpha",
     "crates/proteus-transport-beta",
+    "crates/proteus-fingerprint",
     "crates/proteus-server",
     "crates/proteus-client",
 ]

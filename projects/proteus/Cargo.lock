@@ -904,6 +904,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "proteus-fingerprint"
+version = "0.1.0"
+dependencies = [
+ "rcgen",
+ "rustls",
+ "sha2",
+ "thiserror 1.0.69",
+ "tokio",
+ "tokio-rustls",
+ "webpki-roots",
+]
+
+[[package]]
 name = "proteus-handshake"
 version = "0.1.0"
 dependencies = [

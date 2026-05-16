@@ -1,0 +1,25 @@
+[package]
+name = "proteus-fingerprint"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "TLS ClientHello / JA4 fingerprint extractor — measurement + regression guardrails for Proteus's outer-TLS shape"
+
+[dependencies]
+sha2.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+rcgen = "0.13"
+rustls = { workspace = true }
+tokio-rustls = { workspace = true }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time"] }
+webpki-roots = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"
