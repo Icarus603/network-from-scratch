@@ -448,7 +448,7 @@ where
             let outcome =
                 tokio::time::timeout(deadline, handshake_over_tls(stream, &acceptor, &ctx)).await;
             match outcome {
-                Ok(Ok(session)) => handle(session).await,
+                Ok(Ok(session)) => handle(session.with_peer_addr(peer)).await,
                 Ok(Err(e)) => {
                     tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
                     if let Some(m) = ctx.metrics() {
@@ -535,7 +535,7 @@ where
             )
             .await;
             match outcome {
-                Ok(Ok(session)) => handle(session).await,
+                Ok(Ok(session)) => handle(session.with_peer_addr(peer)).await,
                 Ok(Err(e)) => {
                     tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
                     if let Some(m) = ctx.metrics() {
@@ -612,7 +612,7 @@ where
             let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;
             let (replay_buf, raw_stream, timed_out) = match result {
                 Ok(Ok((session, _))) => {
-                    handle(session).await;
+                    handle(session.with_peer_addr(peer)).await;
                     return;
                 }
                 Ok(Err(HandshakeFailure { buffer, stream, .. })) => {
@@ -891,15 +891,15 @@ async fn handshake_with_prefix(
         m.extend_from_slice(&ext.client_mlkem768_ct);
         m
     };
+    let mut matched_user_id: Option<[u8; 8]> = None;
     if !ctx.keys.client_allowlist.is_empty() {
-        let mut ok = false;
-        for (_uid, vk) in &ctx.keys.client_allowlist {
+        for (uid, vk) in &ctx.keys.client_allowlist {
             if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
-                ok = true;
+                matched_user_id = Some(*uid);
                 break;
             }
         }
-        if !ok {
+        if matched_user_id.is_none() {
             return Err(HandshakeFailure::new(Vec::new(), None));
         }
     }
@@ -1007,7 +1007,7 @@ async fn handshake_with_prefix(
 
     // Pass any post-CF tail bytes (coalesced DATA records) to the session
     // receiver so we don't lose them.
-    Ok(AlphaSession::with_prefix(
+    let mut session = AlphaSession::with_prefix(
         write,
         read,
         s_keys,
@@ -1015,7 +1015,11 @@ async fn handshake_with_prefix(
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
-    ))
+    );
+    if let Some(uid) = matched_user_id {
+        session = session.with_user_id(uid);
+    }
+    Ok(session)
 }
 
 /// Read one frame, draining bytes from a **persistent** receive buffer.
@@ -1192,15 +1196,15 @@ where
         m
     };
     // M1: skip Ed25519 verify if no allowlist is configured.
+    let mut matched_user_id: Option<[u8; 8]> = None;
     if !ctx.keys.client_allowlist.is_empty() {
-        let mut ok = false;
-        for (_uid, vk) in &ctx.keys.client_allowlist {
+        for (uid, vk) in &ctx.keys.client_allowlist {
             if proteus_crypto::sig::verify(vk, &sig_msg, &ext.client_kex_sig).is_ok() {
-                ok = true;
+                matched_user_id = Some(*uid);
                 break;
             }
         }
-        if !ok {
+        if matched_user_id.is_none() {
             return Err(AlphaError::AuthTagInvalid);
         }
     }
@@ -1289,7 +1293,7 @@ where
     )?;
     let (c_keys, s_keys) = final_secrets.direction_keys()?;
     // Server: sends with s_ap_secret keys, receives with c_ap_secret keys.
-    Ok(AlphaSession::with_prefix(
+    let mut session = AlphaSession::with_prefix(
         write,
         read,
         s_keys,
@@ -1297,7 +1301,11 @@ where
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
-    ))
+    );
+    if let Some(uid) = matched_user_id {
+        session = session.with_user_id(uid);
+    }
+    Ok(session)
 }
 
 /// Read one frame, draining bytes from a persistent receive buffer.

@@ -65,6 +65,13 @@ rate_limit:
 # Per-handshake wall-clock deadline (slowloris defense). Default 15s.
 handshake_deadline_secs: 15
 
+# Structured access log (JSON Lines). One record per completed session.
+# Schema: {ts, user_id, peer, duration_ms, tx_bytes, rx_bytes, close_reason}
+# Ship to Loki / CloudWatch / OpenSearch / Datadog without further parsing.
+# Rotate externally via logrotate (use `copytruncate` — proteus-server
+# keeps the FD open). Unset = disabled.
+# access_log: /var/log/proteus/access.log
+
 # Per-session idle timeout in seconds. A session that goes this long
 # without any inner record (either direction) is closed and its FD
 # released. Distinct from handshake_deadline_secs which only bounds

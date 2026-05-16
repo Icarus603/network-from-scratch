@@ -369,6 +369,21 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // Optional structured access log — one JSON Lines record per
+    // completed session. Init early so the spawn task is ready before
+    // the accept loop starts.
+    let access_log_handle: Option<proteus_transport_alpha::access_log::AccessLogHandle> =
+        match cfg.access_log.as_ref() {
+            Some(path) => {
+                let logger = proteus_transport_alpha::access_log::AccessLogger::spawn(path)
+                    .await
+                    .map_err(|e| format!("access log open {path:?}: {e}"))?;
+                info!(path = ?path, "access log enabled");
+                Some(Arc::new(logger))
+            }
+            None => None,
+        };
+
     // Per-session relay knobs. session_idle_secs=0 disables; default 600s.
     let relay_cfg = relay::RelayConfig {
         idle_timeout: match cfg.session_idle_secs.unwrap_or(600) {
@@ -376,6 +391,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             n => Some(std::time::Duration::from_secs(n)),
         },
         metrics: Some(Arc::clone(&metrics)),
+        access_log: access_log_handle,
     };
     if let Some(d) = relay_cfg.idle_timeout {
         info!(secs = d.as_secs(), "session idle timeout configured");

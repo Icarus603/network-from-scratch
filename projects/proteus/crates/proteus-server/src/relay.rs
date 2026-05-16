@@ -16,8 +16,9 @@
 //! upstream; upstream replies are wrapped in records back to the client.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
+use proteus_transport_alpha::access_log::{AccessLogHandle, AccessLogRecord};
 use proteus_transport_alpha::metrics::ServerMetrics;
 use proteus_transport_alpha::session::AlphaSession;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -25,7 +26,7 @@ use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 /// Hold the per-session knobs the relay needs from the binary.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct RelayConfig {
     /// Per-direction idle timeout. `None` = no timeout (default).
     /// When set, a session that goes this long without any record
@@ -36,12 +37,67 @@ pub struct RelayConfig {
     /// `session_idle_reaped` when the timeout fires. The binary wires
     /// this in; standalone tests may leave it as None.
     pub metrics: Option<Arc<ServerMetrics>>,
+    /// Optional structured access log. One JSON Lines record emitted
+    /// per completed session via [`AccessLogHandle::log`]. The handle
+    /// itself is cheap to clone (Arc<dyn LogSink>); we capture it
+    /// once at session entry and emit at session exit.
+    pub access_log: Option<AccessLogHandle>,
+}
+
+impl std::fmt::Debug for RelayConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RelayConfig")
+            .field("idle_timeout", &self.idle_timeout)
+            .field("metrics", &self.metrics.is_some())
+            .field("access_log", &self.access_log.is_some())
+            .finish()
+    }
 }
 
 pub async fn handle_session<R, W>(
     session: AlphaSession<R, W>,
     cfg: RelayConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    // Pull the access-log axes off the session *before* the destructure
+    // so they survive the move into AlphaSender/AlphaReceiver.
+    let user_id = session.user_id;
+    let peer_addr = session.peer_addr;
+    let session_metrics = std::sync::Arc::clone(&session.metrics);
+    let access_log = cfg.access_log.clone();
+    let started = Instant::now();
+
+    let outcome = handle_session_inner(session, cfg).await;
+
+    // Emit one access-log line for the completed session, regardless
+    // of whether the inner body returned Ok / Err / through a panic
+    // (the binary wraps the spawn in an InFlightGuard that catches
+    // panics, but the log path is the same).
+    if let Some(logger) = access_log {
+        let snap = session_metrics.snapshot();
+        let close_reason = match &outcome {
+            Ok(reason) => Some(*reason),
+            Err(_) => Some("relay_error"),
+        };
+        logger.log(AccessLogRecord {
+            user_id,
+            peer: peer_addr,
+            duration_ms: Some(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64),
+            tx_bytes: Some(snap.tx_bytes),
+            rx_bytes: Some(snap.rx_bytes),
+            close_reason,
+        });
+    }
+    outcome.map(|_| ())
+}
+
+async fn handle_session_inner<R, W>(
+    session: AlphaSession<R, W>,
+    cfg: RelayConfig,
+) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>>
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
@@ -59,7 +115,7 @@ where
         Some(b) => b,
         None => {
             warn!("client closed before sending connect target");
-            return Ok(());
+            return Ok("client_no_connect");
         }
     };
     let target = parse_connect(&req)?;
@@ -78,13 +134,13 @@ where
             warn!(error = %e, host = %target.0, "upstream dial failed");
             let _ = sender.send_record(&[]).await;
             let _ = sender.flush().await;
-            return Ok(());
+            return Ok("upstream_dial_fail");
         }
         Err(_) => {
             warn!(host = %target.0, "upstream dial timed out");
             let _ = sender.send_record(&[]).await;
             let _ = sender.flush().await;
-            return Ok(());
+            return Ok("upstream_dial_timeout");
         }
     };
     upstream.set_nodelay(true).ok();
@@ -94,9 +150,24 @@ where
     // `cfg.idle_timeout`: a direction that goes idle longer than this
     // window shuts itself down (which causes the joined task to
     // finish, releasing the session's FDs and crypto state).
+    //
+    // Both halves write a close-reason into `reason_cell` on exit;
+    // first writer wins. The outer body returns whichever reason
+    // landed there (or "session_closed" as a default).
     let idle = cfg.idle_timeout;
+    let reason_cell: std::sync::Arc<std::sync::Mutex<Option<&'static str>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    fn set_reason(cell: &std::sync::Mutex<Option<&'static str>>, r: &'static str) {
+        if let Ok(mut g) = cell.lock() {
+            if g.is_none() {
+                *g = Some(r);
+            }
+        }
+    }
+
     let metrics_c2u = metrics.clone();
-    let client_to_upstream = async {
+    let reason_c2u = std::sync::Arc::clone(&reason_cell);
+    let client_to_upstream = async move {
         loop {
             let recv = receiver.recv_record();
             let next = match idle {
@@ -108,6 +179,7 @@ where
                             m.session_idle_reaped
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
+                        set_reason(&reason_c2u, "idle_timeout");
                         break;
                     }
                 },
@@ -116,23 +188,39 @@ where
             match next {
                 Ok(Some(buf)) if !buf.is_empty() => {
                     if up_w.write_all(&buf).await.is_err() {
+                        set_reason(&reason_c2u, "upstream_write_fail");
                         break;
                     }
                 }
                 Ok(Some(_empty)) => {} // keepalive
-                Ok(None) | Err(_) => break,
+                Ok(None) => {
+                    set_reason(&reason_c2u, "client_close");
+                    break;
+                }
+                Err(_) => {
+                    set_reason(&reason_c2u, "client_recv_err");
+                    break;
+                }
             }
         }
         let _ = up_w.shutdown().await;
     };
     let metrics_u2c = metrics.clone();
-    let upstream_to_client = async {
+    let reason_u2c = std::sync::Arc::clone(&reason_cell);
+    let upstream_to_client = async move {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
             let read_fut = up_r.read(&mut buf);
             let n = match idle {
                 Some(d) => match tokio::time::timeout(d, read_fut).await {
-                    Ok(Ok(0)) | Ok(Err(_)) => break,
+                    Ok(Ok(0)) => {
+                        set_reason(&reason_u2c, "upstream_eof");
+                        break;
+                    }
+                    Ok(Err(_)) => {
+                        set_reason(&reason_u2c, "upstream_read_err");
+                        break;
+                    }
                     Ok(Ok(n)) => n,
                     Err(_) => {
                         warn!(idle_secs = d.as_secs(), "upstream→client idle timeout");
@@ -140,18 +228,28 @@ where
                             m.session_idle_reaped
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         }
+                        set_reason(&reason_u2c, "idle_timeout");
                         break;
                     }
                 },
                 None => match read_fut.await {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => {
+                        set_reason(&reason_u2c, "upstream_eof");
+                        break;
+                    }
+                    Err(_) => {
+                        set_reason(&reason_u2c, "upstream_read_err");
+                        break;
+                    }
                     Ok(n) => n,
                 },
             };
             if sender.send_record(&buf[..n]).await.is_err() {
+                set_reason(&reason_u2c, "client_send_err");
                 break;
             }
             if sender.flush().await.is_err() {
+                set_reason(&reason_u2c, "client_send_err");
                 break;
             }
         }
@@ -166,7 +264,12 @@ where
 
     tokio::join!(client_to_upstream, upstream_to_client);
     debug!("session closed");
-    Ok(())
+    let reason = reason_cell
+        .lock()
+        .ok()
+        .and_then(|g| *g)
+        .unwrap_or("session_closed");
+    Ok(reason)
 }
 
 /// Encode a CONNECT request the way the client transmits it. Public

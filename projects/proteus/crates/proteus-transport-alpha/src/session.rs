@@ -442,6 +442,33 @@ pub struct AlphaSession<
     pub receiver: AlphaReceiver<R>,
     /// Per-session metrics snapshot accessor.
     pub metrics: std::sync::Arc<SessionMetrics>,
+    /// Authenticated user identifier, set by the server-side handshake
+    /// when an allowlist entry matches the client's Ed25519 sig. `None`
+    /// on the client side, or when no allowlist is configured (test
+    /// builds). Used by access logs and per-user rate limiters.
+    pub user_id: Option<[u8; 8]>,
+    /// Peer socket address as observed at TCP accept. `None` when the
+    /// session was built over an in-memory stream (tests). Used by
+    /// access logs.
+    pub peer_addr: Option<std::net::SocketAddr>,
+}
+
+impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
+    /// Builder-style setter for the authenticated user-id. Called by
+    /// the server-side handshake after the allowlist check.
+    #[must_use]
+    pub fn with_user_id(mut self, user_id: [u8; 8]) -> Self {
+        self.user_id = Some(user_id);
+        self
+    }
+
+    /// Builder-style setter for the peer socket address. Called by
+    /// the server-side accept loop just after `accept()`.
+    #[must_use]
+    pub fn with_peer_addr(mut self, peer: std::net::SocketAddr) -> Self {
+        self.peer_addr = Some(peer);
+        self
+    }
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
@@ -494,6 +521,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
                 rx_prefix,
             ),
             metrics,
+            user_id: None,
+            peer_addr: None,
         }
     }
 }

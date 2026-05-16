@@ -23,7 +23,7 @@ hmac.workspace = true
 sha2.workspace = true
 subtle.workspace = true
 
-tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs"] }
 
 socket2 = "0.6"
 libc = "0.2"

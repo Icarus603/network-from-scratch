@@ -89,6 +89,17 @@ pub struct ServerConfig {
     #[serde(default)]
     pub drain_secs: Option<u64>,
 
+    /// Optional path to a JSON Lines access log. One record per
+    /// completed session is appended; rotate it externally via
+    /// `logrotate` (use `copytruncate` since proteus-server keeps
+    /// the FD open). Recommended location for a systemd deploy:
+    /// `/var/log/proteus/access.log`. The schema is:
+    ///     {"ts","user_id","peer","duration_ms","tx_bytes",
+    ///      "rx_bytes","close_reason"}
+    /// Unset = disabled.
+    #[serde(default)]
+    pub access_log: Option<PathBuf>,
+
     /// Per-session idle timeout in seconds. A session that goes this
     /// long without ANY inner traffic (either direction) is closed
     /// and its FD released. Distinct from `handshake_deadline_secs`
