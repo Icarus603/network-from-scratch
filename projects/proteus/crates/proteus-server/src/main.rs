@@ -77,6 +77,33 @@ enum Cmd {
         #[arg(long, default_value = "/etc/proteus/server.yaml")]
         config: PathBuf,
     },
+    /// Admin commands against a running server.
+    Admin {
+        #[command(subcommand)]
+        cmd: AdminCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum AdminCmd {
+    /// Pretty-print a one-shot status snapshot by scraping the
+    /// server's /metrics endpoint. Auth via --token-file or the
+    /// PROTEUS_METRICS_TOKEN env var.
+    Status {
+        /// URL of the metrics endpoint. Default is the loopback bind
+        /// from the bundled server.example.yaml.
+        #[arg(long, default_value = "http://127.0.0.1:9090/metrics")]
+        url: String,
+        /// Path to a file containing the bearer token. If unset, the
+        /// PROTEUS_METRICS_TOKEN env var is consulted; if both are
+        /// unset the request is sent without auth (works only when
+        /// the server has metrics_token_file unset too).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Per-step network timeout in seconds. Default 5 s.
+        #[arg(long, default_value_t = 5)]
+        timeout_secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -98,6 +125,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Cmd::Admin { cmd } => match cmd {
+            AdminCmd::Status {
+                url,
+                token_file,
+                timeout_secs,
+            } => {
+                let token = match token_file {
+                    Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                };
+                proteus_server::admin::run(
+                    &url,
+                    token.as_deref(),
+                    std::time::Duration::from_secs(timeout_secs),
+                )?;
+            }
+        },
     }
     Ok(())
 }

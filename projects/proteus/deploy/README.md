@@ -250,6 +250,64 @@ and signal again. No scenario will brick the running process.
 gets truncated under us, so further appends start at the beginning
 of the file). SIGUSR1 + rename gives sharper rotation boundaries.
 
+## Live snapshot (`proteus-server admin status`)
+
+SSH'd into a live server, no need to remember the `/metrics` path or
+the bearer token format:
+
+```bash
+# Loopback bind, no auth (matches bundled server.example.yaml):
+proteus-server admin status
+
+# With bearer auth:
+proteus-server admin status \
+    --url http://127.0.0.1:9090/metrics \
+    --token-file /etc/proteus/metrics.token
+
+# Or via env var (handy in shell aliases):
+export PROTEUS_METRICS_TOKEN=$(cat /etc/proteus/metrics.token)
+proteus-server admin status
+```
+
+Sample output:
+
+```
+============================================================
+ proteus-server status — LIVE / READY
+============================================================
+ Sessions
+  in_flight_sessions               7
+  sessions_accepted_total          1042
+  handshakes_succeeded_total       1019
+  handshakes_failed_total          23
+  handshake_timeouts_total         2
+
+ Defense pipeline (rejections)
+  firewall_denied                  17
+  handshake_budget_rejected        0
+  rate_limited                     5
+  conn_limit_rejected              0
+  user_rate_rejected               2
+  cover_forwards                   24
+  total_rejected                   24
+
+ Session teardown causes
+  session_idle_reaped              3
+  session_byte_budget_exhausted    0
+
+ Throughput
+  tx_bytes_total                   5048321 (4.81 MiB)
+  rx_bytes_total                   4119883 (3.93 MiB)
+  ratchets_total                   14
+  aead_drops_total                 0
+============================================================
+```
+
+Exit-code-honest: 0 on success, non-zero on any HTTP failure (wrong
+URL, wrong/missing token, server down). Suitable for `watch -n 5
+proteus-server admin status` over an SSH session or as a probe in
+Ansible / Nomad health checks.
+
 ## Pre-deploy validation (`proteus-server validate`)
 
 Every YAML edit should be dry-run-checked before SIGHUP or

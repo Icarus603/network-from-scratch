@@ -5,6 +5,7 @@
 //! (CONNECT parsing, idle timeout, EOF semantics) without re-spawning
 //! the entire binary. The binary itself just calls `relay::handle_session`.
 
+pub mod admin;
 pub mod config;
 pub mod relay;
 pub mod startup;
