@@ -32,7 +32,7 @@ Anonymous messaging at scale (millions of users) with formal anonymity. Existing
 
 ## How it informs our protocol design
 - **DP-form anonymity bounds work well in batched/messaging settings** but not in low-latency interactive.
-- G6 doesn't directly pursue Vuvuzela design for web; for messaging mode, this is a reference point.
+- Proteus doesn't directly pursue Vuvuzela design for web; for messaging mode, this is a reference point.
 
 ## Open questions
 - Vuvuzela-like guarantees for streaming media?

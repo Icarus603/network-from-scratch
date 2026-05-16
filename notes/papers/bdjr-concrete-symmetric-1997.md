@@ -46,13 +46,13 @@ Game G_2: trivial (random ctxt vs random ctxt is uniform)
 - 不考慮 nonce-misuse。實務 GCM 一旦 nonce 重用就 catastrophic（Joux 2006 forbidden attack）；現代設計改用 misuse-resistant AEAD（XChaCha20-Poly1305、AES-GCM-SIV）。
 
 ## How it informs our protocol design
-- **G6 必須在 spec 給 concrete bound**：例如「同一 session 至多 2^48 個 record，每 record 至多 16 KB；Adv ≤ 2^-32」。
-- **G6 必須計算 nonce space**：12-byte AEAD nonce ⇒ 2^96 unique。我們用 8-byte epoch + 4-byte counter，counter 達上限觸發 rekey。
-- **G6 必須 multi-user-aware**：spec 內必須 reference Bellare-Tackmann 2016 給的 multi-user bound。
+- **Proteus 必須在 spec 給 concrete bound**：例如「同一 session 至多 2^48 個 record，每 record 至多 16 KB；Adv ≤ 2^-32」。
+- **Proteus 必須計算 nonce space**：12-byte AEAD nonce ⇒ 2^96 unique。我們用 8-byte epoch + 4-byte counter，counter 達上限觸發 rekey。
+- **Proteus 必須 multi-user-aware**：spec 內必須 reference Bellare-Tackmann 2016 給的 multi-user bound。
 
 ## Open questions
 - ChaCha20 的 multi-key tight bound 在 nonce-misuse 下尚未完全解決（Bellare-Bernstein-Tessaro 2016 是當前最強）。
-- 對 G6 的 cover traffic 場景，concrete security 模型需要擴充以涵蓋「假流量被解密失敗」對 advantage 的影響——open problem。
+- 對 Proteus 的 cover traffic 場景，concrete security 模型需要擴充以涵蓋「假流量被解密失敗」對 advantage 的影響——open problem。
 
 ## References worth following
 - Bellare, Rogaway, *The Security of Triple Encryption and a Framework for Code-Based Game-Playing Proofs* (EUROCRYPT 2006) — game hopping 的 modern 範本。

@@ -113,30 +113,30 @@
 
 ## How it informs our protocol design
 
-對 G6 設計直接 implication：
+對 Proteus 設計直接 implication：
 
-#### 1. G6 server domain 命名
+#### 1. Proteus server domain 命名
 
 - 必須避開 GFW regex filter（41K overblocking 含很多無辜 substring）
 - **不**用「vpn」、「proxy」、「circumvent」等 keyword
 - 也避開「tibet」「freedom」「democracy」等 GFW heavy filter substring
 - 建議：**普通商業 sounding 域名**（如 `analytics-cdn.example.com`）
 
-#### 2. G6 client bootstrap 不能靠 plain DNS
+#### 2. Proteus client bootstrap 不能靠 plain DNS
 
-311K 受審查域名 + GFW 持續加新——G6 server domain 隨時可能被 added。**Plain DNS 不可信**——必須 DoH / DoQ + IP pre-config fallback。
+311K 受審查域名 + GFW 持續加新——Proteus server domain 隨時可能被 added。**Plain DNS 不可信**——必須 DoH / DoQ + IP pre-config fallback。
 
 #### 3. Forged IP detection
 
-GFWatch 公開的 11 組 forged IP——G6 client SDK 內 bundle 這個 list。client 看 DNS response 含 known forged IP → 立即標記 + 切到 fallback bootstrap。
+GFWatch 公開的 11 組 forged IP——Proteus client SDK 內 bundle 這個 list。client 看 DNS response 含 known forged IP → 立即標記 + 切到 fallback bootstrap。
 
 #### 4. 對 GFW injector 指紋的攻擊性反向利用
 
-了解 GFW response 用 DF=1, AA=0 (Injector 2)、特定 IPID pattern——G6 client 可**主動發 probe 觸發 GFW injection**作測量但不依賴此測量做生產決策（風險）。
+了解 GFW response 用 DF=1, AA=0 (Injector 2)、特定 IPID pattern——Proteus client 可**主動發 probe 觸發 GFW injection**作測量但不依賴此測量做生產決策（風險）。
 
 #### 5. 對 public resolver poisoning 的應對
 
-77K domain 在 public resolver 也 poisoned——**即便用 8.8.8.8 / 1.1.1.1**，部分受審查 domain 仍可能拿 forged response。**G6 client 必須做 cross-resolver consistency check + forged IP detection**。
+77K domain 在 public resolver 也 poisoned——**即便用 8.8.8.8 / 1.1.1.1**，部分受審查 domain 仍可能拿 forged response。**Proteus client 必須做 cross-resolver consistency check + forged IP detection**。
 
 ## Open questions
 
@@ -146,7 +146,7 @@ GFWatch 公開的 11 組 forged IP——G6 client SDK 內 bundle 這個 list。c
 - **Forged IP set 動態變化**：GFW 每多久 rotate forged IP？模式如何？
 - **與 active probing 的聯動**：DNS injection trigger 主動 probing 嗎？vice versa？
 - **AI / ML 對 GFW DNS detection 的 feasibility**：基於 response 特徵動態識別 forged——是否可以 deploy 在 client-side without false positive？
-- **GFW 對 G6 server domain 命名 ML detection**：如果 GFW 用 ML 識別「**可能是翻牆 server**」的命名——這是否已發生？open
+- **GFW 對 Proteus server domain 命名 ML detection**：如果 GFW 用 ML 識別「**可能是翻牆 server**」的命名——這是否已發生？open
 - **跨國家 DNS censorship 比較**：Iran / Russia / Turkmenistan 同類 measurement——comparative study 缺
 
 ## References worth following

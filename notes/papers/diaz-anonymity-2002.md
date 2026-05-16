@@ -25,7 +25,7 @@ $|\mathcal{S}|$ (anonymity set size) overstates anonymity when distribution with
 - Average-case; doesn't capture worst-case (max-posterior) leakage.
 
 ## How it informs our protocol design
-- Same as Serjantov-Danezis 2002 (parallel work). G6 may use normalized degree as comparison metric.
+- Same as Serjantov-Danezis 2002 (parallel work). Proteus may use normalized degree as comparison metric.
 
 ## References worth following
 - Serjantov-Danezis 2002 PETS — parallel formulation

@@ -49,11 +49,11 @@ B 解出 sk → solves DLP.
 - **Hard to use for adaptive multi-user setting**: extension needed。
 
 ## How it informs our protocol design
-- **G6 spec Security Considerations 必須**：
+- **Proteus spec Security Considerations 必須**：
   - 給 Schnorr-family (Ed25519) 的 concrete bound under DLP + ROM。
   - Cite Brendel-Cremers-Jackson-Zhao 2021 對 Ed25519 tight bound 結果。
   - Reference forking lemma 為 Ed25519 EUF-CMA 證明的根技術。
-- **G6 implementation**: hash function 選擇影響 ROM model 的 heuristic strength；用 SHA-256 或 SHA-512（with conservative output truncation）保持 RO-like 行為。
+- **Proteus implementation**: hash function 選擇影響 ROM model 的 heuristic strength；用 SHA-256 或 SHA-512（with conservative output truncation）保持 RO-like 行為。
 
 ## Open questions
 - **Tight standard-model Schnorr proof**: 仍 open。Best known 是 ROM-based forking lemma。

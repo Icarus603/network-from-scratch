@@ -1,11 +1,11 @@
 /*
-  G6Ratchet — Tamarin theory for G6's KEYUPDATE ratchet
+  ProteusRatchet — Tamarin theory for Proteus's KEYUPDATE ratchet
   Models post-compromise security (PCS) of the unidirectional KDF ratchet.
 
   See lessons/part-11-design/11.11.
 */
 
-theory G6Ratchet
+theory ProteusRatchet
 begin
 
 builtins: hashing, symmetric-encryption

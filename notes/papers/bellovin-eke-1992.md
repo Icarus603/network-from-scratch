@@ -67,9 +67,9 @@ For each candidate p_i:
 - **Patent encumbrance**：Bellcore patent 阻 deployment。
 
 ## How it informs our protocol design
-- **G6 不直接用 EKE** (過時)；用 OPAQUE。
-- **G6 教訓 #1**：「passive observer 不能 dictionary attack」是 PAKE 的本質保證——任何 G6 PSK-from-passphrase mode 必達此 baseline。
-- **G6 教訓 #2**：encoding details 是 cryptographic implementation 中的 silent killer——必須 group element vs byte string 對應關係嚴格 well-defined（這影響 G6 Elligator2-disguised ephemeral pk 設計）。
+- **Proteus 不直接用 EKE** (過時)；用 OPAQUE。
+- **Proteus 教訓 #1**：「passive observer 不能 dictionary attack」是 PAKE 的本質保證——任何 Proteus PSK-from-passphrase mode 必達此 baseline。
+- **Proteus 教訓 #2**：encoding details 是 cryptographic implementation 中的 silent killer——必須 group element vs byte string 對應關係嚴格 well-defined（這影響 Proteus Elligator2-disguised ephemeral pk 設計）。
 
 ## Open questions
 - **EKE 在 post-quantum setting 是否仍 viable**? Encryption-based encoding 對 PQ KEM 結構不直接適用。

@@ -3,7 +3,7 @@
 **Authors**: Nadia Heninger, Zakir Durumeric, Eric Wustrow, J. Alex Halderman
 **Read on**: 2026-05-14 (in lesson 3.12)
 **Status**: full PDF (`assets/papers/heninger-pq-2012.pdf`)
-**One-line**: 掃描全 IPv4 HTTPS / SSH server 發現 5.57% 共用 keys, 0.5% TLS hosts share RSA primes — GCD pair 立刻 factor；揭示嵌入式 device weak RNG 為大規模 cryptographic disaster；G6 IoT 部署設計教訓。
+**One-line**: 掃描全 IPv4 HTTPS / SSH server 發現 5.57% 共用 keys, 0.5% TLS hosts share RSA primes — GCD pair 立刻 factor；揭示嵌入式 device weak RNG 為大規模 cryptographic disaster；Proteus IoT 部署設計教訓。
 
 ## Problem
 2010-2011 年 Heninger 觀察：許多嵌入式 device (routers, printers, VoIP) 在 first boot 時立刻 generate cryptographic key (SSH / TLS cert)。問題：boot 時 entropy pool 可能未 seeded — 多個 device 可能用 similar seed 產生 similar keys。
@@ -48,13 +48,13 @@
 - 後續 IoT 持續出新 weak key generators (smart TV, IoT sensor)。
 
 ## How it informs our protocol design
-- **G6 IoT deployment 必須**：
+- **Proteus IoT deployment 必須**：
   - 等候 OS entropy seeded (getrandom blocking 模式) 再做 KGen。
   - Embedded mfg 必須 burn unique factory-time seed (with TPM if available)。
   - Spec 內定義 entropy compliance check; client refuses to start if entropy unavailable。
-- **G6 IoT 邊側 testing**：spec 包含 conformance test 驗 RNG 不 trivially weak。
-- **G6 教訓 #1**: RNG 災難常發生在 deployment 早期；spec 必須 explicit RNG requirement，不只是 "use secure RNG"。
-- **G6 教訓 #2**: 公開掃描+factor 是 detection 與 mitigation 的 powerful pattern；G6 spec 可定義 self-audit mechanism。
+- **Proteus IoT 邊側 testing**：spec 包含 conformance test 驗 RNG 不 trivially weak。
+- **Proteus 教訓 #1**: RNG 災難常發生在 deployment 早期；spec 必須 explicit RNG requirement，不只是 "use secure RNG"。
+- **Proteus 教訓 #2**: 公開掃描+factor 是 detection 與 mitigation 的 powerful pattern；Proteus spec 可定義 self-audit mechanism。
 
 ## Open questions
 - **ECC shared randomness detection**: 是否能類似 GCD-attack 對 ECC keys? Open。

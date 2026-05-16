@@ -29,7 +29,7 @@ Survey of:
 - Survey only — no new attack.
 
 ## How it informs our protocol design
-- G6 timing module must defend against watermarking (random jitter ≥ 25ms).
+- Proteus timing module must defend against watermarking (random jitter ≥ 25ms).
 - Active attacker is realistic, especially state-level.
 
 ## References worth following

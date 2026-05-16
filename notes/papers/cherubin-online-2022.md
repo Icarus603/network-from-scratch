@@ -29,7 +29,7 @@ WF evaluations assume attacker has complete trace before classifying. In real on
 - No defense against online attacks studied.
 
 ## How it informs our protocol design
-- **G6 defenses must be active from the first packet**, not just at trace end.
+- **Proteus defenses must be active from the first packet**, not just at trace end.
 - Front-loaded shaping (FRONT) is essential.
 - Trace-end padding alone is insufficient against online attackers.
 

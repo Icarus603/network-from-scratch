@@ -3,7 +3,7 @@
 **Authors**: Daniel J. Bernstein
 **Read on**: 2026-05-14 (in lesson 3.5)
 **Status**: full PDF (`assets/papers/bernstein-curve25519-2006.pdf`)
-**One-line**: Bernstein 提出 Curve25519——基於 prime 2^255-19 + Montgomery form 的橢圓曲線，設計為「fast + safe + simple」三贏；2010 年代起取代 NIST P-curves 成為主流 ECC；WireGuard、Signal、TLS 1.3、SSH ed25519、G6 全部採用。
+**One-line**: Bernstein 提出 Curve25519——基於 prime 2^255-19 + Montgomery form 的橢圓曲線，設計為「fast + safe + simple」三贏；2010 年代起取代 NIST P-curves 成為主流 ECC；WireGuard、Signal、TLS 1.3、SSH ed25519、Proteus 全部採用。
 
 ## Problem
 2006 年的 ECDH 主流是 NIST P-curves (P-256, P-384, P-521)，但有多項設計問題：
@@ -79,10 +79,10 @@ function X25519(k, u):
 - 不直接給 signature scheme：需另 Ed25519 (Bernstein 等 2011)。
 
 ## How it informs our protocol design
-- **G6 key exchange = X25519**：直接採用 RFC 7748 spec。
-- **G6 不需要 point validation**：Curve25519 設計上每 32-byte 都 valid public key (after twist security analysis)。
-- **G6 加 PQ hybrid**：X25519 + Kyber768 → post-quantum 過渡。
-- **G6 implementation library**：curve25519-dalek (Rust) 或 libsodium。
+- **Proteus key exchange = X25519**：直接採用 RFC 7748 spec。
+- **Proteus 不需要 point validation**：Curve25519 設計上每 32-byte 都 valid public key (after twist security analysis)。
+- **Proteus 加 PQ hybrid**：X25519 + Kyber768 → post-quantum 過渡。
+- **Proteus implementation library**：curve25519-dalek (Rust) 或 libsodium。
 
 ## Open questions
 - Multi-key X25519 in TLS 1.3 multi-user setting 的 tight bound 仍 active。

@@ -56,11 +56,11 @@ both compute:
 - **Single-DH 結構**: implicit auth 來自 ephemeral × long-term cross product；若 long-term key 弱（small a）或 ephemeral RNG 不好，整體崩。
 
 ## How it informs our protocol design
-- **G6 不選 HMQV**：選 SIGMA-I 結構（與 TLS 1.3 / Noise IK / WireGuard 對齊）。理由：
+- **Proteus 不選 HMQV**：選 SIGMA-I 結構（與 TLS 1.3 / Noise IK / WireGuard 對齊）。理由：
   - SIGMA 與 PKI / X.509 cert 自然合。
   - SIGMA 透明易理解，formal verification 工具支援度高（Tamarin model 多）。
   - HMQV implicit auth 對 protocol developer 較 counterintuitive。
-- **G6 借鑑 HMQV 的 e/d hash binding 思想**：transcript hash 必綁 ephemeral + identity，避免 UKS / cross-protocol。
+- **Proteus 借鑑 HMQV 的 e/d hash binding 思想**：transcript hash 必綁 ephemeral + identity，避免 UKS / cross-protocol。
 
 ## Open questions
 - Multi-message HMQV variants 在 post-quantum setting 的 generalization 仍 open。

@@ -29,7 +29,7 @@ Paterson-Yau 2006 Eurocrypt 已示範 Linux 實作的 encryption-only ESP 可被
 - 不破 IKE，只破 ESP。
 
 ## How it informs our protocol design
-G6 的決定：
+Proteus 的決定：
 - 連 encryption-only **選項** 都不能在 spec 留下。AEAD（ChaCha20-Poly1305）為 sole option，無 fallback。
 - 不允許「下層協定的錯誤回應」作為密碼系統的可觀察 oracle——所有 decryption 失敗要 timing-constant + identical observable behavior。
 - 受此論文啟發，[Part 11.4 spec 寫作守則] 列「Spec MUST NOT allow encryption-only modes」。

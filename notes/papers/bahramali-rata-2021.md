@@ -28,7 +28,7 @@ Adversarial defenses (Mockingbird, BLANKET) drop DF acc to ~30–50%. Are these 
 
 ## How it informs our protocol design
 - Adversarial defenses are not silver bullets.
-- G6 evaluation must include RATA-style attacker.
+- Proteus evaluation must include RATA-style attacker.
 
 ## References worth following
 - Hou 19 (Mockingbird) — defense RATA targets

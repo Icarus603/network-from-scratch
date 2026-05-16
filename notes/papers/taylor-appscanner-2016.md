@@ -27,8 +27,8 @@ Mobile apps generate encrypted traffic; can the specific app be identified from 
 - Requires per-app training data.
 
 ## How it informs our protocol design
-- Inner-app fingerprinting threat acknowledged; G6 tunneling structurally helps but does not eliminate (if attacker has access at endpoint).
-- G6 should scope-out inner-app fingerprint protection (out of scope for transport).
+- Inner-app fingerprinting threat acknowledged; Proteus tunneling structurally helps but does not eliminate (if attacker has access at endpoint).
+- Proteus should scope-out inner-app fingerprint protection (out of scope for transport).
 
 ## References worth following
 - FlowPrint (NDSS 20) — semi-supervised successor

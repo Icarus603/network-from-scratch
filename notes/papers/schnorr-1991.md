@@ -85,9 +85,9 @@ Concrete bound (non-tight): `Adv^DLP ≥ Adv^Schnorr² / q_H · poly`. Pointchev
 - **Pairing-required variants (BLS)** 不同 trust model（更小 sig 但需 pairing-friendly curve）。
 
 ## How it informs our protocol design
-- **G6 用 Ed25519 (deterministic Schnorr)**：直接繼承 Schnorr 結構優勢 + deterministic 避 nonce 災難。
-- **G6 future multi-party mode 可借 MuSig**：若 G6 後續支援 multi-server / threshold setup。
-- **G6 transcript hash 結構**：c = H(R ‖ M) — 我們的握手簽章 c = H(transcript) where transcript 含 R + identities + messages。
+- **Proteus 用 Ed25519 (deterministic Schnorr)**：直接繼承 Schnorr 結構優勢 + deterministic 避 nonce 災難。
+- **Proteus future multi-party mode 可借 MuSig**：若 Proteus 後續支援 multi-server / threshold setup。
+- **Proteus transcript hash 結構**：c = H(R ‖ M) — 我們的握手簽章 c = H(transcript) where transcript 含 R + identities + messages。
 
 ## Open questions
 - **Tight reduction without ROM**: 仍 open。Standard-model Schnorr-like signature 雖有 (Goh-Jarecki 2003) 但效能差。

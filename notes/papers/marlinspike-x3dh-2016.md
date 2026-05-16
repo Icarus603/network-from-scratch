@@ -67,11 +67,11 @@ upload to server:
 - **No quantum resistance**：DH 全 X25519, Shor 可破。Signal PQ-XDH (2023+) 加 Kyber768 hybrid。
 
 ## How it informs our protocol design
-- **G6 不是 messaging 但 borrowing 兩個 idea**:
-  1. **Multiple-DH combine** for robustness：G6 hybrid X25519 + Kyber768 + (optional PSK) 結合 multiple DH→ KDF。
-  2. **Identifier binding in KDF info**: G6 transcript hash + KDF info 必含 client_id + server_id + protocol_version。
-- **G6 不用 prekey 模型**：G6 是 synchronous proxy（client 連 server 時 server 在線）。
-- **PCS 機制**：G6 借鑑 Double Ratchet 思想（後續 lesson 詳述），per-N-record DH ratchet 達粗粒度 PCS。
+- **Proteus 不是 messaging 但 borrowing 兩個 idea**:
+  1. **Multiple-DH combine** for robustness：Proteus hybrid X25519 + Kyber768 + (optional PSK) 結合 multiple DH→ KDF。
+  2. **Identifier binding in KDF info**: Proteus transcript hash + KDF info 必含 client_id + server_id + protocol_version。
+- **Proteus 不用 prekey 模型**：Proteus 是 synchronous proxy（client 連 server 時 server 在線）。
+- **PCS 機制**：Proteus 借鑑 Double Ratchet 思想（後續 lesson 詳述），per-N-record DH ratchet 達粗粒度 PCS。
 
 ## Open questions
 - PCS in stateless protocols (0-RTT) 仍 open。

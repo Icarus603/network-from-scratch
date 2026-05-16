@@ -32,8 +32,8 @@ DF (Sirinam 18) later reached 90.7% on WTF-PAD — showed it's broken against DL
 
 ## How it informs our protocol design
 - Demonstrates that **marginal-statistic shaping is insufficient against sequence-level DL adversaries**.
-- The state-machine paradigm (used here) is the precursor to Maybenot (Pulls 23) — G6 should adopt Maybenot.
-- Zero-latency is a useful design target but not sufficient on its own — G6 should combine zero-delay padding with occasional latency-tolerating modes.
+- The state-machine paradigm (used here) is the precursor to Maybenot (Pulls 23) — Proteus should adopt Maybenot.
+- Zero-latency is a useful design target but not sufficient on its own — Proteus should combine zero-delay padding with occasional latency-tolerating modes.
 
 ## Open questions
 - Could the IAT histograms be made adversarially robust via randomization / adaptive?

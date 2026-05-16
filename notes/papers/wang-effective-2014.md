@@ -35,9 +35,9 @@ Pre-2014 WF used coarse-grained packet-level features (Liberatore-Levine 06, Pan
 - Single-tab assumption.
 
 ## How it informs our protocol design
-- Demonstrates how easily a feature-class-specific provable bound breaks under DL — G6 must use Bayes-optimal upper bounds (Cherubin 17), not feature-class-specific bounds.
-- Shows the importance of explicit feature taxonomy when claiming "provable" — G6 spec must define precisely which adversary class its bounds cover.
-- The cumulative-byte feature (later formalized as CUMUL by Panchenko 16) is one of the most consistent leakage channels — G6 must address it.
+- Demonstrates how easily a feature-class-specific provable bound breaks under DL — Proteus must use Bayes-optimal upper bounds (Cherubin 17), not feature-class-specific bounds.
+- Shows the importance of explicit feature taxonomy when claiming "provable" — Proteus spec must define precisely which adversary class its bounds cover.
+- The cumulative-byte feature (later formalized as CUMUL by Panchenko 16) is one of the most consistent leakage channels — Proteus must address it.
 
 ## Open questions
 - What's the right feature class to make Wang-14 style proofs DL-resistant? (Cherubin 17 abandoned feature class entirely.)

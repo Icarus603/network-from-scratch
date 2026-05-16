@@ -3,7 +3,7 @@
 **Authors**: Trevor Perrin
 **Read on**: 2026-05-14 (in lesson 3.8)
 **Status**: full PDF (`assets/papers/perrin-noise-2018.pdf`)
-**One-line**: 定義一個 protocol-design DSL，用 token-based pattern 描述 handshake；12 個 fundamental patterns 涵蓋大部分 AKE 場景；WireGuard、Lightning Network、Signal、Wire 全採用；G6 直接 build on Noise IK。
+**One-line**: 定義一個 protocol-design DSL，用 token-based pattern 描述 handshake；12 個 fundamental patterns 涵蓋大部分 AKE 場景；WireGuard、Lightning Network、Signal、Wire 全採用；Proteus 直接 build on Noise IK。
 
 ## Problem
 2014-2016 年 Signal 設計 X3DH + Double Ratchet 時 Perrin 觀察：每個新 protocol 都重新發明 KE + record layer + key schedule。需要一個 framework 能 systematically 設計 protocols with composable security properties。
@@ -62,8 +62,8 @@ After all message tokens, write/read payload (encrypted if cipher_state ready)
 - **0-RTT replay 處理 minimal**: spec 提到但 implementation 負責。
 
 ## How it informs our protocol design
-- **G6 直接 base on Noise IK**：享受 spec、formally verified、production-grade reference impl。
-- **G6 extends Noise**:
+- **Proteus 直接 base on Noise IK**：享受 spec、formally verified、production-grade reference impl。
+- **Proteus extends Noise**:
   - Add Kyber768 KEM token (or use ratification-pending PQNoise spec when available)。
   - Add MAC1 / Cookie reply (WireGuard-style)。
   - Add per-N-record DH ratchet (in transport phase, after handshake)。

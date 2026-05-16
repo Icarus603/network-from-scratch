@@ -31,9 +31,9 @@ TapDance (Wustrow 14) required two-side cooperation: TAP in ISP and decoy site t
 - US-mostly deployment due to regulatory concerns elsewhere.
 
 ## How it informs our protocol design
-- **G6 is not pursuing Conjure-style ISP cooperation** — too narrow deployability.
-- Conjure's "phantom IP" concept does inform G6 bridge design: bridges should appear as low-profile services rather than obviously-proxy hosts.
-- Registration-service vulnerability is a lesson: G6 should avoid centralized registration where possible.
+- **Proteus is not pursuing Conjure-style ISP cooperation** — too narrow deployability.
+- Conjure's "phantom IP" concept does inform Proteus bridge design: bridges should appear as low-profile services rather than obviously-proxy hosts.
+- Registration-service vulnerability is a lesson: Proteus should avoid centralized registration where possible.
 
 ## Open questions
 - Reduced-cooperation Conjure (no TAP)?

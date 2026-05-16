@@ -26,9 +26,9 @@ Quantum computers will eventually break RSA / ECC. When should organizations mig
 - Doesn't address PQ algorithm choice (NIST PQC process did that).
 
 ## How it informs our protocol design
-- G6 threat model (lesson 11.1) lists C10 = PQ-capable adversary as in-scope **specifically for SNDL**.
-- G6 v0.1 §6 commits to hybrid X25519+ML-KEM-768 KEM precisely on this basis.
-- G6 v0.1 §11.12 defers PQ signature (Ed25519 only) on the grounds that signature verification can be post-hoc — consistent with Mosca's encryption/signature distinction.
+- Proteus threat model (lesson 11.1) lists C10 = PQ-capable adversary as in-scope **specifically for SNDL**.
+- Proteus v0.1 §6 commits to hybrid X25519+ML-KEM-768 KEM precisely on this basis.
+- Proteus v0.1 §11.12 defers PQ signature (Ed25519 only) on the grounds that signature verification can be post-hoc — consistent with Mosca's encryption/signature distinction.
 
 ## Open questions
 - Refined estimate of Y_quantum: NIST consensus 10-20 years; some experts say sooner.

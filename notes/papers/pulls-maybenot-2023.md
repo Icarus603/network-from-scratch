@@ -31,7 +31,7 @@ Each WF defense (WTF-PAD, FRONT, RegulaTor, Tamaraw) has its own ad hoc implemen
 - Padding-spec adoption requires Tor-network-wide negotiation.
 
 ## How it informs our protocol design
-- **G6 traffic-shaping layer should be specified as a Maybenot machine.** Reuse the spec language and tooling.
+- **Proteus traffic-shaping layer should be specified as a Maybenot machine.** Reuse the spec language and tooling.
 - Provides natural artifact for security analysis (Cherubin 17 Bayes bound automation).
 - Promotes interoperability — if multiple proxy protocols adopt Maybenot, defense innovations transfer.
 

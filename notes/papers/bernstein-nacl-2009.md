@@ -65,13 +65,13 @@ User 完全不需要選 algorithm; 內部 hard-coded "right answers"。
 - **NaCl-style API 對 multi-step protocols 不夠**: TLS-style stateful API 仍需要 libsodium 提供 secretstream 等 streaming abstractions。
 
 ## How it informs our protocol design
-- **G6 API 借鑑 NaCl 哲學**:
+- **Proteus API 借鑑 NaCl 哲學**:
   - User-facing config: 不 expose cipher choice。
   - Plugin API: protocol-level operations, no raw crypto。
   - Internal: 用 ring (Rust NaCl-spirit)。
-- **G6 hard-coded ciphers per version**: 同 NaCl ergonomic / WireGuard reasoning。
-- **G6 PQ migration via new spec version**: 不 negotiate, 不 fallback. Follows NaCl version-based agility。
-- **G6 教訓**: API design 是 cryptographic security 的 first line — 比 implementation correctness 更早決定 security baseline。
+- **Proteus hard-coded ciphers per version**: 同 NaCl ergonomic / WireGuard reasoning。
+- **Proteus PQ migration via new spec version**: 不 negotiate, 不 fallback. Follows NaCl version-based agility。
+- **Proteus 教訓**: API design 是 cryptographic security 的 first line — 比 implementation correctness 更早決定 security baseline。
 
 ## Open questions
 - **Verified NaCl-compatible API**: HACL\* / EverCrypt 在嘗試 verified equivalent of NaCl primitives。Performance gap 仍 closing。

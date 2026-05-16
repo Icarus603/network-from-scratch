@@ -56,9 +56,9 @@ HKDF-Expand(PRK, info, L):
 - Multi-context derivation 的 tight bound 仍 active。
 
 ## How it informs our protocol design
-- **G6 用 HKDF-SHA-256 全 derive**：所有 record-layer key、handshake-layer key、ratchet seed 都從 master secret 透過 HKDF-Expand-Label 推。
-- **G6 的 info string**：強制含 protocol version + role + purpose（"g6 v1 client record key"），給 future 升級保留空間且避免 cross-context confusion。
-- **G6 的 salt 用法**：handshake transcript hash 作為 salt 餵 Extract，把握手歷史綁進所有後續 keys（防 transcript collision attack, Bhargavan-Leurent NDSS 2016）。
+- **Proteus 用 HKDF-SHA-256 全 derive**：所有 record-layer key、handshake-layer key、ratchet seed 都從 master secret 透過 HKDF-Expand-Label 推。
+- **Proteus 的 info string**：強制含 protocol version + role + purpose（"proteus v1 client record key"），給 future 升級保留空間且避免 cross-context confusion。
+- **Proteus 的 salt 用法**：handshake transcript hash 作為 salt 餵 Extract，把握手歷史綁進所有後續 keys（防 transcript collision attack, Bhargavan-Leurent NDSS 2016）。
 
 ## Open questions
 - 在 quantum random oracle model 下 HKDF 仍 secure？需要 Q-PRF 假設。

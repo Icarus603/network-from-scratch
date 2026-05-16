@@ -44,23 +44,23 @@ Server: Decap(sk_s, ct_s) = ss_static
 - On 5% packet loss network: KEMTLS shows ~30% better median completion time
 
 ## Limitations / what they don't solve
-- 沒 0-RTT support (KEMTLS spec 顯式 out of scope; G6 可以補)
+- 沒 0-RTT support (KEMTLS spec 顯式 out of scope; Proteus 可以補)
 - Client authentication 仍可用 signature 或 KEM-based (paper 給 both options)
 - Server cert revocation 與 OCSP integration 未改變 (仍依賴 CA sign cert)
 - 後續 Celi 等 2022 補 Tamarin 嚴格 proof 才 closure
 
 ## How it informs our protocol design
-G6 v1 Mode C: 採 KEMTLS-style server authentication (省 ~3.3 KB)。
+Proteus v1 Mode C: 採 KEMTLS-style server authentication (省 ~3.3 KB)。
 - Server cert: pk_X25519 ‖ pk_ML-KEM-768, CA signs binding (offline)
 - Handshake: 用 KEMTLS pattern; 但 client identity 仍用 Ed25519+ML-DSA hybrid sig (avoid 0-RTT 複雜化)
-- Phase III 11.10 用 Tamarin 模型 (sigh template from Celi 等 2022) 驗證 G6 KEMTLS-flavored handshake。
+- Phase III 11.10 用 Tamarin 模型 (sigh template from Celi 等 2022) 驗證 Proteus KEMTLS-flavored handshake。
 
-這是 G6 SOTA differentiator #2 (見 3.17 §2)。
+這是 Proteus SOTA differentiator #2 (見 3.17 §2)。
 
 ## Open questions
-- KEMTLS + 0-RTT 怎麼設計？(G6 可貢獻方向)
+- KEMTLS + 0-RTT 怎麼設計？(Proteus 可貢獻方向)
 - KEMTLS + ECH 整合？
-- KEMTLS handshake 可被 fingerprint 嗎？(KEM ct size pattern；G6 用 Elligator2-style padding 平衡)
+- KEMTLS handshake 可被 fingerprint 嗎？(KEM ct size pattern；Proteus 用 Elligator2-style padding 平衡)
 - KEMTLS-Mut (mutual KEM auth) 對 client identity privacy 的影響
 
 ## References worth following

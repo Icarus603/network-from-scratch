@@ -28,7 +28,7 @@ Abe-Goto 16 hinted NN feasible. What's the SOTA NN architecture for WF, and at w
 
 ## How it informs our protocol design
 - DL is the de facto WF SOTA family from 2018 onward.
-- AWF dataset is benchmark for G6 eval reproducibility.
+- AWF dataset is benchmark for Proteus eval reproducibility.
 
 ## References worth following
 - Sirinam 18 CCS (DF) — successor

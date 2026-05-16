@@ -41,16 +41,16 @@ key-committing guarantee: 對任意兩組不同 (k_commit, n, ad, t)，產出不
 - 與 nonce-misuse-resistant AEAD (GCM-SIV) 的 interaction 未深入。
 
 ## How it informs our protocol design
-G6 v1.1 採 CTX-augmented XChaCha20-Poly1305 作為 record layer。
+Proteus v1.1 採 CTX-augmented XChaCha20-Poly1305 作為 record layer。
 - k_commit 由 chaining_key HKDF-Expand 派生。
 - 每 record 多 16 byte (~1.5% on MTU-sized records)。
 - 完全防 partitioning oracle (vs SS / Telegram / 任何 PSK 流派的 production protocol 都未做)。
 
-這是 G6 SOTA differentiator #1 (見 3.17 §1)。
+這是 Proteus SOTA differentiator #1 (見 3.17 §1)。
 
 ## Open questions
 - CTX + AES-GCM-SIV 結合最佳 construction？
-- CTX deterministic tag 是否影響 G6 cover-traffic 的 length-blind randomness 假設？需 evaluate (3.17 §7 open #2)。
+- CTX deterministic tag 是否影響 Proteus cover-traffic 的 length-blind randomness 假設？需 evaluate (3.17 §7 open #2)。
 - 是否能 amortize commit hash over multiple records 而不損 CMT-4？
 
 ## References worth following

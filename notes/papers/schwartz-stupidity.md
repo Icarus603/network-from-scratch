@@ -41,7 +41,7 @@ PhD 流失率高的一個未明文原因：**長期感到 stupid 讓人崩潰離
 **間接但深層的影響**——這篇是 Phase III 心理基線的奠基讀物：
 
 1. **Phase III 第一次測試平台打爆我們協議時**，預期反應應該是 "interesting, what does this teach me about my assumption" 而非 "I'm not good enough"
-2. **G6 設計多次推翻**（預期 2~4 次）是 productive stupidity 在實踐——每次推翻是「**我之前 stupid 在哪**」的具體答案，不是失敗
+2. **Proteus 設計多次推翻**（預期 2~4 次）是 productive stupidity 在實踐——每次推翻是「**我之前 stupid 在哪**」的具體答案，不是失敗
 3. 評估自己學習進度時**抗拒 relative stupidity 的誘惑**：別人（社群討論）懂得多不代表我落後，他們累積的時間比我長。我要 confront 的是 absolute stupidity（這個問題人類目前沒答案）
 4. 研究級補遺第 7 條 "open problems" 的精神來源——把不知道的東西**明確列出來** > 假裝都懂
 5. **問問題的勇氣**：0.3 §5 提到「卡住先想 30 分鐘再問」——但這篇補了反向：**該問就問**，不問是 ego，承認不知是 productive stupidity

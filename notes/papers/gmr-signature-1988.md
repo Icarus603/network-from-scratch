@@ -44,9 +44,9 @@ Adv^EUF-CMA(A) := Pr[Game returns 1]
 - 沒涵蓋 fault attack / side-channel（簽章演算法的 ECDSA 在 RNG bias 下會洩 key——Bleichenbacher 2000、PS3 hack 2010）。
 
 ## How it informs our protocol design
-- **G6 簽章必須 EUF-CMA + sUF-CMA**：選 Ed25519，因 EdDSA 設計上自帶 sUF（deterministic + canonical encoding）。
+- **Proteus 簽章必須 EUF-CMA + sUF-CMA**：選 Ed25519，因 EdDSA 設計上自帶 sUF（deterministic + canonical encoding）。
 - **若選 ECDSA 必須加 anti-malleability**：例如 enforce low-s（BIP-66 比特幣方式）或加 transcript hash binding。
-- **絕不 textbook RSA**：必用 RSA-PSS（若要選 RSA），但 G6 預設不用 RSA。
+- **絕不 textbook RSA**：必用 RSA-PSS（若要選 RSA），但 Proteus 預設不用 RSA。
 
 ## Open questions
 - Strong adaptive existential unforgeability 在量子 oracle (Q-EUF-CMA, Boneh-Zhandry 2013) 是否所有現有 PQ 簽章都達成？ML-DSA (Dilithium) 在 Q-EUF-CMA 的證明仍 active。

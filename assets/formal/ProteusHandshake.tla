@@ -1,8 +1,8 @@
--------------------------- MODULE G6Handshake --------------------------
+-------------------------- MODULE ProteusHandshake --------------------------
 (*
- * G6 Handshake — TLA+ specification for protocol-level safety
+ * Proteus Handshake — TLA+ specification for protocol-level safety
  *
- * Models the high-level state machine of the G6 v0.0 handshake
+ * Models the high-level state machine of the Proteus v0.0 handshake
  * (see lessons/part-11-design/11.6 and 11.9).
  *
  * The crypto is abstracted as oracle services. This module is concerned

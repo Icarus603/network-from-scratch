@@ -31,9 +31,9 @@ obfs3 used static handshake, allowing GFW to detect bridges via active probing. 
 - Per-client shared secret distribution is a deployment burden.
 
 ## How it informs our protocol design
-- **HMAC-based probe-resistance is the canonical pattern** — G6 should include analogous mechanism (or REALITY-fallback as superior alternative).
+- **HMAC-based probe-resistance is the canonical pattern** — Proteus should include analogous mechanism (or REALITY-fallback as superior alternative).
 - Per-client polymorphism reduces some statistical attacks but does not solve high-entropy wire.
-- Out-of-band key distribution doesn't scale — G6 should use REALITY-style server-key-derived signaling.
+- Out-of-band key distribution doesn't scale — Proteus should use REALITY-style server-key-derived signaling.
 
 ## Open questions
 - Polymorphism with constrained byte distributions (low-entropy bytes via FTE)?

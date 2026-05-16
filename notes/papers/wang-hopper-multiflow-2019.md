@@ -27,8 +27,8 @@ Earlier WF defense evaluations (Cai 2014, Sirinam 2018) used single-flow per ses
 - Doesn't address per-flow vs per-cell padding allocation problem.
 
 ## How it informs our protocol design
-- G6 CAR-1 target τ_short ≤ 0.20 assumes single-flow attacker; long-term ε_stretch ≤ 0.30 accommodates multi-flow.
-- G6 spec §11.16 explicitly acknowledges long-term aggregation residual.
+- Proteus CAR-1 target τ_short ≤ 0.20 assumes single-flow attacker; long-term ε_stretch ≤ 0.30 accommodates multi-flow.
+- Proteus spec §11.16 explicitly acknowledges long-term aggregation residual.
 
 ## Open questions
 - Lower bound on multi-flow ε for any deterministic padding?

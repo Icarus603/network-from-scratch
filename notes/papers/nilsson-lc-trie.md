@@ -93,12 +93,12 @@ return node.next_hop
 
 ## How it informs our protocol design
 
-**對 G6 的直接影響為零**（我們不做 routing），但作為**演算法設計範本**意義重大：
+**對 Proteus 的直接影響為零**（我們不做 routing），但作為**演算法設計範本**意義重大：
 
-1. **Average-case complexity 可以 dominate worst-case 設計**：LC-trie 是「為真實 prefix 分佈特化」的演算法。**G6 加密 / 流量整形演算法也可考慮為「真實流量分佈」特化**而非 worst-case
-2. **節點 4 byte 編碼的設計密度**：把 branch/skip/ptr 塞進 32 bit 是極端緊湊。**G6 packet header 設計可參考此密度——每 bit 都有用**
-3. **Build-time 預處理換 query-time 速度**：LC-trie 用 offline build pass 換來 fast lookup。**G6 ticket / pre-shared parameter 機制可借鏡——預先協商換來 0-RTT 連線**
-4. **Linux 的 RCU-based atomic update 補了 LC-trie 1999 的洞**：Linux fib_trie.c 用 RCU 把 immutable LC-trie 變成支援 lock-free update。**這個 immutable + atomic swap 模式是 G6 state management 強參考**
+1. **Average-case complexity 可以 dominate worst-case 設計**：LC-trie 是「為真實 prefix 分佈特化」的演算法。**Proteus 加密 / 流量整形演算法也可考慮為「真實流量分佈」特化**而非 worst-case
+2. **節點 4 byte 編碼的設計密度**：把 branch/skip/ptr 塞進 32 bit 是極端緊湊。**Proteus packet header 設計可參考此密度——每 bit 都有用**
+3. **Build-time 預處理換 query-time 速度**：LC-trie 用 offline build pass 換來 fast lookup。**Proteus ticket / pre-shared parameter 機制可借鏡——預先協商換來 0-RTT 連線**
+4. **Linux 的 RCU-based atomic update 補了 LC-trie 1999 的洞**：Linux fib_trie.c 用 RCU 把 immutable LC-trie 變成支援 lock-free update。**這個 immutable + atomic swap 模式是 Proteus state management 強參考**
 
 ## Open questions
 

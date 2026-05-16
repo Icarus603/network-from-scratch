@@ -61,10 +61,10 @@ RSA-OAEP-Dec:
 - **Padding overhead**: 2 × hash_len + 1 byte。對 short messages 比例顯著。
 
 ## How it informs our protocol design
-- **G6 不用 RSA-OAEP**：理由——key exchange 改用 X25519 ECDH，比 RSA-OAEP 快且 size 小 8×。
-- **G6 必須能 verify 與 RSA-OAEP cert 互通的 PKI chain**：但實務 cert verification 用 PSS signature，OAEP encryption 不常見。
-- **G6 教訓 #1**：「padding 設計要有 reduction proof」——避免 ad-hoc。
-- **G6 教訓 #2**：「ROM proof 不等於真實安全」——Shoup 2001 證明 BR 1994 reduction 有缺陷，提醒我們對 ROM-based proof 保持戒心，G6 盡量 standard-model。
+- **Proteus 不用 RSA-OAEP**：理由——key exchange 改用 X25519 ECDH，比 RSA-OAEP 快且 size 小 8×。
+- **Proteus 必須能 verify 與 RSA-OAEP cert 互通的 PKI chain**：但實務 cert verification 用 PSS signature，OAEP encryption 不常見。
+- **Proteus 教訓 #1**：「padding 設計要有 reduction proof」——避免 ad-hoc。
+- **Proteus 教訓 #2**：「ROM proof 不等於真實安全」——Shoup 2001 證明 BR 1994 reduction 有缺陷，提醒我們對 ROM-based proof 保持戒心，Proteus 盡量 standard-model。
 
 ## Open questions
 - OAEP 在 quantum random oracle model 下的 IND-CCA2 bound 仍 active。

@@ -61,10 +61,10 @@ Use BERLEKAMP / Cantor-Zassenhaus 或 Brent-Kung GCD 找根。
 - 不涵蓋 multi-key 場景；Bellare-Tackmann 2016 補。
 
 ## How it informs our protocol design
-- **G6 nonce 必 deterministic counter**，不靠 randomness：避免 RNG 失誤。
-- **G6 nonce 結構含 epoch + direction + counter**：counter 重置 (overflow) 觸發 ratchet 升 epoch，避免 nonce reuse。
-- **G6 0-RTT 用 GCM-SIV (RFC 8452)**：0-RTT 場景下 nonce 可能 implicitly reuse（client 沒收到 server reply 重 retry），SIV 結構保證 nonce 重用只洩 message equality，不洩 key。
-- **G6 spec 寫明 nonce-misuse 後果**：明確標示「任何 implementation 重用 (key, nonce) → 整個 session security 崩潰」。
+- **Proteus nonce 必 deterministic counter**，不靠 randomness：避免 RNG 失誤。
+- **Proteus nonce 結構含 epoch + direction + counter**：counter 重置 (overflow) 觸發 ratchet 升 epoch，避免 nonce reuse。
+- **Proteus 0-RTT 用 GCM-SIV (RFC 8452)**：0-RTT 場景下 nonce 可能 implicitly reuse（client 沒收到 server reply 重 retry），SIV 結構保證 nonce 重用只洩 message equality，不洩 key。
+- **Proteus spec 寫明 nonce-misuse 後果**：明確標示「任何 implementation 重用 (key, nonce) → 整個 session security 崩潰」。
 
 ## Open questions
 - 對手只有 partial nonce reuse 時的 forge probability tight bound？仍 active。

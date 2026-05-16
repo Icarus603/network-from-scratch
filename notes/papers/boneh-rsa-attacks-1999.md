@@ -44,7 +44,7 @@
 - 不涵蓋 RSA blind signature (Chaum) 等 advanced variants。
 
 ## How it informs our protocol design
-- **G6 設計時用此論文作為「不要重複歷史錯誤」checklist**：
+- **Proteus 設計時用此論文作為「不要重複歷史錯誤」checklist**：
   - ✗ Never use textbook RSA。
   - ✗ Never use PKCS#1 v1.5。
   - ✗ Never trust server padding error indication leak。
@@ -54,8 +54,8 @@
   - ✓ Always use OAEP for encryption / PSS for signature。
   - ✓ Always blind modular exponentiation。
   - ✓ Always constant-time impl with regular memory access。
-- **G6 cert 處理**：必能 reject 任何 RSA cert with d < n^0.292 (Boneh-Durfee bound)。
-- **G6 RNG 要求**：強 OS RNG 避免 Heninger-class shared-prime attack。
+- **Proteus cert 處理**：必能 reject 任何 RSA cert with d < n^0.292 (Boneh-Durfee bound)。
+- **Proteus RNG 要求**：強 OS RNG 避免 Heninger-class shared-prime attack。
 
 ## Open questions
 - 是否存在 sub-exponential factoring algorithm beyond GNFS? 仍 open。

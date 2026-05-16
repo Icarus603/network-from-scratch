@@ -27,7 +27,7 @@ Information-theoretic measures are defined over distributions; in practice we on
 - High-dim sequences not directly addressable.
 
 ## How it informs our protocol design
-- G6 capacity estimation in Part 12 evaluation uses this approach.
+- Proteus capacity estimation in Part 12 evaluation uses this approach.
 - Bootstrap CI provides honest reporting.
 
 ## References worth following

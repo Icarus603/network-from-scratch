@@ -47,9 +47,9 @@ SSL: a = MAC(x); pad x ‖ a to multiple of B; C = CBC-Enc(x ‖ a ‖ pad)
 - 沒考慮 BEAST (Duong-Rizzo 2011) 的 chosen-boundary attack。
 
 ## How it informs our protocol design
-- **G6 不採用 MtE**：即使理論上 case-by-case 安全，工程上太脆弱。
-- **G6 不採用 CBC**：避開所有 padding oracle 風險。
-- **G6 用 AEAD**：ChaCha20-Poly1305 或 AES-GCM，皆是 EtM inline 形式，無 padding。
+- **Proteus 不採用 MtE**：即使理論上 case-by-case 安全，工程上太脆弱。
+- **Proteus 不採用 CBC**：避開所有 padding oracle 風險。
+- **Proteus 用 AEAD**：ChaCha20-Poly1305 或 AES-GCM，皆是 EtM inline 形式，無 padding。
 
 ## Open questions
 - 在 misuse-resistant AEAD 時代，是否仍存在「實作上不安全」的 EtM 構造？AES-GCM-SIV 與 XChaCha20-Poly1305 的 implementation pitfall 仍 active research。

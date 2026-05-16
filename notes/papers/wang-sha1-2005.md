@@ -39,10 +39,10 @@ SHA-1 (1995) 給 80-round Merkle-Damgård 構造，期望 collision security 2^8
 - 影響範圍限於需要 collision-resistance 的 application（簽章、CA cert、commitment）。
 
 ## How it informs our protocol design
-- **G6 絕不用 SHA-1**：transcript hash、KDF、HMAC base 全用 SHA-256+。
-- **G6 必須有 hash agility**：spec 內定義 hash_id field，預留升級到 SHA-3 / BLAKE3 路徑。
-- **G6 教訓 #1**：「security margin 是時間單位」——SHA-1 從 1995 設計到 2005 broken in theory 到 2017 broken in practice，22 年。我們設計 G6 hash 選擇要假設 256-bit security 至少 30 年內安全。
-- **G6 教訓 #2**：collision 比 preimage 早死：design protocol 時要謹慎 hash 在哪些 path 需要 collision-resistance vs preimage-only。
+- **Proteus 絕不用 SHA-1**：transcript hash、KDF、HMAC base 全用 SHA-256+。
+- **Proteus 必須有 hash agility**：spec 內定義 hash_id field，預留升級到 SHA-3 / BLAKE3 路徑。
+- **Proteus 教訓 #1**：「security margin 是時間單位」——SHA-1 從 1995 設計到 2005 broken in theory 到 2017 broken in practice，22 年。我們設計 Proteus hash 選擇要假設 256-bit security 至少 30 年內安全。
+- **Proteus 教訓 #2**：collision 比 preimage 早死：design protocol 時要謹慎 hash 在哪些 path 需要 collision-resistance vs preimage-only。
 
 ## Open questions
 - 對 SHA-256 是否存在類似 differential characteristic？至 2026 年最強 attack 對 SHA-256 round-reduced 是 ~46/64 round。Full 64-round 仍安全 margin 充足。

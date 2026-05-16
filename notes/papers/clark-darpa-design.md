@@ -65,32 +65,32 @@
 
 ## How it informs our protocol design
 
-**對 G6 的核心影響在「為什麼 GFW 必須 in-path / 為什麼我們無法 architectural bypass」**：
+**對 Proteus 的核心影響在「為什麼 GFW 必須 in-path / 為什麼我們無法 architectural bypass」**：
 
 ### 1. **GFW 的存在是 Internet design 的副作用**
 - Survivability 第一 → fate sharing → **state 放在 endpoint**
 - 但 packet **必須穿過中間 router** → GFW 可以放在 router path 上做 inspection
 - **這是 architectural fact，無法改變**——除非完全重設計 Internet（QUIC 沒做、IPv6 沒做、未來也不會做）
 
-### 2. **G6 必須在 application layer 做對抗**
+### 2. **Proteus 必須在 application layer 做對抗**
 - Internet 沒給「prevent intermediate inspection」的 architectural primitive
 - TLS / encryption 是 application-layer fix，是**事後加的**
-- G6 也只能是 application-layer fix → 不能寄望 routing trick / IP-level magic
+- Proteus 也只能是 application-layer fix → 不能寄望 routing trick / IP-level magic
 
 ### 3. **Accountability 排第七 = 為什麼翻牆協議可能存在**
 - 如果 Clark 把 accountability 排第一，Internet 會有強制實名 + payment-per-packet
 - 那種 architecture 下，Tor / VPN / VLESS 都不會存在
-- **G6 的「存在可能性」直接源自 Internet 的 7-priority 順序**——這值得在 Phase III 12.22 論文 intro 提
+- **Proteus 的「存在可能性」直接源自 Internet 的 7-priority 順序**——這值得在 Phase III 12.22 論文 intro 提
 
 ### 4. **多協議共存是 architectural feature**
 - "Multiple types of service" → IP 之上可以是 TCP / UDP / SCTP / QUIC / 任何新協議
-- G6 可以選任何 transport（UDP-based 走 QUIC、TCP-based 走 TLS、甚至 raw IP）
+- Proteus 可以選任何 transport（UDP-based 走 QUIC、TCP-based 走 TLS、甚至 raw IP）
 - Internet architecture 本身**不阻止**新 protocol 出現——這是設計留下的彈性
 
 ### 5. **Survivability 的對偶**：GFW 也利用這個
 - Internet 抗 partial failure → GFW 不能完全切斷 internet（會傷自己）
 - GFW 的策略是**在不切斷的前提下做 selective block**——這是它的弱點
-- G6 的 anti-detection 應該針對 GFW「不能 false-positive 太高」的弱點設計
+- Proteus 的 anti-detection 應該針對 GFW「不能 false-positive 太高」的弱點設計
 
 ## Open questions
 

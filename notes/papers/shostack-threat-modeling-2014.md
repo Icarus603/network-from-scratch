@@ -22,7 +22,7 @@ Industry needs a repeatable methodology for early-stage security analysis. Ad-ho
 - Not formal; relies on human judgment.
 
 ## How it informs our protocol design
-- G6 lesson 11.1 §3 uses STRIDE classification directly.
+- Proteus lesson 11.1 §3 uses STRIDE classification directly.
 - Capability matrix structure derived from Shostack-style enumeration.
 - Residual-risk listing in 11.12 and spec §11.16 follows Shostack template.
 

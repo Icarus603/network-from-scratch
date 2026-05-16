@@ -82,15 +82,15 @@ plaintext = AEAD-Dec(mk, ciphertext, AD = header)
 - Cremers 等 2019 發現 Selfie attack (multi-device 場景下 self-impersonation)；後續 Signal spec 修補。
 
 ## How it informs our protocol design
-G6 v1 ratchet 設計（coarser than Signal，因 G6 是 synchronous proxy 非 IM）:
+Proteus v1 ratchet 設計（coarser than Signal，因 Proteus 是 synchronous proxy 非 IM）:
 - **DH ratchet trigger**: 每 N records (默認 2^20) 或 T 秒 (默認 120) — 比 Signal 粗 (Signal: per direction switch);
 - **Symmetric chain ratchet**: 每 record (與 Signal 一致, 為 FS);
 - **Out-of-order**: 沿用 Signal skipped-key cache 設計, cap = 2^16;
 - **Cost**: ratchet ~50µs/2min → negligible;
 - **PCS guarantee**: ~2-min healing window (vs WireGuard rekey ~2-min;
-   G6 ratchet 比 WireGuard 重新 handshake 便宜 100×)。
+   Proteus ratchet 比 WireGuard 重新 handshake 便宜 100×)。
 
-這是 G6 SOTA differentiator #4 (見 3.17 §4)。WireGuard 雖有 rekey 但每 2 分鐘做 full Noise IK；G6 在握手之間做輕量 ratchet。
+這是 Proteus SOTA differentiator #4 (見 3.17 §4)。WireGuard 雖有 rekey 但每 2 分鐘做 full Noise IK；Proteus 在握手之間做輕量 ratchet。
 
 ## Open questions
 - Hybrid PQ Double Ratchet: 當前所有 DH 為 X25519；換成 ML-KEM 後 ratchet 結構 需重設計 (Brendel-Fischlin-Günther 2022 開始)。

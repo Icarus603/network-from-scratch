@@ -144,13 +144,13 @@ on loss:
 
 ## How it informs our protocol design
 
-對 G6 / QUIC 的全部 reliable + congestion 設計都源於此：
+對 Proteus / QUIC 的全部 reliable + congestion 設計都源於此：
 
-1. **Conservation of packets 原則繼承**：G6 不能無限 burst——必須與 ACK 速率耦合
+1. **Conservation of packets 原則繼承**：Proteus 不能無限 burst——必須與 ACK 速率耦合
 2. **AIMD 是 baseline**：QUIC CUBIC（QUIC RFC 9002 §7）= Jacobson 思想 + Ha 2008 Cubic 改進
 3. **BBR 是 next-gen**：Cardwell 2017 BBR 完全跳過 packet conservation，改用 bandwidth/RTT 估計——**但仍尊重 AIMD 在 fair-sharing 場景的 role**
-4. **G6 不能 100% 拋棄 AIMD**：若 G6 用「**自私**」congestion control（如 Hysteria Brutal），對共網其他流不公平——**有 ethical & practical implications**（會被 ISP / router 視為 abuse）
-5. **slow-start 的「保守起步」哲學**：G6 連線開始時不能 burst 過量——避免被 GFW 偵測為 abnormal、避免造成 self-induced loss
+4. **Proteus 不能 100% 拋棄 AIMD**：若 Proteus 用「**自私**」congestion control（如 Hysteria Brutal），對共網其他流不公平——**有 ethical & practical implications**（會被 ISP / router 視為 abuse）
+5. **slow-start 的「保守起步」哲學**：Proteus 連線開始時不能 burst 過量——避免被 GFW 偵測為 abnormal、避免造成 self-induced loss
 6. **RTO 與 RTT estimator 必須 inherit Karn + Jacobson**：QUIC RFC 9002 直接 spec 此
 
 ## Open questions

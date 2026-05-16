@@ -69,14 +69,14 @@ lemma session_key_secret:
 - **Performance variable**: 對 small protocols 快; 對 large + stateful 可能 hours-days。
 
 ## How it informs our protocol design
-- **G6 stateful protocol parts (ratchet, PSK schedule) 用 Tamarin model**：
+- **Proteus stateful protocol parts (ratchet, PSK schedule) 用 Tamarin model**：
   - Per-N-record DH ratchet step。
   - Multi-device handling (avoid Selfie attack)。
   - PCS proof。
-- **G6 與 Signal-style ratchet 對比 evaluation 用 Tamarin**:
-  - 證 G6 ratchet 達 Signal-equivalent PCS。
-  - 證 G6 PSK schedule 不 leak。
-- **G6 教訓**: stateful protocol 必須 Tamarin (or equivalent stateful tool); ProVerif alone 不夠。
+- **Proteus 與 Signal-style ratchet 對比 evaluation 用 Tamarin**:
+  - 證 Proteus ratchet 達 Signal-equivalent PCS。
+  - 證 Proteus PSK schedule 不 leak。
+- **Proteus 教訓**: stateful protocol 必須 Tamarin (or equivalent stateful tool); ProVerif alone 不夠。
 
 ## Open questions
 - **Tamarin-CryptoVerif coupling**: symbolic + computational integration 仍 active。

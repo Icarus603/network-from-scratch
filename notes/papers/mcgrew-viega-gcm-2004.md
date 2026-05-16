@@ -52,11 +52,11 @@ GHASH_H(X_1, X_2, ..., X_m) = Σ_{i=1}^m X_i · H^{m-i+1}  (in GF(2^128))
 - **Single-key advantage cap**：multi-user setting 下 advantage 隨 user 數惡化（Bellare-Tackmann 2016）。
 
 ## How it informs our protocol design
-- **G6 hardware-fast path 用 AES-256-GCM**：在 AES-NI + PCLMULQDQ 環境下達 ~80 Gbps single core。
-- **G6 強制 96-bit nonce（IETF 變體）**：避免任意長度 IV 引入的 GHASH J_0 derivation 複雜性。
-- **G6 強制 128-bit tag**：禁止 truncation。
-- **G6 nonce 結構 = epoch ‖ direction ‖ counter**：deterministic、不靠 RNG，避免 forbidden attack 在野實例（Bock 等 2016 USENIX WOOT 觀察過）。
-- **G6 0-RTT 改用 GCM-SIV**：0-RTT 重送可能無意 reuse nonce，SIV 結構安全 fallback。
+- **Proteus hardware-fast path 用 AES-256-GCM**：在 AES-NI + PCLMULQDQ 環境下達 ~80 Gbps single core。
+- **Proteus 強制 96-bit nonce（IETF 變體）**：避免任意長度 IV 引入的 GHASH J_0 derivation 複雜性。
+- **Proteus 強制 128-bit tag**：禁止 truncation。
+- **Proteus nonce 結構 = epoch ‖ direction ‖ counter**：deterministic、不靠 RNG，避免 forbidden attack 在野實例（Bock 等 2016 USENIX WOOT 觀察過）。
+- **Proteus 0-RTT 改用 GCM-SIV**：0-RTT 重送可能無意 reuse nonce，SIV 結構安全 fallback。
 
 ## Open questions
 - Multi-user GCM 在 100M+ users 場景的 tight bound？Bellare-Tackmann 2016 仍是當前最強。

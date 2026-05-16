@@ -31,9 +31,9 @@ Mixminion-style high-latency mixnets had hour-level delay. Tor low-latency had n
 - Web browsing impossible (latency too high for interactive web).
 
 ## How it informs our protocol design
-- **Loopix is the formal-anonymity gold standard** for messaging; G6 cannot match its bound without comparable cover-traffic overhead.
-- G6 "high-assurance mode" could approximate Loopix on a per-session basis: constant-rate cover loops with random mix delay.
-- For web, G6 should explicitly accept lower formal anonymity in exchange for usability.
+- **Loopix is the formal-anonymity gold standard** for messaging; Proteus cannot match its bound without comparable cover-traffic overhead.
+- Proteus "high-assurance mode" could approximate Loopix on a per-session basis: constant-rate cover loops with random mix delay.
+- For web, Proteus should explicitly accept lower formal anonymity in exchange for usability.
 
 ## Open questions
 - Loopix-style cover-loop overhead vs achieved anonymity at lower N (smaller user base)?

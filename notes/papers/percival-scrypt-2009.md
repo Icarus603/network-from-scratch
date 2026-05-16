@@ -54,9 +54,9 @@ BlockMix(B): chain Salsa20/8 cores
 - **Side-channel weak**：data-dependent memory access (Integrify) 洩 password bits to cache-monitoring adversary。
 
 ## How it informs our protocol design
-- **G6 不選 scrypt** as primary password KDF; 選 Argon2id (newer, better TMTO)。
+- **Proteus 不選 scrypt** as primary password KDF; 選 Argon2id (newer, better TMTO)。
 - **scrypt 仍是 backup option** if 環境無 Argon2 library。
-- **memory-hard 設計思想對 G6 PoW-style anti-DoS**：未來若 G6 加 client puzzle 防 DoS，可借鑑 memory-hard 思想讓 botnet 平行攻擊昂貴。
+- **memory-hard 設計思想對 Proteus PoW-style anti-DoS**：未來若 Proteus 加 client puzzle 防 DoS，可借鑑 memory-hard 思想讓 botnet 平行攻擊昂貴。
 
 ## Open questions
 - scrypt 在 quantum adversary 下的 bound 仍少有研究。

@@ -85,9 +85,9 @@ Each step is one element.
 
 ## How it informs our protocol design
 
-對 G6 的**架構級**啟發：
+對 Proteus 的**架構級**啟發：
 
-### 1. **G6 spec 應該模組化成 element**
+### 1. **Proteus spec 應該模組化成 element**
 - 加密 element / 握手 element / 流控 element / 偽裝 element / fallback element
 - 每個 element 用 ~200 行寫完
 - spec 描述 element 介面 + connection graph，不寫 monolithic state machine
@@ -103,16 +103,16 @@ Each step is one element.
 - 兩種模式並存的 element graph 設計值得借鑒
 
 ### 4. **Hot swap → 0-downtime upgrade**
-- G6 的 production deployment 應該支援 hot reload
+- Proteus 的 production deployment 應該支援 hot reload
 - 機場運維時改 config 不該斷使用者連線
 - Click 的 hot swap mechanism 是 reference design
 
 ### 5. **Element 的 fine-grained reusability**
-- 同一個「TLS 握手 element」可以被 G6 server / client / GFW simulator / evaluation harness 共用
+- 同一個「TLS 握手 element」可以被 Proteus server / client / GFW simulator / evaluation harness 共用
 - 對應 Phase III 11.5 spec 的設計：spec 不只描述「on the wire」，還描述「element interface」
 
 ### 6. **Flow-based router context = 跨 element 通信**
-- G6 的 anti-replay element 可能要查詢 connection state element
+- Proteus 的 anti-replay element 可能要查詢 connection state element
 - 不要 hardcode pointer，用 flow-based context 讓 element 自動 discover 對方
 - 這跟 Crowcroft 警告的「層間 hard-wired interface 出 bug」對齊
 
@@ -122,7 +122,7 @@ Each step is one element.
 - **Click + eBPF/XDP 整合**？XDP 是 kernel-side 的「element」式 packet processing；能不能把 Click element 直接編譯成 XDP program？
 - **Adversarial Click element**：能不能用 Click 模擬 GFW？把 nDPI / Suricata 包成 element，組成 GFW pipeline——這正是 Phase III 12.x 評測平台該做的
 - **Click + 形式化驗證**：每個 element 是 small enough 可以 ProVerif/TLA+ 驗證；組合的 element graph 能否 compositionally 驗證？開放
-- **Kohler 後來的工作**：去 UCLA 後 Kohler 主導 multikernel / multicore router (NetMap, ClickNP)；他現在在做什麼跟 G6 設計有關？
+- **Kohler 後來的工作**：去 UCLA 後 Kohler 主導 multikernel / multicore router (NetMap, ClickNP)；他現在在做什麼跟 Proteus 設計有關？
 
 ## References worth following
 

@@ -42,15 +42,15 @@
 4. **無中介盒場景**：NAT、firewall、IDS 不能直接放這種 stack 後面（沒有標準 syscall trace）。
 
 ## How it informs our protocol design
-**G6 server side：直接相關**。
+**Proteus server side：直接相關**。
 - 我們要設計同時 SOTA 抗審查 + SOTA 速度的協議——server 性能是「速度」的決定性 axis。
-- Marinos 證明的核心 lesson：**generic socket stack 是 10× 性能上限的天花板**——若 G6 想真正 saturate 商用 NIC（25/100/400 GbE），必須選 kernel-bypass 路線之一。
+- Marinos 證明的核心 lesson：**generic socket stack 是 10× 性能上限的天花板**——若 Proteus 想真正 saturate 商用 NIC（25/100/400 GbE），必須選 kernel-bypass 路線之一。
 - 2026 的演化路徑：
   - **AF_XDP**（Linux）：bypass programmable，仍在 kernel control plane 內 → 工程權衡最佳。
   - **DPDK**：商用 SOTA，但需用戶空間整套生態。
-  - **io_uring**（[[axboe-io-uring-2019]]）：保留 socket 語意但消除 syscall overhead，對 G6 protocol（要 TLS / QUIC handshake stack）較友善。
+  - **io_uring**（[[axboe-io-uring-2019]]）：保留 socket 語意但消除 syscall overhead，對 Proteus protocol（要 TLS / QUIC handshake stack）較友善。
   - **AF_XDP + io_uring + ringbuf**：折衷方案，Cilium / Katran 採用。
-- **Forward ref**：Part 12.4 / 12.5 G6 server 性能評測會回頭引用此 paper 作為 baseline。
+- **Forward ref**：Part 12.4 / 12.5 Proteus server 性能評測會回頭引用此 paper 作為 baseline。
 
 ## Open questions
 - TLS / QUIC handshake CPU cost 是否能被 hardware offload 化（Intel QAT、ARM CCA）→ 結合 specialized stack 達到 line-rate encrypted？

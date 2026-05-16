@@ -31,9 +31,9 @@ Earlier WF defenses (BuFLO, Tamaraw, WTF-PAD, Walkie-Talkie) were evaluated agai
 - Doesn't address multi-flow attacks (later Wang-Hopper 2019).
 
 ## How it informs our protocol design
-- G6 CAR-1 reference attacker `A_dl` is modeled after this paper's 1D-CNN architecture.
+- Proteus CAR-1 reference attacker `A_dl` is modeled after this paper's 1D-CNN architecture.
 - ε target (≤ 0.20 against A_dl) calibrated to match what Tamaraw + similar achieve.
-- G6's per-cell 1280B padding + cover-IAT shaping is designed to be at least as strong as Tamaraw against this classifier class.
+- Proteus's per-cell 1280B padding + cover-IAT shaping is designed to be at least as strong as Tamaraw against this classifier class.
 - Empirical evaluation in Part 12.10 will train a 1D-CNN per this paper as one of the reference attackers.
 
 ## Open questions

@@ -37,9 +37,9 @@ Feature-importance top-10 (Gini): cumulative bytes at 50/75% trace position; bur
 - Open-world threshold tuning is fragile.
 
 ## How it informs our protocol design
-- **Feature-importance ranking is a defense roadmap** — G6 padding should target top-importance features first (cumulative bytes, burst sizes, ordering of early packets).
-- The RF-leaf k-NN architecture is interesting for low-resource attackers — G6 must not assume only DL adversaries.
-- 175 features is a useful regression-test feature set: G6 should be evaluated against full k-FP feature space at minimum to detect coverage gaps.
+- **Feature-importance ranking is a defense roadmap** — Proteus padding should target top-importance features first (cumulative bytes, burst sizes, ordering of early packets).
+- The RF-leaf k-NN architecture is interesting for low-resource attackers — Proteus must not assume only DL adversaries.
+- 175 features is a useful regression-test feature set: Proteus should be evaluated against full k-FP feature space at minimum to detect coverage gaps.
 
 ## Open questions
 - Why does RF-leaf k-NN beat direct RF prediction? Likely supervised similarity > Gini-tree decision boundary, but unformalized.

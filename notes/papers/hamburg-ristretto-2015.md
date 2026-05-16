@@ -53,9 +53,9 @@ X25519 透過 clamping + KDF 解前兩個，但對複雜 protocol（PAKE, thresh
 - **Implementation 略複雜**：encode/decode 比 raw curve ops 多 ~30% cost。
 
 ## How it informs our protocol design
-- **G6 key exchange 用 X25519 raw**：因為 WireGuard 互通 + RFC 7748 標準 + 簡單。
-- **G6 advanced protocol（PAKE, blinded auth, ZK proof）用 Ristretto255**：避免 cofactor 陷阱。
-- **G6 cover-traffic 設計**：若用 Elligator2 把 pk 偽裝為 random bytes，必須在 Ristretto255 上做（X25519 的 cofactor 會洩部分 information through twist-side 偵測）。
+- **Proteus key exchange 用 X25519 raw**：因為 WireGuard 互通 + RFC 7748 標準 + 簡單。
+- **Proteus advanced protocol（PAKE, blinded auth, ZK proof）用 Ristretto255**：避免 cofactor 陷阱。
+- **Proteus cover-traffic 設計**：若用 Elligator2 把 pk 偽裝為 random bytes，必須在 Ristretto255 上做（X25519 的 cofactor 會洩部分 information through twist-side 偵測）。
 
 ## Open questions
 - Decaf/Ristretto 在 post-quantum group action (CSIDH) 是否有對應 abstraction？open。

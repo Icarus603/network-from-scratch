@@ -54,15 +54,15 @@ TLS 1.0-1.2 RFC 8446 之前 默認 cipher suite 用 CBC mode + HMAC-SHA1/256，M
 - Constant-time patch 後不再 vulnerable，但 patch 在 1990s-2000s legacy systems 緩慢部署。
 
 ## How it informs our protocol design
-- **G6 全 AEAD record layer**：直接避免 CBC + MAC-then-Encrypt 整類風險。
-- **G6 任何 server-side validation 必 constant-time**：
+- **Proteus 全 AEAD record layer**：直接避免 CBC + MAC-then-Encrypt 整類風險。
+- **Proteus 任何 server-side validation 必 constant-time**：
   - AEAD tag verify constant-time (libsodium / golang `crypto/subtle`)。
   - Sequence number validation constant-time。
   - Replay window check constant-time。
-- **G6 protocol-level error response 統一**:
+- **Proteus protocol-level error response 統一**:
   - 解密失敗 → silent drop, no response。
   - 握手錯誤 → 統一 close_notify, no error code 區分。
-- **G6 教訓**: 「decrypt then validate」是 risk pattern；AEAD 是 single-step decrypt-and-verify，inherently safer。
+- **Proteus 教訓**: 「decrypt then validate」是 risk pattern；AEAD 是 single-step decrypt-and-verify，inherently safer。
 
 ## Open questions
 - **Network-level timing measurement granularity**: with RTT ~ms vs cycle difference ~ns, 多少 measurements 才能 distinguish? Network jitter 是 attacker's enemy 但 statistical 仍 viable。

@@ -48,7 +48,7 @@ Linux 既有 I/O：
 
 ## How it informs our protocol design
 
-- G6 server runtime 必須走 io_uring（Rust + monoio / compio）
+- Proteus server runtime 必須走 io_uring（Rust + monoio / compio）
 - 必開：registered files、buffer ring、multishot accept、SEND_ZC for large msg、DEFER_TASKRUN + SINGLE_ISSUER
 - Fallback：所有 io_uring path 須有 epoll/kqueue fallback (macOS / restricted Linux)
 - Threshold tuning：small msg < 16KB 用普通 send，大 msg 用 SEND_ZC

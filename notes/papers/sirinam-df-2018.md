@@ -36,10 +36,10 @@
 - Requires 800+ traces/site for training; data-hungry compared to Var-CNN.
 
 ## How it informs our protocol design
-- **DF is the minimum WF adversary baseline G6 must defend against.**
+- **DF is the minimum WF adversary baseline Proteus must defend against.**
 - Demonstrates that "marginal statistic shaping" (WTF-PAD) is insufficient — sequence structure leaks.
-- Direction sequence alone gives ~98% accuracy → G6 must shape direction sequence itself, not just sizes/timing.
-- Open-world results inform G6 evaluation methodology — use realistic 9k+ unmonitored set.
+- Direction sequence alone gives ~98% accuracy → Proteus must shape direction sequence itself, not just sizes/timing.
+- Open-world results inform Proteus evaluation methodology — use realistic 9k+ unmonitored set.
 
 ## Open questions
 - Closed-world ceiling: is 98% the Bayes-optimal accuracy or just DF's? (Cherubin 17 says ~96%, so DF ≈ optimal under their KDE estimator).

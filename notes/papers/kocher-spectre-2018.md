@@ -73,14 +73,14 @@ Probe:
 - 2024 GoFetch 對 Apple M-series 的 constant-time crypto 仍可破。
 
 ## How it informs our protocol design
-- **G6 implementation 必須 Spectre-aware**:
+- **Proteus implementation 必須 Spectre-aware**:
   - Compile with `-mretpoline` (x86) / equivalent ARM flag。
   - Critical crypto sections add `lfence` (x86) 或 `csdb` (ARM)。
   - Use speculative-load-hardening LLVM pass。
-- **G6 對 cloud deployment 風險**:
+- **Proteus 對 cloud deployment 風險**:
   - Public cloud (AWS, GCP) 同 hardware tenant attack 仍 possible。
-  - Dedicated tenancy 推薦 for high-security G6 server。
-- **G6 教訓**: 「constant-time impl is enough」原則在 modern microarch 下被推翻；必須 hardware-aware crypto。
+  - Dedicated tenancy 推薦 for high-security Proteus server。
+- **Proteus 教訓**: 「constant-time impl is enough」原則在 modern microarch 下被推翻；必須 hardware-aware crypto。
 
 ## Open questions
 - **Generic Spectre-resistant cryptographic implementation**: 仍 active research; Vale, CryptoEng 等 attempt formal verification including speculation。

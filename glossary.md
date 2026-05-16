@@ -51,7 +51,7 @@
 **中文**：端到端論證
 **所屬層**：跨層設計原則
 **首次出現**：[1.1 — 分層的真實意義](lessons/part-1-networking/1.1-layering-truth.md)
-**一句話**：Saltzer-Reed-Clark 1984 提出——某些功能只能在端點完整實作，下層做的只是 performance hint，不能取代端點實作；G6 設計時用來決定什麼放協議內、什麼留給 application。
+**一句話**：Saltzer-Reed-Clark 1984 提出——某些功能只能在端點完整實作，下層做的只是 performance hint，不能取代端點實作；Proteus 設計時用來決定什麼放協議內、什麼留給 application。
 
 ### Fate Sharing
 **中文**：命運共擔
@@ -171,7 +171,7 @@
 **中文**：用戶態虛擬網卡（L3 vs L2）
 **所屬層**：OS / virtual interface
 **首次出現**：[0.1](lessons/part-0-orientation/0.1-vpn-misnomer.md)（提名字）／[1.3](lessons/part-1-networking/1.3-ethernet-l2.md)（深度展開）
-**一句話**：TUN 接 L3 IP packet（WireGuard/Tailscale 預設）、TAP 接 L2 Ethernet frame（含 ARP/broadcast，OpenVPN bridge mode）；G6 永遠不該走 TAP——任何 L2 broadcast 都是流量指紋的 anti-feature。
+**一句話**：TUN 接 L3 IP packet（WireGuard/Tailscale 預設）、TAP 接 L2 Ethernet frame（含 ARP/broadcast，OpenVPN bridge mode）；Proteus 永遠不該走 TAP——任何 L2 broadcast 都是流量指紋的 anti-feature。
 
 ### LPM (Longest Prefix Match)
 **中文**：最長前綴匹配
@@ -183,7 +183,7 @@
 **中文**：轉發表 vs 路由表
 **所屬層**：L3 / control vs data plane
 **首次出現**：[1.4](lessons/part-1-networking/1.4-ip-routing-graph.md)
-**一句話**：RIB 是 control plane 持有的「所有候選路由」（從 BGP/OSPF/static 學來），FIB 是 data plane 已決定的「最佳路由」；分離模式是 30 年路由工業界教訓，G6 control/data plane 分離直接受此影響。
+**一句話**：RIB 是 control plane 持有的「所有候選路由」（從 BGP/OSPF/static 學來），FIB 是 data plane 已決定的「最佳路由」；分離模式是 30 年路由工業界教訓，Proteus control/data plane 分離直接受此影響。
 
 ### PATRICIA / Radix Trie
 **中文**：Patricia 樹 / Radix 樹（path-compressed binary trie）
@@ -219,7 +219,7 @@
 **中文**：源路由 / IPv6 段路由
 **所屬層**：L3
 **首次出現**：[1.4](lessons/part-1-networking/1.4-ip-routing-graph.md)
-**一句話**：LSRR/SSRR (RFC 791) 因 anonymity/DDoS 問題 1990s 起被全網 drop；SRv6 (RFC 8754) 把思想復活——信任域內 controller-driven traffic engineering；對 G6 是潛在的 path metadata side channel。
+**一句話**：LSRR/SSRR (RFC 791) 因 anonymity/DDoS 問題 1990s 起被全網 drop；SRv6 (RFC 8754) 把思想復活——信任域內 controller-driven traffic engineering；對 Proteus 是潛在的 path metadata side channel。
 
 ### BGP / RPKI / ROA
 **中文**：邊界閘道協議 / RPKI 公鑰基礎設施 / 路由起源授權
@@ -267,19 +267,19 @@
 **中文**：IPv6 隱私臨時地址 / 穩定但偽隨機 IID
 **所屬層**：L3 IPv6 addressing
 **首次出現**：[1.5](lessons/part-1-networking/1.5-arp-ndp-dhcp.md)
-**一句話**：8981 用 random IID 取代 EUI-64 並定期 rotate（preferred ~1d）；7217 用 PRF(secret, prefix) 生成 stable-but-unlinkable IID；通常**並用**取兩者優點——G6 client identifier 設計參考此模式。
+**一句話**：8981 用 random IID 取代 EUI-64 並定期 rotate（preferred ~1d）；7217 用 PRF(secret, prefix) 生成 stable-but-unlinkable IID；通常**並用**取兩者優點——Proteus client identifier 設計參考此模式。
 
 ### MAC Randomization Defeat (Vanhoef 2016)
 **中文**：MAC 隨機化被擊敗
 **所屬層**：WiFi PHY/MAC
 **首次出現**：[1.5](lessons/part-1-networking/1.5-arp-ndp-dhcp.md)
-**一句話**：Vanhoef et al. 2016——即便 random MAC，probe IE 組合 + scrambler seed + SSID list + timing 四個 side channel 可達 ~95% deanonymize rate；G6 不能依賴 OS-level MAC randomization 做匿名保證。
+**一句話**：Vanhoef et al. 2016——即便 random MAC，probe IE 組合 + scrambler seed + SSID list + timing 四個 side channel 可達 ~95% deanonymize rate；Proteus 不能依賴 OS-level MAC randomization 做匿名保證。
 
 ### Captive Portal Detection (RFC 7710/8910/8908)
 **中文**：強制門戶網路偵測
 **所屬層**：DHCP/RA + HTTP
 **首次出現**：[1.5](lessons/part-1-networking/1.5-arp-ndp-dhcp.md)
-**一句話**：飯店/機場 WiFi 登入頁問題；OS 用 canary URL probe（Apple/Microsoft/Google 各家）+ RFC 8910 標準化 portal URL via DHCP option 114 / RA option；G6 client 啟動流程必須處理。
+**一句話**：飯店/機場 WiFi 登入頁問題；OS 用 canary URL probe（Apple/Microsoft/Google 各家）+ RFC 8910 標準化 portal URL via DHCP option 114 / RA option；Proteus client 啟動流程必須處理。
 
 ### ICMP (RFC 792 / 4443)
 **中文**：互聯網控制訊息協議
@@ -291,7 +291,7 @@
 **中文**：路徑 MTU 探測協議家族
 **所屬層**：transport-layer / network-layer 交介
 **首次出現**：[1.6](lessons/part-1-networking/1.6-icmp-deep.md)
-**一句話**：Classical（1990，ICMP-dependent，公網 ~28% blackhole）→ PLPMTUD（2007，TCP 自探）→ DPLPMTUD（2020，QUIC/SCTP/datagram 統一標準）；G6 必走 DPLPMTUD。
+**一句話**：Classical（1990，ICMP-dependent，公網 ~28% blackhole）→ PLPMTUD（2007，TCP 自探）→ DPLPMTUD（2020，QUIC/SCTP/datagram 統一標準）；Proteus 必走 DPLPMTUD。
 
 ### PMTUD Blackhole
 **中文**：路徑 MTU 探測黑洞
@@ -303,13 +303,13 @@
 **中文**：主動探測
 **所屬層**：審查對手能力
 **首次出現**：[1.6](lessons/part-1-networking/1.6-icmp-deep.md)
-**一句話**：Ensafi et al. 2015 IMC——GFW passive 識別可疑流量後 1 秒~數天內從境內 IP 主動連目標 server replay protocol handshake，命中則永久封 IP+port；G6 必須在威脅模型內列為 first-class。
+**一句話**：Ensafi et al. 2015 IMC——GFW passive 識別可疑流量後 1 秒~數天內從境內 IP 主動連目標 server replay protocol handshake，命中則永久封 IP+port；Proteus 必須在威脅模型內列為 first-class。
 
 ### Parrot is Dead 教訓
 **中文**：完美模仿不可能
 **所屬層**：審查對抗 architecture
 **首次出現**：[1.6](lessons/part-1-networking/1.6-icmp-deep.md)（提及）；後續 Part 7/9 深入
-**一句話**：Houmansadr, Brubaker, Shmatikov 2013——任何 obfuscation protocol 試圖模仿真實 protocol（如 Skype）的 active probing 全部可破；G6 走密碼學 indistinguishability 而非 protocol mimicry。
+**一句話**：Houmansadr, Brubaker, Shmatikov 2013——任何 obfuscation protocol 試圖模仿真實 protocol（如 Skype）的 active probing 全部可破；Proteus 走密碼學 indistinguishability 而非 protocol mimicry。
 
 ### NAT Behavior (RFC 4787 / RFC 5382)
 **中文**：NAT 行為二維分類
@@ -321,7 +321,7 @@
 **中文**：電信級 NAT
 **所屬層**：ISP infrastructure
 **首次出現**：[1.7](lessons/part-1-networking/1.7-nat-taxonomy.md)
-**一句話**：ISP 在客戶端家用 NAT 之外再加一層共享公網 IP 的 NAT，使用 100.64.0.0/10 私網池；中國 mobile ~70%、印度 ~80% 用戶在 CGN 下；對 G6 是 anonymity opportunity 也是 P2P/connection limit threat。
+**一句話**：ISP 在客戶端家用 NAT 之外再加一層共享公網 IP 的 NAT，使用 100.64.0.0/10 私網池；中國 mobile ~70%、印度 ~80% 用戶在 CGN 下；對 Proteus 是 anonymity opportunity 也是 P2P/connection limit threat。
 
 ### Hole Punching (Ford 2005)
 **中文**：穿洞
@@ -339,13 +339,13 @@
 **中文**：QUIC 連線遷移
 **所屬層**：L4 transport
 **首次出現**：[1.7](lessons/part-1-networking/1.7-nat-taxonomy.md)
-**一句話**：QUIC 用 connection ID 取代 4-tuple 作為連線識別 → NAT rebinding / WiFi-cellular 切換不斷連；PATH_CHALLENGE/RESPONSE 驗證新 path；G6 baseline 直接繼承。
+**一句話**：QUIC 用 connection ID 取代 4-tuple 作為連線識別 → NAT rebinding / WiFi-cellular 切換不斷連；PATH_CHALLENGE/RESPONSE 驗證新 path；Proteus baseline 直接繼承。
 
 ### NAT64 / DNS64 / 464XLAT
 **中文**：IPv6-only 環境訪問 IPv4 的翻譯機制
 **所屬層**：L3/L7
 **首次出現**：[1.7](lessons/part-1-networking/1.7-nat-taxonomy.md)
-**一句話**：NAT64 (RFC 6146) 把 v4 嵌進 64:ff9b::/96 prefix；DNS64 (RFC 6147) 合成 AAAA；464XLAT (RFC 6877) 加 client-side translation 讓 v4-only app 在 v6-only 網路工作；G6 server 應 dual-stack。
+**一句話**：NAT64 (RFC 6146) 把 v4 嵌進 64:ff9b::/96 prefix；DNS64 (RFC 6147) 合成 AAAA；464XLAT (RFC 6877) 加 client-side translation 讓 v4-only app 在 v6-only 網路工作；Proteus server 應 dual-stack。
 
 ### TCP State Machine (RFC 9293)
 **中文**：TCP 狀態機
@@ -375,7 +375,7 @@
 **中文**：RST 注入
 **所屬層**：TCP attack
 **首次出現**：[1.8](lessons/part-1-networking/1.8-tcp-connection-mgmt.md)
-**一句話**：on-path attacker（GFW）對識別為敏感的 TCP flow 雙向送偽造 RST 斷連，是 GFW 過去 10 年主要封鎖工具；QUIC 無 RST 概念是 G6 baseline 走 QUIC 的核心動機之一。
+**一句話**：on-path attacker（GFW）對識別為敏感的 TCP flow 雙向送偽造 RST 斷連，是 GFW 過去 10 年主要封鎖工具；QUIC 無 RST 概念是 Proteus baseline 走 QUIC 的核心動機之一。
 
 ### SACK / DSACK (RFC 2018 / 2883)
 **中文**：選擇性確認 / 重複選擇性確認
@@ -405,13 +405,13 @@
 **中文**：前向 RTO 復原
 **所屬層**：TCP recovery
 **首次出現**：[1.9](lessons/part-1-networking/1.9-tcp-reliable-delivery.md)
-**一句話**：RTO 觸發後不立即縮窗，而送 2 個 new segment 探測——若 ACK 對應 new segment 則判定 RTO 是 spurious（如 mobile WiFi↔cellular 切換）並退出 recovery；mobile G6 必要。
+**一句話**：RTO 觸發後不立即縮窗，而送 2 個 new segment 探測——若 ACK 對應 new segment 則判定 RTO 是 spurious（如 mobile WiFi↔cellular 切換）並退出 recovery；mobile Proteus 必要。
 
 ### PRR (Proportional Rate Reduction, RFC 6937)
 **中文**：比例速率縮減
 **所屬層**：TCP recovery pacing
 **首次出現**：[1.9](lessons/part-1-networking/1.9-tcp-reliable-delivery.md)
-**一句話**：Mathis, Dukkipati, Cheng 2013——在 recovery 期間精確平衡 in-flight packet 與 ACK 釋放速率，避免 secondary burst loss；Linux 預設 enabled，G6 應 inherit。
+**一句話**：Mathis, Dukkipati, Cheng 2013——在 recovery 期間精確平衡 in-flight packet 與 ACK 釋放速率，避免 secondary burst loss；Linux 預設 enabled，Proteus 應 inherit。
 
 ### AIMD / Chiu-Jain 1989
 **中文**：加性增乘性減 / Chiu-Jain 最優性
@@ -435,7 +435,7 @@
 **中文**：自私擁塞控制
 **所屬層**：L4 CC（翻牆專用）
 **首次出現**：[1.10](lessons/part-1-networking/1.10-tcp-congestion-control.md)
-**一句話**：固定 sending rate（user-set）+ 不對 loss/RTT 縮窗 + 對 loss 反而加速補償；對中國 lossy international link 比 BBR 快 5-10×，代價是完全放棄 fairness；G6 作為 opt-in option。
+**一句話**：固定 sending rate（user-set）+ 不對 loss/RTT 縮窗 + 對 loss 反而加速補償；對中國 lossy international link 比 BBR 快 5-10×，代價是完全放棄 fairness；Proteus 作為 opt-in option。
 
 ### ECN / L4S (RFC 3168 / 9330-9332)
 **中文**：顯式擁塞通知 / 低延遲低損失可擴展吞吐
@@ -447,19 +447,19 @@
 **中文**：多路徑 TCP
 **所屬層**：L4 multipath
 **首次出現**：[1.11 TCP 進階](lessons/part-1-networking/1.11-tcp-advanced.md)
-**一句話**：單一邏輯連線跨多 subflow（各 4-tuple），上層 app 看單一 socket；Apple iOS Siri 全球 10 億+ device 部署；RFC 6356 LIA coupled CC 確保「do no harm」於其他 single-path flow；G6 baseline 不採用但 v2 可考慮 multipath QUIC。
+**一句話**：單一邏輯連線跨多 subflow（各 4-tuple），上層 app 看單一 socket；Apple iOS Siri 全球 10 億+ device 部署；RFC 6356 LIA coupled CC 確保「do no harm」於其他 single-path flow；Proteus baseline 不採用但 v2 可考慮 multipath QUIC。
 
 ### TCP-AO (RFC 5925)
 **中文**：TCP 認證選項
 **所屬層**：L4 transport security
 **首次出現**：[1.11](lessons/part-1-networking/1.11-tcp-advanced.md)
-**一句話**：取代 RFC 2385 TCP-MD5；HMAC-SHA-256 + per-connection traffic key（從 master + ISN derive）+ in-band key rotation + replay protection；BGP / LDP / RPKI / G6 control channel 設計範本。
+**一句話**：取代 RFC 2385 TCP-MD5；HMAC-SHA-256 + per-connection traffic key（從 master + ISN derive）+ in-band key rotation + replay protection；BGP / LDP / RPKI / Proteus control channel 設計範本。
 
 ### USO / TSO / GSO / GRO (NIC Offload)
 **中文**：UDP/TCP 分片卸載
 **所屬層**：NIC + kernel
 **首次出現**：[1.2](lessons/part-1-networking/1.2-physical-and-phy-mac.md)（提及）；[1.11](lessons/part-1-networking/1.11-tcp-advanced.md) 深入；[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md) UDP 端深入
-**一句話**：TSO/GSO 把大 SKB 切成 MTU-size packet 由 NIC 或 kernel 處理；USO（Linux 4.18+）為 UDP/QUIC 同類功能，對 QUIC throughput +10× 級；GRO 為接收側合併；G6 server production 必須啟用。
+**一句話**：TSO/GSO 把大 SKB 切成 MTU-size packet 由 NIC 或 kernel 處理；USO（Linux 4.18+）為 UDP/QUIC 同類功能，對 QUIC throughput +10× 級；GRO 為接收側合併；Proteus server production 必須啟用。
 
 ### UDP_SEGMENT (UDP GSO socket option)
 **中文**：UDP 分段卸載 socket 選項
@@ -489,7 +489,7 @@
 **中文**：發送時戳 socket option
 **所屬層**：kernel socket / cmsg
 **首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
-**一句話**：EDT model 的 user-space API；clockid 通常 `CLOCK_TAI`；G6 pacing 設計的硬性 API 對齊目標。
+**一句話**：EDT model 的 user-space API；clockid 通常 `CLOCK_TAI`；Proteus pacing 設計的硬性 API 對齊目標。
 
 ### BQL (Byte Queue Limits)
 **中文**：驅動發送隊列字節限制
@@ -501,13 +501,13 @@
 **中文**：高效能 user-space raw packet capture / inject
 **所屬層**：kernel L2 / user-space
 **首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
-**一句話**：mmap-based 環狀緩衝把 packet 從 kernel 零拷貝給 user，比 libpcap default backend 快 ~10×；G6 evaluation 用來抓「未被 app buffer 模糊」的真實時序給 DPI mock。
+**一句話**：mmap-based 環狀緩衝把 packet 從 kernel 零拷貝給 user，比 libpcap default backend 快 ~10×；Proteus evaluation 用來抓「未被 app buffer 模糊」的真實時序給 DPI mock。
 
 ### CID-aware reuseport BPF
 **中文**：連線標識感知的 SO_REUSEPORT 分發 BPF 程式
 **所屬層**：socket layer (sk_reuseport BPF program type)
 **首次出現**：[2.15](lessons/part-2-high-perf-io/2.15-udp-fastpath.md)
-**一句話**：QUIC 因 NAT 換 port 會使 5-tuple hash 漂移、worker 切換破壞 state；解法是用 sk_reuseport eBPF 解析 QUIC short header 取 CID 做分發；G6 server 多核擴展必備、且收窄了我們 CID 結構設計（前 8B 必須 routing-stable）。
+**一句話**：QUIC 因 NAT 換 port 會使 5-tuple hash 漂移、worker 切換破壞 state；解法是用 sk_reuseport eBPF 解析 QUIC short header 取 CID 做分發；Proteus server 多核擴展必備、且收窄了我們 CID 結構設計（前 8B 必須 routing-stable）。
 
 ### UDP (RFC 768) + UDP Usage Guidelines (RFC 8085)
 **中文**：用戶資料報協議與其應用準則
@@ -519,49 +519,49 @@
 **中文**：IP 分片問題
 **所屬層**：L3-L4 互動
 **首次出現**：[1.12](lessons/part-1-networking/1.12-udp-anatomy.md)
-**一句話**：UDP 不切 segment 直接靠 IP 分片——一個 fragment 丟 → 整 datagram 丟（effective loss rate × k）；多 firewall drop 分片；NAT 處理不一致；G6 鐵律「永禁分片」+ DF=1 + DPLPMTUD。
+**一句話**：UDP 不切 segment 直接靠 IP 分片——一個 fragment 丟 → 整 datagram 丟（effective loss rate × k）；多 firewall drop 分片；NAT 處理不一致；Proteus 鐵律「永禁分片」+ DF=1 + DPLPMTUD。
 
 ### UDP connect() Semantics
 **中文**：UDP 連接的真實意義
 **所屬層**：socket API
 **首次出現**：[1.12](lessons/part-1-networking/1.12-udp-anatomy.md)
-**一句話**：UDP `connect()` 不建連線但啟用三效果：filter 非 peer packet、default destination、kernel fast path；G6 client 用 connected socket，G6 server 必 unconnected (multi-client)。
+**一句話**：UDP `connect()` 不建連線但啟用三效果：filter 非 peer packet、default destination、kernel fast path；Proteus client 用 connected socket，Proteus server 必 unconnected (multi-client)。
 
 ### UDP-Lite (RFC 3828)
 **中文**：輕量 UDP（部分 checksum）
 **所屬層**：L4 transport variant
 **首次出現**：[1.12](lessons/part-1-networking/1.12-udp-anatomy.md)
-**一句話**：允許 checksum 只覆蓋 packet 前 N byte，讓 audio/video application 容忍 payload byte 損壞；middlebox 對非標準 protocol number drop 使其無 deployment；G6 不採用。
+**一句話**：允許 checksum 只覆蓋 packet 前 N byte，讓 audio/video application 容忍 payload byte 損壞；middlebox 對非標準 protocol number drop 使其無 deployment；Proteus 不採用。
 
 ### IPv6 (RFC 8200) Header & Extension Headers
 **中文**：IPv6 與其擴展頭
 **所屬層**：L3
 **首次出現**：[1.13 IPv6 完整解剖](lessons/part-1-networking/1.13-ipv6-anatomy.md)
-**一句話**：40-byte fixed header + chained extension headers (HBH/Routing/Fragment/AH/ESP/Dest Options)；header checksum removed；fragmentation 只 source 做；EH 在公網 drop rate 高 (RFC 7872 ~30-50%)，G6 不應使用 EH。
+**一句話**：40-byte fixed header + chained extension headers (HBH/Routing/Fragment/AH/ESP/Dest Options)；header checksum removed；fragmentation 只 source 做；EH 在公網 drop rate 高 (RFC 7872 ~30-50%)，Proteus 不應使用 EH。
 
 ### Happy Eyeballs v2 (RFC 8305)
 **中文**：快樂眼球 v2
 **所屬層**：dual-stack client UX
 **首次出現**：[1.13](lessons/part-1-networking/1.13-ipv6-anatomy.md)
-**一句話**：Schinazi & Pauly 2017——dual-stack client 同時試 IPv6 + IPv4 connection、race who connects first；改善 partial-broken v6 path 40× latency；DNS query 也 happy eyeball（AAAA 先發 + 50ms 後 A）；250ms Connection Attempt Delay 給 v6 head start；G6 client mandatory。
+**一句話**：Schinazi & Pauly 2017——dual-stack client 同時試 IPv6 + IPv4 connection、race who connects first；改善 partial-broken v6 path 40× latency；DNS query 也 happy eyeball（AAAA 先發 + 50ms 後 A）；250ms Connection Attempt Delay 給 v6 head start；Proteus client mandatory。
 
 ### RFC 6724 Default Address Selection
 **中文**：IPv6 預設地址選擇
 **所屬層**：socket / getaddrinfo
 **首次出現**：[1.13](lessons/part-1-networking/1.13-ipv6-anatomy.md)
-**一句話**：dual-stack OS 對候選 (src, dst) address pair 排序的 9 條 rule；不同 OS 實作不一致是 dual-stack deployment hidden complexity；G6 client 應 RFC 6724 compliant。
+**一句話**：dual-stack OS 對候選 (src, dst) address pair 排序的 9 條 rule；不同 OS 實作不一致是 dual-stack deployment hidden complexity；Proteus client 應 RFC 6724 compliant。
 
 ### IPv6 Privacy: 8981 + 7217 並用
 **中文**：IPv6 隱私雙機制
 **所屬層**：SLAAC IID derivation
 **首次出現**：[1.5](lessons/part-1-networking/1.5-arp-ndp-dhcp.md)、[1.13](lessons/part-1-networking/1.13-ipv6-anatomy.md)
-**一句話**：RFC 7217 stable opaque IID (PRF-derived from secret + prefix) 給 inbound reachability + RFC 8981 temporary random IID 給 outbound privacy；G6 client 應 enforce 兩者並用。
+**一句話**：RFC 7217 stable opaque IID (PRF-derived from secret + prefix) 給 inbound reachability + RFC 8981 temporary random IID 給 outbound privacy；Proteus client 應 enforce 兩者並用。
 
 ### Czyz 2014 IPv6 Adoption Measurement
 **中文**：IPv6 部署量測
 **所屬層**：measurement
 **首次出現**：[1.13](lessons/part-1-networking/1.13-ipv6-anatomy.md)
-**一句話**：Czyz et al. SIGCOMM 2014——12 metrics + 10 datasets；IPv6 prefix 2004-2014 增 37×、traffic 年增 400%；2024 update：全球 ~45% user IPv6 capable，India 75%；G6 dual-stack mandatory。
+**一句話**：Czyz et al. SIGCOMM 2014——12 metrics + 10 datasets；IPv6 prefix 2004-2014 增 37×、traffic 年增 400%；2024 update：全球 ~45% user IPv6 capable，India 75%；Proteus dual-stack mandatory。
 
 ### DNS (RFC 1034/1035) + Resource Records
 **中文**：域名系統與資源記錄
@@ -579,13 +579,13 @@
 **中文**：DNS 安全擴展（失敗）
 **所屬層**：DNS authentication
 **首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
-**一句話**：對 RR 簽章配 zone key + DS chain of trust；理論完美但 deployment ~5-15%、resolver validation ~1-3%；複雜性 + NSEC enumeration + algorithm rollover 痛 + errors 比 unprotected 更糟；G6 不依賴。
+**一句話**：對 RR 簽章配 zone key + DS chain of trust；理論完美但 deployment ~5-15%、resolver validation ~1-3%；複雜性 + NSEC enumeration + algorithm rollover 痛 + errors 比 unprotected 更糟；Proteus 不依賴。
 
 ### DoT / DoH / DoQ (RFC 7858 / 8484 / 9250)
 **中文**：加密 DNS 三件套
 **所屬層**：DNS transport security
 **首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
-**一句話**：DoT (TLS over TCP/853, 2016) / DoH (HTTPS, 2018, port 443 與 HTTPS 混合難 block) / DoQ (QUIC, dedicated UDP/853, 2022, 0-RTT 快但同 DoT 易 selective block)；G6 bootstrap：DoH > DoQ > 預配 IP。
+**一句話**：DoT (TLS over TCP/853, 2016) / DoH (HTTPS, 2018, port 443 與 HTTPS 混合難 block) / DoQ (QUIC, dedicated UDP/853, 2022, 0-RTT 快但同 DoT 易 selective block)；Proteus bootstrap：DoH > DoQ > 預配 IP。
 
 ### ECS (EDNS Client Subnet, RFC 7871)
 **中文**：EDNS 客戶端子網
@@ -597,19 +597,19 @@
 **中文**：加密 ClientHello + HTTPS 記錄
 **所屬層**：TLS + DNS
 **首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
-**一句話**：HTTPS RR (type 65) 在 DNS 階段同傳 ALPN/IP hint/ECH config；ECH 把 ClientHello 內 SNI 加密；2024+ GFW 對 ECH 部分 selective drop；G6 publish HTTPS RR 是 mandatory，但需 ECH-less fallback。
+**一句話**：HTTPS RR (type 65) 在 DNS 階段同傳 ALPN/IP hint/ECH config；ECH 把 ClientHello 內 SNI 加密；2024+ GFW 對 ECH 部分 selective drop；Proteus publish HTTPS RR 是 mandatory，但需 ECH-less fallback。
 
 ### Hoang 2021 GFWatch — GFW DNS Censorship Measurement
 **中文**：GFW DNS 審查量測
 **所屬層**：censorship measurement
 **首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)；[1.6 ICMP](lessons/part-1-networking/1.6-icmp-deep.md) reference
-**一句話**：Hoang et al. USENIX Sec 2021——411M domain/day × 9 月發現 311K 受審查域名、3 個 injector（Injector 2 負責 99%）、11 組 forged IP、41K 無辜 overblocking、77K 受 public resolver spillover；G6 server domain 命名與 client bootstrap 直接依此設計。
+**一句話**：Hoang et al. USENIX Sec 2021——411M domain/day × 9 月發現 311K 受審查域名、3 個 injector（Injector 2 負責 99%）、11 組 forged IP、41K 無辜 overblocking、77K 受 public resolver spillover；Proteus server domain 命名與 client bootstrap 直接依此設計。
 
 ### DDR (RFC 9462) + Encrypted DNS Discovery
 **中文**：發現指定解析器
 **所屬層**：DNS auto-config
 **首次出現**：[1.14](lessons/part-1-networking/1.14-dns-anatomy.md)
-**一句話**：client 啟動時用 plain DNS resolver IP 查 `_dns.resolver.arpa.` SVCB → 拿到該 resolver 的 DoH/DoT/DoQ endpoint；對應 RFC 9463 透過 DHCP/RA option 推 encrypted DNS endpoint；G6 client opportunistic 採用。
+**一句話**：client 啟動時用 plain DNS resolver IP 查 `_dns.resolver.arpa.` SVCB → 拿到該 resolver 的 DoH/DoT/DoQ endpoint；對應 RFC 9463 透過 DHCP/RA option 推 encrypted DNS endpoint；Proteus client opportunistic 採用。
 
 ### Tier 1/2/3 ISP + IXP
 **中文**：ISP 分層與 IXP
@@ -639,13 +639,13 @@
 **中文**：中國電信優質國際線路與機場行話
 **所屬層**：BGP economics + traffic engineering
 **首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
-**一句話**：CN2 GIA (AS4809) 是 China Telecom 商業優質國際線路（價格 $$$ × ChinaNet）；「BGP 加速 / 中轉節點」實際是「**機房選 transit + 在合適 AS 加 relay VPS**」，無神奇技術；G6 server 部署應選 IXP-rich 城市 + 對中峰值優化 transit。
+**一句話**：CN2 GIA (AS4809) 是 China Telecom 商業優質國際線路（價格 $$$ × ChinaNet）；「BGP 加速 / 中轉節點」實際是「**機房選 transit + 在合適 AS 加 relay VPS**」，無神奇技術；Proteus server 部署應選 IXP-rich 城市 + 對中峰值優化 transit。
 
 ### Griffin-Wilfong 1999 BGP Non-Convergence
 **中文**：BGP 不收斂性
 **所屬層**：distributed system theory
 **首次出現**：[1.15](lessons/part-1-networking/1.15-bgp-internet-routing.md)
-**一句話**：SIGCOMM 1999 證明 BGP 在 expressive policy 下動態系統可能不收斂、永久 oscillation；對 G6 control plane 反面教訓——不要設計可表達任意 policy 的 protocol，採 Raft/Paxos 等 proven algorithm。
+**一句話**：SIGCOMM 1999 證明 BGP 在 expressive policy 下動態系統可能不收斂、永久 oscillation；對 Proteus control plane 反面教訓——不要設計可表達任意 policy 的 protocol，採 Raft/Paxos 等 proven algorithm。
 
 ### BGPsec (RFC 8205) — Failed Standard
 **中文**：BGPsec 失敗標準
@@ -657,7 +657,7 @@
 **中文**：任播
 **所屬層**：BGP + routing
 **首次出現**：[1.16 CDN/Anycast](lessons/part-1-networking/1.16-cdn-anycast.md)
-**一句話**：同一 IP prefix 從多個物理 POP 同時 BGP announce，BGP best-path 自動把 client 導到最近；Cloudflare/Bing/Google DNS 用；Calder 2015 IMC 量測 80% client geo-optimal、20% sub-optimal；G6 baseline 不採用（一封全封）。
+**一句話**：同一 IP prefix 從多個物理 POP 同時 BGP announce，BGP best-path 自動把 client 導到最近；Cloudflare/Bing/Google DNS 用；Calder 2015 IMC 量測 80% client geo-optimal、20% sub-optimal；Proteus baseline 不採用（一封全封）。
 
 ### Domain Fronting (Fifield 2015)
 **中文**：域名前置
@@ -669,19 +669,19 @@
 **中文**：邊緣 serverless 計算
 **所屬層**：CDN compute
 **首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
-**一句話**：在 CDN POP 上跑 JavaScript / WASM；典型 5ms cold start, <1ms warm；G6 可用作 endpoint discovery / control plane / lightweight relay，但 ToS 對 circumvention use 模糊。
+**一句話**：在 CDN POP 上跑 JavaScript / WASM；典型 5ms cold start, <1ms warm；Proteus 可用作 endpoint discovery / control plane / lightweight relay，但 ToS 對 circumvention use 模糊。
 
 ### iCloud Private Relay (Apple, 2021)
 **中文**：iCloud 私密轉送
 **所屬層**：production VPN architecture
 **首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
-**一句話**：兩跳 trust split 設計——Apple-operated ingress（知身份不知目標）+ CDN-operated egress（知目標不知身份）；MASQUE over QUIC；千萬 user scale 部署；GFW 完全封；G6 v2 可考慮 architecture reference。
+**一句話**：兩跳 trust split 設計——Apple-operated ingress（知身份不知目標）+ CDN-operated egress（知目標不知身份）；MASQUE over QUIC；千萬 user scale 部署；GFW 完全封；Proteus v2 可考慮 architecture reference。
 
 ### Cloudflare WARP / cloudflared / Spectrum / Magic Transit
 **中文**：Cloudflare 全家桶（VPN/Tunnel/L4 proxy/DDoS）
 **所屬層**：CDN-based VPN/Tunneling
 **首次出現**：[1.16](lessons/part-1-networking/1.16-cdn-anycast.md)
-**一句話**：WARP 為 consumer VPN（WireGuard + MASQUE）；cloudflared 讓 origin 主動 outbound tunnel 隱藏 IP；Spectrum 是 L4 任意 TCP/UDP proxy；Magic Transit 是 L3 DDoS protection；G6 deployment 可選擇 partial 採用。
+**一句話**：WARP 為 consumer VPN（WireGuard + MASQUE）；cloudflared 讓 origin 主動 outbound tunnel 隱藏 IP；Spectrum 是 L4 任意 TCP/UDP proxy；Magic Transit 是 L3 DDoS protection；Proteus deployment 可選擇 partial 採用。
 
 ### Refraction Networking / Conjure / Slitheen
 **中文**：折射網路
@@ -699,7 +699,7 @@
 **中文**：Netfilter 框架與 packet 過濾工具演化
 **所屬層**：Linux netfilter
 **首次出現**：[1.18](lessons/part-1-networking/1.18-linux-network-stack.md)
-**一句話**：5 個 hook (PREROUTING/INPUT/FORWARD/OUTPUT/POSTROUTING)；iptables (legacy linear scan) → nftables (modern, expression-based) → eBPF (programmable, 5-10× 快); G6 killswitch 用 nftables baseline。
+**一句話**：5 個 hook (PREROUTING/INPUT/FORWARD/OUTPUT/POSTROUTING)；iptables (legacy linear scan) → nftables (modern, expression-based) → eBPF (programmable, 5-10× 快); Proteus killswitch 用 nftables baseline。
 
 ### TC qdisc (fq / fq_codel / cake / mq)
 **中文**：流量控制 / 佇列規則
@@ -731,7 +731,7 @@
 ### CTX (Context Commitment Transform)
 **所屬層**：AEAD generic transform
 **首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §1
-**一句話**：Bellare-Hoang EUROCRYPT 2022 提出，在現有 AEAD 後接一個 HMAC-based commit tag，達 CMT-4 安全 (最強)；G6 採用，每 record +16 byte (~1.5% MTU overhead)。
+**一句話**：Bellare-Hoang EUROCRYPT 2022 提出，在現有 AEAD 後接一個 HMAC-based commit tag，達 CMT-4 安全 (最強)；Proteus 採用，每 record +16 byte (~1.5% MTU overhead)。
 
 ### Partitioning Oracle Attack
 **所屬層**：適用對 password-derived key AEAD 的攻擊
@@ -741,42 +741,42 @@
 ### KEMTLS
 **所屬層**：握手協議家族
 **首次出現**：[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §2
-**一句話**：Schwabe-Stebila-Wiggers CCS 2020。用 server long-term KEM (decap capability) 替代 server signature 做 implicit authentication；PQ mode 下握手減 ~6 KB；G6 v1 採 Mode C (KEMTLS server + signature client)。
+**一句話**：Schwabe-Stebila-Wiggers CCS 2020。用 server long-term KEM (decap capability) 替代 server signature 做 implicit authentication；PQ mode 下握手減 ~6 KB；Proteus v1 採 Mode C (KEMTLS server + signature client)。
 
 ### Hybrid KEM Combiner
 **所屬層**：PQ KE
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §3
-**一句話**：將 classical KEM (X25519) 與 PQ KEM (ML-KEM) combine 成 hybrid KEM 的構造；Bindel-Brendel-Fischlin-Goncalves-Stebila PQCrypto 2019 證明 "ciphertext + KDF" 構造 IND-CCA2 OR-secure (任一 component 安全則 hybrid 安全)；G6 hybrid spec 直接套用。
+**一句話**：將 classical KEM (X25519) 與 PQ KEM (ML-KEM) combine 成 hybrid KEM 的構造；Bindel-Brendel-Fischlin-Goncalves-Stebila PQCrypto 2019 證明 "ciphertext + KDF" 構造 IND-CCA2 OR-secure (任一 component 安全則 hybrid 安全)；Proteus hybrid spec 直接套用。
 
 ### Double Ratchet
 **所屬層**：cryptographic ratchet
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)、[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §4
-**一句話**：Marlinspike-Perrin 2016 Signal protocol。DH ratchet (粗) + symmetric chain ratchet (細) 兩層；每 message FS、每 round-trip PCS；G6 採 coarser-grained 版 (per N records 而非 per message)。
+**一句話**：Marlinspike-Perrin 2016 Signal protocol。DH ratchet (粗) + symmetric chain ratchet (細) 兩層；每 message FS、每 round-trip PCS；Proteus 採 coarser-grained 版 (per N records 而非 per message)。
 
 ### PCS Healing Window
 **所屬層**：AKE 安全性質
 **首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §4
-**一句話**：對手洩漏 state at time t 後，協議自動恢復 secrecy 所需時間；Signal ~1 message；G6 ~2 minutes (與 WireGuard rekey 同階)；衡量「snapshot adversary」防禦能力。
+**一句話**：對手洩漏 state at time t 後，協議自動恢復 secrecy 所需時間；Signal ~1 message；Proteus ~2 minutes (與 WireGuard rekey 同階)；衡量「snapshot adversary」防禦能力。
 
 ### Domain Separation (Label Discipline)
 **所屬層**：hash / KDF 工程
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §5
-**一句話**：不同 context 用 unique label 隔離 hash 輸入空間；TLS 1.3 用 "tls13 " prefix; G6 用 "g6_v1__ " prefix；防 cross-protocol / cross-version key reuse；對應 indifferentiability 工程實踐。
+**一句話**：不同 context 用 unique label 隔離 hash 輸入空間；TLS 1.3 用 "tls13 " prefix; Proteus 用 "g6_v1__ " prefix；防 cross-protocol / cross-version key reuse；對應 indifferentiability 工程實踐。
 
 ### Indifferentiability
 **所屬層**：hash function 理論
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §5
-**一句話**：Maurer-Renner-Holenstein TCC 2004。hash 對 random oracle 不可區分；SHA-3 sponge inherently indifferentiable，SHA-2 MD 不是 (Coron-Dodis 等 2005)；G6 透過 HMAC/HKDF wrapper 解決 SHA-2 indifferentiability gap。
+**一句話**：Maurer-Renner-Holenstein TCC 2004。hash 對 random oracle 不可區分；SHA-3 sponge inherently indifferentiable，SHA-2 MD 不是 (Coron-Dodis 等 2005)；Proteus 透過 HMAC/HKDF wrapper 解決 SHA-2 indifferentiability gap。
 
 ### Robust AE (RAE)
 **所屬層**：AEAD 強化版
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §6
-**一句話**：Rogaway-Shrimpton EUROCRYPT 2006 提出，AEAD 對任意 input 都產 IND-CCA + INT-CTXT 並 constant-time abort；G6 mandate RAE-style 錯誤路徑防 timing-oracle。
+**一句話**：Rogaway-Shrimpton EUROCRYPT 2006 提出，AEAD 對任意 input 都產 IND-CCA + INT-CTXT 並 constant-time abort；Proteus mandate RAE-style 錯誤路徑防 timing-oracle。
 
 ### Beyond-Birthday-Bound (BBB) Security
 **所屬層**：AEAD 安全 bound
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)、[3.17](lessons/part-3-cryptography/3.17-advanced-frontiers.md) §6
-**一句話**：AEAD 安全 bound 超越 q²/2^128 standard birthday；AES-GCM-SIV (q³/2^256)、XChaCha20 (24-byte nonce 把 ~2^32 推到 ~2^48 records-per-key)；G6 採 XChaCha20-Poly1305 為 record cipher。
+**一句話**：AEAD 安全 bound 超越 q²/2^128 standard birthday；AES-GCM-SIV (q³/2^256)、XChaCha20 (24-byte nonce 把 ~2^32 推到 ~2^48 records-per-key)；Proteus 採 XChaCha20-Poly1305 為 record cipher。
 
 ---
 
@@ -1001,19 +1001,19 @@
 **中文**：Linux scalable I/O readiness 機制
 **所屬層**：kernel syscall
 **首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)
-**一句話**：紅黑樹維護 interest set + 雙向 ready list + per-fd wait queue callback；ET/LT 兩 mode，ET 必須 drain 到 EAGAIN；C10K 後 server 標配；G6 server fallback path。
+**一句話**：紅黑樹維護 interest set + 雙向 ready list + per-fd wait queue callback；ET/LT 兩 mode，ET 必須 drain 到 EAGAIN；C10K 後 server 標配；Proteus server fallback path。
 
 ### kqueue
 **中文**：BSD/macOS 的 scalable event notification
 **所屬層**：kernel syscall
 **首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)、[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
-**一句話**：Lemon ATC 2001；filter (READ/WRITE/SIGNAL/TIMER/VNODE/PROC/USER) + udata 統一各種 event source；EV_CLEAR = ET；G6 macOS client 核心。
+**一句話**：Lemon ATC 2001；filter (READ/WRITE/SIGNAL/TIMER/VNODE/PROC/USER) + udata 統一各種 event source；EV_CLEAR = ET；Proteus macOS client 核心。
 
 ### Edge-Triggered (ET) / Level-Triggered (LT)
 **中文**：邊緣觸發 / 電平觸發
 **所屬層**：epoll/kqueue 語意
 **首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)
-**一句話**：ET 只在狀態變化瞬間通知，必須 drain 到 EAGAIN；LT 反覆通知；G6 server worker 預期用 ET。
+**一句話**：ET 只在狀態變化瞬間通知，必須 drain 到 EAGAIN；LT 反覆通知；Proteus server worker 預期用 ET。
 
 ### EPOLLEXCLUSIVE
 **中文**：epoll 排他喚醒 flag
@@ -1025,19 +1025,19 @@
 **中文**：socket bind port 共用 flag
 **所屬層**：socket option
 **首次出現**：[2.1](lessons/part-2-high-perf-io/2.1-select-poll-epoll.md)、[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：Linux 3.9；多 socket 可 bind 同 (addr,port)，kernel 用 5-tuple hash 分配 incoming；G6 server N worker 標配。
+**一句話**：Linux 3.9；多 socket 可 bind 同 (addr,port)，kernel 用 5-tuple hash 分配 incoming；Proteus server N worker 標配。
 
 ### SO_ATTACH_REUSEPORT_EBPF
 **中文**：可程式化 reuseport 分配
 **所屬層**：socket option + eBPF
 **首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：用 BPF program 自訂 reuseport hash 策略；G6 用 per-client-IP affinity + CPU load balance。
+**一句話**：用 BPF program 自訂 reuseport hash 策略；Proteus 用 per-client-IP affinity + CPU load balance。
 
 ### io_uring
 **中文**：Linux 共享 ring 異步 I/O
 **所屬層**：kernel syscall
 **首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
-**一句話**：Axboe 2019；SQ + CQ + SQE/CQE mmap 共享 ring；SQPOLL 模式 0 syscall fast path；registered files/buffers 移除 fdget/page pin cost；G6 server 主路徑。
+**一句話**：Axboe 2019；SQ + CQ + SQE/CQE mmap 共享 ring；SQPOLL 模式 0 syscall fast path；registered files/buffers 移除 fdget/page pin cost；Proteus server 主路徑。
 
 ### SQE / CQE
 **中文**：Submission/Completion Queue Entry
@@ -1073,25 +1073,25 @@
 **中文**：io_uring 預註冊資源
 **所屬層**：io_uring
 **首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)、[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：register_files 移除 fdget atomic；register_buffers 預先 pin user page；register_buf_ring (5.19+) ring-based buffer supply；G6 server 配 hugepage 必開。
+**一句話**：register_files 移除 fdget atomic；register_buffers 預先 pin user page；register_buf_ring (5.19+) ring-based buffer supply；Proteus server 配 hugepage 必開。
 
 ### SEND_ZC / SENDMSG_ZC
 **中文**：io_uring 零拷貝送出
 **所屬層**：io_uring
 **首次出現**：[2.2](lessons/part-2-high-perf-io/2.2-io-uring.md)
-**一句話**：底層走 MSG_ZEROCOPY page pinning，產生兩個 CQE（kernel 收到 + 實際送完 page ref 釋放）；小 msg 反而慢，threshold ~16KB；G6 大 msg 用。
+**一句話**：底層走 MSG_ZEROCOPY page pinning，產生兩個 CQE（kernel 收到 + 實際送完 page ref 釋放）；小 msg 反而慢，threshold ~16KB；Proteus 大 msg 用。
 
 ### Zero-Copy I/O
 **中文**：零拷貝
 **所屬層**：跨 OS 概念
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：byte 在 kernel/user 路徑上完整 copy 次數降到 0 或 1；對加密協議下界 = 1（除非 NIC offload）；G6 in-place AEAD + io_uring SEND_ZC 達 user 1 touch。
+**一句話**：byte 在 kernel/user 路徑上完整 copy 次數降到 0 或 1；對加密協議下界 = 1（除非 NIC offload）；Proteus in-place AEAD + io_uring SEND_ZC 達 user 1 touch。
 
 ### splice / sendfile / vmsplice / tee
 **中文**：Linux 零拷貝 syscall 家族
 **所屬層**：kernel syscall
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：sendfile = in-kernel file→socket pass-through；splice = 任一端 pipe 的 byte stream forward；vmsplice = user buffer page-move 進 pipe；tee = pipe→pipe page-clone；G6 加密斷鏈，不適用。
+**一句話**：sendfile = in-kernel file→socket pass-through；splice = 任一端 pipe 的 byte stream forward；vmsplice = user buffer page-move 進 pipe；tee = pipe→pipe page-clone；Proteus 加密斷鏈，不適用。
 
 ### MSG_ZEROCOPY / SO_ZEROCOPY
 **中文**：socket-level 零拷貝 send
@@ -1103,25 +1103,25 @@
 **中文**：TCP 接收端零拷貝
 **所屬層**：socket option
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：getsockopt mmap user buffer 收 packet；alignment 限制嚴，only Google scale 用；G6 不採用。
+**一句話**：getsockopt mmap user buffer 收 packet；alignment 限制嚴，only Google scale 用；Proteus 不採用。
 
 ### MAP_HUGETLB / Hugepage
 **中文**：大頁面
 **所屬層**：mm
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)、[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
-**一句話**：2MB / 1GB page；大幅減 TLB pressure；DPDK 必用，io_uring buf_ring + G6 server 應用；sysctl vm.nr_hugepages 預配。
+**一句話**：2MB / 1GB page；大幅減 TLB pressure；DPDK 必用，io_uring buf_ring + Proteus server 應用；sysctl vm.nr_hugepages 預配。
 
 ### In-place AEAD
 **中文**：原地加密
 **所屬層**：crypto + memory layout
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：ChaCha20-Poly1305 / AES-GCM 支援 plaintext / ciphertext 同 buffer；省一次 copy；G6 user-space crypto 必用此 pattern。
+**一句話**：ChaCha20-Poly1305 / AES-GCM 支援 plaintext / ciphertext 同 buffer；省一次 copy；Proteus user-space crypto 必用此 pattern。
 
 ### kTLS
 **中文**：kernel TLS
 **所屬層**：socket ULP
 **首次出現**：[2.4](lessons/part-2-high-perf-io/2.4-ktls.md)
-**一句話**：Linux 4.13；setsockopt(TCP_ULP="tls") 把 TLS record 加解密放 kernel；支援 sendfile + TLS；nginx/Netflix 用；G6 不適用（framing 非 TLS record）。
+**一句話**：Linux 4.13；setsockopt(TCP_ULP="tls") 把 TLS record 加解密放 kernel；支援 sendfile + TLS；nginx/Netflix 用；Proteus 不適用（framing 非 TLS record）。
 
 ### NIC TLS Offload
 **中文**：硬體 TLS 加解密
@@ -1133,13 +1133,13 @@
 **中文**：extended Berkeley Packet Filter
 **所屬層**：kernel programmability framework
 **首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
-**一句話**：64-bit register VM + verifier + JIT + map + helper + CO-RE；可程式化 kernel 30+ hook point；G6 用於 observability、self-fingerprint、DDoS filter、worker dispatch。
+**一句話**：64-bit register VM + verifier + JIT + map + helper + CO-RE；可程式化 kernel 30+ hook point；Proteus 用於 observability、self-fingerprint、DDoS filter、worker dispatch。
 
 ### BPF Verifier
 **中文**：BPF 靜態驗證器
 **所屬層**：kernel/bpf/verifier.c
 **首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
-**一句話**：abstract interpretation 確保程式有界、無 OOB、無 UAF；sound but incomplete；Gershuni PLDI 2019 形式化；G6 寫 BPF 要 verifier-friendly。
+**一句話**：abstract interpretation 確保程式有界、無 OOB、無 UAF；sound but incomplete；Gershuni PLDI 2019 形式化；Proteus 寫 BPF 要 verifier-friendly。
 
 ### CO-RE (Compile Once Run Everywhere)
 **中文**：BPF 跨 kernel 版本可攜
@@ -1163,7 +1163,7 @@
 **中文**：BPF 新一代環形緩衝
 **所屬層**：BPF map
 **首次出現**：[2.5](lessons/part-2-high-perf-io/2.5-ebpf-intro.md)
-**一句話**：Linux 5.8+；取代 PERF_EVENT_ARRAY；single-producer multi-consumer；bpf_ringbuf_reserve/submit；G6 telemetry 用。
+**一句話**：Linux 5.8+；取代 PERF_EVENT_ARRAY；single-producer multi-consumer；bpf_ringbuf_reserve/submit；Proteus telemetry 用。
 
 ### bpftrace / BCC / libbpf
 **中文**：BPF 三大開發工具鏈
@@ -1175,19 +1175,19 @@
 **中文**：traffic control 上 BPF classifier
 **所屬層**：Linux QoS subsystem
 **首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：Borkmann NetDev 2016；packet 進 / 出 stack 時跑 BPF；含 ingress / egress；G6 server 用於 egress 抗指紋檢驗。
+**一句話**：Borkmann NetDev 2016；packet 進 / 出 stack 時跑 BPF；含 ingress / egress；Proteus server 用於 egress 抗指紋檢驗。
 
 ### Sockmap / sk_msg / sk_skb
 **中文**：BPF socket-to-socket redirect 框架
 **所屬層**：BPF + socket
 **首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：kernel 內 socket pointer map + sk_redirect helper；user-space 0 touch proxy；plaintext only；G6 baseline mode 可考慮，加密主流量不適用。
+**一句話**：kernel 內 socket pointer map + sk_redirect helper；user-space 0 touch proxy；plaintext only；Proteus baseline mode 可考慮，加密主流量不適用。
 
 ### cgroup-bpf
 **中文**：cgroup 級 BPF program attach
 **所屬層**：cgroup + BPF
 **首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：connect4/6、sendmsg4/6、sock_create、sockops、setsockopt 等 attach type；G6 client transparent proxy 用 connect4 redirect。
+**一句話**：connect4/6、sendmsg4/6、sock_create、sockops、setsockopt 等 attach type；Proteus client transparent proxy 用 connect4 redirect。
 
 ### SK_LOOKUP
 **中文**：BPF 動態 socket 派發
@@ -1199,13 +1199,13 @@
 **中文**：BPF 動態 TCP 調參
 **所屬層**：cgroup-bpf
 **首次出現**：[2.6](lessons/part-2-high-perf-io/2.6-ebpf-network.md)
-**一句話**：sockops hook 在 TCP state change 時觸發；BPF 內呼 bpf_setsockopt 改 TCP_CONGESTION、TCP_NOTSENT_LOWAT 等；G6 動態切 BBR/CUBIC。
+**一句話**：sockops hook 在 TCP state change 時觸發；BPF 內呼 bpf_setsockopt 改 TCP_CONGESTION、TCP_NOTSENT_LOWAT 等；Proteus 動態切 BBR/CUBIC。
 
 ### XDP (eXpress Data Path)
 **中文**：driver-level eBPF packet 處理
 **所屬層**：NIC driver hook
 **首次出現**：[2.7](lessons/part-2-high-perf-io/2.7-xdp.md)
-**一句話**：Høiland-Jørgensen CoNEXT 2018；packet 還沒 alloc skb 前跑 BPF；XDP_DROP/PASS/TX/REDIRECT 四 verdict；單核 24 Mpps；G6 server DDoS 防線。
+**一句話**：Høiland-Jørgensen CoNEXT 2018；packet 還沒 alloc skb 前跑 BPF；XDP_DROP/PASS/TX/REDIRECT 四 verdict；單核 24 Mpps；Proteus server DDoS 防線。
 
 ### XDP_REDIRECT + devmap/cpumap/xskmap
 **中文**：XDP redirect 三種 map
@@ -1217,13 +1217,13 @@
 **中文**：XDP-fed user-space zero-copy socket
 **所屬層**：socket family
 **首次出現**：[2.7](lessons/part-2-high-perf-io/2.7-xdp.md)
-**一句話**：UMEM (mmap user buffer) + FILL/COMPLETION/RX/TX 4 ring；NIC DMA 直接寫進 user page；DPDK-like 性能但不獨佔 NIC；G6 極致 mode 候選。
+**一句話**：UMEM (mmap user buffer) + FILL/COMPLETION/RX/TX 4 ring；NIC DMA 直接寫進 user page；DPDK-like 性能但不獨佔 NIC；Proteus 極致 mode 候選。
 
 ### DPDK (Data Plane Development Kit)
 **中文**：用戶態 packet I/O 框架
 **所屬層**：user-space
 **首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)
-**一句話**：Intel 主導；PMD + UIO/VFIO + hugepage + mempool + ring + lcore；完全 bypass kernel；NFV/5G UPF/HFT 標配；G6 不採用（太重，無 stack）。
+**一句話**：Intel 主導；PMD + UIO/VFIO + hugepage + mempool + ring + lcore；完全 bypass kernel；NFV/5G UPF/HFT 標配；Proteus 不採用（太重，無 stack）。
 
 ### PMD (Poll-Mode Driver)
 **中文**：用戶態輪詢驅動
@@ -1241,31 +1241,31 @@
 **中文**：user-space TCP stack 家族
 **所屬層**：user-space transport
 **首次出現**：[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)
-**一句話**：mTCP NSDI 2014 學術；F-Stack = FreeBSD TCP + DPDK 工業；Seastar = C++ TPC runtime；smoltcp = Rust no_std 嵌入式；netstack3 = Fuchsia Rust；G6 不採用 server，client TUN path 用 smoltcp。
+**一句話**：mTCP NSDI 2014 學術；F-Stack = FreeBSD TCP + DPDK 工業；Seastar = C++ TPC runtime；smoltcp = Rust no_std 嵌入式；netstack3 = Fuchsia Rust；Proteus 不採用 server，client TUN path 用 smoltcp。
 
 ### Share-Nothing Thread-Per-Core (TPC)
 **中文**：共享一無的執行緒模型
 **所屬層**：runtime architecture
 **首次出現**：[2.8](lessons/part-2-high-perf-io/2.8-dpdk.md)、[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)
-**一句話**：每 core 獨立 state、無 cross-core lock、靠 lock-free ring 通訊；DPDK lcore / Seastar / monoio 都這設計；G6 server runtime 採用。
+**一句話**：每 core 獨立 state、無 cross-core lock、靠 lock-free ring 通訊；DPDK lcore / Seastar / monoio 都這設計；Proteus server runtime 採用。
 
 ### Network Extension (NE) framework
 **中文**：macOS/iOS 系統網路擴展
 **所屬層**：macOS userspace + system process
 **首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
-**一句話**：Apple 強制 VPN/firewall/DNS 走 NE 不可 kext；NEPacketTunnelProvider / NETransparentProxyProvider / NEFilter / NEDNSProxyProvider 等子類；需 entitlement + notarization；G6 macOS client 必經之路。
+**一句話**：Apple 強制 VPN/firewall/DNS 走 NE 不可 kext；NEPacketTunnelProvider / NETransparentProxyProvider / NEFilter / NEDNSProxyProvider 等子類；需 entitlement + notarization；Proteus macOS client 必經之路。
 
 ### NEPacketTunnelProvider
 **中文**：macOS 全隧道 VPN 提供者
 **所屬層**：NE
 **首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
-**一句話**：接管整個 device 流量；NEPacketTunnelFlow.readPackets/writePackets API；iOS only support 此種；G6 跨 macOS/iOS 必有。
+**一句話**：接管整個 device 流量；NEPacketTunnelFlow.readPackets/writePackets API；iOS only support 此種；Proteus 跨 macOS/iOS 必有。
 
 ### NETransparentProxyProvider
 **中文**：macOS 11+ 透明流量代理提供者
 **所屬層**：NE
 **首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
-**一句話**：socket flow level (NEAppProxyFlow)；只攔截條件命中的 flow（per-app/per-host）；iOS 不支援；G6 macOS client 預期主路徑。
+**一句話**：socket flow level (NEAppProxyFlow)；只攔截條件命中的 flow（per-app/per-host）；iOS 不支援；Proteus macOS client 預期主路徑。
 
 ### utun
 **中文**：macOS L3 虛擬介面
@@ -1277,7 +1277,7 @@
 **中文**：macOS/Solaris 動態追蹤
 **所屬層**：tracing
 **首次出現**：[2.10](lessons/part-2-high-perf-io/2.10-macos.md)
-**一句話**：Sun 2003 起源，Apple 移植；macOS 的「半個 eBPF」；M1+ SIP 限制；G6 macOS observability 替代方案。
+**一句話**：Sun 2003 起源，Apple 移植；macOS 的「半個 eBPF」；M1+ SIP 限制；Proteus macOS observability 替代方案。
 
 ### TUN / IFF_TUN / IFF_NO_PI / IFF_MULTI_QUEUE
 **中文**：Linux TUN device + 關鍵 flag
@@ -1289,13 +1289,13 @@
 **中文**：跨平台 TUN abstraction trait
 **所屬層**：user-space lib
 **首次出現**：[2.11](lessons/part-2-high-perf-io/2.11-tun-tap.md)
-**一句話**：File/Read/Write/Flush/MTU/Name/Events/Close/BatchSize；wireguard-go tun/ 子目錄；Linux/macOS/Windows/iOS/BSD/netstack 各實作；G6 client TUN trait 直接抄。
+**一句話**：File/Read/Write/Flush/MTU/Name/Events/Close/BatchSize；wireguard-go tun/ 子目錄；Linux/macOS/Windows/iOS/BSD/netstack 各實作；Proteus client TUN trait 直接抄。
 
 ### Network Namespace (netns)
 **中文**：Linux 網路命名空間
 **所屬層**：kernel isolation
 **首次出現**：[2.12](lessons/part-2-high-perf-io/2.12-netns.md)
-**一句話**：Biederman 2007；隔離 netdev/routing/netfilter/conntrack/BPF/sysctl 一整套 stack；ip netns add 用 bind mount pin；G6 整合測試骨架。
+**一句話**：Biederman 2007；隔離 netdev/routing/netfilter/conntrack/BPF/sysctl 一整套 stack；ip netns add 用 bind mount pin；Proteus 整合測試骨架。
 
 ### veth pair
 **中文**：虛擬乙太網對
@@ -1307,25 +1307,25 @@
 **中文**：netns 拓樸自動化工具
 **所屬層**：testing tooling
 **首次出現**：[2.12](lessons/part-2-high-perf-io/2.12-netns.md)
-**一句話**：用 YAML 描述網路拓樸自動拉起 netns + veth + 各節點 container；G6 整合測試直接用。
+**一句話**：用 YAML 描述網路拓樸自動拉起 netns + veth + 各節點 container；Proteus 整合測試直接用。
 
 ### tc / qdisc
 **中文**：Linux traffic control / queueing discipline
 **所屬層**：net/sched
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：每 NIC root qdisc + child class 樹狀；classful (HTB/HFSC/PRIO) vs classless (pfifo/fq/fq_codel/cake/netem)；G6 server 預設 fq_codel。
+**一句話**：每 NIC root qdisc + child class 樹狀；classful (HTB/HFSC/PRIO) vs classless (pfifo/fq/fq_codel/cake/netem)；Proteus server 預設 fq_codel。
 
 ### fq / fq_codel
 **中文**：Fair Queue 與 fq_codel
 **所屬層**：qdisc
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：fq = per-flow FIFO + pacing（配 BBR 必要）；fq_codel = per-flow + CoDel AQM（RFC 8290）；Linux 5.x default；G6 server fq + BBR。
+**一句話**：fq = per-flow FIFO + pacing（配 BBR 必要）；fq_codel = per-flow + CoDel AQM（RFC 8290）；Linux 5.x default；Proteus server fq + BBR。
 
 ### CAKE
 **中文**：Common Applications Kept Enhanced qdisc
 **所屬層**：qdisc
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：Høiland-Jørgensen 2018 / arXiv:1804.07617；fq_codel 後繼，內建 shaping + ISP overhead 補償 + per-host fairness + DiffServ；OpenWrt SQM 預設；G6 文件建議家用 router 開。
+**一句話**：Høiland-Jørgensen 2018 / arXiv:1804.07617；fq_codel 後繼，內建 shaping + ISP overhead 補償 + per-host fairness + DiffServ；OpenWrt SQM 預設；Proteus 文件建議家用 router 開。
 
 ### CoDel (Controlled Delay)
 **中文**：受控延遲 AQM 演算法
@@ -1337,19 +1337,19 @@
 **中文**：緩衝臃腫
 **所屬層**：networking 病灶
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：Gettys 2010 命名；大 buffer + tail drop → 高 latency under load；fq_codel/cake/BBR 是 cure；G6 client 在 user router 後易受影響。
+**一句話**：Gettys 2010 命名；大 buffer + tail drop → 高 latency under load；fq_codel/cake/BBR 是 cure；Proteus client 在 user router 後易受影響。
 
 ### BBR (Bottleneck Bandwidth and Round-trip propagation)
 **中文**：Google 的 model-based congestion control
 **所屬層**：TCP CC
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：Cardwell CACM 2017；持續 estimate BtlBw + RTprop，pacing 不 fill buffer，對 loss 不過度反應；lossy 鏈路下比 CUBIC 強 10-80×；G6 server 必開（配 fq pacing）。
+**一句話**：Cardwell CACM 2017；持續 estimate BtlBw + RTprop，pacing 不 fill buffer，對 loss 不過度反應；lossy 鏈路下比 CUBIC 強 10-80×；Proteus server 必開（配 fq pacing）。
 
 ### netem
 **中文**：Linux 網路模擬器 qdisc
 **所屬層**：qdisc
 **首次出現**：[2.13](lessons/part-2-high-perf-io/2.13-tc-netem.md)
-**一句話**：tc qdisc add ... netem delay/loss/reorder/duplicate/corrupt/rate；4-state Gilbert loss model；G6 對抗測試模擬「中美鏈路 50Mbps + 100ms RTT + 5% loss」canonical scenario。
+**一句話**：tc qdisc add ... netem delay/loss/reorder/duplicate/corrupt/rate；4-state Gilbert loss model；Proteus 對抗測試模擬「中美鏈路 50Mbps + 100ms RTT + 5% loss」canonical scenario。
 
 ### NAPI (New API)
 **中文**：Linux 收包 IRQ/poll 混合
@@ -1367,19 +1367,19 @@
 **中文**：模組化封包處理 graph
 **所屬層**：軟體 router architecture
 **首次出現**：[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
-**一句話**：Kohler TOCS 2000；directed graph of element 描述 packet path；VPP/Cilium 後繼；G6 server packet processing 內部抽象。
+**一句話**：Kohler TOCS 2000；directed graph of element 描述 packet path；VPP/Cilium 後繼；Proteus server packet processing 內部抽象。
 
 ### Stack Specialization
 **中文**：協議堆疊特化
 **所屬層**：systems design philosophy
 **首次出現**：[2.9](lessons/part-2-high-perf-io/2.9-userspace-tcp.md)、[2.14](lessons/part-2-high-perf-io/2.14-final-picture.md)
-**一句話**：Marinos SIGCOMM 2014；general-purpose stack 必然 overhead，為 application 量身打造 stack 可大幅減 code；G6 是「為 proxy 量身打造的 transport」。
+**一句話**：Marinos SIGCOMM 2014；general-purpose stack 必然 overhead，為 application 量身打造 stack 可大幅減 code；Proteus 是「為 proxy 量身打造的 transport」。
 
 ### Byte Touch Count
 **中文**：byte 觸碰次數
 **所屬層**：performance modeling
 **首次出現**：[2.3](lessons/part-2-high-perf-io/2.3-zero-copy.md)
-**一句話**：packet 從 NIC RX 到 NIC TX 路徑上 CPU load/store 次數；加密協議下界 = 1（加密本身）；G6 目標穩定達 1。
+**一句話**：packet 從 NIC RX 到 NIC TX 路徑上 CPU load/store 次數；加密協議下界 = 1（加密本身）；Proteus 目標穩定達 1。
 
 ---
 
@@ -1540,19 +1540,19 @@
 **中文**：選擇明文 / 選擇密文（非適應性 / 適應性）攻擊下的不可區分性
 **所屬層**：密碼學安全定義
 **首次出現**：[3.1 — 密碼學的目標分類學](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
-**一句話**：對手能挑明文（CPA）或密文（CCA）並查 oracle，仍無法在兩個等長明文間區分密文對應哪一個；現代加密最低門檻是 IND-CCA2，G6 record layer 必須達成。
+**一句話**：對手能挑明文（CPA）或密文（CCA）並查 oracle，仍無法在兩個等長明文間區分密文對應哪一個；現代加密最低門檻是 IND-CCA2，Proteus record layer 必須達成。
 
 ### EUF-CMA / sUF-CMA
 **中文**：Existential / Strong Unforgeability under Chosen-Message Attack
 **所屬層**：密碼學安全定義（簽章 / MAC）
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
-**一句話**：對手在 adaptively 查 signing oracle 後仍無法產生新訊息（EUF）或新對 (m, σ)（sUF）的有效簽章；GMR 1988 給出原始定義；G6 用 Ed25519 達成 sUF-CMA。
+**一句話**：對手在 adaptively 查 signing oracle 後仍無法產生新訊息（EUF）或新對 (m, σ)（sUF）的有效簽章；GMR 1988 給出原始定義；Proteus 用 Ed25519 達成 sUF-CMA。
 
 ### AEAD (Authenticated Encryption with Associated Data)
 **中文**：帶附加資料的認證加密
 **所屬層**：對稱加密 primitive
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
-**一句話**：合機密 (IND-CCA2) + 完整 (INT-CTXT) 為一原語；現代協議 record layer 標配；ChaCha20-Poly1305、AES-GCM 是 G6 候選。
+**一句話**：合機密 (IND-CCA2) + 完整 (INT-CTXT) 為一原語；現代協議 record layer 標配；ChaCha20-Poly1305、AES-GCM 是 Proteus 候選。
 
 ### INT-PTXT / INT-CTXT
 **中文**：明文 / 密文完整性
@@ -1564,31 +1564,31 @@
 **中文**：前向保密
 **所屬層**：AKE 安全屬性
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Diffie 1976 萌芽；DOW 1992 正式化）
-**一句話**：長期金鑰 t 時刻外洩，**早於** t 完成的 session 仍安全；G6 必達，由 ephemeral X25519 達成。
+**一句話**：長期金鑰 t 時刻外洩，**早於** t 完成的 session 仍安全；Proteus 必達，由 ephemeral X25519 達成。
 
 ### PCS (Post-Compromise Security)
 **中文**：後折損安全性
 **所屬層**：AKE 安全屬性
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Cohn-Gordon-Cremers-Garratt CSF 2016）
-**一句話**：t 時刻長期金鑰外洩 + 對手之後離開／無持續 active，**晚於** t 的 session 重新安全；Signal Double Ratchet 是代表；G6 用 per-N-record DH ratchet 達成粗粒度版。
+**一句話**：t 時刻長期金鑰外洩 + 對手之後離開／無持續 active，**晚於** t 的 session 重新安全；Signal Double Ratchet 是代表；Proteus 用 per-N-record DH ratchet 達成粗粒度版。
 
 ### KCI Resistance (Key Compromise Impersonation)
 **中文**：金鑰折損冒充抗性
 **所屬層**：AKE 安全屬性
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
-**一句話**：A 的 LTK 被偷後，對手仍**不能假冒 B 對 A 講話**；plain DH 沒這屬性，SIGMA-I（Krawczyk 2003）有；G6 用 SIGMA-I 結構達成。
+**一句話**：A 的 LTK 被偷後，對手仍**不能假冒 B 對 A 講話**；plain DH 沒這屬性，SIGMA-I（Krawczyk 2003）有；Proteus 用 SIGMA-I 結構達成。
 
 ### UKS (Unknown Key Share)
 **中文**：未知金鑰共享攻擊
 **所屬層**：AKE 攻擊類別
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)
-**一句話**：A 與 B 完成 handshake 並對共享 key 一致，但雙方註冊的對方身份不一致；STS 1992 有此 bug，SIGMA 用 MAC 綁 identity 修補；G6 transcript 必含雙方 ID。
+**一句話**：A 與 B 完成 handshake 並對共享 key 一致，但雙方註冊的對方身份不一致；STS 1992 有此 bug，SIGMA 用 MAC 綁 identity 修補；Proteus transcript 必含雙方 ID。
 
 ### SIGMA / SIGMA-I
 **中文**：SIGn-and-MAc 結構的認證 DH
 **所屬層**：AKE 設計範式
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Krawczyk CRYPTO 2003）
-**一句話**：簽 ephemeral DH share + MAC 綁 identity；TLS 1.3、IKEv2、Noise IK 的學術根基；G6 採用其 identity protection (SIGMA-I) 變體。
+**一句話**：簽 ephemeral DH share + MAC 綁 identity；TLS 1.3、IKEv2、Noise IK 的學術根基；Proteus 採用其 identity protection (SIGMA-I) 變體。
 
 ### Dolev-Yao Model
 **中文**：Dolev-Yao 對手模型
@@ -1600,7 +1600,7 @@
 **中文**：隨機 oracle 模型
 **所屬層**：密碼學證明 model
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Bellare-Rogaway CCS 1993）
-**一句話**：把 hash function 當 truly random function 證明；Canetti-Goldreich-Halevi 1998 證明 ROM 不嚴格 sound 但實務上仍是 standard heuristic；G6 證明盡量 standard model。
+**一句話**：把 hash function 當 truly random function 證明；Canetti-Goldreich-Halevi 1998 證明 ROM 不嚴格 sound 但實務上仍是 standard heuristic；Proteus 證明盡量 standard model。
 
 ### Replay Resistance
 **中文**：重放抗性
@@ -1612,31 +1612,31 @@
 **中文**：Canetti-Krawczyk / extended CK 模型
 **所屬層**：AKE 安全 model
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（Canetti-Krawczyk EUROCRYPT 2001 / LaMacchia-Lauter-Mityagin 2007）
-**一句話**：定義 AKE 中對手能查哪些 oracle（session-key、ephemeral、long-term）；G6 spec 必須宣告其證明採用哪個 model。
+**一句話**：定義 AKE 中對手能查哪些 oracle（session-key、ephemeral、long-term）；Proteus spec 必須宣告其證明採用哪個 model。
 
 ### Concrete Security
 **中文**：具體安全性
 **所屬層**：密碼學定義範式
 **首次出現**：[3.1](lessons/part-3-cryptography/3.1-crypto-goals-taxonomy.md)（BDJR FOCS 1997）
-**一句話**：把 asymptotic「negligible」改為 explicit `Adv ≤ q²/2^n` 形式；現代 RFC（如 RFC 8446 Appendix E）寫法的根基；G6 spec 必含 concrete bound。
+**一句話**：把 asymptotic「negligible」改為 explicit `Adv ≤ q²/2^n` 形式；現代 RFC（如 RFC 8446 Appendix E）寫法的根基；Proteus spec 必含 concrete bound。
 
 ### AES / Rijndael
 **中文**：高級加密標準 / Rijndael 演算法
 **所屬層**：對稱 block cipher
 **首次出現**：[3.2 對稱加密](lessons/part-3-cryptography/3.2-symmetric-aead.md)
-**一句話**：Daemen-Rijmen 1998 設計，1997-2000 NIST 競賽勝出，FIPS 197 (2001) 標準化；128-bit block，128/192/256-bit key；G6 在硬體加速場景用 AES-256-GCM。
+**一句話**：Daemen-Rijmen 1998 設計，1997-2000 NIST 競賽勝出，FIPS 197 (2001) 標準化；128-bit block，128/192/256-bit key；Proteus 在硬體加速場景用 AES-256-GCM。
 
 ### AES-NI / PCLMULQDQ
 **中文**：AES 硬體指令集 / Carryless multiply
 **所屬層**：CPU 指令集 / 硬體加速
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Intel 2008 Westmere 起；ARMv8 對應 AES + PMULL）
-**一句話**：把 AES round 與 GHASH GF(2^128) 乘法降到 1 cycle/op；單核 80 Gbps line-rate AES-GCM 的物理基礎；G6 hardware-fast path 必依賴。
+**一句話**：把 AES round 與 GHASH GF(2^128) 乘法降到 1 cycle/op；單核 80 Gbps line-rate AES-GCM 的物理基礎；Proteus hardware-fast path 必依賴。
 
 ### ChaCha20
 **中文**：Bernstein 設計的 ARX stream cipher
 **所屬層**：對稱加密
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bernstein 2008，Salsa20 改良）
-**一句話**：256-bit key、20-round ARX 設計，無 S-box 天然 constant-time，軟體效能 ~1.5 c/b (SIMD)；RFC 8439 標準化；G6 預設 cipher。
+**一句話**：256-bit key、20-round ARX 設計，無 S-box 天然 constant-time，軟體效能 ~1.5 c/b (SIMD)；RFC 8439 標準化；Proteus 預設 cipher。
 
 ### Poly1305
 **中文**：Z_p (p=2^130-5) 多項式評估 MAC
@@ -1648,13 +1648,13 @@
 **中文**：AEAD 模式族
 **所屬層**：對稱加密 mode
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)
-**一句話**：GCM = CTR + GHASH（最普及）；CCM = CTR + CBC-MAC（IoT）；OCB3 = single-pass tweakable（最快但 IPR 歷史拖累）；GCM-SIV = misuse-resistant；G6 default ChaCha20-Poly1305 + AES-GCM HW fallback + GCM-SIV for 0-RTT。
+**一句話**：GCM = CTR + GHASH（最普及）；CCM = CTR + CBC-MAC（IoT）；OCB3 = single-pass tweakable（最快但 IPR 歷史拖累）；GCM-SIV = misuse-resistant；Proteus default ChaCha20-Poly1305 + AES-GCM HW fallback + GCM-SIV for 0-RTT。
 
 ### Forbidden Attack
 **中文**：GCM nonce 重用 → recover GHASH H 攻擊
 **所屬層**：對稱加密 cryptanalysis
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Joux 2006 NIST comment）
-**一句話**：同 (key, IV) 兩 message → 多項式系統 → recover H = AES_K(0) → 完全打破 INT-CTXT；TLS 1.3 nonce 構造規則的源頭；G6 用 deterministic counter 結構避免。
+**一句話**：同 (key, IV) 兩 message → 多項式系統 → recover H = AES_K(0) → 完全打破 INT-CTXT；TLS 1.3 nonce 構造規則的源頭；Proteus 用 deterministic counter 結構避免。
 
 ### Carter-Wegman / ε-AXU
 **中文**：Universal hash + one-time pad → MAC 範式
@@ -1672,19 +1672,19 @@
 **中文**：cache 行為差異洩 secret
 **所屬層**：side-channel
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bernstein 2005 cache-timing on AES T-table）
-**一句話**：T-table-based AES 軟體實作 cache 行為依賴 plaintext，遠程觀察可 recover key；G6 禁用 T-table impl，必用 AES-NI 或 bitsliced。
+**一句話**：T-table-based AES 軟體實作 cache 行為依賴 plaintext，遠程觀察可 recover key；Proteus 禁用 T-table impl，必用 AES-NI 或 bitsliced。
 
 ### Multi-User Security
 **中文**：多使用者安全模型
 **所屬層**：密碼學安全模型
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Bellare-Tackmann CRYPTO 2016）
-**一句話**：μ users 各自有 key；對手對任一 user 的 advantage 算總；GCM bound 在 μ × q × ℓ ≤ 2^60 大致 secure；G6 spec 必含 multi-user analysis。
+**一句話**：μ users 各自有 key；對手對任一 user 的 advantage 算總；GCM bound 在 μ × q × ℓ ≤ 2^60 大致 secure；Proteus spec 必含 multi-user analysis。
 
 ### Misuse-Resistant AE (MRAE) / SIV
 **中文**：抗誤用認證加密 / Synthetic IV
 **所屬層**：AEAD 設計範式
 **首次出現**：[3.2](lessons/part-3-cryptography/3.2-symmetric-aead.md)（Rogaway-Shrimpton EUROCRYPT 2006）
-**一句話**：nonce 重用只洩 message equality，不洩 key；GCM-SIV (RFC 8452) 是 deployment；G6 0-RTT data 用此防護。
+**一句話**：nonce 重用只洩 message equality，不洩 key；GCM-SIV (RFC 8452) 是 deployment；Proteus 0-RTT data 用此防護。
 
 ### Merkle-Damgård Construction
 **中文**：Merkle-Damgård 雜湊結構
@@ -1708,7 +1708,7 @@
 **中文**：Hash-based Message Authentication Code
 **所屬層**：MAC 構造
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Bellare-Canetti-Krawczyk CRYPTO 1996, RFC 2104）
-**一句話**：`HMAC = H(K' ⊕ opad ‖ H(K' ⊕ ipad ‖ m))`；防 length-extension 的 nested 結構；G6 KDF 與 transcript bind 全用 HMAC-SHA-256。
+**一句話**：`HMAC = H(K' ⊕ opad ‖ H(K' ⊕ ipad ‖ m))`；防 length-extension 的 nested 結構；Proteus KDF 與 transcript bind 全用 HMAC-SHA-256。
 
 ### HKDF (Extract-then-Expand)
 **中文**：兩段式金鑰派生
@@ -1720,13 +1720,13 @@
 **中文**：ARX-based 現代雜湊家族
 **所屬層**：hash function
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)
-**一句話**：BLAKE2 (Aumasson 2013, RFC 7693) ~3 c/b、WireGuard 用；BLAKE3 (2020) 加 Merkle tree + SIMD 達 ~0.5 c/b；G6 hash agility 候選。
+**一句話**：BLAKE2 (Aumasson 2013, RFC 7693) ~3 c/b、WireGuard 用；BLAKE3 (2020) 加 Merkle tree + SIMD 達 ~0.5 c/b；Proteus hash agility 候選。
 
 ### Argon2 (i / d / id)
 **中文**：Memory-hard 密碼雜湊
 **所屬層**：password hashing
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Biryukov-Dinu-Khovratovich EuroS&P 2016）
-**一句話**：PHC 2015 winner；OWASP/NIST 推薦 Argon2id；G6 PSK-from-passphrase 模式必用。
+**一句話**：PHC 2015 winner；OWASP/NIST 推薦 Argon2id；Proteus PSK-from-passphrase 模式必用。
 
 ### scrypt
 **中文**：第一代 sequential memory-hard KDF
@@ -1744,13 +1744,13 @@
 **中文**：第一個實際 SHA-1 collision
 **所屬層**：hash cryptanalysis
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Stevens 等 CRYPTO 2017）
-**一句話**：~$110k cloud cost 算出兩 PDF 同 SHA-1；2017 後 SHA-1 完全棄用；G6 強制 SHA-256+。
+**一句話**：~$110k cloud cost 算出兩 PDF 同 SHA-1；2017 後 SHA-1 完全棄用；Proteus 強制 SHA-256+。
 
 ### Random Oracle (Indifferentiability)
 **中文**：隨機 oracle 不可區分性
 **所屬層**：hash function security model
 **首次出現**：[3.3](lessons/part-3-cryptography/3.3-hash-functions-kdf.md)（Maurer-Renner-Holenstein TCC 2004）
-**一句話**：sponge 構造在 PRP 假設下與 RO indifferentiable；MD construction 不是；指導 G6 hash 選擇。
+**一句話**：sponge 構造在 PRP 假設下與 RO indifferentiable；MD construction 不是；指導 Proteus hash 選擇。
 
 ### RSA Problem / FACT
 **中文**：RSA 問題 / 整數分解問題
@@ -1768,7 +1768,7 @@
 **中文**：Bleichenbacher padding oracle 攻擊
 **所屬層**：protocol-level attack
 **首次出現**：[3.4](lessons/part-3-cryptography/3.4-rsa.md)（Bleichenbacher CRYPTO 1998）
-**一句話**：PKCS#1 v1.5 padding 錯誤回應作 oracle，~10^6 queries 解 plaintext；ROBOT 2018 證明 20 年後仍在 wild；G6 從不依賴任何 server-side validation 差異化回應。
+**一句話**：PKCS#1 v1.5 padding 錯誤回應作 oracle，~10^6 queries 解 plaintext；ROBOT 2018 證明 20 年後仍在 wild；Proteus 從不依賴任何 server-side validation 差異化回應。
 
 ### Coppersmith's Method
 **中文**：Coppersmith 多項式小根尋找法
@@ -1798,13 +1798,13 @@
 **中文**：Bernstein 設計的 ECC 曲線 / 對應 ECDH
 **所屬層**：橢圓曲線
 **首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein PKC 2006；RFC 7748）
-**一句話**：prime 2^255-19 + Montgomery form；128-bit security；32-byte pk；clamping + Montgomery ladder 給 constant-time；G6 key exchange 必選。
+**一句話**：prime 2^255-19 + Montgomery form；128-bit security；32-byte pk；clamping + Montgomery ladder 給 constant-time；Proteus key exchange 必選。
 
 ### Ed25519 / EdDSA
 **中文**：Edwards-curve digital signature
 **所屬層**：數位簽章
 **首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein 等 CHES 2011；RFC 8032）
-**一句話**：Schnorr-style + deterministic nonce + sUF-CMA + 64-byte sig + ~50k cycle sign；徹底取代 ECDSA 於 modern protocol；G6 簽章用此。
+**一句話**：Schnorr-style + deterministic nonce + sUF-CMA + 64-byte sig + ~50k cycle sign；徹底取代 ECDSA 於 modern protocol；Proteus 簽章用此。
 
 ### Edwards Curve / Twisted Edwards
 **中文**：Edwards 形式橢圓曲線
@@ -1828,19 +1828,19 @@
 **中文**：cofactor / Ristretto255 商群
 **所屬層**：橢圓曲線 group structure
 **首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Hamburg CRYPTO 2015 Decaf；Ristretto255 IETF draft）
-**一句話**：cofactor 8 在 Edwards25519 帶來 protocol 陷阱；Ristretto255 商 quotient out 形成 prime-order group；G6 advanced protocol 用此。
+**一句話**：cofactor 8 在 Edwards25519 帶來 protocol 陷阱；Ristretto255 商 quotient out 形成 prime-order group；Proteus advanced protocol 用此。
 
 ### SafeCurves
 **中文**：橢圓曲線安全評估標準
 **所屬層**：ECC curve selection
 **首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein-Lange 2014+）
-**一句話**：九項 curve safety criteria；Curve25519 全綠，NIST P-curves 多項紅；G6 選 curve 必須 SafeCurves 全綠。
+**一句話**：九項 curve safety criteria；Curve25519 全綠，NIST P-curves 多項紅；Proteus 選 curve 必須 SafeCurves 全綠。
 
 ### Elligator
 **中文**：曲線點 ↔ 隨機 byte 雙射
 **所屬層**：ECC point encoding
 **首次出現**：[3.5](lessons/part-3-cryptography/3.5-elliptic-curves.md)（Bernstein-Hamburg-Krasnova-Lange 2013）
-**一句話**：把 curve point map 成 indistinguishable-from-random 32 byte；G6 cover-traffic 用於把 ephemeral pk 偽裝為 random padding。
+**一句話**：把 curve point map 成 indistinguishable-from-random 32 byte；Proteus cover-traffic 用於把 ephemeral pk 偽裝為 random padding。
 
 ### Signature Malleability
 **中文**：簽章可變形性
@@ -1858,31 +1858,31 @@
 **中文**：implicit-authentication DH protocol family
 **所屬層**：AKE
 **首次出現**：[3.6 金鑰交換協議](lessons/part-3-cryptography/3.6-key-exchange.md)（MQV 1995；HMQV CRYPTO 2005）
-**一句話**：結合 long-term + ephemeral key 直接 compute shared secret 達 implicit auth；HMQV 給 CK model formal proof；G6 不選（偏 SIGMA-I 結構）。
+**一句話**：結合 long-term + ephemeral key 直接 compute shared secret 達 implicit auth；HMQV 給 CK model formal proof；Proteus 不選（偏 SIGMA-I 結構）。
 
 ### X3DH (Extended Triple DH)
 **中文**：擴展三重 DH
 **所屬層**：asynchronous AKE
 **首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Marlinspike-Perrin 2016, Signal whitepaper）
-**一句話**：4-DH combine (IK + SPK + EK + OPK) → asynchronous auth + FS + PCS seed；Signal/WhatsApp 部署；G6 借鑑 multi-DH combine 思想。
+**一句話**：4-DH combine (IK + SPK + EK + OPK) → asynchronous auth + FS + PCS seed；Signal/WhatsApp 部署；Proteus 借鑑 multi-DH combine 思想。
 
 ### Noise Protocol Framework
 **中文**：Noise 協議框架
 **所屬層**：AKE design framework
 **首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Perrin 2016, rev 34 2018）
-**一句話**：用 (e, s, ee, es, se, ss, psk) DSL 描述握手 pattern；WireGuard (Noise IK)、Lightning Network 等採用；G6 採用 Noise IK 變體。
+**一句話**：用 (e, s, ee, es, se, ss, psk) DSL 描述握手 pattern；WireGuard (Noise IK)、Lightning Network 等採用；Proteus 採用 Noise IK 變體。
 
 ### Static / Ephemeral Key Combination
 **中文**：靜態 / 短暫金鑰組合
 **所屬層**：AKE 設計
 **首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)
-**一句話**：static-static DH 認證 identity；ephemeral-ephemeral DH 給 FS；混合給 mutual auth + FS + KCI；G6 hybrid。
+**一句話**：static-static DH 認證 identity；ephemeral-ephemeral DH 給 FS；混合給 mutual auth + FS + KCI；Proteus hybrid。
 
 ### Logjam / Downgrade Attack
 **中文**：Logjam 降級攻擊
 **所屬層**：protocol-level attack
 **首次出現**：[3.6](lessons/part-3-cryptography/3.6-key-exchange.md)（Adrian 等 CCS 2015）
-**一句話**：MitM 降級 TLS 到 512-bit DHE_EXPORT，用 pre-computed NFS table 即時解 DH；G6 設計教訓——hard-code cipher, no negotiation。
+**一句話**：MitM 降級 TLS 到 512-bit DHE_EXPORT，用 pre-computed NFS table 即時解 DH；Proteus 設計教訓——hard-code cipher, no negotiation。
 
 ### Selfie Attack
 **中文**：自我攻擊
@@ -1900,7 +1900,7 @@
 **中文**：Boneh-Lynn-Shacham 配對簽章
 **所屬層**：pairing-based signature
 **首次出現**：[3.7 數位簽章](lessons/part-3-cryptography/3.7-digital-signatures.md)（Boneh-Lynn-Shacham ASIACRYPT 2001）
-**一句話**：σ = sk · HashToCurve(M)；verify 用 bilinear pairing；signature 短 + 天然 aggregation；Ethereum 2.0、Filecoin 部署；G6 不直接用但 future group mode 候選。
+**一句話**：σ = sk · HashToCurve(M)；verify 用 bilinear pairing；signature 短 + 天然 aggregation；Ethereum 2.0、Filecoin 部署；Proteus 不直接用但 future group mode 候選。
 
 ### Fiat-Shamir Heuristic
 **中文**：Fiat-Shamir 轉換
@@ -1918,19 +1918,19 @@
 **中文**：ECDSA 簽章可變形性 / 低 s 規範化
 **所屬層**：ECDSA implementation defense
 **首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)
-**一句話**：(r, s) ↔ (r, -s mod n) 都 valid → malleability；Bitcoin BIP-66 enforce s ≤ n/2；G6 verify ECDSA 必加此 check。
+**一句話**：(r, s) ↔ (r, -s mod n) 都 valid → malleability；Bitcoin BIP-66 enforce s ≤ n/2；Proteus verify ECDSA 必加此 check。
 
 ### Certificate Transparency (CT)
 **中文**：證書透明度
 **所屬層**：PKI accountability
 **首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)（Laurie RFC 6962 2013 / RFC 9162 2021）
-**一句話**：公開 append-only Merkle log 記錄所有 issued cert；CA 無法秘密發 cert；Chrome 2018+ 強制 SCT；G6 可借鑑做 update log。
+**一句話**：公開 append-only Merkle log 記錄所有 issued cert；CA 無法秘密發 cert；Chrome 2018+ 強制 SCT；Proteus 可借鑑做 update log。
 
 ### Threshold Signature / DKG
 **中文**：門檻簽章 / 分散式金鑰生成
 **所屬層**：multi-party crypto
 **首次出現**：[3.7](lessons/part-3-cryptography/3.7-digital-signatures.md)
-**一句話**：t-of-n parties 才能簽；DKG (Pedersen 1991) 分散生成 key；BLS / Schnorr 變體；G6 future server key management 候選。
+**一句話**：t-of-n parties 才能簽；DKG (Pedersen 1991) 分散生成 key；BLS / Schnorr 變體；Proteus future server key management 候選。
 
 ### Noise Pattern DSL (NN/NK/NX/IK/XK/XX...)
 **中文**：Noise pattern 描述語言
@@ -1942,55 +1942,55 @@
 **中文**：Noise initiator-known pattern
 **所屬層**：Noise AKE
 **首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
-**一句話**：1-RTT, responder static pre-known, mutual auth, initiator identity encrypted；WireGuard 採用；G6 base pattern。
+**一句話**：1-RTT, responder static pre-known, mutual auth, initiator identity encrypted；WireGuard 採用；Proteus base pattern。
 
 ### WireGuard MAC1 / MAC2 / Cookie Reply
 **中文**：WireGuard anti-DoS 機制
 **所屬層**：handshake DoS defense
 **首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)（Donenfeld NDSS 2017）
-**一句話**：MAC1 確認 client 知 server static pk；Cookie Reply 確認 client 是 routable IP；G6 借用此機制 + cover-traffic disguise。
+**一句話**：MAC1 確認 client 知 server static pk；Cookie Reply 確認 client 是 routable IP；Proteus 借用此機制 + cover-traffic disguise。
 
 ### Cryptokey Routing
 **中文**：金鑰路由
 **所屬層**：VPN routing model
 **首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
-**一句話**：peer 由 static pk 識別而非 IP；允許 roaming + 自動 endpoint update；WireGuard 標誌設計；G6 採用。
+**一句話**：peer 由 static pk 識別而非 IP；允許 roaming + 自動 endpoint update；WireGuard 標誌設計；Proteus 採用。
 
 ### HandshakeState / SymmetricState / CipherState
 **中文**：Noise framework 三層 state machine
 **所屬層**：Noise 內部 abstraction
 **首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
-**一句話**：HandshakeState 管 ephemeral/static keys；SymmetricState 管 ck + h；CipherState 管 (k, n) AEAD state；G6 直接繼承。
+**一句話**：HandshakeState 管 ephemeral/static keys；SymmetricState 管 ck + h；CipherState 管 (k, n) AEAD state；Proteus 直接繼承。
 
 ### PSK in Noise
 **中文**：Noise PSK 混入機制
 **所屬層**：post-quantum hybrid
 **首次出現**：[3.8](lessons/part-3-cryptography/3.8-noise-protocol-framework.md)
-**一句話**：MixKeyAndHash(psk) 把 PSK 混入 chaining key；out-of-band 安全分發 PSK → 即使 ECDH 被 Shor 破仍保密；G6 PQ 過渡用。
+**一句話**：MixKeyAndHash(psk) 把 PSK 混入 chaining key；out-of-band 安全分發 PSK → 即使 ECDH 被 Shor 破仍保密；Proteus PQ 過渡用。
 
 ### PAKE (Password-Authenticated Key Exchange)
 **中文**：密碼認證金鑰交換
 **所屬層**：AKE family
 **首次出現**：[3.9 PAKE](lessons/part-3-cryptography/3.9-pake.md)（Bellovin-Merritt EKE IEEE S&P 1992）
-**一句話**：使用者只有 password (~40-bit entropy) 仍能 secure KE；passive observer 不能 offline dictionary attack；G6 PSK-from-passphrase mode 用。
+**一句話**：使用者只有 password (~40-bit entropy) 仍能 secure KE；passive observer 不能 offline dictionary attack；Proteus PSK-from-passphrase mode 用。
 
 ### Balanced vs Augmented PAKE
 **中文**：對等 / 增強 PAKE
 **所屬層**：PAKE 分類
 **首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)
-**一句話**：balanced 雙方對等知 password (SPAKE2, EKE, CPace)；augmented server 只存 verifier (SRP, OPAQUE)；G6 用 augmented OPAQUE。
+**一句話**：balanced 雙方對等知 password (SPAKE2, EKE, CPace)；augmented server 只存 verifier (SRP, OPAQUE)；Proteus 用 augmented OPAQUE。
 
 ### SPAKE2
 **中文**：Simple Password-based Encrypted Key Exchange
 **所屬層**：Balanced PAKE
 **首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)（Abdalla-Pointcheval CT-RSA 2005, RFC 9382 2023）
-**一句話**：用 magic constants M, N + password-derived scalar w 構造 balanced PAKE；簡單、無 patent；G6 antiDoS pre-handshake 候選。
+**一句話**：用 magic constants M, N + password-derived scalar w 構造 balanced PAKE；簡單、無 patent；Proteus antiDoS pre-handshake 候選。
 
 ### OPAQUE
 **中文**：增強型 PAKE with pre-computation resistance
 **所屬層**：Augmented PAKE
 **首次出現**：[3.9](lessons/part-3-cryptography/3.9-pake.md)（Jarecki-Krawczyk-Xu EUROCRYPT 2018, RFC 9807 2025）
-**一句話**：OPRF + envelope + AKE 三段；server compromise 後仍須 online OPRF query 才能 brute-force；WhatsApp / 1Password 部署；G6 passphrase 模式必用。
+**一句話**：OPRF + envelope + AKE 三段；server compromise 後仍須 online OPRF query 才能 brute-force；WhatsApp / 1Password 部署；Proteus passphrase 模式必用。
 
 ### OPRF (Oblivious PRF)
 **中文**：不可知 PRF
@@ -2020,7 +2020,7 @@
 **中文**：簡潔 / 透明 ZK argument
 **所屬層**：modern ZK system
 **首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)（Groth16 EUROCRYPT 2016 / Ben-Sasson 等 2018）
-**一句話**：SNARK proof ~200 byte but trusted setup + pairing；STARK ~100 KB but transparent + PQ-safe；G6 future anonymous auth 候選。
+**一句話**：SNARK proof ~200 byte but trusted setup + pairing；STARK ~100 KB but transparent + PQ-safe；Proteus future anonymous auth 候選。
 
 ### Trusted Setup / CRS
 **中文**：可信設置 / 公開參考字串
@@ -2032,13 +2032,13 @@
 **中文**：bulletproofs ZK 證明
 **所屬層**：ZK protocol
 **首次出現**：[3.10](lessons/part-3-cryptography/3.10-zero-knowledge.md)（Bünz 等 IEEE S&P 2018）
-**一句話**：無 trusted setup, short proofs (~700 byte for range)；Monero 部署；G6 confidential subscription 候選。
+**一句話**：無 trusted setup, short proofs (~700 byte for range)；Monero 部署；Proteus confidential subscription 候選。
 
 ### Shor's Algorithm
 **中文**：Shor 量子分解 / 離散對數演算法
 **所屬層**：quantum cryptanalysis
 **首次出現**：[3.11 後量子](lessons/part-3-cryptography/3.11-post-quantum.md)（Shor 1994 / SIAM J. Comp. 1997）
-**一句話**：量子電腦 polynomial time 解 FACT / DLP / ECDLP；殺死 RSA / DH / ECC；觸發 NIST PQ 競賽；G6 必 PQ hybrid。
+**一句話**：量子電腦 polynomial time 解 FACT / DLP / ECDLP；殺死 RSA / DH / ECC；觸發 NIST PQ 競賽；Proteus 必 PQ hybrid。
 
 ### Grover's Algorithm
 **中文**：Grover 量子搜索
@@ -2050,25 +2050,25 @@
 **中文**：Module-Lattice-based KEM
 **所屬層**：post-quantum KEM
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 203 2024，原 CRYSTALS-Kyber）
-**一句話**：基於 Module-LWE problem；ML-KEM-768 = 1184-byte pk + 1088-byte ct + 110k cycles encap；G6 hybrid with X25519。
+**一句話**：基於 Module-LWE problem；ML-KEM-768 = 1184-byte pk + 1088-byte ct + 110k cycles encap；Proteus hybrid with X25519。
 
 ### ML-DSA (Dilithium)
 **中文**：Module-Lattice-based signature
 **所屬層**：post-quantum signature
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 204 2024，原 CRYSTALS-Dilithium）
-**一句話**：lattice Fiat-Shamir with aborts；ML-DSA-65 = 1952-byte pk + 3293-byte sig + 700k cycles sign；G6 hybrid with Ed25519。
+**一句話**：lattice Fiat-Shamir with aborts；ML-DSA-65 = 1952-byte pk + 3293-byte sig + 700k cycles sign；Proteus hybrid with Ed25519。
 
 ### SLH-DSA (SPHINCS+)
 **中文**：Stateless Hash-based digital signature
 **所屬層**：post-quantum signature
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)（FIPS 205 2024，原 SPHINCS+）
-**一句話**：純 hash-based, multi-tree Merkle 結構; ~17 KB sig but 最 conservative 對未來 cryptanalysis；G6 root signing backup。
+**一句話**：純 hash-based, multi-tree Merkle 結構; ~17 KB sig but 最 conservative 對未來 cryptanalysis；Proteus root signing backup。
 
 ### FN-DSA (Falcon)
 **中文**：NTRU-lattice signature
 **所屬層**：post-quantum signature
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
-**一句話**：~666-byte sig but floating-point impl 引入 side-channel risk；G6 不選 v1 default，future evaluate。
+**一句話**：~666-byte sig but floating-point impl 引入 side-channel risk；Proteus 不選 v1 default，future evaluate。
 
 ### Hybrid PQ Mode
 **中文**：混合後量子模式
@@ -2080,25 +2080,25 @@
 **中文**：先存後解
 **所屬層**：long-term threat model
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
-**一句話**：對手錄存今天加密流量，等未來量子電腦解開；對長壽 information critical；G6 hybrid 立即部署的核心動機。
+**一句話**：對手錄存今天加密流量，等未來量子電腦解開；對長壽 information critical；Proteus hybrid 立即部署的核心動機。
 
 ### SIKE Disaster
 **中文**：SIKE 災難（Castryck-Decru 2022）
 **所屬層**：PQ cryptanalysis
 **首次出現**：[3.11](lessons/part-3-cryptography/3.11-post-quantum.md)
-**一句話**：~25 年 isogeny-based research SIKE 被 1 小時 laptop 破；教訓 G6 只用 NIST-standardized PQ。
+**一句話**：~25 年 isogeny-based research SIKE 被 1 小時 laptop 破；教訓 Proteus 只用 NIST-standardized PQ。
 
 ### CSPRNG (Cryptographically Secure PRNG)
 **中文**：密碼學安全的偽隨機數生成器
 **所屬層**：cryptographic primitive
 **首次出現**：[3.12 隨機性](lessons/part-3-cryptography/3.12-randomness.md)
-**一句話**：output 與 uniform distribution computationally indistinguishable；現代 Linux 用 ChaCha20-based；G6 必用 OS getrandom()。
+**一句話**：output 與 uniform distribution computationally indistinguishable；現代 Linux 用 ChaCha20-based；Proteus 必用 OS getrandom()。
 
 ### getrandom() syscall
 **中文**：Linux/POSIX 安全隨機 syscall
 **所屬層**：OS interface
 **首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（Linux 3.17 2014）
-**一句話**：block until entropy pool seeded then non-blocking secure random output；G6 mandatory entropy source。
+**一句話**：block until entropy pool seeded then non-blocking secure random output；Proteus mandatory entropy source。
 
 ### Dual_EC_DRBG
 **中文**：NSA backdoored RNG 標準
@@ -2122,7 +2122,7 @@
 **中文**：嵌入式 device 弱 key 大規模調查
 **所屬層**：empirical security study
 **首次出現**：[3.12](lessons/part-3-cryptography/3.12-randomness.md)（USENIX Security 2012 / CRYPTO 2012）
-**一句話**：~5% TLS hosts share keys / ~0.5% share RSA primes → GCD factor；root cause boot-time entropy deficit；G6 IoT 部署設計關鍵教訓。
+**一句話**：~5% TLS hosts share keys / ~0.5% share RSA primes → GCD factor；root cause boot-time entropy deficit；Proteus IoT 部署設計關鍵教訓。
 
 ### Min-entropy / Leftover Hash Lemma
 **中文**：min-entropy / 剩餘哈希引理
@@ -2134,13 +2134,13 @@
 **中文**：側信道攻擊
 **所屬層**：implementation-level cryptanalysis
 **首次出現**：[3.13 側信道](lessons/part-3-cryptography/3.13-side-channels.md)（Kocher CRYPTO 1996）
-**一句話**：通過 timing / cache / power / EM 等 observable 推 secret；G6 implementation 必 constant-time。
+**一句話**：通過 timing / cache / power / EM 等 observable 推 secret；Proteus implementation 必 constant-time。
 
 ### Constant-Time Programming
 **中文**：恆時程式設計
 **所屬層**：cryptographic implementation discipline
 **首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)
-**一句話**：no secret-dependent branch / memory access / division；用 mask + bitwise ops 替代；G6 必驗證 via ctgrind/dudect。
+**一句話**：no secret-dependent branch / memory access / division；用 mask + bitwise ops 替代；Proteus 必驗證 via ctgrind/dudect。
 
 ### Lucky Thirteen
 **中文**：Lucky 13 timing 攻擊
@@ -2152,13 +2152,13 @@
 **中文**：推測執行 microarchitectural 攻擊
 **所屬層**：CPU-level side-channel
 **首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（Kocher / Lipp 2018-2019）
-**一句話**：跨 security boundary 透過 speculative execution + cache side-channel 讀任意 memory；甚至 constant-time impl 不夠；G6 必加 lfence + speculative load hardening。
+**一句話**：跨 security boundary 透過 speculative execution + cache side-channel 讀任意 memory；甚至 constant-time impl 不夠；Proteus 必加 lfence + speculative load hardening。
 
 ### Hertzbleed
 **中文**：CPU 頻率時序洩漏
 **所屬層**：microarch side-channel
 **首次出現**：[3.13](lessons/part-3-cryptography/3.13-side-channels.md)（Wang 等 USENIX Security 2022）
-**一句話**：CPU 動態頻率管理依賴計算內容 → remote timing leak 即使 constant-time impl；G6 推薦 disable Turbo Boost in production。
+**一句話**：CPU 動態頻率管理依賴計算內容 → remote timing leak 即使 constant-time impl；Proteus 推薦 disable Turbo Boost in production。
 
 ### Flush+Reload / Prime+Probe
 **中文**：快取側信道技術
@@ -2176,49 +2176,49 @@
 **中文**：密碼學正確答案
 **所屬層**：modern crypto engineering survey
 **首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)（Latacora blog 2018）
-**一句話**：每 use case 給「單一正確選擇」（ChaCha20-Poly1305, HKDF-SHA-256, Argon2id, Ed25519, X25519...）；G6 全採。
+**一句話**：每 use case 給「單一正確選擇」（ChaCha20-Poly1305, HKDF-SHA-256, Argon2id, Ed25519, X25519...）；Proteus 全採。
 
 ### libsodium / ring / BoringSSL
 **中文**：modern crypto library 三大主流
 **所屬層**：cryptographic library
 **首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
-**一句話**：libsodium (C, NaCl-compat) / ring (Rust, BoringSSL-derived) / BoringSSL (Google internal); G6 用 ring。
+**一句話**：libsodium (C, NaCl-compat) / ring (Rust, BoringSSL-derived) / BoringSSL (Google internal); Proteus 用 ring。
 
 ### HACL* / EverCrypt
 **中文**：形式化驗證的密碼庫
 **所屬層**：verified crypto
 **首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)（Zinzindohoué 等 CCS 2017 / Bhargavan 等 IEEE S&P 2020）
-**一句話**：F* 語言 + Vale assembly 驗證 ChaCha20-Poly1305 / Curve25519 / Ed25519 等；性能 within 10-30% of hand-tuned；G6 future evaluate。
+**一句話**：F* 語言 + Vale assembly 驗證 ChaCha20-Poly1305 / Curve25519 / Ed25519 等；性能 within 10-30% of hand-tuned；Proteus future evaluate。
 
 ### "Don't roll your own crypto"
 **中文**：別自製密碼學
 **所屬層**：crypto engineering principle
 **首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
-**一句話**：別實作 primitive (AES, SHA, ECC) 也別設計新 primitive；但 protocol composition 可設計 — G6 嚴格遵守此邊界。
+**一句話**：別實作 primitive (AES, SHA, ECC) 也別設計新 primitive；但 protocol composition 可設計 — Proteus 嚴格遵守此邊界。
 
 ### Algorithm Agility / Crypto Agility
 **中文**：密碼學敏捷性
 **所屬層**：protocol design
 **首次出現**：[3.14](lessons/part-3-cryptography/3.14-crypto-engineering.md)
-**一句話**：太多 agility 引發 Logjam downgrade；太少難 PQ migrate；G6 採 version-based agility (no per-handshake negotiation)。
+**一句話**：太多 agility 引發 Logjam downgrade；太少難 PQ migrate；Proteus 採 version-based agility (no per-handshake negotiation)。
 
 ### ProVerif
 **中文**：基於 applied pi-calculus 的 protocol verifier
 **所屬層**：formal verification tool
 **首次出現**：[3.15 形式化驗證](lessons/part-3-cryptography/3.15-formal-verification.md)（Blanchet CSFW 2001）
-**一句話**：把 protocol 翻譯為 Horn clauses + SLD resolution 自動證 secrecy / auth；TLS 1.3 / Noise / MLS / WireGuard 等 IETF spec verify 主工具；G6 Phase III 11.10 必用。
+**一句話**：把 protocol 翻譯為 Horn clauses + SLD resolution 自動證 secrecy / auth；TLS 1.3 / Noise / MLS / WireGuard 等 IETF spec verify 主工具；Proteus Phase III 11.10 必用。
 
 ### Tamarin
 **中文**：基於 multiset rewriting 的 protocol verifier
 **所屬層**：formal verification tool
 **首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Meier-Schmidt-Cremers-Basin CAV 2013）
-**一句話**：表達力強處理 stateful protocols (Signal ratchet, 5G AKA)；G6 ratchet / multi-device 部分用 Tamarin。
+**一句話**：表達力強處理 stateful protocols (Signal ratchet, 5G AKA)；Proteus ratchet / multi-device 部分用 Tamarin。
 
 ### CryptoVerif
 **中文**：computational sound 的 protocol verifier
 **所屬層**：formal verification tool
 **首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Blanchet IEEE S&P 2008）
-**一句話**：在 computational model 透過 game transformation chain 證明；WireGuard handshake formal proof 用此；G6 handshake computational proof 用。
+**一句話**：在 computational model 透過 game transformation chain 證明；WireGuard handshake formal proof 用此；Proteus handshake computational proof 用。
 
 ### F* / miTLS / EverCrypt
 **中文**：implementation-level verification
@@ -2236,7 +2236,7 @@
 **中文**：Noise pattern 自動驗證工具
 **所屬層**：automated formal verification
 **首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Kobeissi-Bhargavan-Beurdouche EuroS&P 2019）
-**一句話**：對所有 Noise patterns 自動 generate ProVerif models + verify 18 properties；G6 借用作 baseline。
+**一句話**：對所有 Noise patterns 自動 generate ProVerif models + verify 18 properties；Proteus 借用作 baseline。
 
 ### Hyperproperty
 **中文**：超屬性（針對「軌跡集合」而非單一軌跡的 property）
@@ -2290,7 +2290,7 @@
 **中文**：Wu-Ensafi-Crandall 對「fully encrypted protocols」的 ML classifier
 **所屬層**：threat model
 **首次出現**：[5.10](lessons/part-5-formal-methods/5.10-probabilistic-statistical-fm.md)（Wu et al. USENIX Security 2023）
-**一句話**：GFW 對 "看起來隨機" 的流量用 entropy / size / IAT 等 features 訓的 classifier；G6 形式化的對手定義基準。
+**一句話**：GFW 對 "看起來隨機" 的流量用 entropy / size / IAT 等 features 訓的 classifier；Proteus 形式化的對手定義基準。
 
 ### Universal Composability (UC)
 **中文**：通用可組合性
@@ -2669,31 +2669,31 @@
 **中文**：對手能力矩陣
 **所屬層**：threat modeling
 **首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
-**一句話**：把對手可做的事按 ID（C1, C2, ...）列表，每條 in-scope 必對應 defense 與 verification; G6 在 C1–C7、C9–C12 in-scope。
+**一句話**：把對手可做的事按 ID（C1, C2, ...）列表，每條 in-scope 必對應 defense 與 verification; Proteus 在 C1–C7、C9–C12 in-scope。
 
 ### ε_CAR (Distinguishing Advantage for Censorship Resistance)
 **中文**：抗審查可區分度
 **所屬層**：anti-censorship 評估
 **首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
-**一句話**：classifier 區分 G6 與 cover protocol 的 advantage，定義仿 IND game (Tschantz FOCI 2016)；G6 target ε_short ≤ 0.20, ε_stretch ≤ 0.30。
+**一句話**：classifier 區分 Proteus 與 cover protocol 的 advantage，定義仿 IND game (Tschantz FOCI 2016)；Proteus target ε_short ≤ 0.20, ε_stretch ≤ 0.30。
 
 ### Mosca's Theorem / SNDL
 **中文**：「現在收集、未來解密」威脅模型
 **所屬層**：PQ 威脅
 **首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
-**一句話**：Mosca 2018 給的 migration 時程公式；G6 因此 mandatory hybrid PQ KEM。
+**一句話**：Mosca 2018 給的 migration 時程公式；Proteus 因此 mandatory hybrid PQ KEM。
 
 ### KCI (Key Compromise Impersonation) Resistance
 **中文**：金鑰妥協冒充抗性
 **所屬層**：handshake security
 **首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
-**一句話**：Krawczyk HMQV 2005 定義；client SK 洩後，attacker 仍不能假冒 honest server 對 client；G6 由 server TLS cert + signature 達成。
+**一句話**：Krawczyk HMQV 2005 定義；client SK 洩後，attacker 仍不能假冒 honest server 對 client；Proteus 由 server TLS cert + signature 達成。
 
 ### PCS (Post-Compromise Security)
 **中文**：後妥協安全
 **所屬層**：handshake / ratchet security
 **首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)（Cohn-Gordon-Cremers-Garratt JoC 2016）
-**一句話**：key reveal 後，未來 ratchet 之後的 key 仍 secret；G6 v0.1 KEYUPDATE 達 PCS-weak（Tamarin 已驗）。
+**一句話**：key reveal 後，未來 ratchet 之後的 key 仍 secret；Proteus v0.1 KEYUPDATE 達 PCS-weak（Tamarin 已驗）。
 
 ### REALITY / SNI Borrowing
 **中文**：借用真實 popular SNI + auth-fail forward
@@ -2705,19 +2705,19 @@
 **中文**：HTTP/3 內的 UDP/IP proxy
 **所屬層**：transport substrate
 **首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（RFC 9297/9298/9484）
-**一句話**：IETF MASQUE WG 的 proxy 規格；G6-γ 選此作 primary transport，inner 不是 TLS 故 architectural 規避 TLS-in-TLS 攻擊。
+**一句話**：IETF MASQUE WG 的 proxy 規格；Proteus-γ 選此作 primary transport，inner 不是 TLS 故 architectural 規避 TLS-in-TLS 攻擊。
 
 ### TLS-in-TLS Detection
 **中文**：TLS-in-TLS 結構性洩漏
 **所屬層**：anti-censorship 攻擊面
 **首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（Xue USENIX 2024）
-**一句話**：outer TLS-over-TCP 內跑 inner TLS，inner record 邊界由 outer 段碎洩漏；G6-γ MASQUE 架構規避。
+**一句話**：outer TLS-over-TCP 內跑 inner TLS，inner record 邊界由 outer 段碎洩漏；Proteus-γ MASQUE 架構規避。
 
 ### Hybrid KEM
 **中文**：classical + PQ 並聯 KEM
 **所屬層**：post-quantum migration
 **首次出現**：[11.4](lessons/part-11-design/11.4-architecture-decision.md)（Bindel PQCrypto 2019）
-**一句話**：G6 用 KDF(X25519 ‖ ML-KEM-768)；攻擊者必須同時 break 兩個分支才得 secret。
+**一句話**：Proteus 用 KDF(X25519 ‖ ML-KEM-768)；攻擊者必須同時 break 兩個分支才得 secret。
 
 ### GREASE
 **中文**：Generate Random Extensions And Sustain Extensibility
@@ -2729,7 +2729,7 @@
 **中文**：cover protocol 鎖死
 **所屬層**：CAR-1
 **首次出現**：[11.2](lessons/part-11-design/11.2-goals-non-goals.md)
-**一句話**：ε_CAR 必相對 specific cover distribution 才有意義；G6 鎖 TLS 1.3 over UDP-443 (H3) to popular CDN。
+**一句話**：ε_CAR 必相對 specific cover distribution 才有意義；Proteus 鎖 TLS 1.3 over UDP-443 (H3) to popular CDN。
 
 ### Active Probing
 **中文**：主動探測
@@ -2741,13 +2741,13 @@
 **中文**：goodput 排除 retransmit/padding 的 effective bandwidth
 **所屬層**：performance metric
 **首次出現**：[11.2](lessons/part-11-design/11.2-goals-non-goals.md)（Cardwell BBR CACM 2017）
-**一句話**：G6 PERF-1 用 goodput ≥ 0.95 BDP, 不是 raw throughput。
+**一句話**：Proteus PERF-1 用 goodput ≥ 0.95 BDP, 不是 raw throughput。
 
 ### Cell Padding
 **中文**：固定 cell 大小填充
 **所屬層**：CAR-1 padding
 **首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)
-**一句話**：每 UDP datagram round-up 到 1280 bytes (G6 spec)，去除 size feature。
+**一句話**：每 UDP datagram round-up 到 1280 bytes (Proteus spec)，去除 size feature。
 
 ### Cover-Distribution Sampling
 **中文**：採樣 cover 分佈整形
@@ -2759,19 +2759,19 @@
 **中文**：多形變化 vs 模仿
 **所屬層**：CAR design philosophy
 **首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（Houmansadr S&P 2013 "Parrot is dead"）
-**一句話**：mimicry 任一 semantic 不對就死；polymorphism 仰賴 distribution coverage 不仰賴 semantic equivalence; G6 採 polymorphism。
+**一句話**：mimicry 任一 semantic 不對就死；polymorphism 仰賴 distribution coverage 不仰賴 semantic equivalence; Proteus 採 polymorphism。
 
 ### Fallback Forwarding
 **中文**：auth-fail 透傳給真 cover
 **所屬層**：anti-active-probing 機制
 **首次出現**：[11.4](lessons/part-11-design/11.4-architecture-decision.md)
-**一句話**：G6 server 對 auth-fail connection 整段 bytes forward 給真 cover；attacker 看 cover 的真實回應; spec 要 < 1ms p99 budget。
+**一句話**：Proteus server 對 auth-fail connection 整段 bytes forward 給真 cover；attacker 看 cover 的真實回應; spec 要 < 1ms p99 budget。
 
 ### Adversarial Reading
 **中文**：對抗式 review
 **所屬層**：design review methodology
 **首次出現**：[11.12](lessons/part-11-design/11.12-design-review.md)
-**一句話**：design review 不是 confirming spec, 是 attack spec 找漏洞；G6 v0.1 從 v0.0 經此 review 加 10 條 normative fix。
+**一句話**：design review 不是 confirming spec, 是 attack spec 找漏洞；Proteus v0.1 從 v0.0 經此 review 加 10 條 normative fix。
 
 ### Residual Risk
 **中文**：殘餘風險（已 known but explicitly 接受）
@@ -2783,19 +2783,19 @@
 **中文**：MUST / SHOULD / MAY 規範用詞
 **所屬層**：spec writing
 **首次出現**：[11.5](lessons/part-11-design/11.5-spec-wire-format.md)
-**一句話**：IETF normative keyword convention; G6 spec strictly 遵循。
+**一句話**：IETF normative keyword convention; Proteus spec strictly 遵循。
 
 ### Conformance Test Vectors
 **中文**：符合性測試向量
 **所屬層**：spec writing
 **首次出現**：[11.13](lessons/part-11-design/11.13-spec-v01.md)
-**一句話**：spec 內附 byte-exact test vectors 確保多 impl 互通; G6 v0.1 deferred 到 Part 12 reference impl 一起 release。
+**一句話**：spec 內附 byte-exact test vectors 確保多 impl 互通; Proteus v0.1 deferred 到 Part 12 reference impl 一起 release。
 
 ### Bloom Filter (anti-replay)
 **中文**：機率資料結構濾重複
 **所屬層**：anti-replay
 **首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)（Bloom 1970）
-**一句話**：G6 用 sliding 1-hour Bloom 過 nonce, FPR ≤ 10⁻⁹; false positive 觸發 fallback (safe)。
+**一句話**：Proteus 用 sliding 1-hour Bloom 過 nonce, FPR ≤ 10⁻⁹; false positive 觸發 fallback (safe)。
 
 ### Forward-only Ratchet (KDF-only)
 **中文**：單向 KDF ratchet
@@ -2811,7 +2811,7 @@
 **中文**：IP 層安全架構（真 VPN 之祖）
 **所屬層**：L3
 **首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
-**一句話**：IETF 1998 起家、由 AH/ESP/IKE 三部曲 + SAD/SPD/PAD 三表構成的 modular 巨獸；25 年累積攻擊與配置複雜度是 G6「絕對不做」清單的最大來源。
+**一句話**：IETF 1998 起家、由 AH/ESP/IKE 三部曲 + SAD/SPD/PAD 三表構成的 modular 巨獸；25 年累積攻擊與配置複雜度是 Proteus「絕對不做」清單的最大來源。
 
 ### ESP / AH (RFC 4302/4303)
 **中文**：Encapsulating Security Payload / Authentication Header
@@ -2829,13 +2829,13 @@
 **中文**：Security Association DB / Policy DB / Peer Authorization DB
 **所屬層**：IPsec 控制狀態
 **首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
-**一句話**：IPsec policy 三層分離；O(SAD × SPD × PAD) 是配置噩夢主因；WireGuard 摺疊成單一 peer table，G6 沿用。
+**一句話**：IPsec policy 三層分離；O(SAD × SPD × PAD) 是配置噩夢主因；WireGuard 摺疊成單一 peer table，Proteus 沿用。
 
 ### NAT-T (RFC 3947/3948)
 **中文**：IPsec NAT Traversal
 **所屬層**：UDP encapsulation patch
 **首次出現**：[6.1](lessons/part-6-vpn-internals/6.1-ipsec-anatomy.md)
-**一句話**：UDP/4500 包 ESP + 開頭 4-byte 0 marker；對 GFW 是免費 fingerprint；G6 day-1 假設 UDP-only 避開此補丁。
+**一句話**：UDP/4500 包 ESP + 開頭 4-byte 0 marker；對 GFW 是免費 fingerprint；Proteus day-1 假設 UDP-only 避開此補丁。
 
 ### Bleichenbacher 1998 / ROBOT
 **中文**：PKCS#1 v1.5 padding oracle 攻擊家族
@@ -2865,19 +2865,19 @@
 **中文**：對主動探測無可區分回應
 **所屬層**：抗審查協議設計屬性
 **首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)；於 [Part 7.10 REALITY] 全面展開
-**一句話**：對任意 probe message，server response 與 generic non-protocol server 計算上不可區分；REALITY、Conjure 提出，是 G6 hard requirement。
+**一句話**：對任意 probe message，server response 與 generic non-protocol server 計算上不可區分；REALITY、Conjure 提出，是 Proteus hard requirement。
 
 ### VPN Fingerprinting
 **中文**：對某條流量是否為 VPN（含哪一種）的識別
 **所屬層**：DPI / 流量分析
 **首次出現**：[6.2](lessons/part-6-vpn-internals/6.2-openvpn-anatomy.md)
-**一句話**：Xue 2022 之後從 ML 派轉到 deterministic、bytes-level、probe-confirmed 派；G6 必須對 deterministic 派 day-1 設計對抗。
+**一句話**：Xue 2022 之後從 ML 派轉到 deterministic、bytes-level、probe-confirmed 派；Proteus 必須對 deterministic 派 day-1 設計對抗。
 
 ### Cryptokey Routing
 **中文**：密碼-路由綁定
 **所屬層**：WireGuard 核心抽象
 **首次出現**：[6.3](lessons/part-6-vpn-internals/6.3-wireguard-whitepaper.md)
-**一句話**：peer 的 static pk 同時是 crypto identity 與 routing key；AllowedIPs 表 lookup 取代 SAD/SPD；G6 沿用。
+**一句話**：peer 的 static pk 同時是 crypto identity 與 routing key；AllowedIPs 表 lookup 取代 SAD/SPD；Proteus 沿用。
 
 ### MAC1 / MAC2 (WireGuard)
 **中文**：identity-based filter + DoS cookie
@@ -2889,7 +2889,7 @@
 **中文**：WireGuard-go 的抗審查 fork
 **所屬層**：WireGuard 變種協議
 **首次出現**：[6.7](lessons/part-6-vpn-internals/6.7-wireguard-blocked-china.md)
-**一句話**：透過 H1-H4 替換 message type、S1-S4 隨機 padding、Jc junk packet、I1-I5 protocol mimicry 補 WG 的 6 條 fingerprint；G6 對照範本。
+**一句話**：透過 H1-H4 替換 message type、S1-S4 隨機 padding、Jc junk packet、I1-I5 protocol mimicry 補 WG 的 6 條 fingerprint；Proteus 對照範本。
 
 ### Fully Encrypted Detection (Wu 2023)
 **中文**：對「看起來像隨機 bytes」的流量做 entropy/popcount 啟發式偵測
@@ -2959,7 +2959,7 @@
 **中文**：傳輸通道容量（流量混淆語境）
 **所屬層**：information theory applied to defense
 **首次出現**：[10.1](lessons/part-10-traffic-analysis/10.1-information-theory.md)
-**一句話**：$C = \max_{p(X)} I(X; Y)$；每次 trace 最多洩漏 $C$ bits，repeated-visit attack 累積需 $H(X)/C$ traces；G6 evaluation 必 report $\hat{C}$。
+**一句話**：$C = \max_{p(X)} I(X; Y)$；每次 trace 最多洩漏 $C$ bits，repeated-visit attack 累積需 $H(X)/C$ traces；Proteus evaluation 必 report $\hat{C}$。
 
 ### BuFLO / Tamaraw
 **中文**：constant-rate channel WF defense
@@ -3001,7 +3001,7 @@
 **中文**：traffic-defense state machine framework
 **所屬層**：WF defense framework
 **首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Pulls-Witwer 2023 PoPETs）
-**一句話**：把 defense 寫成 state-machine spec（state, transition, event, action）；Tor padding-v2 的標準化方向；G6 shape 層直接 adopt。
+**一句話**：把 defense 寫成 state-machine spec（state, transition, event, action）；Tor padding-v2 的標準化方向；Proteus shape 層直接 adopt。
 
 ### Mockingbird / BLANKET / Surakav
 **中文**：adversarial-perturbation / GAN-based defenses
@@ -3031,7 +3031,7 @@
 **中文**：micro-TLS — Go TLS fingerprint parrot library
 **所屬層**：TLS layer
 **首次出現**：[10.6](lessons/part-10-traffic-analysis/10.6-pluggable-transports.md)（Frolov-Wustrow 2019 NDSS）
-**一句話**：fork Go crypto/tls 讓 ClientHello 完美 mimic Chrome/Firefox；VLESS+REALITY / Hysteria2 必用；G6 mandatory。
+**一句話**：fork Go crypto/tls 讓 ClientHello 完美 mimic Chrome/Firefox；VLESS+REALITY / Hysteria2 必用；Proteus mandatory。
 
 ### JA3 / JA4
 **中文**：TLS ClientHello fingerprint hash
@@ -3043,7 +3043,7 @@
 **中文**：Xray 提出的 「proxy 到真實 TLS server」 trick
 **所屬層**：TLS / proxy fallback
 **首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Xray 2023）
-**一句話**：bridge 對 unauthenticated probe 真實 forward 給 target CDN，對 authenticated client 替換 ServerHello 建 G6 tunnel；解 「silent bridge looks like dead host」 問題。
+**一句話**：bridge 對 unauthenticated probe 真實 forward 給 target CDN，對 authenticated client 替換 ServerHello 建 Proteus tunnel；解 「silent bridge looks like dead host」 問題。
 
 ### ECH (Encrypted Client Hello)
 **中文**：加密的 TLS ClientHello SNI
@@ -3055,13 +3055,13 @@
 **中文**：HTTP-tunneling IETF working group
 **所屬層**：transport / H3
 **首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
-**一句話**：CONNECT-UDP (RFC 9298), CONNECT-IP, CONNECT-Ethernet 系列 RFC；H3 上 tunnel 任意 traffic；G6 transport baseline。
+**一句話**：CONNECT-UDP (RFC 9298), CONNECT-IP, CONNECT-Ethernet 系列 RFC；H3 上 tunnel 任意 traffic；Proteus transport baseline。
 
 ### TLS-in-TLS detection
 **中文**：嵌套 TLS 偵測
 **所屬層**：TLS analysis
 **首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
-**一句話**：外層 TLS 與內層 TLS 的 record size pattern 仍可被識別；G6 不在 G6 tunnel 內 nest TLS。
+**一句話**：外層 TLS 與內層 TLS 的 record size pattern 仍可被識別；Proteus 不在 Proteus tunnel 內 nest TLS。
 
 ### FEP detection
 **中文**：Fully-Encrypted Protocol detection (Wu 23)
@@ -3073,13 +3073,13 @@
 **中文**：模仿 vs 隧道
 **所屬層**：design philosophy
 **首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)
-**一句話**：mimicry = wire format 假裝像 X（FTE / Marionette）；tunneling = wire 真的是 X（meek / Snowflake / REALITY）；mimicry 「parrot is dead」 已死，tunneling 是 G6 路線。
+**一句話**：mimicry = wire format 假裝像 X（FTE / Marionette）；tunneling = wire 真的是 X（meek / Snowflake / REALITY）；mimicry 「parrot is dead」 已死，tunneling 是 Proteus 路線。
 
 ### DeepCorr
 **中文**：DL-based Tor flow correlation
 **所屬層**：traffic-analysis attack
 **首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Nasr 2018 CCS）
-**一句話**：CNN 對 entry/exit Tor flow timing 做配對；90%+ correlation accuracy；G6 timing jitter 防禦。
+**一句話**：CNN 對 entry/exit Tor flow timing 做配對；90%+ correlation accuracy；Proteus timing jitter 防禦。
 
 ### Watermarking attack
 **中文**：流量水印攻擊
@@ -3091,7 +3091,7 @@
 **中文**：應用級指紋識別家族
 **所屬層**：app fingerprinting
 **首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
-**一句話**：AppScanner (Taylor 16) 監督式 per-app；FlowPrint (van Ede 20) 半監督式 + destination cluster；FS-Net (Liu 19) deep flow-sequence；G6 single-tunnel 結構天然防 FlowPrint。
+**一句話**：AppScanner (Taylor 16) 監督式 per-app；FlowPrint (van Ede 20) 半監督式 + destination cluster；FS-Net (Liu 19) deep flow-sequence；Proteus single-tunnel 結構天然防 FlowPrint。
 
 ### Loopix / Vuvuzela / Karaoke
 **中文**：formal-anonymity messaging systems
@@ -3103,7 +3103,7 @@
 **中文**：假流量 / 誘餌流量 / 迴環流量
 **所屬層**：anonymity / traffic shaping
 **首次出現**：[10.9](lessons/part-10-traffic-analysis/10.9-probabilistic-decoy-traffic.md)
-**一句話**：主動產生與真實流量不可區分的假封包以壓低 channel capacity；selective cover = G6 default light mode；constant-rate = G6 high-assurance mode。
+**一句話**：主動產生與真實流量不可區分的假封包以壓低 channel capacity；selective cover = Proteus default light mode；constant-rate = Proteus high-assurance mode。
 
 ### Khattak SoK 6 軸
 **中文**：CRS 系統化的 6 維分類
@@ -3115,25 +3115,25 @@
 **中文**：CRS 評估方法論 4 條
 **所屬層**：methodology
 **首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Tschantz 2016 IEEE S&P）
-**一句話**：1) empirical real-censor eval；2) define adversary precisely；3) compare with existing；4) report deployment data；G6 Part 12 evaluation 必符。
+**一句話**：1) empirical real-censor eval；2) define adversary precisely；3) compare with existing；4) report deployment data；Proteus Part 12 evaluation 必符。
 
 ### Website Oracle attack
 **中文**：網站預言機攻擊
 **所屬層**：augmented WF
 **首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Pulls-Dahlberg 2020 PoPETs）
-**一句話**：WF + DNS resolver log / CT log / CDN log → 99% accuracy；G6 必 DoH-over-tunnel 防 DNS oracle。
+**一句話**：WF + DNS resolver log / CT log / CDN log → 99% accuracy；Proteus 必 DoH-over-tunnel 防 DNS oracle。
 
 ### Online WF
 **中文**：流式網站指紋
 **所屬層**：WF attack model
 **首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Cherubin-Jansen-Troncoso 2022 USENIX Sec）
-**一句話**：attacker 即時分類，不等 trace 結束；first burst 60% / mid 80% / end 95%；G6 defense 必 from-first-packet。
+**一句話**：attacker 即時分類，不等 trace 結束；first burst 60% / mid 80% / end 95%；Proteus defense 必 from-first-packet。
 
 ### Provability level (L0–L4)
 **中文**：可證明性分級
 **所屬層**：security framework
 **首次出現**：[10.12](lessons/part-10-traffic-analysis/10.12-provable-defense.md)
-**一句話**：L0=empirical / L1=feature-class bound (Wang 14) / L2=Bayes-optimal upper bound (Cherubin 17) / L3=DP-form / L4=computational indist；G6 目標 L2+partial L3。
+**一句話**：L0=empirical / L1=feature-class bound (Wang 14) / L2=Bayes-optimal upper bound (Cherubin 17) / L3=DP-form / L4=computational indist；Proteus 目標 L2+partial L3。
 ---
 
 ## Part 12 — 實作、評測、發表
@@ -3393,7 +3393,7 @@
 **中文**：應用層代理協議祖宗
 **所屬層**：L5 explicit-proxy ABI
 **首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)（RFC 1928, 1996）
-**一句話**：binary 5-byte greeting + TCP CONNECT/BIND/UDP_ASSOCIATE 三命令；現代仍是所有 client（browser、curl、Clash）說「我要 proxy」的唯一 ABI；G6 north-bound interface 必選。
+**一句話**：binary 5-byte greeting + TCP CONNECT/BIND/UDP_ASSOCIATE 三命令；現代仍是所有 client（browser、curl、Clash）說「我要 proxy」的唯一 ABI；Proteus north-bound interface 必選。
 
 ### HTTP CONNECT
 **中文**：HTTP 端的 proxy 動詞
@@ -3405,7 +3405,7 @@
 **中文**：IETF 把 proxy 系列搬到 HTTP/3 上的工作群
 **所屬層**：proxy-over-QUIC
 **首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)（IETF MASQUE WG, 2020-）
-**一句話**：CONNECT-UDP (RFC 9298) + CONNECT-IP (RFC 9484)；Apple iCloud Private Relay、Cloudflare WARP、Chrome IP Protection 已部署；G6 對齊與否是 Part 11.6 主要 trade-off。
+**一句話**：CONNECT-UDP (RFC 9298) + CONNECT-IP (RFC 9484)；Apple iCloud Private Relay、Cloudflare WARP、Chrome IP Protection 已部署；Proteus 對齊與否是 Part 11.6 主要 trade-off。
 
 ### UDP ASSOCIATE
 **中文**：SOCKS5 的 UDP relay 命令
@@ -3417,13 +3417,13 @@
 **中文**：顯式代理 vs 透明代理
 **所屬層**：proxy 部署形態
 **首次出現**：[7.1](lessons/part-7-proxy-protocols/7.1-socks-http-connect.md)
-**一句話**：explicit = client 知情並設定（SOCKS5、HTTP CONNECT）；transparent = NAT/iptables redirect 攔截（Squid intercept、tproxy）；G6 客戶端是 explicit，TUN/redir 模式靠 sing-box 等 wrapper。
+**一句話**：explicit = client 知情並設定（SOCKS5、HTTP CONNECT）；transparent = NAT/iptables redirect 攔截（Squid intercept、tproxy）；Proteus 客戶端是 explicit，TUN/redir 模式靠 sing-box 等 wrapper。
 
 ### Shadowsocks (SS, 第一代)
 **中文**：clowwindy 2012 設計的最簡 stream-cipher proxy
 **所屬層**：L5 application-layer encrypted proxy
 **首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
-**一句話**：IV+stream-cipher+SOCKS5-style header；無 MAC 無 anti-replay；IMC 2020 完整剖析其偵測；G6 視為「不能犯的錯誤」教科書。
+**一句話**：IV+stream-cipher+SOCKS5-style header；無 MAC 無 anti-replay；IMC 2020 完整剖析其偵測；Proteus 視為「不能犯的錯誤」教科書。
 
 ### EVP_BytesToKey
 **中文**：OpenSSL 從 password 推 key/IV 的函數
@@ -3435,13 +3435,13 @@
 **中文**：CFB / CTR / Salsa20 / ChaCha20 流加密，無認證
 **所屬層**：crypto mode
 **首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)
-**一句話**：CCA-broken；malleability + active probing 攻擊面；SS 第一代用過後 G6 永不採。
+**一句話**：CCA-broken；malleability + active probing 攻擊面；SS 第一代用過後 Proteus 永不採。
 
 ### Active Probing
 **中文**：主動探測
 **所屬層**：對手能力
 **首次出現**：[7.2](lessons/part-7-proxy-protocols/7.2-shadowsocks-stream-era.md)（Ensafi NDSS 2015 / 「Alice in Wonderland」IMC 2020）
-**一句話**：審查者主動連可疑 server 觀察行為差異；對 SS 第一代致命；現代 G6 必須通過此測試。
+**一句話**：審查者主動連可疑 server 觀察行為差異；對 SS 第一代致命；現代 Proteus 必須通過此測試。
 
 ### Replay Attack（協議層）
 **中文**：重放攻擊
@@ -3471,7 +3471,7 @@
 **中文**：BLAKE3 的領域分隔 KDF 模式
 **所屬層**：crypto KDF
 **首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（O'Connor et al., 2020）
-**一句話**：context string 編進 internal IV；不同 context 推出的 key 永遠不同；比 HKDF info 更難用錯；G6 KDF 首選。
+**一句話**：context string 編進 internal IV；不同 context 推出的 key 永遠不同；比 HKDF info 更難用錯；Proteus KDF 首選。
 
 ### Channel Binding
 **中文**：通道綁定
@@ -3483,25 +3483,25 @@
 **中文**：滑動視窗重放防護
 **所屬層**：協議實作技術
 **首次出現**：[7.4](lessons/part-7-proxy-protocols/7.4-shadowsocks-2022.md)（IPsec ESP RFC 4303 §3.4.3 起源；WireGuard `replay.c` 為現代教科書實作）
-**一句話**：bitmap 記住最近 N 個 packet ID 哪些見過；O(1) bit ops；無 false positive；G6 必抄。
+**一句話**：bitmap 記住最近 N 個 packet ID 哪些見過；O(1) bit ops；無 false positive；Proteus 必抄。
 
 ### Fully-Encrypted Protocol (FEP)
 **中文**：全加密協議
 **所屬層**：學界對 SS/Trojan/VMess 的統稱
 **首次出現**：[7.3](lessons/part-7-proxy-protocols/7.3-shadowsocks-aead.md)（Wu et al., USENIX Security 2023）
-**一句話**：第一個 byte 起就是高 entropy 密文；GFW 能用 5 條 entropy + ASCII 規則直接識別；G6 必須通過此測試。
+**一句話**：第一個 byte 起就是高 entropy 密文；GFW 能用 5 條 entropy + ASCII 規則直接識別；Proteus 必須通過此測試。
 
 ### VMess (legacy + AEAD)
 **中文**：V2Ray 自有 inner protocol
 **所屬層**：L5 應用層加密 proxy
 **首次出現**：[7.5](lessons/part-7-proxy-protocols/7.5-vmess.md)
-**一句話**：UUID + EAuID + AES-GCM header；2020 active-probe 後升級 AEAD；alterID 死；G6 視為「分層 KDF + multi-user」設計教材。
+**一句話**：UUID + EAuID + AES-GCM header；2020 active-probe 後升級 AEAD；alterID 死；Proteus 視為「分層 KDF + multi-user」設計教材。
 
 ### alterID（VMess legacy 反例）
 **中文**：rotating identifier 集合
 **所屬層**：anti-replay (失敗)
 **首次出現**：[7.5](lessons/part-7-proxy-protocols/7.5-vmess.md)
-**一句話**：每 user N+1 個 HMAC-derived ID 隨機選；server 端 RAM 爆炸 + multi-user lookup O(M×U)；2021 deprecated；G6 採 stateless single-AuthID。
+**一句話**：每 user N+1 個 HMAC-derived ID 隨機選；server 端 RAM 爆炸 + multi-user lookup O(M×U)；2021 deprecated；Proteus 採 stateless single-AuthID。
 
 ### V2Ray streamSettings
 **中文**：outer transport + outer crypto 抽象
@@ -3531,7 +3531,7 @@
 **中文**：VMess 的密碼學拔光版
 **所屬層**：L5 應用層
 **首次出現**：[7.8](lessons/part-7-proxy-protocols/7.8-vless.md)（XTLS @RPRX 2020）
-**一句話**：UUID + addons (ProtoBuf) + addr + payload；無 inner crypto, stateless, 0-RTT；強假設 outer = TLS/REALITY；G6 inner 設計 baseline。
+**一句話**：UUID + addons (ProtoBuf) + addr + payload；無 inner crypto, stateless, 0-RTT；強假設 outer = TLS/REALITY；Proteus inner 設計 baseline。
 
 ### XTLS-Vision
 **中文**：消滅 TLS-in-TLS pattern 的 splice 機制
@@ -3543,7 +3543,7 @@
 **中文**：kernel zero-copy forward
 **所屬層**：proxy implementation
 **首次出現**：[7.9](lessons/part-7-proxy-protocols/7.9-xtls-vision.md)
-**一句話**：用 splice(2) syscall 直接把兩個 socket 的 byte stream 串起來，無 user-space copy/crypto；XTLS-Vision 主機制；G6 對 QUIC 內部 stream 也應抄。
+**一句話**：用 splice(2) syscall 直接把兩個 socket 的 byte stream 串起來，無 user-space copy/crypto；XTLS-Vision 主機制；Proteus 對 QUIC 內部 stream 也應抄。
 
 ### REALITY
 **中文**：借真網站 ServerHello/cert 的第 4 代範式
@@ -3579,13 +3579,13 @@
 **中文**：proxy 軟體標準架構
 **所屬層**：proxy software architecture
 **首次出現**：[7.14](lessons/part-7-proxy-protocols/7.14-xray-source-overview.md)
-**一句話**：xray、sing-box、mihomo 共識架構；inbound 解 wire + 提取 dest，router 純 metadata 決路由，outbound 包 wire 出去；G6 reference impl 必抄。
+**一句話**：xray、sing-box、mihomo 共識架構；inbound 解 wire + 提取 dest，router 純 metadata 決路由，outbound 包 wire 出去；Proteus reference impl 必抄。
 
 ### Rule-Set / Rule-Provider
 **中文**：路由規則的預編譯 / 動態 fetch
 **所屬層**：proxy routing
 **首次出現**：[7.15](lessons/part-7-proxy-protocols/7.15-singbox-source-overview.md)（sing-box .srs）/ [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（mihomo provider）
-**一句話**：sing-box `.srs` binary trie 高效；mihomo text format 易寫但 lookup 慢；G6 直接整合而非自寫。
+**一句話**：sing-box `.srs` binary trie 高效；mihomo text format 易寫但 lookup 慢；Proteus 直接整合而非自寫。
 
 ### TUN Mode（client-side）
 **中文**：用戶態虛擬網卡接管全流量
@@ -3603,13 +3603,13 @@
 **中文**：proxy/rule 訂閱模式
 **所屬層**：client UX
 **首次出現**：[7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)（Clash 創立, mihomo 主導）
-**一句話**：subscription URL 動態 fetch proxy/rule + health-check + auto-fallback；G6 client SDK 必須支援。
+**一句話**：subscription URL 動態 fetch proxy/rule + health-check + auto-fallback；Proteus client SDK 必須支援。
 
 ### Censorship Resistance 4 代範式
 **中文**：循環演化軌跡
 **所屬層**：學科總結
 **首次出現**：[7.13](lessons/part-7-proxy-protocols/7.13-misc-protocols.md) / [7.16](lessons/part-7-proxy-protocols/7.16-mihomo-source-overview.md)
-**一句話**：mimicry → fully-encrypted → HTTPS-shaped → borrow-real (REALITY)；G6 目標是第 5 代 (handshake + traffic 同時解)。
+**一句話**：mimicry → fully-encrypted → HTTPS-shaped → borrow-real (REALITY)；Proteus 目標是第 5 代 (handshake + traffic 同時解)。
 
 ### Henan Firewall (HenanFW)
 **中文**：河南省級防火牆
@@ -3623,11 +3623,11 @@
 **首次出現**：[9.15](lessons/part-9-gfw-research/9.15-gfw-2025-ledger.md)
 **一句話**：俄羅斯 ISP 級 DPI 系統；2025-2026 起對 TLS 1.3 流量採用 15-20 KB freeze（無 RST，連線停接收）+ CIDR 白名單；尚無 peer-reviewed paper，社群觀察為主。
 
-### Capability C14 / C15（G6 威脅模型升級）
+### Capability C14 / C15（Proteus 威脅模型升級）
 **中文**：區域審查能力 / 全域阻斷能力
 **所屬層**：threat model
 **首次出現**：[9.15](lessons/part-9-gfw-research/9.15-gfw-2025-ledger.md)
-**一句話**：C14 = sub-national regional censor with own blocklist；C15 = transient blanket port block (e.g. 2025-08-20 TCP/443 74 min 全域 RST)；G6 spec §1.3 capability table v2 必含。
+**一句話**：C14 = sub-national regional censor with own blocklist；C15 = transient blanket port block (e.g. 2025-08-20 TCP/443 74 min 全域 RST)；Proteus spec §1.3 capability table v2 必含。
 
 ### EDT pacing (SO_TXTIME + sch_fq)
 **中文**：預定到達時間-基底 pacing
@@ -3637,24 +3637,24 @@
 
 ### ProbeRTT padding pause
 **中文**：BBR ProbeRTT 期間暫停 padding emission
-**所屬層**：G6 implementation requirement
+**所屬層**：Proteus implementation requirement
 **首次出現**：[8.11](lessons/part-8-quic-protocols/8.11-bbrv3-and-pacing.md)
-**一句話**：BBRv3 ProbeRTT 期間 inflight 限 4 packet，G6 padding cell 在此 200 ms 視窗 MUST 暫停 emission；spec §9 padding budget α 仍滿足（10 s 滑動窗）。
+**一句話**：BBRv3 ProbeRTT 期間 inflight 限 4 packet，Proteus padding cell 在此 200 ms 視窗 MUST 暫停 emission；spec §9 padding budget α 仍滿足（10 s 滑動窗）。
 
 ### Cover forward pool
 **中文**：cover-server 預熱連線池
-**所屬層**：G6 server architecture
-**首次出現**：[8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)、[12.7](lessons/part-12-implement-evaluate/12.7-server-panel-fallback.md)
-**一句話**：為達 spec §7 < 1ms p99 forward inflation，G6 server 預先維持到 cover_url 的 long-lived TCP/QUIC connection pool；冷啟 50-150ms → 立即 fingerprint，必須 hot pool。
+**所屬層**：Proteus server architecture
+**首次出現**：[8.12](lessons/part-8-quic-protocols/8.12-proteus-masque-wire-mapping.md)、[12.7](lessons/part-12-implement-evaluate/12.7-server-panel-fallback.md)
+**一句話**：為達 spec §7 < 1ms p99 forward inflation，Proteus server 預先維持到 cover_url 的 long-lived TCP/QUIC connection pool；冷啟 50-150ms → 立即 fingerprint，必須 hot pool。
 
-### G6InnerHeader（12-byte inner framing）
-**中文**：G6 內層封包標頭
-**所屬層**：G6 wire format (spec §4.2)
-**首次出現**：[11.5](lessons/part-11-design/11.5-spec-wire-format.md)、深入見 [8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)
-**一句話**：12 byte（type uint8 + flags uint8 + reserved uint16 + seqnum uint64）；γ profile 嵌於 RFC 9298 CONNECT-UDP payload，β profile 嵌於 QUIC DATAGRAM frame；1280-byte UDP cell 內可有多個 G6InnerHeader。
+### ProteusInnerHeader（12-byte inner framing）
+**中文**：Proteus 內層封包標頭
+**所屬層**：Proteus wire format (spec §4.2)
+**首次出現**：[11.5](lessons/part-11-design/11.5-spec-wire-format.md)、深入見 [8.12](lessons/part-8-quic-protocols/8.12-proteus-masque-wire-mapping.md)
+**一句話**：12 byte（type uint8 + flags uint8 + reserved uint16 + seqnum uint64）；γ profile 嵌於 RFC 9298 CONNECT-UDP payload，β profile 嵌於 QUIC DATAGRAM frame；1280-byte UDP cell 內可有多個 ProteusInnerHeader。
 
 ### Quarter Stream ID (RFC 9297)
 **中文**：HTTP Datagram 中的 1/4 stream-ID 編碼
 **所屬層**：MASQUE / HTTP/3 wire
-**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)、[8.12](lessons/part-8-quic-protocols/8.12-g6-masque-wire-mapping.md)
+**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)、[8.12](lessons/part-8-quic-protocols/8.12-proteus-masque-wire-mapping.md)
 **一句話**：H/3 client-initiated bidi stream ID 都是 4k → 除以 4 後 varint 壓更短；HTTP Datagram payload 用此識別所屬 associated stream。

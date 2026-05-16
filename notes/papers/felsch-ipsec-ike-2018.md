@@ -35,7 +35,7 @@ IKE 規格允許多種 authentication method：PSK、RSA signature、RSA encrypt
 - 不能解密過去通訊（只能 impersonate）。
 
 ## How it informs our protocol design
-G6 的決定：
+Proteus 的決定：
 - **絕對禁止 key 跨 protocol / 跨 protocol version reuse**。每個 spec major version 必須有獨立的 KDF context label（類似 TLS 1.3 的 `tls13 ...` HKDF labels）。
 - **PKCS#1 v1.5 全面禁用**。簽章用 EdDSA / Ed25519；KEM 用 X25519/MLKEM-hybrid。
 - **無 RSA-encrypted-nonces 這種「historic curiosity」auth mode**。
@@ -49,4 +49,4 @@ G6 的決定：
 - Bleichenbacher 1998 *Chosen Ciphertext Attacks Against Protocols Based on the RSA Encryption Standard PKCS #1*（[3.4 RSA](../../lessons/part-3-cryptography/3.4-rsa.md) 已讀）
 - Aviram et al. 2016 USENIX Security *DROWN: Breaking TLS Using SSLv2*（同思想：cross-protocol key reuse）
 - Böck et al. 2018 *ROBOT: Return Of Bleichenbacher's Oracle Threat*（PKCS#1 v1.5 復活鬼）
-- [Part 11.5 G6 KDF 設計] 會回頭引用這篇
+- [Part 11.5 Proteus KDF 設計] 會回頭引用這篇

@@ -39,11 +39,11 @@ Prior censorship literature treats the GFW as monolithic. Anecdotal reports from
 - Mechanism for blocklist generation in Henan unknown.
 - Does not address whether HenanFW is run by the province or by a delegated ISP (China Mobile / China Telecom Henan branch).
 
-## How it informs our protocol design (G6)
-- **Threat model must include "regional censor"**, not just national. G6 spec §1.3 capability taxonomy should add C-regional (provincial, with own blocklist, different rules).
-- **Parsing-flaw exploitation is real**: TCP options inclusion is a free defense against parser-fragile censors. G6 over TCP-cover SHOULD include TCP options (timestamps, SACK-permitted) as default — many proxy stacks already do, but document this.
-- **Henan's 10× blocklist size + 35-day churn** suggests "fail-open + aggressive" model. Implication: G6 cover domain selection must avoid SLDs that any provincial censor might temporarily blacklist; rotate or use multi-cover.
-- **Single-packet RST fingerprint** (10-byte specific payload) is the easiest signature to identify a HenanFW drop in client logs — good telemetry hook for G6 reference impl.
+## How it informs our protocol design (Proteus)
+- **Threat model must include "regional censor"**, not just national. Proteus spec §1.3 capability taxonomy should add C-regional (provincial, with own blocklist, different rules).
+- **Parsing-flaw exploitation is real**: TCP options inclusion is a free defense against parser-fragile censors. Proteus over TCP-cover SHOULD include TCP options (timestamps, SACK-permitted) as default — many proxy stacks already do, but document this.
+- **Henan's 10× blocklist size + 35-day churn** suggests "fail-open + aggressive" model. Implication: Proteus cover domain selection must avoid SLDs that any provincial censor might temporarily blacklist; rotate or use multi-cover.
+- **Single-packet RST fingerprint** (10-byte specific payload) is the easiest signature to identify a HenanFW drop in client logs — good telemetry hook for Proteus reference impl.
 
 ## Open questions
 - Are there more provincial firewalls (Xinjiang has historically had stricter controls)?

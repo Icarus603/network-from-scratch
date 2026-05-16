@@ -1,11 +1,11 @@
 (*
-  G6 Handshake — ProVerif model (applied pi-calculus)
+  Proteus Handshake — ProVerif model (applied pi-calculus)
   Version: 0.1.1 (2026-05-16) — rewritten for ProVerif 2.05 syntax compliance.
 
-  Models the v0.0 G6 handshake's crypto layer:
+  Models the v0.0 Proteus handshake's crypto layer:
     Client knows server's long-term static (signature + KEM) public keys
     via cover-domain certificate pinning. Client sends ClientHello with
-    G6 ext 0xfe0d carrying:
+    Proteus ext 0xfe0d carrying:
       - ephemeral X25519 share
       - ML-KEM-768 ciphertext encapsulating to server static KEM pk
       - client_id ciphertext (encrypted to a KDF-derived auth_key)
@@ -36,7 +36,7 @@
     - We DO NOT model padding / shape / RTT — those are out-of-band of
       the secrecy/authentication game ProVerif decides.
 
-  Run with:  proverif G6Handshake.pv
+  Run with:  proverif ProteusHandshake.pv
 *)
 
 (* ---------------- types ---------------- *)
@@ -202,10 +202,10 @@ process
       NOT modelled here; that lives at the QUIC layer and is
       analysed separately (see lesson 4.8 + Cremers et al. 2017).
     - PCS (post-compromise security after compromise) requires the
-      ratchet model in G6Ratchet.spthy (Tamarin).
+      ratchet model in ProteusRatchet.spthy (Tamarin).
     - Replay window via Bloom filter is OUT-OF-SCOPE for symbolic
       verification; we verify injective agreement instead, which is
       the symbolic-model analogue.
     - Side channels & padding shape are out of scope for ProVerif;
-      see assets/formal/G6Padding.psi (PRISM, TBD v0.2).
+      see assets/formal/ProteusPadding.psi (PRISM, TBD v0.2).
 *)

@@ -28,7 +28,7 @@ Tor designed against unobservable-relay traffic correlation. But if attacker obs
 - Closed-world circuit-pair assumption; real-world circuit churn not addressed.
 
 ## How it informs our protocol design
-- **Flow correlation is real and DL-strong** — G6 timing module must include ±jitter to disrupt DeepCorr.
+- **Flow correlation is real and DL-strong** — Proteus timing module must include ±jitter to disrupt DeepCorr.
 - Multipath (TrafficSliver / MASQUE multipath) spreads correlation surface.
 - Defense effective if jitter ≥ 25ms — but at latency cost.
 

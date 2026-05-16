@@ -28,7 +28,7 @@ Mixnet packet formats (Mixmaster, Mixminion) had ad-hoc designs; some had vulner
 
 ## How it informs our protocol design
 - Sphinx packet format is the modern mixnet packet building block.
-- G6 multi-hop mode (if added) should use Sphinx-style packets.
+- Proteus multi-hop mode (if added) should use Sphinx-style packets.
 
 ## References worth following
 - Mixminion (S&P 03)

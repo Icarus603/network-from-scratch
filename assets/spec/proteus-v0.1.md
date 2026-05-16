@@ -1,7 +1,7 @@
-# G6 Protocol Specification v0.1
+# Proteus Protocol Specification v0.1
 
 > **Status**: Internal draft. Authored during course `learn/` Part 11. Not for IETF submission; will be IETF-aligned post Part 12 implementation feedback.
-> **Codename**: G6 (Generation 6 anti-censorship transport).
+> **Codename**: Proteus —— 名取自希臘神話海神 Πρωτεύς（Homer, *Odyssey* IV.385），以能隨意變形避捕著稱。對照本協議在 ML traffic classifier 下隨機 cover-shape，在 GFW blanket port block 下隨機 transport profile（γ/β/α）切換，命名直譯其行為。
 > **Date**: 2026-05-16 (course author timestamp).
 > **License**: see repo LICENSE.
 
@@ -9,7 +9,7 @@
 
 ### 1.1 Purpose
 
-G6 is an anti-censorship transport protocol designed for two simultaneous goals:
+Proteus is an anti-censorship transport protocol designed for two simultaneous goals:
 
 1. **Censorship resistance**: indistinguishable from popular cover protocol traffic at flow-level under SOTA detectors, and indistinguishable from the cover server during active probing.
 2. **High performance**: matching SOTA QUIC-based proxies (Hysteria2, TUIC v5) in goodput, latency, and CPU.
@@ -24,7 +24,7 @@ Detailed threat model in §11. Capabilities C1–C13 are taxonomized; C1–C7, C
 
 ### 1.4 Comparison to existing protocols
 
-| Property | G6 v0.1 | VLESS+REALITY | Hysteria2 | TUIC v5 | WireGuard |
+| Property | Proteus v0.1 | VLESS+REALITY | Hysteria2 | TUIC v5 | WireGuard |
 |---|---|---|---|---|---|
 | Transport | MASQUE/H3-on-QUIC (primary), QUIC, TCP-TLS fallback | TCP-TLS | QUIC | QUIC | UDP |
 | Hybrid PQ | yes | no | no | no | optional |
@@ -42,8 +42,8 @@ All byte sequences are big-endian unless stated otherwise. Variable-length integ
 ## §3. Architecture overview
 
 ```
-+--------+    UDP/443 H3 (with G6 ext in ClientHello)   +-----------------+
-| Client | ----------------------------------------------> | G6 Server (G6S) |
++--------+    UDP/443 H3 (with Proteus ext in ClientHello)   +-----------------+
+| Client | ----------------------------------------------> | Proteus Server (ProteusS) |
 +--------+                                                +-----------------+
                                                                    |
                                                                    | if auth fails
@@ -53,11 +53,11 @@ All byte sequences are big-endian unless stated otherwise. Variable-length integ
                                                             +-------------+
 ```
 
-G6 has three transport mode profiles in priority order:
+Proteus has three transport mode profiles in priority order:
 
-- **Primary** (G6-γ): MASQUE CONNECT-UDP over H3 over QUIC over UDP/443.
-- **Fallback** (G6-β): raw QUIC + REALITY-on-QUIC.
-- **Last resort** (G6-α): TLS 1.3 over TCP/443 + REALITY-on-TCP + inner padding mode.
+- **Primary** (Proteus-γ): MASQUE CONNECT-UDP over H3 over QUIC over UDP/443.
+- **Fallback** (Proteus-β): raw QUIC + REALITY-on-QUIC.
+- **Last resort** (Proteus-α): TLS 1.3 over TCP/443 + REALITY-on-TCP + inner padding mode.
 
 Servers MUST support primary mode. Servers MAY additionally listen for fallback/last-resort modes.
 
@@ -65,13 +65,13 @@ Servers MUST support primary mode. Servers MAY additionally listen for fallback/
 
 Detailed in `lessons/part-11-design/11.5`. Summary:
 
-### §4.1 ClientHello G6 authentication extension
+### §4.1 ClientHello Proteus authentication extension
 
 ```
 extension_type = 0xfe0d
-extension_data = G6AuthExtension (1186 bytes)
+extension_data = ProteusAuthExtension (1186 bytes)
 
-struct G6AuthExtension {
+struct ProteusAuthExtension {
     opaque   client_nonce[16];
     opaque   client_x25519_pub[32];
     opaque   client_mlkem768_ct[1088];
@@ -87,10 +87,10 @@ struct G6AuthExtension {
 
 ### §4.2 Inner packet format
 
-After H3 + MASQUE CONNECT-UDP capsule, inner stream is G6 packets:
+After H3 + MASQUE CONNECT-UDP capsule, inner stream is Proteus packets:
 
 ```
-struct G6InnerHeader {
+struct ProteusInnerHeader {
     uint8   type;        // 0x01=DATA, 0x02=ACK, 0x03=NEW_STREAM, etc.
     uint8   flags;
     uint16  reserved;     // MUST be zero; receiver MUST reject if not
@@ -116,7 +116,7 @@ See lesson 11.6 §2 for full state transition table.
 
 ### §5.2 Key schedule
 
-G6 uses TLS 1.3's HKDF key schedule (RFC 8446 §7.1) with the following modification: the DH input is the concatenation of K_classic = X25519(c_sk, s_pk) and K_pq = ML-KEM-768.Decaps(server_kemsk, client_mlkem768_ct):
+Proteus uses TLS 1.3's HKDF key schedule (RFC 8446 §7.1) with the following modification: the DH input is the concatenation of K_classic = X25519(c_sk, s_pk) and K_pq = ML-KEM-768.Decaps(server_kemsk, client_mlkem768_ct):
 
 ```
 DH_input = K_classic || K_pq         (64 bytes total)
@@ -135,12 +135,12 @@ Trigger: either party sends KEYUPDATE packet (type=0x06) when one of:
 - application-explicit request,
 - received from peer.
 
-Action: `new_secret = HKDF-Expand-Label(old_secret, "g6 ratchet", "", 32)`. KEYUPDATE payload contains `next_epoch` and `transcript_hash_at_connected`.
+Action: `new_secret = HKDF-Expand-Label(old_secret, "proteus ratchet", "", 32)`. KEYUPDATE payload contains `next_epoch` and `transcript_hash_at_connected`.
 
 ## §6. Cryptographic algorithms (fixed)
 
 - **AEAD**: ChaCha20-Poly1305 (RFC 8439, default) OR AES-256-GCM (RFC 5116).
-- **Hash**: SHA-256 (RFC 6234) for TLS 1.3 transcript; BLAKE3 for G6-internal KDF where labelled.
+- **Hash**: SHA-256 (RFC 6234) for TLS 1.3 transcript; BLAKE3 for Proteus-internal KDF where labelled.
 - **ECDH**: X25519 (RFC 7748).
 - **KEM**: ML-KEM-768 (NIST FIPS-203).
 - **Signature** (TLS cert): Ed25519 (RFC 8032). ML-DSA-65 SHALL be added in v0.2.
@@ -174,7 +174,7 @@ Idle (no application data for > 5 seconds) MUST NOT send dummy padding. Applicat
 
 ## §10. Connection migration & multi-path
 
-Connection migration is governed by QUIC (RFC 9000 §9). G6 servers SHOULD set QUIC transport parameter `disable_active_migration = true` (i.e., only peer-initiated NAT rebinding allowed). Multi-path is currently unsupported (deferred to v0.2+ pending IETF QUIC MULTIPATH WG maturation).
+Connection migration is governed by QUIC (RFC 9000 §9). Proteus servers SHOULD set QUIC transport parameter `disable_active_migration = true` (i.e., only peer-initiated NAT rebinding allowed). Multi-path is currently unsupported (deferred to v0.2+ pending IETF QUIC MULTIPATH WG maturation).
 
 ## §11. Security Considerations
 
@@ -208,7 +208,7 @@ Connection migration is governed by QUIC (RFC 9000 §9). G6 servers SHOULD set Q
 
 ## §14. IANA considerations
 
-This document does not require IANA actions at this stage. Future versions targeted for IETF submission will register `0xfe0d` and successor extension type codepoints in the TLS ExtensionType registry, and define an ALPN identifier `g6/0.1` (if needed; v0.1 inherits `h3` ALPN).
+This document does not require IANA actions at this stage. Future versions targeted for IETF submission will register `0xfe0d` and successor extension type codepoints in the TLS ExtensionType registry, and define an ALPN identifier `proteus/0.1` (if needed; v0.1 inherits `h3` ALPN).
 
 ## §15. References
 
@@ -276,4 +276,4 @@ Compared to draft v0.0 (lessons 11.5–11.8):
 
 ---
 
-End of G6 v0.1.
+End of Proteus v0.1.

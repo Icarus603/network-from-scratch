@@ -28,8 +28,8 @@ DF requires 1000 traces/site. For attackers retraining on fresh data (concept dr
 - Timing channel exploited; later Tik-Tok formalizes it.
 
 ## How it informs our protocol design
-- Attacker can deploy with low data → G6 cannot rely on attacker's slow retraining.
-- Timing channel critical; G6 timing module mandatory.
+- Attacker can deploy with low data → Proteus cannot rely on attacker's slow retraining.
+- Timing channel critical; Proteus timing module mandatory.
 
 ## References worth following
 - Sirinam 18 (DF)

@@ -107,17 +107,17 @@ TCP 比 UDP 難很多倍——TCP 必須完成 3-way handshake，且 NAT 對 TCP
 
 ## How it informs our protocol design
 
-對 G6 影響：
+對 Proteus 影響：
 
-1. **G6 baseline 選 client-server 避開 hole punching 複雜度**：本論文 + 後續 20 年 ICE 工程實證——P2P-over-NAT 永遠是 ~85% 成功率 + 10-15% 退路 + 複雜 fallback。**對審查抗性協議**這個複雜度與失敗率不可接受。**P2P 留 v2 evaluate**。
+1. **Proteus baseline 選 client-server 避開 hole punching 複雜度**：本論文 + 後續 20 年 ICE 工程實證——P2P-over-NAT 永遠是 ~85% 成功率 + 10-15% 退路 + 複雜 fallback。**對審查抗性協議**這個複雜度與失敗率不可接受。**P2P 留 v2 evaluate**。
 
-2. **若 G6 v2 走 P2P**：必須完整實作 ICE（**不是簡化版**）——包括 host / srflx / prflx / relayed 4 種 candidate 與所有 connectivity check 邏輯。Pion WebRTC 是 reference 實作。
+2. **若 Proteus v2 走 P2P**：必須完整實作 ICE（**不是簡化版**）——包括 host / srflx / prflx / relayed 4 種 candidate 與所有 connectivity check 邏輯。Pion WebRTC 是 reference 實作。
 
 3. **Symmetric NAT 場景必須 TURN fallback**：~10-30% mobile CGN 用戶屬此類——**沒有 fallback 等於放棄這群人**。
 
-4. **Hole punching 的 timing pattern 是 fingerprint**：simultaneous send 的精確 timing 與 packet size pattern 對 GFW 視角極可識別——**P2P G6 在審查場景的 cover traffic 設計必須隱藏 hole-punch 特徵**。
+4. **Hole punching 的 timing pattern 是 fingerprint**：simultaneous send 的精確 timing 與 packet size pattern 對 GFW 視角極可識別——**P2P Proteus 在審查場景的 cover traffic 設計必須隱藏 hole-punch 特徵**。
 
-5. **Hairpinning 的 G6 場景**：self-hosted G6 server + same-LAN client → 觸發 hairpin。OS 對 hairpin 處理 inconsistent——**client 必須有 LAN fallback**（mDNS 或固定 LAN IP）。
+5. **Hairpinning 的 Proteus 場景**：self-hosted Proteus server + same-LAN client → 觸發 hairpin。OS 對 hairpin 處理 inconsistent——**client 必須有 LAN fallback**（mDNS 或固定 LAN IP）。
 
 ## Open questions
 

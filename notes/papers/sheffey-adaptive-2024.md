@@ -30,7 +30,7 @@ Adversarial WF defenses claim high resistance but typically against static surro
 - Generator-discriminator GANs may have other failure modes not tested.
 
 ## How it informs our protocol design
-- **Adversarial defense without adaptive eval is misleading.** G6 evaluation must include adaptive retraining.
+- **Adversarial defense without adaptive eval is misleading.** Proteus evaluation must include adaptive retraining.
 - Surakav-style synchronized generator is more robust than perturbation-based defenses.
 
 ## Open questions

@@ -68,9 +68,9 @@ flowchart LR
 - 不處理 length-hiding。Length leakage 是另一條 attack surface（compression attacks: CRIME, BREACH）。
 
 ## How it informs our protocol design
-- **G6 record layer 一定 EtM / AEAD**：直接採用 ChaCha20-Poly1305 (RFC 8439) 或 AES-256-GCM。
-- **G6 spec 必須寫 nonce uniqueness invariant**：每 (key, nonce) 對只能用一次；建議 nonce = epoch ‖ counter。
-- **G6 spec 必須證明 IND-CCA2**：用本論文主定理的「IND-CPA + INT-CTXT ⇒ IND-CCA2」reduce 到 ChaCha20 的 PRF security + Poly1305 的 ε-AXU bound。
+- **Proteus record layer 一定 EtM / AEAD**：直接採用 ChaCha20-Poly1305 (RFC 8439) 或 AES-256-GCM。
+- **Proteus spec 必須寫 nonce uniqueness invariant**：每 (key, nonce) 對只能用一次；建議 nonce = epoch ‖ counter。
+- **Proteus spec 必須證明 IND-CCA2**：用本論文主定理的「IND-CPA + INT-CTXT ⇒ IND-CCA2」reduce 到 ChaCha20 的 PRF security + Poly1305 的 ε-AXU bound。
 
 ## Open questions
 - Multi-user multi-instance 下 EtM 的 tight bound？Bellare-Bernstein-Tessaro 2016 仍是當前最強，但 ChaCha20-Poly1305 在 millions of users 下仍 open。

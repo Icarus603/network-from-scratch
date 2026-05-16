@@ -35,7 +35,7 @@
 - 對 OpenVPN 3.x（基於 OpenVPN3 library）也部分適用但作者未全面測試。
 
 ## How it informs our protocol design
-**G6 必須滿足的 design constraints**（每一條都直接來自這篇）：
+**Proteus 必須滿足的 design constraints**（每一條都直接來自這篇）：
 1. **首封 packet 不能有 fixed-pattern byte**——所有 protocol-identifying bits 必須在 AEAD 內。
 2. **packet size sequence 必須是可控的**——day-1 設計 size padding / packet length blending。
 3. **server 對任何 invalid packet 沒有可區分 response**——probe resistance is a hard requirement。

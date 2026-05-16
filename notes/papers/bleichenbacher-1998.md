@@ -65,12 +65,12 @@ Step 3 (converge):
 - 需要 server 端 active oracle；purely passive 對手攻不到。
 
 ## How it informs our protocol design
-- **G6 設計從根本避免任何 server-side oracle**：
+- **Proteus 設計從根本避免任何 server-side oracle**：
   - Record layer 用 AEAD（INT-CTXT，constant-time tag verify）。
   - 解密失敗 → drop packet，**沒有任何錯誤回應給對方**。
   - 握手錯誤 → close connection with generic close_notify，不洩具體錯誤原因。
-- **G6 從不用 RSA encryption**：避免任何 PKCS#1 v1.5 / OAEP misuse 風險。簽章用 Ed25519，KEX 用 X25519。
-- **G6 教訓**：「padding oracle」是任何 protocol 都可能存在的攻擊面，不只 RSA。設計時必須對所有 decryption / validation step 確保「無差異化 error response」。
+- **Proteus 從不用 RSA encryption**：避免任何 PKCS#1 v1.5 / OAEP misuse 風險。簽章用 Ed25519，KEX 用 X25519。
+- **Proteus 教訓**：「padding oracle」是任何 protocol 都可能存在的攻擊面，不只 RSA。設計時必須對所有 decryption / validation step 確保「無差異化 error response」。
 
 ## Open questions
 - 是否存在「constant-time padding check」的 formally verified 實作？libsodium 用 constant-time 比較，但 hardware-level timing 仍 active research。

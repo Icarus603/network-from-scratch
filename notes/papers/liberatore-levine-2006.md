@@ -30,7 +30,7 @@ Hintz 02 demonstrated WF on 5 sites. Does it scale to realistic site count?
 
 ## How it informs our protocol design
 - Establishes leakage scale: 75% on 1000 sites is significant.
-- HTTPS + ordinary VPN ≠ private; G6 must shape sizes.
+- HTTPS + ordinary VPN ≠ private; Proteus must shape sizes.
 
 ## References worth following
 - Hintz 02 — predecessor

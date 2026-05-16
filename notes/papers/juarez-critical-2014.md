@@ -37,12 +37,12 @@ For each, ran experiments showing 20-50 point accuracy drops when assumption rel
 - The "ideal evaluation" is unspecified — left to subsequent SoKs (Khattak 16, Tschantz 16).
 
 ## How it informs our protocol design
-- **G6 evaluation must avoid all four fallacies**:
+- **Proteus evaluation must avoid all four fallacies**:
   - Open-world ≥ 100k unmonitored sites
   - Real-world train/test condition mismatch
   - ≥ 30-day staleness gap
   - Multi-tab realistic browsing
-- The 20-50% accuracy drop in "real world" gives G6 some natural margin — but doesn't relieve G6 of defense duty since 50% real-world is still too high for state adversary.
+- The 20-50% accuracy drop in "real world" gives Proteus some natural margin — but doesn't relieve Proteus of defense duty since 50% real-world is still too high for state adversary.
 
 ## Open questions
 - Quantitative threat-model: what's "acceptable" WF accuracy from the user perspective? (Pulls 20 oracle attacks suggest even 50% is sufficient.)

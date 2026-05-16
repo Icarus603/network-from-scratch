@@ -29,9 +29,9 @@ Probe-resistant proxies (obfs4 with HMAC silence) defeat naive active probing. B
 - Detection vs blocking gap — blocking still has collateral risk.
 
 ## How it informs our protocol design
-- **Silent fallback is insufficient.** G6 must fall back to a real TLS server response (REALITY-style), not silence.
+- **Silent fallback is insufficient.** Proteus must fall back to a real TLS server response (REALITY-style), not silence.
 - The obfs4 design philosophy is officially deprecated by this paper.
-- G6 fallback should be carefully tested against Frolov-style probing.
+- Proteus fallback should be carefully tested against Frolov-style probing.
 
 ## Open questions
 - Larger-scale fallback consistency (how to maintain consistent fallback under load)?

@@ -47,13 +47,13 @@
 - ECDH 不在 attack scope（不同 problem structure）。
 
 ## How it informs our protocol design
-- **G6 硬性決定**:
+- **Proteus 硬性決定**:
   1. **Hard-code curve**: X25519 only (PQ-hybrid Kyber768)；不 negotiable。
   2. **Transcript binding**: transcript hash 必含全 ciphersuite list；任何 negotiation 結果綁進 KDF info。
   3. **Reject downgrade**: client 若見到 unexpected group/cipher，abort connection。
   4. **No EXPORT-grade fallback**: spec 內無 export / weak option（即使為相容性）。
-- **G6 教訓 #1**：「Negotiation flexibility is attack surface」。Hard-code 越少越好。
-- **G6 教訓 #2**：「Common parameter pre-computation」對任何 fixed-group cryptography 是真實威脅。我們選 Curve25519 (Bernstein-derived constants, no national agency influence) 部分 motivation 在此。
+- **Proteus 教訓 #1**：「Negotiation flexibility is attack surface」。Hard-code 越少越好。
+- **Proteus 教訓 #2**：「Common parameter pre-computation」對任何 fixed-group cryptography 是真實威脅。我們選 Curve25519 (Bernstein-derived constants, no national agency influence) 部分 motivation 在此。
 
 ## Open questions
 - Quantum NFS 對 RSA 與 finite-field DH 的精確 cost reduction？

@@ -53,9 +53,9 @@
 
 ## How it informs our protocol design
 
-- 直接 inform G6 server epoll(ET) 配 SO_REUSEPORT 的 architecture
-- 「**interest set persistent、ready set incremental**」是 G6 內部 connection table 設計的心智模型
-- 對比 readiness 跟 completion 模型（io_uring）的差異，是評估 G6 server stack 的根本框架
+- 直接 inform Proteus server epoll(ET) 配 SO_REUSEPORT 的 architecture
+- 「**interest set persistent、ready set incremental**」是 Proteus 內部 connection table 設計的心智模型
+- 對比 readiness 跟 completion 模型（io_uring）的差異，是評估 Proteus server stack 的根本框架
 
 ## Open questions
 

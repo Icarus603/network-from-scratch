@@ -34,10 +34,10 @@ DF (Sirinam 18) used only direction sequence. Defenses like Walkie-Talkie reduce
 - Wang–Goldberg 16 concept-drift concerns still apply.
 
 ## How it informs our protocol design
-- **Timing is a first-class WF channel — G6 must shape timing alongside direction.**
+- **Timing is a first-class WF channel — Proteus must shape timing alongside direction.**
 - Confirms Walkie-Talkie-style supersequence defense is insufficient since it only covers direction.
-- The `log(time)` normalization motivates G6 to use real-system timing patterns rather than synthetic constant rates (constant rates would saturate the log channel and stand out).
-- Establishes Tik-Tok as the WF attacker baseline G6 must beat. DF alone is no longer sufficient evidence.
+- The `log(time)` normalization motivates Proteus to use real-system timing patterns rather than synthetic constant rates (constant rates would saturate the log channel and stand out).
+- Establishes Tik-Tok as the WF attacker baseline Proteus must beat. DF alone is no longer sufficient evidence.
 
 ## Open questions
 - What's the irreducible timing leakage given physical RTT variability? Can RegulaTor envelope close all of it?

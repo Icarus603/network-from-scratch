@@ -33,7 +33,7 @@ Mockingbird requires per-trace iterative optimization (~10s). Not deployable rea
 
 ## How it informs our protocol design
 - **Universal perturbation is the right shape for real-time defense** but requires rotation.
-- G6 could rotate $\delta^*$ periodically (key-derived from session key) — moves attack surface to key compromise.
+- Proteus could rotate $\delta^*$ periodically (key-derived from session key) — moves attack surface to key compromise.
 - Combine universal perturbation with shaping envelope for defense-in-depth.
 
 ## Open questions

@@ -54,25 +54,25 @@
 
 ## How it informs our protocol design
 
-對 G6 的**根本性影響**：
+對 Proteus 的**根本性影響**：
 
 ### 1. **「End」的明確定義**
-- G6 的兩個 endpoint = 用戶 client + 用戶 server（VPS）
+- Proteus 的兩個 endpoint = 用戶 client + 用戶 server（VPS）
 - **GFW、ISP、中繼節點、CDN 都不是 endpoint**
 - 因此：**anti-detection 必須在端點做**，無法 outsource 給任何中間元件
 
 ### 2. **加密 + 認證 拆開**
 - Saltzer 明確指出：通訊系統做加密不能取代 application-layer authentication
-- G6 雖是 transport-layer encryption，**仍須在握手時做端點 authentication**（避免 MITM）
+- Proteus 雖是 transport-layer encryption，**仍須在握手時做端點 authentication**（避免 MITM）
 - 這直接影響 Phase III 11.5 spec 的 handshake 設計
 
 ### 3. **避免「過度承諾」**
-- G6 不該承諾「reliable delivery」——這是 application 該做的事
-- G6 該承諾的是「**unobservable transport**」——這是 application 做不到、必須由我們負責的功能
-- 把 reliable / ordered 等保證下放到 QUIC 層（如果走 QUIC），不要在 G6 protocol 層重做
+- Proteus 不該承諾「reliable delivery」——這是 application 該做的事
+- Proteus 該承諾的是「**unobservable transport**」——這是 application 做不到、必須由我們負責的功能
+- 把 reliable / ordered 等保證下放到 QUIC 層（如果走 QUIC），不要在 Proteus protocol 層重做
 
 ### 4. **「performance hint」的合理使用**
-- G6 內部可以做 reliability enhancement（loss recovery、FEC）作為 perf hint
+- Proteus 內部可以做 reliability enhancement（loss recovery、FEC）作為 perf hint
 - 但**不該假設 application 不做 retry**——application 仍要在 timeout 後 retry
 - 對應 Saltzer 的「low level 是 perf enhancement，不是 correctness substitute」
 
@@ -94,7 +94,7 @@
 論文 §History 與 References 摘出對我們最 relevant：
 
 - **Branstad 1973** Security aspects of computer networks (AIAA) — encryption end-to-end argument 的最早 publicly discussed
-- **Diffie & Hellman 1976** New Directions in Cryptography — 後來成為 G6 的 key exchange 基礎
+- **Diffie & Hellman 1976** New Directions in Cryptography — 後來成為 Proteus 的 key exchange 基礎
 - **Needham & Schroeder 1978** Using encryption for authentication — application-level auth 的開山
 - **Reed 1978 dissertation** Naming and Synchronization in a Decentralized Computer System — fate sharing 理論基礎
 - **Lampson & Sproull 1979** An open operating system for a single-user machine — 「functions should be replaceable」的延伸

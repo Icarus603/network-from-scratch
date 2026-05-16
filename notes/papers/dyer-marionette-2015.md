@@ -29,8 +29,8 @@ FTE (Dyer 13) covers single regex but not full protocol sessions. Real protocols
 
 ## How it informs our protocol design
 - **State-machine paradigm for obfuscation is sound** — Maybenot (Pulls 23) is the modern, narrower-scope successor.
-- Marionette tried to be too ambitious (full protocol mimicry); G6 keeps shaping at lower level (size/timing) and relies on real-protocol tunneling for higher-level conformance.
-- Programmable defenses are reusable infrastructure — G6 should build defenses as Maybenot machines, not hard-coded logic.
+- Marionette tried to be too ambitious (full protocol mimicry); Proteus keeps shaping at lower level (size/timing) and relies on real-protocol tunneling for higher-level conformance.
+- Programmable defenses are reusable infrastructure — Proteus should build defenses as Maybenot machines, not hard-coded logic.
 
 ## Open questions
 - Marionette + REALITY-style real-server fallback hybrid?

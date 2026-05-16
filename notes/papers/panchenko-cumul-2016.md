@@ -33,9 +33,9 @@ Wang 14 hand-crafted features and k-NN don't scale to large datasets; researcher
 - Hand-crafted feature ceiling — DF 18 surpasses.
 
 ## How it informs our protocol design
-- **Cumulative-bytes curve is a top-leakage channel.** G6 must shape this curve to be multi-site indistinguishable.
-- Open-world 100k is the right scale for G6 evaluation.
-- 100-dim CUMUL feature space is the natural domain for Cherubin 17 Bayes-bound KDE estimation; G6 evaluation should use it.
+- **Cumulative-bytes curve is a top-leakage channel.** Proteus must shape this curve to be multi-site indistinguishable.
+- Open-world 100k is the right scale for Proteus evaluation.
+- 100-dim CUMUL feature space is the natural domain for Cherubin 17 Bayes-bound KDE estimation; Proteus evaluation should use it.
 
 ## Open questions
 - Why is 100-dim resampling so effective? What's the right resampling for non-Tor protocols?

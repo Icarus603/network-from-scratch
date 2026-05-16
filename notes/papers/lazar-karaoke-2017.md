@@ -27,8 +27,8 @@ Vuvuzela bottlenecks on single-server shuffle; latency grows with user count. Ka
 - DP noise overhead in cover messages.
 
 ## How it informs our protocol design
-- DP anonymity baseline for messaging-mode G6 if pursued.
-- Anytrust model concept: G6 multi-bridge could use similar threshold trust.
+- DP anonymity baseline for messaging-mode Proteus if pursued.
+- Anytrust model concept: Proteus multi-bridge could use similar threshold trust.
 
 ## References worth following
 - Vuvuzela (SOSP 15) — predecessor

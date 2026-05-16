@@ -35,13 +35,13 @@ DF (Sirinam 18) later achieved 49.7% on Walkie-Talkie — close to the 50% theor
 - Multi-tab user invalidates supersequence.
 
 ## How it informs our protocol design
-- **Supersequence idea is sound but must extend to all leakage channels**, not just direction. G6 supersequence-like pairing must include timing + size envelopes.
-- 50% indistinguishability floor is achievable; G6 should aim for similar 1/N floors with cover loops + decoy generation (Surakav).
-- Half-duplex burst structure is exploitable at the protocol level — G6 can mandate per-burst direction commitment without browser modification (by buffering at G6 client).
+- **Supersequence idea is sound but must extend to all leakage channels**, not just direction. Proteus supersequence-like pairing must include timing + size envelopes.
+- 50% indistinguishability floor is achievable; Proteus should aim for similar 1/N floors with cover loops + decoy generation (Surakav).
+- Half-duplex burst structure is exploitable at the protocol level — Proteus can mandate per-burst direction commitment without browser modification (by buffering at Proteus client).
 
 ## Open questions
 - Can multi-site supersequence (3+ candidates) be made efficient? — open problem; bandwidth overhead becomes superlinear.
-- Application-level support: half-duplex requires browser changes — can G6 enforce it at QUIC layer transparently?
+- Application-level support: half-duplex requires browser changes — can Proteus enforce it at QUIC layer transparently?
 - Adversarial site-pair selection: if attacker chooses test pairs that maximize distinguishability across un-shaped channels, can defender adapt?
 
 ## References worth following

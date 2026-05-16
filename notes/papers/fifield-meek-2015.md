@@ -34,7 +34,7 @@ By 2014 censors (GFW, Iran) routinely block Tor bridges via active probing and D
 ## How it informs our protocol design
 - **Domain fronting is fragile to CDN policy** — never depend on a single CDN provider.
 - The principle (route via permitted host) generalizes — REALITY (Xray) is an evolution that doesn't depend on CDN cooperation.
-- G6 may include domain fronting as optional fallback transport (in environments where Cloudflare/Azure still cooperate).
+- Proteus may include domain fronting as optional fallback transport (in environments where Cloudflare/Azure still cooperate).
 
 ## Open questions
 - Multi-CDN sharding to reduce single-provider risk (Wails et al. proposed).

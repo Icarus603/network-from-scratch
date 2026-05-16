@@ -59,7 +59,7 @@ CRS 數量爆炸（73 個 deployed + academic），但**評估標準各說各話
 4. **Performance Properties section** — 5 個 performance metric 直接套用，加我們特別強調的 high-loss-link goodput（Hysteria2 戰場）。
 5. **Evaluation table** — Phase III 12.11–12.18 評測直接產出本篇 Table 1/Table 2 風格的對比表，與 Hysteria2、TUIC v5、VLESS+REALITY 並排。
 
-**設計座標 G6 vs Table 1/2**：
+**設計座標 Proteus vs Table 1/2**：
 - 我們相對 Active Probing Resistance（SilentKnock, ScrambleSuit）：要 inherit 全部該欄屬性
 - 我們相對 Tunnelling（Freewave）/ Covert Channel（Collage）/ Traffic Manipulation（Khattak et al.）：要在 unobservability 三個 sub-property（Content / Flow / Destination Obfuscation）全勝
 - 我們的劣勢：可能需要在 deniability 部分讓步（換取效能）

@@ -175,7 +175,7 @@ Every lesson MUST follow this structure. The 「研究級補遺」 section is no
 3~10 個必追的 primary source。每個用一行說「為什麼追」+ 「之後在哪一堂精讀」。
 
 ### 5. 我們協議的座標 / 設計取捨
-本堂內容在 G6 設計空間中的位置：哪些選擇仍 open、哪些已被本堂內容收窄、Part 11 設計時哪一節會回頭引用。
+本堂內容在 Proteus 設計空間中的位置：哪些選擇仍 open、哪些已被本堂內容收窄、Part 11 設計時哪一節會回頭引用。
 
 ### 6. 必追資源 / 社群入口
 GFW.report、IETF working group、IACR ePrint subscription、相關 GitHub issue tracker、領域內研究者的個人 blog 等。新手不必立刻讀，建立 awareness 即可。

@@ -47,8 +47,8 @@ fq_codel (Høiland-Jørgensen 2018 RFC 8290) 已解 bufferbloat，但 deployment
 
 ## How it informs our protocol design
 
-- G6 server 不必開 cake（DC link buffer 小，fq_codel + BBR 已足）
-- **G6 client deployment guide 須建議家用 user 在 router 開 cake**：otherwise 客戶端家用 router bufferbloat 拖累 G6 體驗
+- Proteus server 不必開 cake（DC link buffer 小，fq_codel + BBR 已足）
+- **Proteus client deployment guide 須建議家用 user 在 router 開 cake**：otherwise 客戶端家用 router bufferbloat 拖累 Proteus 體驗
 - 對「**抗對手做 bandwidth throttle 攻擊**」的場景，cake 在受害者 router 端可緩解
 
 ## Open questions

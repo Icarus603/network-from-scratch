@@ -29,7 +29,7 @@
 - 後續攻擊（Paterson-Yau 2006、Degabriele-Paterson 2007）走得更遠，但思想脈絡都能追到這篇。
 
 ## How it informs our protocol design
-G6 設計時把這篇當「不要這樣做」清單：
+Proteus 設計時把這篇當「不要這樣做」清單：
 - 不要把 fragmentation 留給 protocol layer 處理（forbid IP fragmentation 之上跑 protocol，或用 PLPMTUD）。
 - 不要讓 ICMP 自由穿過 tunnel（policy decision，不是 protocol-implicit）。
 - 不要 negotiation policy 與 selector 互相耦合。

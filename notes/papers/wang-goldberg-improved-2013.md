@@ -27,7 +27,7 @@ Prior Tor WF inferred cells from TLS records imperfectly. What if attacker had c
 
 ## How it informs our protocol design
 - Even with TLS-record-level observation, cell sequence is reconstructable.
-- G6 must shape both cell-level and record-level structure.
+- Proteus must shape both cell-level and record-level structure.
 
 ## References worth following
 - Wang 14 — successor at full scale

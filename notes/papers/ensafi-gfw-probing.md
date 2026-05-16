@@ -99,23 +99,23 @@ server 端 tcpdump 全部 inbound flow，後續 analysis 區分：
 
 ## How it informs our protocol design
 
-對 G6 的直接影響：
+對 Proteus 的直接影響：
 
-1. **威脅模型必須列入 active probing**：不是「邊緣 case」是 first-class adversary capability。**G6 server 設計階段就要假設「對手可以隨時主動連我」**
+1. **威脅模型必須列入 active probing**：不是「邊緣 case」是 first-class adversary capability。**Proteus server 設計階段就要假設「對手可以隨時主動連我」**
 
 2. **「不留指紋」是 mandatory，不是 nice-to-have**：
-   - **Connection handshake 必須 indistinguishable from normal HTTPS server**（REALITY 設計就是這目的，G6 繼承）
+   - **Connection handshake 必須 indistinguishable from normal HTTPS server**（REALITY 設計就是這目的，Proteus 繼承）
    - **無 user 流量時 server 行為與 nginx/Apache 等真實 server 無法區分**
    - **probe pattern 偵測 + log + 但不改變 response**——若改變 response 就被識別
 
-3. **Passive trigger surface 縮小是 winning condition**：Ensafi 2015 證實 **沒有 trigger 就沒有 probe**。⇒ G6 對抗的優先順序：
+3. **Passive trigger surface 縮小是 winning condition**：Ensafi 2015 證實 **沒有 trigger 就沒有 probe**。⇒ Proteus 對抗的優先順序：
    - **passive obfuscation > active probing 防禦**
    - 若 passive 看起來像 normal HTTPS（不 trigger），probing 自然不發生
    - 這也是 Wu 2023 FEP 之後 [precis](wu-fep-detection.md) entropy-based detection 變主要威脅的原因
 
-4. **Probe 後 blacklist 永久**：意味著「**IP 燒了**」是不可逆——G6 設計必須有 **IP rotation strategy**（多 server IP、可動態替換）+ **client 端離線更新通道**（不能依賴查 DNS 在中國解析，因為解析本身可能被監視）
+4. **Probe 後 blacklist 永久**：意味著「**IP 燒了**」是不可逆——Proteus 設計必須有 **IP rotation strategy**（多 server IP、可動態替換）+ **client 端離線更新通道**（不能依賴查 DNS 在中國解析，因為解析本身可能被監視）
 
-5. **Anti-mimicry stance**：Houmansadr 2013 "Parrot is Dead" 教訓 + Ensafi 2015 證實——**完全 mimic 真實 protocol 必失敗**。G6 走 **cryptographic indistinguishability** 路線：每個 packet 看起來像 uniform random（or like real HTTPS data），**不**試圖偽裝成具體某種 protocol
+5. **Anti-mimicry stance**：Houmansadr 2013 "Parrot is Dead" 教訓 + Ensafi 2015 證實——**完全 mimic 真實 protocol 必失敗**。Proteus 走 **cryptographic indistinguishability** 路線：每個 packet 看起來像 uniform random（or like real HTTPS data），**不**試圖偽裝成具體某種 protocol
 
 ## Open questions
 
@@ -123,7 +123,7 @@ server 端 tcpdump 全部 inbound flow，後續 analysis 區分：
 - **Probe sensor 位置 vs effector 位置**：本文 reverse engineer effector，**sensor 部署位置是什麼**？是否在每個 AS 邊界，是否在 IXP？這部分仍是 partial-knowledge
 - **Probe scheduling 的 ML 化**：GFW probe queue 是否用 ML 排序「最可能命中」的目標優先？目前無公開證據
 - **跨國家 probing infrastructure 比較**：Iran、Russia、Turkmenistan 都有類似機制，**comparative study** 缺乏
-- **G6 對抗 probing 的可證明性**：如何**formally prove**「我的 server 在 probing 下沒有 distinguishable behavior」？目前只有 empirical evidence，**formal indistinguishability proof** 仍 open
+- **Proteus 對抗 probing 的可證明性**：如何**formally prove**「我的 server 在 probing 下沒有 distinguishable behavior」？目前只有 empirical evidence，**formal indistinguishability proof** 仍 open
 - **被 probe 後 server 主動 honeypot**：probe 確認後，server 是否該**主動回應 plausible fake** 誤導 GFW 浪費資源？道德、技術、戰術上都有討論空間
 
 ## References worth following

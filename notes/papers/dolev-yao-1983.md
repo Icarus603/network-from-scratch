@@ -50,10 +50,10 @@ A 能做的 derivation 規則：
 - **No timing**：許多 attack 依賴 timing，Dolev-Yao 抽象掉時間。
 
 ## How it informs our protocol design
-- **G6 形式化驗證用 ProVerif（symbolic）+ CryptoVerif（computational）雙軌**：
+- **Proteus 形式化驗證用 ProVerif（symbolic）+ CryptoVerif（computational）雙軌**：
   - ProVerif：證明 secrecy / authenticity / forward secrecy 在 symbolic model（Part 11.10）。
   - CryptoVerif：證明 IND-CCA2 + EUF-CMA 的 computational reduction（Part 11.11）。
-- **G6 的 implementation 需另外處理 Dolev-Yao 抓不到的攻擊**：
+- **Proteus 的 implementation 需另外處理 Dolev-Yao 抓不到的攻擊**：
   - Constant-time impl（Part 3.13 / Part 12.2）。
   - Side-channel resistance test（Part 12.16）。
   - Fuzzing（Part 12.8）。

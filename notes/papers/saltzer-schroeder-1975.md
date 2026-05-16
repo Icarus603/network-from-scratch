@@ -21,10 +21,10 @@
 - These have survived as the canonical reference list for 50+ years.
 
 ## How it informs our protocol design
-- G6's "silent drop / forward-to-cover" pattern: fail-safe default.
-- G6's spec-public + crypto-standard: open design.
-- G6's per-session ephemeral + KEYUPDATE rotation: least common mechanism + privilege separation across time.
-- G6's BCP-14-strict normative MUST/SHOULD/MAY: complete mediation (explicit verification at every gate).
+- Proteus's "silent drop / forward-to-cover" pattern: fail-safe default.
+- Proteus's spec-public + crypto-standard: open design.
+- Proteus's per-session ephemeral + KEYUPDATE rotation: least common mechanism + privilege separation across time.
+- Proteus's BCP-14-strict normative MUST/SHOULD/MAY: complete mediation (explicit verification at every gate).
 
 ## References worth following
 - NIST SP 800-160 (Systems Security Engineering)

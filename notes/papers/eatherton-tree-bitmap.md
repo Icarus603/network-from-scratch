@@ -109,12 +109,12 @@ while True:
 
 ## How it informs our protocol design
 
-對 G6 主要為**設計範式啟發**：
+對 Proteus 主要為**設計範式啟發**：
 
-1. **Bitmap-based dispatch 是常用工程技巧**：G6 capability negotiation / extension 列表可用 bitmap 編碼，比 TLV-list 緊湊
-2. **Popcount 索引 = O(1) lookup**：若 G6 connection ID space 用 sparse bitmap 表達，popcount 給 dense storage index——記憶體效率
-3. **Bounded operation count 是 production-grade 必要性**：硬體可預期、formally analyzable。**G6 任何 hot path 都應該有 bounded operation count claim**——這是 Phase III 12.4 設計 review 標準
-4. **Incremental update 設計 vs offline build**：LC-trie 偏 build-once，TBM 偏 update-friendly。**G6 不同 component 應該明確選一邊**——例如：session table（update-friendly）vs static config（build-once）
+1. **Bitmap-based dispatch 是常用工程技巧**：Proteus capability negotiation / extension 列表可用 bitmap 編碼，比 TLV-list 緊湊
+2. **Popcount 索引 = O(1) lookup**：若 Proteus connection ID space 用 sparse bitmap 表達，popcount 給 dense storage index——記憶體效率
+3. **Bounded operation count 是 production-grade 必要性**：硬體可預期、formally analyzable。**Proteus 任何 hot path 都應該有 bounded operation count claim**——這是 Phase III 12.4 設計 review 標準
+4. **Incremental update 設計 vs offline build**：LC-trie 偏 build-once，TBM 偏 update-friendly。**Proteus 不同 component 應該明確選一邊**——例如：session table（update-friendly）vs static config（build-once）
 
 ## Open questions
 

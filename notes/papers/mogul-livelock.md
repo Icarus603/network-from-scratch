@@ -69,30 +69,30 @@
 
 ## How it informs our protocol design
 
-對 G6 的**根本性背景知識**：
+對 Proteus 的**根本性背景知識**：
 
-### 1. **G6 server 在高負載下不會 livelock**
+### 1. **Proteus server 在高負載下不會 livelock**
 - Linux NAPI 是 Mogul 思想的 production 實作
-- 我們無需在 G6 application code 處理 livelock——kernel 已解決
+- 我們無需在 Proteus application code 處理 livelock——kernel 已解決
 - **但**：如果用 DPDK / netmap 完全 bypass kernel，要自己負責 polling + quota 設計
 
 ### 2. **Packet rate 是 throughput 上限**
 - Phase III 12.4 設計時要算 packet-per-second 而非 bps
 - 1500 byte packet @ 5 Gbps ≈ 416 Kpps；64 byte packet @ 5 Gbps ≈ 9.7 Mpps（後者極難達到）
-- **協議設計影響 packet rate**：如果 G6 多用小 packet（為 anti-fingerprinting）→ packet rate budget 緊張
+- **協議設計影響 packet rate**：如果 Proteus 多用小 packet（為 anti-fingerprinting）→ packet rate budget 緊張
 
 ### 3. **Mogul 5 技術組合是 modern packet IO 設計的祖譜**
 - DPDK = polling + process-to-completion + no kernel context（完全脫離 interrupt）
 - AF_XDP = NAPI + zero-copy（混合）
 - io_uring = batched syscall + completion model（Mogul "polling thread" 的 syscall API 化）
-- G6 不論選哪個，**都是 Mogul 1997 的後代**
+- Proteus 不論選哪個，**都是 Mogul 1997 的後代**
 
 ### 4. **Cycle-limit feedback 也適用協議內部**
-- 我們 G6 內如果做 inline DPI (anti-fingerprinting evaluation)，應該也有 cycle limit
+- 我們 Proteus 內如果做 inline DPI (anti-fingerprinting evaluation)，應該也有 cycle limit
 - 避免 application-level livelock：太多時間花在分類 → 沒時間 forward
 
 ### 5. **Early drop = anti-DoS**
-- GFW 主動探測或 DDoS 場景下，G6 server 必須 early drop 而非 try to process all
+- GFW 主動探測或 DDoS 場景下，Proteus server 必須 early drop 而非 try to process all
 - nftables / eBPF 在 driver level drop 比 application drop 省 10x CPU
 
 ## Open questions
@@ -125,5 +125,5 @@
 - **與 Han 2012 MegaPipe**：兩個獨立攻擊不同層級——Mogul 解 driver/interrupt 層，MegaPipe 解 socket API 層；兩者組合就是 modern 高效能 server
 - **與 Neugebauer 2018 PCIe**：Mogul 解 CPU side livelock；Neugebauer 揭露 PCIe bus 本身才是現代瓶頸——四篇形成完整的「packet 處理 cost 階梯」
 - **與 Crowcroft 1992 Is Layering Harmful**：Mogul 是 Crowcroft 警告的「strict layering 出 bug」之一具體 case——interrupt prio + queue layering 在高負載下出 bug
-- **直接 inform** Phase III 12.4 G6 資料路徑設計選擇
+- **直接 inform** Phase III 12.4 Proteus 資料路徑設計選擇
 - **直接 inform** Phase III evaluation 對 packet-rate 限制的理解

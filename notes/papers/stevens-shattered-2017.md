@@ -40,10 +40,10 @@
 - 攻擊有 controlled prefix constraint（不能任意挑兩文檔）；Leurent-Peyrin 2020 才解此限制。
 
 ## How it informs our protocol design
-- **G6 絕不用 SHA-1**（已是 industry baseline）。
-- **G6 hash agility 設計**：spec 內定義 hash_id field 與 negotiation 機制；想像 SHA-256 在 2040 年遭遇類似攻擊時的升級路徑。
-- **G6 教訓**：理論破解到實作破解的時間是 12 年（Wang 2005 → SHAttered 2017）。為 G6 spec 中的 256-bit hash 安全聲明，假設「至少 30 年安全」是合理的——但要設計 graceful 升級。
-- **G6 文件級 hash binding（如有 cover document hash）**：必用 SHA-256+ 或 BLAKE2/3。
+- **Proteus 絕不用 SHA-1**（已是 industry baseline）。
+- **Proteus hash agility 設計**：spec 內定義 hash_id field 與 negotiation 機制；想像 SHA-256 在 2040 年遭遇類似攻擊時的升級路徑。
+- **Proteus 教訓**：理論破解到實作破解的時間是 12 年（Wang 2005 → SHAttered 2017）。為 Proteus spec 中的 256-bit hash 安全聲明，假設「至少 30 年安全」是合理的——但要設計 graceful 升級。
+- **Proteus 文件級 hash binding（如有 cover document hash）**：必用 SHA-256+ 或 BLAKE2/3。
 
 ## Open questions
 - 同樣 framework 是否能對 SHA-256 round-reduced 破？至 2026 best 是 46/64-round semi-free-start。

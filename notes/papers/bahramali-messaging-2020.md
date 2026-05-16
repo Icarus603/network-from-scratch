@@ -27,8 +27,8 @@ End-to-end-encrypted messaging is widely deployed. Does it leak user-level activ
 - Doesn't recover message content.
 
 ## How it informs our protocol design
-- G6 packet-level shaping insufficient if inner app traffic is distinct.
-- G6 user might mix in cover traffic at app level if extra privacy needed.
+- Proteus packet-level shaping insufficient if inner app traffic is distinct.
+- Proteus user might mix in cover traffic at app level if extra privacy needed.
 
 ## References worth following
 - AppScanner (Taylor 16) — predecessor

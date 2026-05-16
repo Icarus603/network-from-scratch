@@ -100,7 +100,7 @@ PCIe 過去**沒人嚴肅研究**——「PCIe 是 fast interconnect，當作 fr
 
 ## How it informs our protocol design
 
-對 G6 的**deployment & evaluation 層級**影響：
+對 Proteus 的**deployment & evaluation 層級**影響：
 
 ### 1. **Phase III 12.11 baseline 必須記錄 PCIe / NUMA topology**
 - 只記 "10G NIC" 不夠
@@ -108,17 +108,17 @@ PCIe 過去**沒人嚴肅研究**——「PCIe 是 fast interconnect，當作 fr
 - 否則 reproduce 不出來
 
 ### 2. **Server hardware selection 是 evaluation 一部分**
-- G6 server 跑同一份 binary 在不同 Xeon 上 throughput 可能差 2-5x
+- Proteus server 跑同一份 binary 在不同 Xeon 上 throughput 可能差 2-5x
 - Phase III 12.18 真實對抗測試的境內 VPS 要記錄 CPU 型號
 
 ### 3. **Single-instance 5 Gbps 在 PCIe Gen3 x8 上**
 - 1500B packet @ 5 Gbps ≈ 416 Kpps，PCIe Gen3 x8 沒問題
 - 64B packet @ 5 Gbps ≈ 9.7 Mpps，**這超過 PCIe Gen3 x8 64B 可用頻寬 10 Gbps 對應的理論上限**
-- → G6 small packet 場景如果要達 5 Gbps line rate，**需要 PCIe Gen4 或更新**
+- → Proteus small packet 場景如果要達 5 Gbps line rate，**需要 PCIe Gen4 或更新**
 
 ### 4. **NUMA 強制注意**
-- VPS 上跑 G6，process 必須 pin 到 NIC attached socket
-- `numactl --cpunodebind=0 --membind=0 ./g6-server` 是 baseline 啟動命令
+- VPS 上跑 Proteus，process 必須 pin 到 NIC attached socket
+- `numactl --cpunodebind=0 --membind=0 ./proteus-server` 是 baseline 啟動命令
 - 否則白白損失 5-20% throughput
 
 ### 5. **不要假設 packet rate 限制**
@@ -127,16 +127,16 @@ PCIe 過去**沒人嚴肅研究**——「PCIe 是 fast interconnect，當作 fr
 - → packet rate 可能成為 anti-fingerprinting 維度
 
 ### 6. **CXL / PCIe Gen5 是 5 年 deployment 變數**
-- G6 spec 應該 future-proof：不假設 packet/buffer 一定能 fit in PCIe DMA
+- Proteus spec 應該 future-proof：不假設 packet/buffer 一定能 fit in PCIe DMA
 - Spec 設計時保留「per-flow buffer size 可調」的 knob
 
 ## Open questions
 
 - **PCIe Gen5 + CXL 下 PCIe 還是 bottleneck 嗎**？Gen5 是 Gen3 的 4x；CXL allows coherent shared cache 跟 NIC——這兩個會徹底改變 host-NIC 互動 model
 - **SmartNIC FPGA 內部 PCIe** vs **host PCIe**：programmable NIC 內部也有 PCIe（chiplet level）；論文沒分析這層
-- **AI accelerator interconnect**：GPU/TPU via NVLink / TPU mesh 跟 PCIe 哪邊更貼近 G6 服務端架構？
-- **多 PCIe device 競爭**：G6 server 同時有 NIC + NVMe SSD + GPU，PCIe root complex 怎麼分配 bandwidth？
-- **PCIe security**：DMA attack（Thunderclap 2019 等）—— PCIe 信任 model 對 G6 server hardening 有意義嗎？
+- **AI accelerator interconnect**：GPU/TPU via NVLink / TPU mesh 跟 PCIe 哪邊更貼近 Proteus 服務端架構？
+- **多 PCIe device 競爭**：Proteus server 同時有 NIC + NVMe SSD + GPU，PCIe root complex 怎麼分配 bandwidth？
+- **PCIe security**：DMA attack（Thunderclap 2019 等）—— PCIe 信任 model 對 Proteus server hardening 有意義嗎？
 
 ## References worth following
 
@@ -162,5 +162,5 @@ PCIe 過去**沒人嚴肅研究**——「PCIe 是 fast interconnect，當作 fr
 - **與 Han 2012 MegaPipe**：MegaPipe 解 socket API；Neugebauer 解硬體互連——兩層獨立 bottleneck 都要處理
 - **與 Saltzer 1984 End-to-End**：PCIe 是 host 內部 e2e 路徑的一段——middle box (PCIe root complex) 都會引入 latency variance
 - **直接 inform** Phase III 12.11 baseline evaluation 必須記錄 PCIe + NUMA topology
-- **直接 inform** Phase III 12.4 G6 server CPU pinning + NUMA-aware deployment
+- **直接 inform** Phase III 12.4 Proteus server CPU pinning + NUMA-aware deployment
 - **直接 inform** Phase III 12.18 真實對抗測試 hardware reporting standards

@@ -74,10 +74,10 @@ Round R applied to state A[5][5][64]:
 - 部分硬體加速指令 (Intel SHA Extensions) 只支援 SHA-1/2，不支援 SHA-3。
 
 ## How it informs our protocol design
-- **G6 future-proof option**：spec 預留 hash_id field 支援 SHA-3 升級；hash agility 重要。
-- **G6 cover-traffic padding 用 SHAKE128**：任意長 PRG-style output 適合產生 plausible-looking padding。
-- **G6 不 default SHA-3**：軟體效能 + library 普及度 + TLS 1.3 互通 三因素仍偏 SHA-256。
-- **G6 設計取捨**：若 future PQ 主導讓 hash-agnostic 重要，會 migrate 到 SHA-3 / SHAKE。
+- **Proteus future-proof option**：spec 預留 hash_id field 支援 SHA-3 升級；hash agility 重要。
+- **Proteus cover-traffic padding 用 SHAKE128**：任意長 PRG-style output 適合產生 plausible-looking padding。
+- **Proteus 不 default SHA-3**：軟體效能 + library 普及度 + TLS 1.3 互通 三因素仍偏 SHA-256。
+- **Proteus 設計取捨**：若 future PQ 主導讓 hash-agnostic 重要，會 migrate 到 SHA-3 / SHAKE。
 
 ## Open questions
 - Quantum cryptanalysis of Keccak-f[1600]：BHT 量子 collision 達 2^128 操作；對 SHA3-256 仍提供 ~85-bit quantum collision security。是否 sufficient？

@@ -78,13 +78,13 @@ check S · B == R + k · A
 ## Limitations / what they don't solve
 - Quantum-vulnerable (Shor)。需 PQ hybrid。
 - **Cofactor 8 issue**: 嚴格上 (M, σ) 對唯一 modulo cofactor，cofactor multiplier 不同 byte 表示同 abstract sig。Ed25519 spec 用 canonical encoding 防 trivially malleable bytes，但 protocol designer 仍須注意（CCTV-style protocol 用 Ristretto 更乾淨）。
-- **No identity protection**: pk 在 sig 中可被 derive；G6 在 handshake 用 SIGMA-I 結構 encrypt pk。
+- **No identity protection**: pk 在 sig 中可被 derive；Proteus 在 handshake 用 SIGMA-I 結構 encrypt pk。
 
 ## How it informs our protocol design
-- **G6 簽章 = Ed25519**：deterministic、sUF-CMA、small、fast。
-- **G6 hybrid with ML-DSA-65 (Dilithium)**: PQ 過渡。
-- **G6 transcript signing**: sign hash of (sk side handshake transcript)，按 SIGMA-I 結構。
-- **G6 不依賴 RNG for signing**：EdDSA deterministic → reduce one RNG dependency。
+- **Proteus 簽章 = Ed25519**：deterministic、sUF-CMA、small、fast。
+- **Proteus hybrid with ML-DSA-65 (Dilithium)**: PQ 過渡。
+- **Proteus transcript signing**: sign hash of (sk side handshake transcript)，按 SIGMA-I 結構。
+- **Proteus 不依賴 RNG for signing**：EdDSA deterministic → reduce one RNG dependency。
 
 ## Open questions
 - Multi-user EdDSA tight bound (Bellare-Davis-Günther 2020 framework) 仍 evolving。

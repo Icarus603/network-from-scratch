@@ -29,7 +29,7 @@ DF/Var-CNN need many samples per site. For attacker adapting to new sites or con
 - Site representation can drift; periodic refresh needed.
 
 ## How it informs our protocol design
-- Adversary can quickly expand to new monitored sites — G6 cannot assume "obscure sites" are safe.
+- Adversary can quickly expand to new monitored sites — Proteus cannot assume "obscure sites" are safe.
 - Concept-drift mitigation via cheap reference re-collection.
 
 ## References worth following

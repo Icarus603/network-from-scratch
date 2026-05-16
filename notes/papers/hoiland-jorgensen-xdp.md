@@ -51,11 +51,11 @@
 
 ## How it informs our protocol design
 
-- **G6 server 必開 XDP-based DDoS 防線**（SYN flood / rate limit）
-- **TC egress + ring buffer** 量 G6 自家出口流量特徵，驗證抗指紋
+- **Proteus server 必開 XDP-based DDoS 防線**（SYN flood / rate limit）
+- **TC egress + ring buffer** 量 Proteus 自家出口流量特徵，驗證抗指紋
 - **AF_XDP 留作 future**：io_uring 已夠，AF_XDP 是極致 mode
 - **VPS 部署 guide 須列 supported NIC driver**（virtio-net 5.5+ OK，消費卡某些不行）
-- 對手（GFW）能力評估：對手用 XDP 抽特徵 → G6 必須對 line rate adversary robust
+- 對手（GFW）能力評估：對手用 XDP 抽特徵 → Proteus 必須對 line rate adversary robust
 
 ## Open questions
 

@@ -30,8 +30,8 @@
 - No analysis of cover traffic — that came later.
 
 ## How it informs our protocol design
-- **Onion-encryption pattern is a fundamental tool** — G6 may use 1-hop trust by default but support multi-hop optional.
-- The "batched shuffle" is incompatible with low-latency web — G6 uses encrypted point-to-point instead.
+- **Onion-encryption pattern is a fundamental tool** — Proteus may use 1-hop trust by default but support multi-hop optional.
+- The "batched shuffle" is incompatible with low-latency web — Proteus uses encrypted point-to-point instead.
 - Conceptual: every CRS designer should know this paper.
 
 ## Open questions

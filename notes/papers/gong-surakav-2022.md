@@ -36,8 +36,8 @@ Adversarial-perturbation defenses (Mockingbird, BLANKET) fail to adaptive attack
 - Per-class generator may be needed for different traffic types.
 
 ## How it informs our protocol design
-- **Surakav-style synchronized generator is the modern SOTA shape defense.** G6 should adopt the concept with key-derived synchronization.
-- 70% overhead is the price of GAN-based defense — G6 should aim to reduce via combination with cheaper layers (FRONT, RegulaTor envelope).
+- **Surakav-style synchronized generator is the modern SOTA shape defense.** Proteus should adopt the concept with key-derived synchronization.
+- 70% overhead is the price of GAN-based defense — Proteus should aim to reduce via combination with cheaper layers (FRONT, RegulaTor envelope).
 - Demonstrates value of "indistinguishable from realistic trace" target rather than "minimize attacker accuracy".
 
 ## Open questions

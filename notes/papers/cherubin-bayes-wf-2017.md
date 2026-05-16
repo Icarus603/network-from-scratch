@@ -31,8 +31,8 @@ Apply Smith 09 QIF + Bayes-optimal classifier theory to WF:
 - Only single-visit; doesn't compose tightly across multiple user visits.
 
 ## How it informs our protocol design
-- **G6 evaluation must report $\hat{\text{acc}}^*$** alongside specific-attack accuracies. This is the "classifier-agnostic" headline number.
-- Allows G6 to claim "no attack can exceed X%" with statistical backing.
+- **Proteus evaluation must report $\hat{\text{acc}}^*$** alongside specific-attack accuracies. This is the "classifier-agnostic" headline number.
+- Allows Proteus to claim "no attack can exceed X%" with statistical backing.
 - Suggests choice of feature representation (CUMUL space) for evaluation simulator.
 - Pairs with QIF g-leakage table (Smith 09) for richer reporting.
 

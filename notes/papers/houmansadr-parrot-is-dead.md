@@ -83,9 +83,9 @@
 
 ## How it informs our protocol design
 
-**對 G6 設計的根本影響**——本篇是「為什麼我們不能走 mimicry 路線」的學理判決：
+**對 Proteus 設計的根本影響**——本篇是「為什麼我們不能走 mimicry 路線」的學理判決：
 
-### 1. **G6 不能走 mimicry**
+### 1. **Proteus 不能走 mimicry**
 
 確認本門課協議目標的設計約束：
 - ❌ 不模擬 Skype / WhatsApp / Zoom 等具體應用（會撞 parrot 死路）
@@ -95,9 +95,9 @@
 
 ### 2. **設計必須 enumerate 所有 observable 維度**
 
-把本篇 §V 的 mimicry requirements 改寫成 **G6 的「不暴露 observable」清單**：
+把本篇 §V 的 mimicry requirements 改寫成 **Proteus 的「不暴露 observable」清單**：
 
-| 本篇 mimicry requirement | G6 對應 design requirement |
+| 本篇 mimicry requirement | Proteus 對應 design requirement |
 |---|---|
 | Correct | 真實 TLS 1.3 handshake，行為完全合規 |
 | SideProtocols | 處理 SNI extension lookup, OCSP stapling 等 TLS side info |
@@ -117,7 +117,7 @@
 ### 3. **Active probing 是 first-class threat**
 
 本篇 Table II 證明即使 hypothetically fix 所有 passive attack，**active probing 仍能 break**。所以：
-- G6 spec 必須包含 **active probing resistance**（對應 Khattak 2016 framework 的 Active Probing Resistance scheme）
+- Proteus spec 必須包含 **active probing resistance**（對應 Khattak 2016 framework 的 Active Probing Resistance scheme）
 - REALITY 的「**借用真實大網站握手 + fallback 給 real server**」就是對 active probing 的標準回應——本門課要繼承並強化
 
 ### 4. **「Three Researchers, Five Conjectures」**警告

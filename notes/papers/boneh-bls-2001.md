@@ -76,11 +76,11 @@ verify: e(σ_agg, P_2) == e(H, pk_agg)    ✓
 - **Quantum-vulnerable**：Shor 對 ECDLP 可破，pairing-based 同樣脆弱。
 
 ## How it informs our protocol design
-- **G6 不直接用 BLS**：理由——
+- **Proteus 不直接用 BLS**：理由——
   - Pairing computation overhead 對單 client-server proxy 不需要。
-  - G6 不是 BFT consensus，沒 aggregation 需求。
-- **G6 借鑑 BLS aggregation 概念**：未來若 G6 加 group mode (multi-server failover, threshold backup key)，BLS 是候選。
-- **G6 對 BLS-based PKI 兼容**：若未來 cert chain 用 BLS，G6 需 BLS verify support。
+  - Proteus 不是 BFT consensus，沒 aggregation 需求。
+- **Proteus 借鑑 BLS aggregation 概念**：未來若 Proteus 加 group mode (multi-server failover, threshold backup key)，BLS 是候選。
+- **Proteus 對 BLS-based PKI 兼容**：若未來 cert chain 用 BLS，Proteus 需 BLS verify support。
 
 ## Open questions
 - **Post-quantum BLS-equivalent**: 仍 open. Lattice-based aggregatable signature 是 active research。

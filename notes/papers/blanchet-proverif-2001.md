@@ -3,7 +3,7 @@
 **Authors**: Bruno Blanchet
 **Read on**: 2026-05-14 (in lesson 3.15)
 **Status**: abstract-only（INRIA mirror Cloudflare 阻擋；引用內容綜合自 ProVerif manual + Blanchet's homepage + 訓練資料）
-**One-line**: ProVerif 工具的 origin paper——把 cryptographic protocol 翻譯成 Horn clauses 用 SLD resolution 自動找 attack 或證 secrecy；20+ 年來 IETF spec (TLS 1.3, Noise, MLS) 共同進化的主要 verification tool；G6 必用。
+**One-line**: ProVerif 工具的 origin paper——把 cryptographic protocol 翻譯成 Horn clauses 用 SLD resolution 自動找 attack 或證 secrecy；20+ 年來 IETF spec (TLS 1.3, Noise, MLS) 共同進化的主要 verification tool；Proteus 必用。
 
 ## Problem
 1990 年代 protocol verification 主流是 model checker (FDR for Lowe's Needham-Schroeder 1995)。但 model checker 對 unbounded sessions / unbounded fresh nonces 處理 poor. Blanchet 想：能不能用 Prolog-style logical inference 處理 unbounded?
@@ -67,15 +67,15 @@ att(c).                       (* attacker knows channel name *)
 - **Equational theory limit**: 某些 advanced primitive (pairing, BLS aggregation) 較難 model。
 
 ## How it informs our protocol design
-- **G6 必用 ProVerif**: Phase III 11.10 為 G6 IK variant + PSK + ratchet 寫 ProVerif model。
-- **G6 spec design 與 ProVerif co-evolve**: 若 spec 改變 must rerun verification。
-- **G6 properties to verify**:
+- **Proteus 必用 ProVerif**: Phase III 11.10 為 Proteus IK variant + PSK + ratchet 寫 ProVerif model。
+- **Proteus spec design 與 ProVerif co-evolve**: 若 spec 改變 must rerun verification。
+- **Proteus properties to verify**:
   - Secrecy of session keys (各 layer)。
   - Mutual authentication。
   - KCI / UKS resistance。
   - Forward secrecy。
   - Replay resistance。
-- **G6 教訓**: design 階段就要把 protocol 寫成可形式化 form (Noise pattern 啟發 mechanical translation)。
+- **Proteus 教訓**: design 階段就要把 protocol 寫成可形式化 form (Noise pattern 啟發 mechanical translation)。
 
 ## Open questions
 - **Termination guarantees for complex protocols**: 仍 active research。

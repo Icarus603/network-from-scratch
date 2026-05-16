@@ -32,7 +32,7 @@ DF (Sirinam 18) defeated all then-existing low-overhead defenses. Need a defense
 ## How it informs our protocol design
 - **Adversarial perturbation is a useful auxiliary technique but not a primary defense.** Adaptive attackers recover from transfer-perturbations.
 - Suggests value of randomizing perturbation parameters frequently (key rotation analogue).
-- Important baseline: G6 must beat Mockingbird in BOTH offline and adaptive-attacker settings.
+- Important baseline: Proteus must beat Mockingbird in BOTH offline and adaptive-attacker settings.
 
 ## Open questions
 - Universal (not per-trace) adversarial perturbation (Nasr 21 BLANKET pursued).

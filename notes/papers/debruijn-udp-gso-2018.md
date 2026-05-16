@@ -35,7 +35,7 @@ UDP-based protocols（DNS、QUIC、Google QUIC、RTP、custom 之 game/VoIP tran
 - UDP_SEGMENT 不會自動帶 pacing；burst 64 packets 可能 overrun NIC TX ring 或下游 buffer。要配 `SO_TXTIME` + `sch_fq`（EDT model）才能 production 用。
 
 ## How it informs our protocol design
-- G6 server 為什麼 mandate Linux 5.10+ 的源頭：4.18 GSO，5.0 GRO，5.10 IPv6 對等。
+- Proteus server 為什麼 mandate Linux 5.10+ 的源頭：4.18 GSO，5.0 GRO，5.10 IPv6 對等。
 - application-layer record size cap 設為 16×MTU（~19 KB），充分利用 GSO 但留 batching 餘裕。
 - pacing 要走 EDT model（見 LWN-752184），不能裸用 GSO burst。
 - evaluation harness 必須能切換「GSO on/off」做對照，不然 perf numbers 不可解讀。

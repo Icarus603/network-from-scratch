@@ -31,9 +31,9 @@ Tor pluggable transports, Shadowsocks, Lantern etc. use Go/Python TLS libraries 
 - Server-side fingerprinting (ServerHello) also possible; uTLS doesn't help defenders running TLS server.
 
 ## How it informs our protocol design
-- **uTLS is mandatory for G6 client.** No exceptions. Direct Go/Rust crypto/tls usage betrays G6 identity.
-- G6 must subscribe to a "uTLS profile sync" workflow — when Chrome updates, G6 client updates too.
-- Server-side TLS still uniquely identifiable; G6 server should leverage REALITY-style passing of real TLS server's responses.
+- **uTLS is mandatory for Proteus client.** No exceptions. Direct Go/Rust crypto/tls usage betrays Proteus identity.
+- Proteus must subscribe to a "uTLS profile sync" workflow — when Chrome updates, Proteus client updates too.
+- Server-side TLS still uniquely identifiable; Proteus server should leverage REALITY-style passing of real TLS server's responses.
 
 ## Open questions
 - Automated uTLS profile derivation from live traffic dumps?

@@ -51,9 +51,9 @@ K_session = KDF(g^ab, "session")
 - PSK-only 模式（無 DH）需要另外設計（Noise NK / NN）。
 
 ## How it informs our protocol design
-- **G6 握手用 SIGMA-I 結構**：ephemeral X25519 + Ed25519 簽 DH share pair + HMAC bind identity + identity protection via early-derived encryption key。
-- **G6 transcript 必須包含 ciphersuite list**：防 downgrade（Logjam 2015 的 lesson）。
-- **G6 spec 證明採用 CK^+ model**：直接 reference SIGMA security 證明。
+- **Proteus 握手用 SIGMA-I 結構**：ephemeral X25519 + Ed25519 簽 DH share pair + HMAC bind identity + identity protection via early-derived encryption key。
+- **Proteus transcript 必須包含 ciphersuite list**：防 downgrade（Logjam 2015 的 lesson）。
+- **Proteus spec 證明採用 CK^+ model**：直接 reference SIGMA security 證明。
 
 ## Open questions
 - SIGMA 在 PQ-hybrid 下的精確 security model 仍在收斂（Bos 等 2023）。

@@ -33,8 +33,8 @@
 - Recommends mitigations: forward to real-server fallback, mimic popular-protocol response — direct intellectual ancestor of REALITY.
 
 ## How it informs our protocol design
-- G6's REALITY-style fallback (cover forward on auth fail) directly addresses Leak #1.
-- G6 spec §11.10 enumerates all 4 leaks and corresponding mitigations.
+- Proteus's REALITY-style fallback (cover forward on auth fail) directly addresses Leak #1.
+- Proteus spec §11.10 enumerates all 4 leaks and corresponding mitigations.
 - Forward must complete with < 1ms p99 RTT inflation (spec §7) to defeat timing-based leak (#3, #4).
 - Server OS tuning must match cover server's OS (Linux + standard tuning) to defeat (#2).
 

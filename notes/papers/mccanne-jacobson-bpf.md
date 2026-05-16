@@ -47,7 +47,7 @@
 ## How it informs our protocol design
 
 - 設計哲學：**「kernel 內運行 user 提交的 small program」是極強的 abstraction**
-- 直接 inform 我們的 G6 自我量測：用 BPF 在 kernel inline measure 出口流量特徵
+- 直接 inform 我們的 Proteus 自我量測：用 BPF 在 kernel inline measure 出口流量特徵
 - 對手（GFW）的 inspection 工具也是 BPF 演化路徑——理解 BPF 才能 reason about GFW capability
 
 ## Open questions（vs 後續演化）

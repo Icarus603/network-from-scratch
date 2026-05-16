@@ -45,9 +45,9 @@
 
 ## How it informs our protocol design
 
-- G6 macOS / iOS client 用 kqueue 是必然選擇（透過 GCD `dispatch_source_t` 包一層）
-- 統一 event source 設計哲學影響 G6 內部 event loop 抽象（fd / timer / cancel signal 一套 API）
-- 對比 epoll 缺陷 → G6 不應假設 epoll 的弱抽象，runtime 抽象層自己統一
+- Proteus macOS / iOS client 用 kqueue 是必然選擇（透過 GCD `dispatch_source_t` 包一層）
+- 統一 event source 設計哲學影響 Proteus 內部 event loop 抽象（fd / timer / cancel signal 一套 API）
+- 對比 epoll 缺陷 → Proteus 不應假設 epoll 的弱抽象，runtime 抽象層自己統一
 
 ## Open questions
 

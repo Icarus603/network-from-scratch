@@ -33,9 +33,9 @@ By 2012 several padding defenses claimed to defeat WF: pad-to-MTU, pad-to-unifor
 - BuFLO's latency overhead makes it unusable for interactive web.
 
 ## How it informs our protocol design
-- **G6 should publish a "Peek-a-Boo style" sanity test**: run NB / SVM on G6 traces and verify the simple attacks fail. If they don't, the defense isn't even at 2012 bar.
+- **Proteus should publish a "Peek-a-Boo style" sanity test**: run NB / SVM on Proteus traces and verify the simple attacks fail. If they don't, the defense isn't even at 2012 bar.
 - Demonstrates the importance of **defense-in-depth across feature channels** — no single-channel padding suffices.
-- BuFLO's 200% overhead provides the upper bound; G6 should be much cheaper.
+- BuFLO's 200% overhead provides the upper bound; Proteus should be much cheaper.
 
 ## Open questions
 - Was the pessimism justified? Modern Surakav (Gong 22) achieves Tamaraw-level defense at ~70% overhead. Not "low" but much better.

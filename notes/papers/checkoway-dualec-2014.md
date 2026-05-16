@@ -58,11 +58,11 @@ If Q = c · P with attacker knows c:
 - 後續 ScreenOS 災難證明: 即使官方 backdoor 持有者控管，**也可被別人替換**。
 
 ## How it informs our protocol design
-- **G6 不用 NIST P-curves**: 部分動機就是 Dual_EC 事件後對 NIST-pushed constants 的不信任。用 Curve25519 (Bernstein 公開 derivation)。
-- **G6 RNG 必須**: no magic constants; 用 OS getrandom() not custom DRBG with embedded constants。
-- **G6 spec 內 「nothing-up-my-sleeve」principle**: 任何 spec 中的 constant 必須 derivable 從 public process (SHA-256 of "G6 v1 nonce 1" 等)。
-- **G6 教訓 #1**: 「Trust but verify」對 standards bodies 同樣適用。NIST 不是 immune to compromise。
-- **G6 教訓 #2**: PQ migration 過程必須 fully transparent — 否則重蹈 Dual_EC 覆轍。
+- **Proteus 不用 NIST P-curves**: 部分動機就是 Dual_EC 事件後對 NIST-pushed constants 的不信任。用 Curve25519 (Bernstein 公開 derivation)。
+- **Proteus RNG 必須**: no magic constants; 用 OS getrandom() not custom DRBG with embedded constants。
+- **Proteus spec 內 「nothing-up-my-sleeve」principle**: 任何 spec 中的 constant 必須 derivable 從 public process (SHA-256 of "Proteus v1 nonce 1" 等)。
+- **Proteus 教訓 #1**: 「Trust but verify」對 standards bodies 同樣適用。NIST 不是 immune to compromise。
+- **Proteus 教訓 #2**: PQ migration 過程必須 fully transparent — 否則重蹈 Dual_EC 覆轍。
 
 ## Open questions
 - **NIST P-curves backdoor possibility**: 雖無證據 backdoor，但 P-curves seeds (SHA-1 of unexplained "Wsigma" string) source 仍 controversial。

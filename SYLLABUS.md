@@ -207,7 +207,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 - **論文**：Fifield 2015 PoPETs (domain fronting) / Calder 2015 IMC (anycast CDN) / Calder 2013 IMC (Google infra) / Calder 2018 NSDI (Odin) / Wei-Heidemann 2020 CoNEXT / Bocovich-Goldberg 2016 CCS Slitheen / 2019 CCS Conjure
 
 ### 1.17 把所有東西串起來：「點開 google.com 的 50 ms」 ✅
-真實 packet capture 的 frame-by-frame 講解：從 ARP/DHCP 到 DoH 到 QUIC+TLS 1.3+ECH 到 HTTP/3 到渲染；對應 G6 client boot sequence 的 architectural reference。
+真實 packet capture 的 frame-by-frame 講解：從 ARP/DHCP 到 DoH 到 QUIC+TLS 1.3+ECH 到 HTTP/3 到渲染；對應 Proteus client boot sequence 的 architectural reference。
 
 ### 1.18 Linux 網路 stack 巡禮 ✅
 - skbuff 結構、netfilter hooks、qdisc、TC
@@ -385,7 +385,7 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 **這是 Phase I 密碼學的期末考。**
 
 ### 3.17 進階補遺：超越 SOTA 必備的密碼學深水區 ✅
-Committing AEAD (Bellare-Hoang 2022)、KEMTLS (Schwabe-Stebila-Wiggers 2020)、Hybrid KEM combiner 形式化證明 (Bindel 2019)、Signal Double Ratchet 完整解剖、Domain separation discipline、Robust AE / Beyond-Birthday-Bound。**G6 真正能宣稱「超越 SOTA」的 7 個 differentiator 的密碼學基礎**。
+Committing AEAD (Bellare-Hoang 2022)、KEMTLS (Schwabe-Stebila-Wiggers 2020)、Hybrid KEM combiner 形式化證明 (Bindel 2019)、Signal Double Ratchet 完整解剖、Domain separation discipline、Robust AE / Beyond-Birthday-Bound。**Proteus 真正能宣稱「超越 SOTA」的 7 個 differentiator 的密碼學基礎**。
 
 ---
 
@@ -494,7 +494,7 @@ Committing AEAD (Bellare-Hoang 2022)、KEMTLS (Schwabe-Stebila-Wiggers 2020)、H
 - Wu-FEP-class adversary 的 game-based formalization
 - Total variation distance、Pinsker 不等式
 - PRISM/SMC bound 餵 CryptoVerif 作 user-supplied axiom
-- 此堂直接 attack G6（ε-indistinguishability from cover traffic against ML classifier）
+- 此堂直接 attack Proteus（ε-indistinguishability from cover traffic against ML classifier）
 
 ### 5.11 Composition + Implementation-level FM ✅
 - Canetti UC framework + 為何 TLS 1.3 用 weaker composition
@@ -658,7 +658,7 @@ TCP-over-TCP、TCP-over-everything 的問題。
 ### 8.11 BBRv3 模式與 packet pacing：spec §6 的硬性根據 ✅
 （新增於 2026-05-16 audit）BBRv3 四 mode、quic-go pacer、Linux SO_TXTIME + sch_fq EDT pacing、ProbeRTT 期間 padding pause；Brutal CC 對照。
 
-### 8.12 G6 在 MASQUE 上的 wire-format mapping：實作藍圖 ✅
+### 8.12 Proteus 在 MASQUE 上的 wire-format mapping：實作藍圖 ✅
 （新增於 2026-05-16 audit）spec §4 wire format 怎麼塞進 RFC 9297 HTTP Datagram / RFC 9298 CONNECT-UDP / 1280-byte cell；γ/β/α 三 profile 的位元順序。
 
 ---
@@ -717,7 +717,7 @@ nDPI 識別器的部署與規則寫法。
 作為協議設計者，威脅模型要包含哪些對手能力。
 
 ### 9.15 2025–2026 GFW 重大事件與區域審查浮現 ✅
-（新增於 2026-05-16 audit）Wu et al. *A Wall Behind A Wall* S&P 2025（Henan firewall）、2025-08-20 unconditional TCP/443 RST 事件、Russian TSPU 2025-2026 15-20 KB freeze 與 CIDR whitelist、Zohaib disclosure 後 GFW 反應時程；對 G6 capability table 增 C14（regional）+ C15（transient blanket）。
+（新增於 2026-05-16 audit）Wu et al. *A Wall Behind A Wall* S&P 2025（Henan firewall）、2025-08-20 unconditional TCP/443 RST 事件、Russian TSPU 2025-2026 15-20 KB freeze 與 CIDR whitelist、Zohaib disclosure 後 GFW 反應時程；對 Proteus capability table 增 C14（regional）+ C15（transient blanket）。
 
 ---
 
@@ -761,7 +761,7 @@ Chaum mixnet → Mixminion → Sphinx → Loopix → Vuvuzela / Karaoke。select
 Khattak 16 / Tschantz 16 SoK 6-軸 taxonomy + 4 mandate；Pulls 20 oracle、Cherubin 22 online、Wails 24 deployment。
 
 ### 10.11 威脅 → 防禦對應表 ✅
-完整 mapping：wire / connection / probing / ML / correlation / oracle 六大 threat category 對應 G6 mechanism；7 層 defense-in-depth architecture。
+完整 mapping：wire / connection / probing / ML / correlation / oracle 六大 threat category 對應 Proteus mechanism；7 層 defense-in-depth architecture。
 
 ### 10.12 反制設計的可證明性 ✅
 Wang 14 → Cherubin 17 Bayes → Smith QIF → DP-form attempt → randomized smoothing — provability 四件套。

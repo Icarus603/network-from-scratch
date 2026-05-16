@@ -32,9 +32,9 @@ AWS engineers shipped distributed-storage protocols (S3, DynamoDB) and routinely
 - Doesn't address implementation bugs (only spec bugs).
 
 ## How it informs our protocol design
-- G6 lesson 11.9 cites this as industry validation that TLA+ is worth the engineering investment.
-- G6Handshake.tla follows the AWS pattern: small model, invariants, TLC.
-- Engineering discipline: write spec in TLA+ before coding (G6 v0.1 first, Part 12 impl second).
+- Proteus lesson 11.9 cites this as industry validation that TLA+ is worth the engineering investment.
+- ProteusHandshake.tla follows the AWS pattern: small model, invariants, TLC.
+- Engineering discipline: write spec in TLA+ before coding (Proteus v0.1 first, Part 12 impl second).
 
 ## Open questions
 - TLA+ industry adoption rate beyond AWS / Microsoft / Oracle?

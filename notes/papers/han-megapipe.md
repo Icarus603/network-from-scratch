@@ -106,38 +106,38 @@ Han 在 8-core server 上 microbenchmark：
 
 ## How it informs our protocol design
 
-對 G6 設計的**結構性影響**：
+對 Proteus 設計的**結構性影響**：
 
-### 1. **G6 server 應該用 completion-based async API**
+### 1. **Proteus server 應該用 completion-based async API**
 - io_uring 是 2026 主流——比 epoll/MegaPipe 更通用且 mainline
-- G6 dataplane 應該基於 io_uring 而非 epoll
+- Proteus dataplane 應該基於 io_uring 而非 epoll
 - 直接收穫 MegaPipe 的 batching benefit
 
 ### 2. **Per-core sharding 對 short-connection 場景關鍵**
-- 如果 G6 走「每 request 一個 short TCP/QUIC connection」（anti-fingerprinting 動機）
+- 如果 Proteus 走「每 request 一個 short TCP/QUIC connection」（anti-fingerprinting 動機）
 - → 必須做 per-core partitioned listener
 - → 用 SO_REUSEPORT 在 Linux 上實現（MegaPipe 思想的 mainline 化）
 
 ### 3. **Connection affinity**
 - 配合 NIC RSS + SO_INCOMING_CPU + thread pinning
-- 避免 G6 connection 跨 core，省 cache bounce
+- 避免 Proteus connection 跨 core，省 cache bounce
 - Phase III 12.4 設計時的 mandatory architectural choice
 
 ### 4. **小 message 的開銷需要 batch**
-- G6 內部 control message 通常小（< 100B）
+- Proteus 內部 control message 通常小（< 100B）
 - 不能每個 message 一次 sendto/recvfrom
 - 必須走 io_uring batched submission
 
 ### 5. **VFS overhead 對 mobile/edge 場景**
-- 嵌入式 / 移動端 G6 client，每個 TCP connection 的 inode/dentry overhead 累積成問題
-- lwsocket 思想對行動端 G6 部署有意義（Phase III 12.6 客戶端整合）
+- 嵌入式 / 移動端 Proteus client，每個 TCP connection 的 inode/dentry overhead 累積成問題
+- lwsocket 思想對行動端 Proteus 部署有意義（Phase III 12.6 客戶端整合）
 
 ## Open questions
 
 - **io_uring 完全取代 MegaPipe 了嗎**？io_uring 是 MegaPipe completion model 的 Linux mainline 版，但 lwsocket 等更 invasive 改動沒進 mainline；長期看 io_uring 是否會繼續演化加上 lwsocket-like fast path？
 - **eBPF + socket** 是否能替代 MegaPipe 的核心優化？socket-level eBPF program（cgroup eBPF、sk_msg）可以做 routing 但不 redesign API；兩者 complementary
 - **多核 + NUMA 進階優化**：MegaPipe 解單 socket 多 core，但跨 socket NUMA 仍是 open
-- **QUIC + completion model**：QUIC 在 user space 跑，傳統用 recvmmsg 收 UDP；用 io_uring 跟 G6 整合是否能再 squeeze 出效能？
+- **QUIC + completion model**：QUIC 在 user space 跑，傳統用 recvmmsg 收 UDP；用 io_uring 跟 Proteus 整合是否能再 squeeze 出效能？
 - **per-flow CPU 隔離 vs anti-fingerprinting**：如果每 flow 跑在固定 core，攻擊者可能用 cache side-channel 區分 flow——是隱私 vs 效能的開放權衡
 
 ## References worth following
@@ -164,6 +164,6 @@ Han 在 8-core server 上 microbenchmark：
 - **與 Rizzo 2012 netmap**：哲學差別：netmap = kernel bypass + DIY stack；MegaPipe = keep kernel stack but redesign API。同年（2012）的兩條 high-perf IO 路線
 - **與 Crowcroft 1992 Is Layering Harmful**：MegaPipe 直接證實 Crowcroft 的論點——BSD socket 跟 TCP 的 layer interaction 在 multi-core + short-conn 場景下產生 systemic bottleneck
 - **與 Saltzer 1984 End-to-End**：MegaPipe 沒違反 e2e，只是讓 e2e 在 kernel 內更快
-- **直接 inform** Phase III 12.4 G6 server 應使用 io_uring + SO_REUSEPORT + per-core affinity
+- **直接 inform** Phase III 12.4 Proteus server 應使用 io_uring + SO_REUSEPORT + per-core affinity
 - **直接 inform** Phase III 12.6 客戶端整合（lwsocket 思想對 mobile）
 - **直接 inform** Phase III 12.13 高丟包鏈路評測——short-connection 場景的 throughput baseline

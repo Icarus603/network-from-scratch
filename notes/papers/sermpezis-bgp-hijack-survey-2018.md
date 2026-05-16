@@ -4,7 +4,7 @@
 **Authors**: Pavlos Sermpezis (FORTH-ICS), Vasileios Kotronis (FORTH-ICS), Alberto Dainotti (CAIDA, UCSD), Xenofontas Dimitropoulos (FORTH-ICS / U. of Crete)
 **Read on**: 2026-05-16（in lesson [[1.15-bgp-internet-routing]] 引用）
 **Status**: 從 arXiv 1801.02918 + CAIDA / CCR online 摘要合成；PDF 已 fetch 但 parser 部分失敗——關鍵統計來自摘要與已公開 review 內容
-**One-line**: 對 75 個 network operator 問卷 + 量測：40% 自承曾被 hijack，76% 認為 hijack 影響「持續數小時以上」，RPKI 部署率仍低、operator 反應仰賴第三方服務——這證明 BGP-layer 對手對 G6 部署是 production-grade threat。
+**One-line**: 對 75 個 network operator 問卷 + 量測：40% 自承曾被 hijack，76% 認為 hijack 影響「持續數小時以上」，RPKI 部署率仍低、operator 反應仰賴第三方服務——這證明 BGP-layer 對手對 Proteus 部署是 production-grade threat。
 
 ## Problem
 - BGP 從 1989 部署起就無認證——任何 AS 可宣告任何 prefix。
@@ -47,23 +47,23 @@
 3. **時間切片**：2018 數據；RPKI 部署率與 detection tooling 已大幅演化（2024 RPKI ~50%、MANRS 倡議普及）——引用本 paper 時需配合更新數據。
 
 ## How it informs our protocol design
-**G6 設計層次的 BGP threat 影響**：
+**Proteus 設計層次的 BGP threat 影響**：
 
-1. **G6 server prefix 應 RPKI sign**——保護 own announcement 不被 hijack（partial defense）。
-2. **G6 client bootstrap 必須容錯 BGP hijack**：
+1. **Proteus server prefix 應 RPKI sign**——保護 own announcement 不被 hijack（partial defense）。
+2. **Proteus client bootstrap 必須容錯 BGP hijack**：
    - 若 client 透過 DNS 解析到 IP，IP 因 BGP hijack 連到攻擊者 server → TLS / Noise authentication 必須阻止 silent MITM。
    - 解：**pin server public key**（類似 SSH HPKP、TOFU），不只信 CA。Part 11.x 設計時對應 [[1.14-dns-anatomy]] DNS 威脅模型。
 3. **BGP-level adversary 雖無法直接讀加密 payload，但可**：
-   - DoS：黑洞化 G6 server prefix → 區域 user 連不上。
+   - DoS：黑洞化 Proteus server prefix → 區域 user 連不上。
    - Active MITM 平台：hijack + valid DV cert（Sun 2018 *Bamboozling CA* 證明 BGP hijack + Let's Encrypt DV 可拿到 valid cert）。
-4. **Multi-region deployment**：G6 不該綁定單一 AS / 單一 anycast IP——分散 IP space + 多家 hosting provider 是 BGP-level resilience 基本盤。
+4. **Multi-region deployment**：Proteus 不該綁定單一 AS / 單一 anycast IP——分散 IP space + 多家 hosting provider 是 BGP-level resilience 基本盤。
 5. **Forward ref**：Part 11.1 威脅模型必須明確列「BGP-layer attacker」為 known capability；Part 12.x 部署文件須含 RPKI ROA setup checklist。
 
 ## Open questions
 - **RPKI 邊際**：2026 RPKI 覆蓋率拐點到 70% 後，剩下 30% prefix 的 hijack 防護如何？(經典「missing tail」問題)
 - **ARTEMIS** 等 real-time hijack neutralization 系統能否做到分鐘級 mitigation？對 censor-controlled hijack 是否仍有效？
 - **BGPsec** 為何遲未部署？是否徹底沒戲？replacement 提案？
-- 對抗式 hijack：審查者用 BGP 配合 DNS / TLS attack chain 對 G6 設計的累積影響。
+- 對抗式 hijack：審查者用 BGP 配合 DNS / TLS attack chain 對 Proteus 設計的累積影響。
 
 ## References worth following
 - Demchak & Shavitt — **China's Maxim** (Military Cyber Affairs 2018) — 對 China Telecom hijack 系統研究

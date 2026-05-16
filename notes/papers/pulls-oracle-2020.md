@@ -28,9 +28,9 @@ WF attacker outputs candidate site list with confidence. In reality, attackers h
 - Some oracles privacy-policy-controlled.
 
 ## How it informs our protocol design
-- **G6 must use DoH (or DoQ) inside the G6 tunnel** to defeat DNS oracle.
+- **Proteus must use DoH (or DoQ) inside the Proteus tunnel** to defeat DNS oracle.
 - Avoid identifiers that leak via CT (no per-session certificates issued).
-- Inner-app DNS routing through G6 mandatory.
+- Inner-app DNS routing through Proteus mandatory.
 
 ## Open questions
 - Oracle privacy regulations vs attacker access?

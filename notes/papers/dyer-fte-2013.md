@@ -29,7 +29,7 @@ Censors use protocol-conformance DPI: if wire matches HTTP regex, allow; if does
 - Real protocol state machines not modeled.
 
 ## How it informs our protocol design
-- **G6 doesn't pursue FTE-style mimicry** — tunneling real protocol (HTTP/2 with real Chrome behavior) is structurally superior.
+- **Proteus doesn't pursue FTE-style mimicry** — tunneling real protocol (HTTP/2 with real Chrome behavior) is structurally superior.
 - FTE is useful as fallback in extreme low-bandwidth censorship environments (text-only channel).
 - The rank-unrank algorithm has independent interest for protocol obfuscation primitives.
 

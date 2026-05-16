@@ -27,7 +27,7 @@ Existing WF work treated attacks and defenses separately. A coherent attack-defe
 - Edit distance computationally expensive on large datasets.
 
 ## How it informs our protocol design
-- Codesign attack-defense — useful for G6 evaluation methodology.
+- Codesign attack-defense — useful for Proteus evaluation methodology.
 - BuFLO is the formal indistinguishability baseline.
 
 ## References worth following

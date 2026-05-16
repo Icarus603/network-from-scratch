@@ -40,7 +40,7 @@
 - 沒涵蓋 IP 範圍以外的場景；若 GFW 擴大掃描，補丁可能失效。
 
 ## How it informs our protocol design
-- G6 必須**每一條** exemption 都過（OR-of-exemptions 邏輯，只要被任何一條判為「不放行」就封）。
+- Proteus 必須**每一條** exemption 都過（OR-of-exemptions 邏輯，只要被任何一條判為「不放行」就封）。
 - 最低成本的滿足法：偽裝 TLS 過 Ex5——這是 Trojan / VLESS+REALITY 在工程上勝出的根本原因。
 - TCP 為主的協議（VLESS、Trojan）必須在 Part 11.5 spec 強制 first packet TLS-like；UDP/QUIC（Hysteria2、TUIC）暫安全但不能假設長期。
 - Probabilistic blocking + IP range 啟示：部署在 CDN IP 段比 VPS 機房 IP 段安全得多，這應反映在 Part 12 evaluation 的部署矩陣。

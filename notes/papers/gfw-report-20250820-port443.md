@@ -31,10 +31,10 @@ The GFW historically RST-injects only after matching content (TLS SNI / HTTP Hos
 - Suggests either (a) a newly deployed device not previously catalogued, (b) a known device operating in a misconfigured state (e.g., a forwarding-loop counter mistakenly emitted as TTL/WIN), or (c) a deliberate test by GFW operators.
 - The brief 74-minute window prevented full identification before the event ended.
 
-## Implications for G6 design
-- **The GFW reserves the right to do port-blanket blocks**, even if rare. Any cover-protocol design that pins TCP/443 *only* is fragile against this class of event. G6's three-tier transport (γ=MASQUE/UDP/443, β=raw QUIC, α=TLS/TCP/443) ALREADY anticipates this — if α is RST-flooded, β/γ can serve as live fallback.
-- **Fingerprint diversity** as a defensive observable: if client telemetry sees the 3-RST-with-incrementing-fields pattern, it should NOT switch to TCP fallback (which is what's broken) but stay on UDP path. G6 reference impl SHOULD log RST fingerprints when handshake fails on TCP path.
-- **Operator implication**: G6 server-side telemetry should record "RST window" anomalies so that operators can correlate user-side breakage with GFW incident timelines.
+## Implications for Proteus design
+- **The GFW reserves the right to do port-blanket blocks**, even if rare. Any cover-protocol design that pins TCP/443 *only* is fragile against this class of event. Proteus's three-tier transport (γ=MASQUE/UDP/443, β=raw QUIC, α=TLS/TCP/443) ALREADY anticipates this — if α is RST-flooded, β/γ can serve as live fallback.
+- **Fingerprint diversity** as a defensive observable: if client telemetry sees the 3-RST-with-incrementing-fields pattern, it should NOT switch to TCP fallback (which is what's broken) but stay on UDP path. Proteus reference impl SHOULD log RST fingerprints when handshake fails on TCP path.
+- **Operator implication**: Proteus server-side telemetry should record "RST window" anomalies so that operators can correlate user-side breakage with GFW incident timelines.
 
 ## Open questions
 - Was the new fingerprint a permanent device upgrade (re-deployed later in a stealthy mode) or a one-time misconfiguration?

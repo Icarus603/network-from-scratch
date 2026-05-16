@@ -37,7 +37,7 @@ Bandwidth overhead: minimal (no padding). Latency: slight (multi-circuit jitter)
 - Adds Tor circuit construction overhead.
 
 ## How it informs our protocol design
-- **Splitting is orthogonal to shaping** — G6 should optionally split via Multipath QUIC (MASQUE).
+- **Splitting is orthogonal to shaping** — Proteus should optionally split via Multipath QUIC (MASQUE).
 - Single-vantage attacker (corporate, single ISP) is well-defended.
 - For state-level multi-vantage adversary, splitting helps but is not sufficient — must combine with shaping.
 

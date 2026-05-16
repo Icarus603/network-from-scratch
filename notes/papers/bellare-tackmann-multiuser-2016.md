@@ -3,7 +3,7 @@
 **Authors**: Mihir Bellare, Björn Tackmann
 **Read on**: 2026-05-14 (in lesson 3.2)
 **Status**: abstract-only（IACR ePrint Cloudflare 阻擋；引用內容自 CRYPTO 2016 proceedings TOC + Springer abstract + 訓練資料）。
-**One-line**: 給出第一個對 AES-GCM 在「百萬使用者共用 cipher（不同 key）」場景下的 tight 安全 bound——把單 user IND-CCA bound `q²/2^n` 一般化為 multi-user `μq²/2^n` 並證明 TLS 1.3 record layer 仍 secure；G6 的 multi-user spec 直接 reference 此論文。
+**One-line**: 給出第一個對 AES-GCM 在「百萬使用者共用 cipher（不同 key）」場景下的 tight 安全 bound——把單 user IND-CCA bound `q²/2^n` 一般化為 multi-user `μq²/2^n` 並證明 TLS 1.3 record layer 仍 secure；Proteus 的 multi-user spec 直接 reference 此論文。
 
 ## Problem
 傳統 AEAD security analysis 假設「single key, single user」。但實務 TLS server 同時跟百萬 client TLS connection 各自一個 session key。對手只要從**任一**user 拿到一次 distinguishing advantage 就贏 — 嚴格 bound 應該是 single-user bound × 用戶數 μ。
@@ -56,10 +56,10 @@ Step 4 (final): combine all → quoted bound
 - Quantum adversary 不在 scope。
 
 ## How it informs our protocol design
-- **G6 spec Security Considerations 必須寫 multi-user analysis**，類似 RFC 8446 Appendix E 寫法。
-- **G6 假設 μ ≤ 10M concurrent sessions, q ≤ 2^32 records each, ℓ ≤ 2^14 (16 KB max record)** → 計算 bound 並聲明。
-- **G6 對 ChaCha20-Poly1305 也要算 multi-user bound**：reference Procter 2014、Hoang-Tessaro。
-- **G6 強制 256-bit key**（即使 ChaCha20 也是 256-bit）：避免 multi-user key-collision 在百萬 user 變顯著（128-bit key 在 μ = 2^48 開始崩）。
+- **Proteus spec Security Considerations 必須寫 multi-user analysis**，類似 RFC 8446 Appendix E 寫法。
+- **Proteus 假設 μ ≤ 10M concurrent sessions, q ≤ 2^32 records each, ℓ ≤ 2^14 (16 KB max record)** → 計算 bound 並聲明。
+- **Proteus 對 ChaCha20-Poly1305 也要算 multi-user bound**：reference Procter 2014、Hoang-Tessaro。
+- **Proteus 強制 256-bit key**（即使 ChaCha20 也是 256-bit）：避免 multi-user key-collision 在百萬 user 變顯著（128-bit key 在 μ = 2^48 開始崩）。
 
 ## Open questions
 - ChaCha20-Poly1305 multi-user 的 tight bound？目前 Hoang-Tessaro 2017 給的是 GCM-style bound，但 ChaCha20 結構不同，有改進空間。

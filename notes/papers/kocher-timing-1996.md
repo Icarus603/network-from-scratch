@@ -52,12 +52,12 @@ After enough measurements (~thousands per bit), recover full d.
 - 不涵蓋 Spectre-class 對 even constant-time code 的 leak。
 
 ## How it informs our protocol design
-- **G6 所有 crypto operations 必須 constant-time**：
+- **Proteus 所有 crypto operations 必須 constant-time**：
   - Curve25519 X25519 Montgomery ladder 已是 constant-time。
   - Ed25519 sign/verify constant-time (deterministic + canonical encoding)。
   - ChaCha20-Poly1305 inherently constant-time (ARX, 無 table lookup)。
-- **G6 implementation 必須 audit with ctgrind / dudect**。
-- **G6 教訓**: timing attack 是 cryptographic implementation 的 baseline 風險；任何 deployment 必須 constant-time。
+- **Proteus implementation 必須 audit with ctgrind / dudect**。
+- **Proteus 教訓**: timing attack 是 cryptographic implementation 的 baseline 風險；任何 deployment 必須 constant-time。
 
 ## Open questions
 - **Generic constant-time guarantee for PQ schemes**: lattice rejection sampling 等 inherently variable-time; making it constant-time without performance disaster？

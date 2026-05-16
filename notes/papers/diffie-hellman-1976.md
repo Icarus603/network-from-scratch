@@ -53,10 +53,10 @@ K := B^a mod p                 K := A^b mod p
 - **量子脆弱**：Shor 1994 演算法讓 DLP 在量子電腦上 polynomial-time 可解；後 PQ 時代 DH 必須跟 Kyber 等做 hybrid（NIST FIPS 203）。
 
 ## How it informs our protocol design
-- **G6 必須用 ephemeral DH 達成 PFS**：直接繼承 DH 1976 的 ephemeral key 概念。
-- **G6 用 X25519**：橢圓曲線版本的 DH，安全性對應 ECDLP。Bernstein 2006 設計，prime 2^255-19。
-- **G6 必須做 hybrid PQ**：X25519 + ML-KEM-768。原因：DH 1976 的 DLP 假設在量子時代失效，但 Kyber 的 LWE 假設（目前認為）量子安全。
-- **G6 必須認證 DH**：SIGMA-I 結構（簽章綁定 transcript），避免 DH 1976 自己承認的 MitM 漏洞。
+- **Proteus 必須用 ephemeral DH 達成 PFS**：直接繼承 DH 1976 的 ephemeral key 概念。
+- **Proteus 用 X25519**：橢圓曲線版本的 DH，安全性對應 ECDLP。Bernstein 2006 設計，prime 2^255-19。
+- **Proteus 必須做 hybrid PQ**：X25519 + ML-KEM-768。原因：DH 1976 的 DLP 假設在量子時代失效，但 Kyber 的 LWE 假設（目前認為）量子安全。
+- **Proteus 必須認證 DH**：SIGMA-I 結構（簽章綁定 transcript），避免 DH 1976 自己承認的 MitM 漏洞。
 
 ## Open questions
 - 「post-quantum DH」是否存在 group-theoretic 的優雅構造？目前 NIST PQ KEM 都是 lattice/code-based，不是 group-based。

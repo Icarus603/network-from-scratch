@@ -27,7 +27,7 @@ Older anonymity literature used $|\mathcal{S}|$ (anonymity set size) as the metr
 - Smith 09 QIF later extended to richer adversary models.
 
 ## How it informs our protocol design
-- G6 evaluation should report anonymity entropy alongside accuracy.
+- Proteus evaluation should report anonymity entropy alongside accuracy.
 - For "anonymous routing" features (multi-hop), use entropy bound.
 
 ## Open questions

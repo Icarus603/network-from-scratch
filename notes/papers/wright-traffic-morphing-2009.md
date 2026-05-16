@@ -29,9 +29,9 @@
 - Doesn't address timing channel at all.
 
 ## How it informs our protocol design
-- **Marginal distribution matching is insufficient** — same lesson as WTF-PAD (Juarez 16). G6 must shape joint structure.
+- **Marginal distribution matching is insufficient** — same lesson as WTF-PAD (Juarez 16). Proteus must shape joint structure.
 - LP-based optimization framework is elegant but cannot capture sequence dependencies; sequence-level GAN (Surakav) is the modern alternative.
-- Still useful as a fallback / sanity check: G6 should at minimum match Chrome H2 marginal size distribution.
+- Still useful as a fallback / sanity check: Proteus should at minimum match Chrome H2 marginal size distribution.
 
 ## Open questions
 - Joint distribution matching: how much overhead does it cost? (Walkie-Talkie supersequence ≈ first answer.)

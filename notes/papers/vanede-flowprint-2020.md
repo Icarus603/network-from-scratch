@@ -24,17 +24,17 @@ AppScanner (Taylor 16) required per-app training data; unfeasible for thousands 
 - Even with VPN tunnelling, destination cluster preserved (since CDN endpoints multiplex).
 
 ## Limitations
-- Tunnelling all destinations through single CDN (G6-style) breaks FlowPrint's destination clustering.
+- Tunnelling all destinations through single CDN (Proteus-style) breaks FlowPrint's destination clustering.
 - Per-app destination patterns may evolve over time.
 
 ## How it informs our protocol design
-- **G6 + DoH-over-tunnel + single-endpoint tunneling fundamentally breaks FlowPrint** — all flows appear to go to G6 bridge.
-- Confirms that G6's "everything-through-single-tunnel" model has anti-FlowPrint side benefit.
-- FlowPrint motivates G6 to NOT split-tunnel certain apps directly without G6 protection.
+- **Proteus + DoH-over-tunnel + single-endpoint tunneling fundamentally breaks FlowPrint** — all flows appear to go to Proteus bridge.
+- Confirms that Proteus's "everything-through-single-tunnel" model has anti-FlowPrint side benefit.
+- FlowPrint motivates Proteus to NOT split-tunnel certain apps directly without Proteus protection.
 
 ## Open questions
-- Multi-bridge G6 deployment — does that re-introduce FlowPrint vulnerability?
-- Inner-tunnel app discovery from inside G6 protocol (G6 client logs)?
+- Multi-bridge Proteus deployment — does that re-introduce FlowPrint vulnerability?
+- Inner-tunnel app discovery from inside Proteus protocol (Proteus client logs)?
 
 ## References worth following
 - AppScanner (Taylor 16 EuroS&P) — per-app supervised predecessor

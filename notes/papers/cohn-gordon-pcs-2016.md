@@ -54,9 +54,9 @@ PCS 故意排除「對手持續 active 在通道」的 case——那叫 Active P
 - 量子對手下 PCS 仍 open。
 
 ## How it informs our protocol design
-- **G6 必須有 ratchet 機制**：每 N 個 record 或每 T 秒，ephemeral DH 換一次 session key。
-- **G6 spec 寫 PCS 假設**：明確聲明「對手 snatch-and-run、後續無 active presence」是 PCS 達成的前提。
-- **G6 0-RTT data 不享 PCS**：spec 內明確標示 0-RTT segment 為 reduced-security，且只允許 idempotent payload。
+- **Proteus 必須有 ratchet 機制**：每 N 個 record 或每 T 秒，ephemeral DH 換一次 session key。
+- **Proteus spec 寫 PCS 假設**：明確聲明「對手 snatch-and-run、後續無 active presence」是 PCS 達成的前提。
+- **Proteus 0-RTT data 不享 PCS**：spec 內明確標示 0-RTT segment 為 reduced-security，且只允許 idempotent payload。
 
 ## Open questions
 - 「持續部分 corruption」（malware on device）下的 PCS 仍 open。

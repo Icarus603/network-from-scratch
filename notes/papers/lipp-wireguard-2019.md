@@ -3,7 +3,7 @@
 **Authors**: Benjamin Lipp (Inria Paris), Bruno Blanchet (Inria Paris), Karthikeyan Bhargavan (Inria Paris)
 **Read on**: 2026-05-16 (referenced from lesson 5.7 + 6.3 + 11.10)
 **Status**: full PDF (`assets/papers/lipp-wireguard-2019.pdf`, 54 pages from HAL)
-**One-line**: 用 ProVerif + CryptoVerif 把 WireGuard handshake 整段做端到端機器驗證——首個對部署級 VPN handshake 的 mechanised symbolic + computational proof，奠定 G6 spec 必須附 mechanised proof 的研究先例。
+**One-line**: 用 ProVerif + CryptoVerif 把 WireGuard handshake 整段做端到端機器驗證——首個對部署級 VPN handshake 的 mechanised symbolic + computational proof，奠定 Proteus spec 必須附 mechanised proof 的研究先例。
 
 ## Problem
 Donenfeld 2017 NDSS 給的是 Tamarin 的 symbolic-level proof；Dowling-Paterson 2018 給的是手算 game-based proof（且為 proof tractability 加了 explicit confirmation tweak）。Lipp et al. 想要：對 **as-deployed** WireGuard（不加 tweak）做機器可檢驗的 symbolic + computational proof。
@@ -48,12 +48,12 @@ Donenfeld 2017 NDSS 給的是 Tamarin 的 symbolic-level proof；Dowling-Paterso
 - Symbolic ProVerif 假設 perfect crypto；computational CryptoVerif 假設 standard reductions。
 
 ## How it informs our protocol design
-1. **G6 spec 必須一開始就寫 ProVerif + CryptoVerif input**——不是事後補。Lipp 證明這對 NDSS 級 VPN protocol 完全可行。
-2. **PSK 為零的 corner case** 提醒：G6 設計 PQ hybrid 時，"hybrid-default-off" 配置不能變成 silent downgrade。
+1. **Proteus spec 必須一開始就寫 ProVerif + CryptoVerif input**——不是事後補。Lipp 證明這對 NDSS 級 VPN protocol 完全可行。
+2. **PSK 為零的 corner case** 提醒：Proteus 設計 PQ hybrid 時，"hybrid-default-off" 配置不能變成 silent downgrade。
 3. **Mechanised proof 對 spec 的反饋**：寫 ProVerif / CryptoVerif 時會逼著你想清楚每個 message 的 invariants——是極好的 spec quality 工具。
-4. **G6 ProVerif model（[11.10](../../lessons/part-11-design/11.10-proverif-tamarin.md) `G6Handshake.pv`）** 的結構直接 inspired by this work。
-5. **Cross-tool composition（ProVerif + CryptoVerif）** 設定了 G6 future v0.2 同時做 symbolic + computational 驗證的先例。
-6. 啟發 G6 spec 對 Noise IK 候選的最終評估（Part 11.6 在 Noise IK 與 TLS 1.3-borrowed 之間取捨時引用此 paper 的 confidence）。
+4. **Proteus ProVerif model（[11.10](../../lessons/part-11-design/11.10-proverif-tamarin.md) `ProteusHandshake.pv`）** 的結構直接 inspired by this work。
+5. **Cross-tool composition（ProVerif + CryptoVerif）** 設定了 Proteus future v0.2 同時做 symbolic + computational 驗證的先例。
+6. 啟發 Proteus spec 對 Noise IK 候選的最終評估（Part 11.6 在 Noise IK 與 TLS 1.3-borrowed 之間取捨時引用此 paper 的 confidence）。
 
 ## Open questions
 - 把 CryptoVerif proof 推到 F*-verified implementation 的完整工具鏈，仍是 active 工程問題。

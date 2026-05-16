@@ -134,21 +134,21 @@ VPN 的 tunnel control plane（handshake、keep-alive）走自己已建立的 so
 
 ## How it informs our protocol design
 
-對 G6 的硬性影響：
+對 Proteus 的硬性影響：
 
-1. **G6 client 不能用 routing table mechanism 做 traffic capture**——必須走 socket-layer interception（user-space proxy）或 explicit netns
-2. **Killswitch 必須在 G6 server 連線建立前 install**——順序：先 firewall lockdown → 再 G6 control channel → 再 data plane
+1. **Proteus client 不能用 routing table mechanism 做 traffic capture**——必須走 socket-layer interception（user-space proxy）或 explicit netns
+2. **Killswitch 必須在 Proteus server 連線建立前 install**——順序：先 firewall lockdown → 再 Proteus control channel → 再 data plane
 3. **Threat model 必須列入「同 LAN 對手」** 為 first-class（不是「邊緣場景」）
-4. **G6 client 啟動流程加入 rogue DHCP detection**：sample 多次 DHCP options，異常值 → 警告或拒連
-5. **「應用層 TLS 加密」不是充足保護**——SNI 與 IP-level metadata 對 censorship 對手仍有價值，**G6 必須在 IP/transport 層做 obfuscation**（不僅僅是應用 payload 加密）
+4. **Proteus client 啟動流程加入 rogue DHCP detection**：sample 多次 DHCP options，異常值 → 警告或拒連
+5. **「應用層 TLS 加密」不是充足保護**——SNI 與 IP-level metadata 對 censorship 對手仍有價值，**Proteus 必須在 IP/transport 層做 obfuscation**（不僅僅是應用 payload 加密）
 
 #### 架構選擇對比
 
-| VPN 設計範式 | TunnelVision 暴露的問題 | G6 設計選擇 |
+| VPN 設計範式 | TunnelVision 暴露的問題 | Proteus 設計選擇 |
 |---|---|---|
-| **依賴 OS routing**（WireGuard、IPsec tunnel mode） | 嚴重漏 | **不採用**作為 G6 baseline |
-| **socket-layer proxy**（Shadowsocks、V2Ray、sing-box） | 不受影響（沒搶 default route） | **G6 baseline 採用** |
-| **netns 隔離**（手動 wireguard-go in netns） | 不受影響 | G6 可選增強 |
+| **依賴 OS routing**（WireGuard、IPsec tunnel mode） | 嚴重漏 | **不採用**作為 Proteus baseline |
+| **socket-layer proxy**（Shadowsocks、V2Ray、sing-box） | 不受影響（沒搶 default route） | **Proteus baseline 採用** |
+| **netns 隔離**（手動 wireguard-go in netns） | 不受影響 | Proteus 可選增強 |
 | **VPN extension API**（iOS Network Extension、Android VpnService） | OS 內建保護優於 generic routing-VPN | 行動 client 採用 |
 
 ## Open questions

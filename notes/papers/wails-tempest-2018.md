@@ -27,9 +27,9 @@ Most WF research considers single-trace attacks. What if attacker observes user 
 - User behavior changes break the template.
 
 ## How it informs our protocol design
-- G6 cannot fully protect long-term temporal pattern leakage.
+- Proteus cannot fully protect long-term temporal pattern leakage.
 - Recommend documenting as out-of-scope in threat model — user behavior is application responsibility.
-- G6 cover-traffic and connection rotation help marginally.
+- Proteus cover-traffic and connection rotation help marginally.
 
 ## References worth following
 - Khattak 16 / Tschantz 16 SoK

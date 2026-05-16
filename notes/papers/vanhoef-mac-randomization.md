@@ -114,20 +114,20 @@ OS vendor 反應：
 
 ## How it informs our protocol design
 
-對 G6 的硬性影響：
+對 Proteus 的硬性影響：
 
-1. **Client identifier 不能依賴「OS-level MAC randomization」做為 anonymity 保證**——這是底線。**G6 必須在應用層用密碼學 identifier**：
+1. **Client identifier 不能依賴「OS-level MAC randomization」做為 anonymity 保證**——這是底線。**Proteus 必須在應用層用密碼學 identifier**：
    - 每 session 用 ephemeral key derived from long-term identity
    - 跨 server unlinkable（不同 server 看不出同 client）
    - 同 server 跨 session 內可選擇 linkable 或 unlinkable（depends on threat model）
 
-2. **LAN-level adversary 能 fingerprint device**：即便 G6 加密內容，**device 在加入 WiFi 那一刻就被識別**。G6 不能「修補這個」——但 threat model 要寫明這層 leakage 在 G6 scope 之外
+2. **LAN-level adversary 能 fingerprint device**：即便 Proteus 加密內容，**device 在加入 WiFi 那一刻就被識別**。Proteus 不能「修補這個」——但 threat model 要寫明這層 leakage 在 Proteus scope 之外
 
-3. **Multi-channel monitoring 必須假設存在**：商場/機場/邊境/被入侵 home router 都可能跑 multi-channel sniffer。G6 deployment 建議**搭配 mobile hotspot / VPN-over-cellular** 從根本避開 WiFi 監聽
+3. **Multi-channel monitoring 必須假設存在**：商場/機場/邊境/被入侵 home router 都可能跑 multi-channel sniffer。Proteus deployment 建議**搭配 mobile hotspot / VPN-over-cellular** 從根本避開 WiFi 監聽
 
-4. **Timing side channel 是普遍威脅**：Matte 2016 companion paper 顯示 timing 即足以 fingerprint。**G6 application-layer pacing 必須考慮 timing fingerprint**（Part 10 流量分析會深入）
+4. **Timing side channel 是普遍威脅**：Matte 2016 companion paper 顯示 timing 即足以 fingerprint。**Proteus application-layer pacing 必須考慮 timing fingerprint**（Part 10 流量分析會深入）
 
-5. **Anonymity set 量化**：G6 設計時把 anonymity set 寫成 formal property，**而非「我們有加密所以匿名」這種 hand-waving**
+5. **Anonymity set 量化**：Proteus 設計時把 anonymity set 寫成 formal property，**而非「我們有加密所以匿名」這種 hand-waving**
 
 ## Open questions
 

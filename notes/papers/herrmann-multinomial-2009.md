@@ -27,7 +27,7 @@ Tor uses fixed-size cells (512 bytes); does WF still work?
 
 ## How it informs our protocol design
 - Historical lesson: "Tor's cell padding solves WF" was a costly wrong conclusion.
-- G6 must shape sequence, not just sizes.
+- Proteus must shape sequence, not just sizes.
 
 ## References worth following
 - Panchenko 11 WPES — disproves Herrmann

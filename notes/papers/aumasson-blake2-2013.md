@@ -66,9 +66,9 @@ G(v, a, b, c, d, x, y):
 - 軟體還可更快——BLAKE3 達 ~0.5 c/b。
 
 ## How it informs our protocol design
-- **G6 secondary hash 候選**：BLAKE2s 用作 noise-style mixhash（若採用 Noise framework）。
-- **G6 keyed-MAC 可用 BLAKE2-MAC** 替代 HMAC-SHA256，節省一層 HMAC 開銷；但為了 TLS 1.3 互通仍偏 HMAC-SHA256。
-- **G6 password hashing 內部**：Argon2id 用 BLAKE2b，間接受益。
+- **Proteus secondary hash 候選**：BLAKE2s 用作 noise-style mixhash（若採用 Noise framework）。
+- **Proteus keyed-MAC 可用 BLAKE2-MAC** 替代 HMAC-SHA256，節省一層 HMAC 開銷；但為了 TLS 1.3 互通仍偏 HMAC-SHA256。
+- **Proteus password hashing 內部**：Argon2id 用 BLAKE2b，間接受益。
 
 ## Open questions
 - BLAKE2 的 quantum cryptanalysis bound 與 SHA-2 / SHA-3 比較？

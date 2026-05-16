@@ -56,7 +56,7 @@ Proof goes by game hops:
 - KEM combiner 沒處理 KEM 之間 key length 差異引發的 length-leak side channel。
 
 ## How it informs our protocol design
-G6 hybrid combine spec (見 3.17 §3 & 3.11 §9):
+Proteus hybrid combine spec (見 3.17 §3 & 3.11 §9):
 ```
 K_hybrid = HKDF-Extract(
     salt = transcript_hash,
@@ -66,14 +66,14 @@ K_hybrid = HKDF-Extract(
 
 完全按 Bindel et al. Construction "XtKEM"。
 
-**Justification**: G6 session key IND-CCA2 secure if either X25519 ECDH or ML-KEM-768 IND-CCA2 holds。對 PQ 過渡期最 robust 的 choice。
+**Justification**: Proteus session key IND-CCA2 secure if either X25519 ECDH or ML-KEM-768 IND-CCA2 holds。對 PQ 過渡期最 robust 的 choice。
 
-**Verification (Phase III 11.11)**: CryptoVerif game-based proof reproducing Bindel et al. Thm 3.4 with G6-specific KDF instantiation。
+**Verification (Phase III 11.11)**: CryptoVerif game-based proof reproducing Bindel et al. Thm 3.4 with Proteus-specific KDF instantiation。
 
-這是 G6 SOTA differentiator #3 (見 3.17 §3)。
+這是 Proteus SOTA differentiator #3 (見 3.17 §3)。
 
 ## Open questions
-- Hybrid PCS (ratchet under hybrid KE) — Brendel-Fischlin-Günther 2022 已開始，但未完整 (G6 可貢獻)。
+- Hybrid PCS (ratchet under hybrid KE) — Brendel-Fischlin-Günther 2022 已開始，但未完整 (Proteus 可貢獻)。
 - Hybrid + 0-RTT: 0-RTT 場景下 combiner 安全性無 formal treatment。
 - Hybrid + KEMTLS: Schwabe-Stebila-Wiggers 2020 framework 與本論文整合的具體 spec。
 - Multi-KEM (3+ components) combine 是否帶來新 attack vector？

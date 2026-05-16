@@ -29,9 +29,9 @@ GFW is widely reported to use multiple detection mechanisms in series ("censorsh
 - Mitigation recommendations are partial.
 
 ## How it informs our protocol design
-- G6 spec §11.10 enumerates error-pattern oracle resistance: all negative-path responses must be "forward to cover", not differentiated errors.
-- G6 spec §7 cover-URL pinning is designed to deny adaptive censor any state in which it can build error-pattern profile.
-- G6 design review (lesson 11.12) explicitly references this paper's findings as one of the adversarial reading inputs.
+- Proteus spec §11.10 enumerates error-pattern oracle resistance: all negative-path responses must be "forward to cover", not differentiated errors.
+- Proteus spec §7 cover-URL pinning is designed to deny adaptive censor any state in which it can build error-pattern profile.
+- Proteus design review (lesson 11.12) explicitly references this paper's findings as one of the adversarial reading inputs.
 
 ## Open questions
 - Does GFW use DL on flow-level features yet? Suspect yes; public evidence partial.

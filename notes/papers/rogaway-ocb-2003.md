@@ -51,9 +51,9 @@ Tag computation:
 - **沒原生 streaming**：要算 final tag 必須等到末 block；對 streaming AEAD 場景需另設計。
 
 ## How it informs our protocol design
-- **G6 不選 OCB**：理由純 IPR conservatism（2026 年仍對 patent-encumbered legacy 敏感）+ implementation library 少（boringssl 沒、ring 沒）。
-- **G6 借鑑 OCB 的 design 思想**：tweakable offset 概念在我們設計 cover-traffic packet structure 時可能用上。
-- **G6 觀察 OCB 的 single-pass 教訓**：未來 V2 spec 若要 throughput 極限可考慮 AEGIS-128L（同樣 single-pass + AES-NI 友善 + 無 patent）。
+- **Proteus 不選 OCB**：理由純 IPR conservatism（2026 年仍對 patent-encumbered legacy 敏感）+ implementation library 少（boringssl 沒、ring 沒）。
+- **Proteus 借鑑 OCB 的 design 思想**：tweakable offset 概念在我們設計 cover-traffic packet structure 時可能用上。
+- **Proteus 觀察 OCB 的 single-pass 教訓**：未來 V2 spec 若要 throughput 極限可考慮 AEGIS-128L（同樣 single-pass + AES-NI 友善 + 無 patent）。
 
 ## Open questions
 - 是否能設計同時 single-pass + misuse-resistant + streaming 的 AEAD？目前三者只能取二（OCB single-pass 但無 MR；GCM-SIV MR 但 two-pass；ChaCha20-Poly1305 streaming 但 two-pass）。

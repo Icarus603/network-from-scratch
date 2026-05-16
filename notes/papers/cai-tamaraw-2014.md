@@ -36,11 +36,11 @@ Still one of the strongest classical defenses. DF (Sirinam 18) achieves ~25% —
 - Single-flow assumption.
 
 ## How it informs our protocol design
-- **Asymmetric rate is a free win** — G6 should design with different rates for client→server vs server→client.
-- L-quantum padding is a strong primitive — fits G6's session-level granular shaping budget.
-- Tamaraw provides the floor "what can be achieved with shaping alone" — G6 should beat it on overhead while matching defense.
-- G6 padding strategy (1280B cell + cover IAT + idle off, ≤30% budget per Part 11.3) is a much-less-aggressive scheme than Tamaraw — trade-off chosen for PERF. G6 explicitly accepts ε > Tamaraw's ε in exchange for goodput parity (PERF-1).
-- Tamaraw's evaluation methodology is adopted for G6 Part 12.10 evaluation (closed-world + open-world, overhead-vs-accuracy curve).
+- **Asymmetric rate is a free win** — Proteus should design with different rates for client→server vs server→client.
+- L-quantum padding is a strong primitive — fits Proteus's session-level granular shaping budget.
+- Tamaraw provides the floor "what can be achieved with shaping alone" — Proteus should beat it on overhead while matching defense.
+- Proteus padding strategy (1280B cell + cover IAT + idle off, ≤30% budget per Part 11.3) is a much-less-aggressive scheme than Tamaraw — trade-off chosen for PERF. Proteus explicitly accepts ε > Tamaraw's ε in exchange for goodput parity (PERF-1).
+- Tamaraw's evaluation methodology is adopted for Proteus Part 12.10 evaluation (closed-world + open-world, overhead-vs-accuracy curve).
 
 ## Open questions
 - Optimal $\rho_+, \rho_-$ given user activity distribution? Empirical only.

@@ -85,10 +85,10 @@ Client:
 - **Client-side envelope storage**: 對 stateless client 是負擔（但 server-side 存 envelope 也可，仍 secure）。
 
 ## How it informs our protocol design
-- **G6 PSK-from-passphrase mode 用 OPAQUE**：替代 simple Argon2(passphrase, salt) PSK derivation。
-- **G6 server-side storage protection**: 即使 G6 server 被 hack，passphrase-mode users 仍 safe (modulo online OPRF query cost)。
-- **G6 spec 預留 PQ-OPAQUE migration path**: RFC 9807 變動兼容版 (Kyber + OPRF) 將在 v2 採用。
-- **G6 不直接用 OPAQUE for primary handshake**: primary mode 是 cert/static-pk (Noise IK)，OPAQUE 是 passphrase mode 的 sub-protocol。
+- **Proteus PSK-from-passphrase mode 用 OPAQUE**：替代 simple Argon2(passphrase, salt) PSK derivation。
+- **Proteus server-side storage protection**: 即使 Proteus server 被 hack，passphrase-mode users 仍 safe (modulo online OPRF query cost)。
+- **Proteus spec 預留 PQ-OPAQUE migration path**: RFC 9807 變動兼容版 (Kyber + OPRF) 將在 v2 採用。
+- **Proteus 不直接用 OPAQUE for primary handshake**: primary mode 是 cert/static-pk (Noise IK)，OPAQUE 是 passphrase mode 的 sub-protocol。
 
 ## Open questions
 - **PQ-OPAQUE**: 當前 IETF draft 階段；Kyber-based OPRF + Kyber AKE 整合 spec 仍 evolving。

@@ -41,11 +41,11 @@
 - 對 protocol-borrowing（REALITY / Conjure / domain fronting）不直接適用——但這些自己另有 fingerprint surface。
 
 ## How it informs our protocol design
-**G6 必須滿足的 first-bytes hard constraint**（直接來自此論文）：
-1. **第一 byte 不能是常見 protocol header**（避開 HTTP/TLS/SSH 簽名）——這是廢的，G6 要更強。
+**Proteus 必須滿足的 first-bytes hard constraint**（直接來自此論文）：
+1. **第一 byte 不能是常見 protocol header**（避開 HTTP/TLS/SSH 簽名）——這是廢的，Proteus 要更強。
 2. **第一 6 bytes 必須通過 ASCII printable 5/6 比例的 OR 反轉**：要嘛全 printable 看起來像 HTTP，要嘛 entropy 完全 random 但配合 ranged padding 偽裝成其他協議的 first bytes（更難達成）。
 3. **popcount distribution must avoid 3.4~4.6 cluster**（如果走 fully-encrypted 路線）。
-4. **更好做法**：G6 day-1 走 **protocol-borrowing**——把握手包進 real TLS / QUIC / HTTP envelope（[Part 7.10 REALITY](../../lessons/part-7-proxy-protocols/)），完全跳過 fully-encrypted heuristic。
+4. **更好做法**：Proteus day-1 走 **protocol-borrowing**——把握手包進 real TLS / QUIC / HTTP envelope（[Part 7.10 REALITY](../../lessons/part-7-proxy-protocols/)），完全跳過 fully-encrypted heuristic。
 
 ## Open questions
 - GFW 未來的偵測升級會走 ML 還是仍堅持 heuristic？目前無公開證據。

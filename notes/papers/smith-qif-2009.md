@@ -28,8 +28,8 @@ Shannon mutual info measures average leakage; doesn't capture worst-case (most-l
 - Composition results limited.
 
 ## How it informs our protocol design
-- **G6 evaluation should report multiple $g$-leakages** (exact site, top-5, topic-class) for richer leakage picture.
-- Smith 09 framework is the right language for G6 quantitative provability claims.
+- **Proteus evaluation should report multiple $g$-leakages** (exact site, top-5, topic-class) for richer leakage picture.
+- Smith 09 framework is the right language for Proteus quantitative provability claims.
 
 ## Open questions
 - Tight composition bounds for $g$-leakage across multiple observations.

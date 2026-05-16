@@ -44,12 +44,12 @@
 - Evasion 通常需 attacker 與 victim 雙邊配合 packet 生成——不像 fronting 那種 transparent 方案。
 
 ## How it informs our protocol design
-**G6 的 anti-DPI 設計直接相關**：
-1. **不只是 payload 加密**：即便整個 G6 流量都加密，TCP layer 仍可被 GFW 用「state divergence active probe」識別（Wang 2020 的工具就能用來生成這種 probe）。
-2. **G6 server 應**：
+**Proteus 的 anti-DPI 設計直接相關**：
+1. **不只是 payload 加密**：即便整個 Proteus 流量都加密，TCP layer 仍可被 GFW 用「state divergence active probe」識別（Wang 2020 的工具就能用來生成這種 probe）。
+2. **Proteus server 應**：
    - 用 vanilla Linux TCP stack（最常見 → DPI 對它最熟悉，但也是 evasion 工具庫最豐富）；或
    - 用 specialized userspace stack（[[marinos-network-stack-specialization-2014]]）——但 stack 本身的 idiosyncratic behavior 變成新 fingerprint surface。
-3. **G6 client 應**：避免使用可被 SymTCP-style discrepancy 識別的 TCP option 組合；TFO、PAWS、Selective ACK 的開啟組合需 Part 11 設計時考慮。
+3. **Proteus client 應**：避免使用可被 SymTCP-style discrepancy 識別的 TCP option 組合；TFO、PAWS、Selective ACK 的開啟組合需 Part 11 設計時考慮。
 4. **更深 implication**：依賴 TCP 作 transport → 必然繼承 TCP discrepancy attack surface。**QUIC over UDP 把這層攻擊面消除**（QUIC 端對端加密所有 transport state）—— 這是 Part 8.x QUIC protocol 課與 Part 11.3 transport 選擇的論證主軸之一。
 
 ## Open questions

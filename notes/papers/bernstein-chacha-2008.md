@@ -61,11 +61,11 @@ QR(a, b, c, d):
 - counter 32-bit 在 IETF 版意味著單 (key, nonce) 對最多 2^32 × 64 byte = 256 GB——大但 finite。
 
 ## How it informs our protocol design
-- **G6 default AEAD = ChaCha20-Poly1305**。理由：
+- **Proteus default AEAD = ChaCha20-Poly1305**。理由：
   - 軟體實作 universal fast（無 AES-NI 也快）。
   - 天然 constant-time（無 cache-timing risk，避免 Bernstein 2005 cache-timing attack）。
   - CFRG-blessed (RFC 8439)。
-- **G6 nonce 結構**：採用 12-byte 的 IETF 變體（`epoch ‖ direction ‖ counter`）。
+- **Proteus nonce 結構**：採用 12-byte 的 IETF 變體（`epoch ‖ direction ‖ counter`）。
 
 ## Open questions
 - 是否存在 round-reduced ChaCha 的 attack 改善？目前 7-round 是 best；若降到 8/9-round 仍安全 margin 充足，但能否 cleanly 擴 differential framework？

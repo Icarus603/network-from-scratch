@@ -37,8 +37,8 @@ Multi-tab (2-page parallel): closed-world acc drops to ~50% from 90%.
 - Doesn't measure attacker retraining cost (which would partially recover acc).
 
 ## How it informs our protocol design
-- **G6 evaluation must include ≥ 30-day staleness gap** between training and testing data.
-- Suggests G6 could leverage drift by frequently rotating wire-format details — increases attacker retraining cost.
+- **Proteus evaluation must include ≥ 30-day staleness gap** between training and testing data.
+- Suggests Proteus could leverage drift by frequently rotating wire-format details — increases attacker retraining cost.
 - Multi-tab parsing remains an open defense opportunity (GLUE from Gong-Wang 20 addresses).
 
 ## Open questions

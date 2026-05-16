@@ -33,9 +33,9 @@ DF drops 33 pts at 25% overhead — best 2020 zero-delay defense.
 - GLUE requires application support (initiate decoy pages).
 
 ## How it informs our protocol design
-- **Front-loaded padding is a cheap, effective primitive** — G6 should include it in opening burst.
-- GLUE is conceptually important: G6 should consider session-level "no idle disconnect" with cover decoy fetches.
-- Combining FRONT with shape envelope (RegulaTor) and decoy (Surakav) is unexplored — G6's hybrid opportunity.
+- **Front-loaded padding is a cheap, effective primitive** — Proteus should include it in opening burst.
+- GLUE is conceptually important: Proteus should consider session-level "no idle disconnect" with cover decoy fetches.
+- Combining FRONT with shape envelope (RegulaTor) and decoy (Surakav) is unexplored — Proteus's hybrid opportunity.
 
 ## Open questions
 - Front + back loading: does adding trace-end padding further help? (Unstudied.)

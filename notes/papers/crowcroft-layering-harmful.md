@@ -64,10 +64,10 @@
 
 ## How it informs our protocol design
 
-對 G6 設計的**警示性教訓**：
+對 Proteus 設計的**警示性教訓**：
 
 ### 1. **「每層各自正確」不夠，必須整體測試**
-- G6 = 加密 layer + 握手 layer + 流控 layer + 偽裝 layer
+- Proteus = 加密 layer + 握手 layer + 流控 layer + 偽裝 layer
 - 即使每個 layer unit test pass，組合後可能出 perf bug
 - **Phase III 12.13 高丟包鏈路評測**就是要抓這類 layer interaction bug
 
@@ -89,7 +89,7 @@
 - 不是「全 layered」或「全 monolithic」
 - 而是「**層間介面該開哪些 hook**」——讓 application 能 hint lower layer，讓 lower layer 能 expose status 給 application
 - TCP_NODELAY 是個粗糙 hint；現代 TLS / QUIC 有更精細的 hint API
-- G6 也該設計**雙向 hint API**
+- Proteus 也該設計**雙向 hint API**
 
 ## Open questions
 

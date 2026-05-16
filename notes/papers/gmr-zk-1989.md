@@ -62,9 +62,9 @@ Prover P, Verifier V:
 - ROM-free perfect ZK in NP 仍 open (general)。
 
 ## How it informs our protocol design
-- **G6 認知到 Ed25519 是 NIZK 的 special case**：Schnorr proof of knowledge of sk + Fiat-Shamir → signature。
-- **G6 未來 anonymous auth**: Privacy Pass / VRF 等都基於 ZK proof of credential validity。
-- **G6 教訓**：「knowledge」這個概念可形式化；「我知道 sk」可被 cryptographically verified 而不 reveal sk。為 G6 anonymous subscription / decoy-indistinguishability 等 future feature 提供 conceptual base。
+- **Proteus 認知到 Ed25519 是 NIZK 的 special case**：Schnorr proof of knowledge of sk + Fiat-Shamir → signature。
+- **Proteus 未來 anonymous auth**: Privacy Pass / VRF 等都基於 ZK proof of credential validity。
+- **Proteus 教訓**：「knowledge」這個概念可形式化；「我知道 sk」可被 cryptographically verified 而不 reveal sk。為 Proteus anonymous subscription / decoy-indistinguishability 等 future feature 提供 conceptual base。
 
 ## Open questions
 - ZK with sub-linear verifier time (succinct verifier) 仍 active。

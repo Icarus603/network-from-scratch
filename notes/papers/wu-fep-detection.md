@@ -56,9 +56,9 @@
 
 ## How it informs our protocol design
 
-**這篇是 G2/G3 世代協議被打的決定性證據**，直接定義了 G6（我們）必須過的 baseline：
+**這篇是 G2/G3 世代協議被打的決定性證據**，直接定義了 Proteus（我們）必須過的 baseline：
 
-1. **G6 必須通過所有 5 條 exemption** — 不是隨便一條，而是**每條都過**，因為 GFW 是 OR-of-exemptions 邏輯
+1. **Proteus 必須通過所有 5 條 exemption** — 不是隨便一條，而是**每條都過**，因為 GFW 是 OR-of-exemptions 邏輯
 2. **最簡單的滿足方法**：偽裝成 TLS（過 Ex5）——這就是 Trojan/VLESS+REALITY 為什麼勝出的工程理由
 3. **TCP 之外**：UDP/QUIC 系暫時不受此 system 影響——這是 Hysteria2/TUIC v5 的暫時優勢，但**不能假設長期成立**
 4. **Probabilistic blocking 啟示**：GFW 願意接受誤封率，但用 IP 範圍 + probability 控制 collateral damage——我們協議設計時要假設**部署在熱門 VPS 機房 IP 上**會被優先掃，而 CDN IP 段相對安全

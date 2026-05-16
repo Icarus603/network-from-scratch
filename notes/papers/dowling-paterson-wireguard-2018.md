@@ -35,9 +35,9 @@ Game-based reduction in standard model：
 - 沒處理 PQ。
 
 ## How it informs our protocol design
-1. **G6 必須 day-1 加 explicit key confirmation**——避免 Dowling-Paterson barrier。可以是一封極小（< 32 bytes）的 finished-like message，或像 TLS 1.3 用 Finished MAC。
-2. **G6 spec 必須附 game-based proof**（[Part 11.10] 設計階段直接寫）——不能只靠 Tamarin。
-3. **5-DH 混合**對 KCI / FS 至關重要——G6 沿用但要加 PQ hybrid。
+1. **Proteus 必須 day-1 加 explicit key confirmation**——避免 Dowling-Paterson barrier。可以是一封極小（< 32 bytes）的 finished-like message，或像 TLS 1.3 用 Finished MAC。
+2. **Proteus spec 必須附 game-based proof**（[Part 11.10] 設計階段直接寫）——不能只靠 Tamarin。
+3. **5-DH 混合**對 KCI / FS 至關重要——Proteus 沿用但要加 PQ hybrid。
 
 ## Open questions
 - 對 deployed WireGuard（無 explicit confirmation）的完整 proof 仍 open——可能需要新 framework。

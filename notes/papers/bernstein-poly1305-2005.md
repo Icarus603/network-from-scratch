@@ -3,7 +3,7 @@
 **Authors**: Daniel J. Bernstein
 **Read on**: 2026-05-14 (in lesson 3.2)
 **Status**: full PDF (`assets/papers/bernstein-poly1305-2005.pdf`)
-**One-line**: 在質數 p = 2^130 - 5 上做多項式評估的 Carter-Wegman MAC——比 HMAC 快 3-5 倍，secure with provable ε-AXU bound；後與 ChaCha20 結合成 IETF AEAD 標準 (RFC 8439)，是 G6 預設 record-layer 認證。
+**One-line**: 在質數 p = 2^130 - 5 上做多項式評估的 Carter-Wegman MAC——比 HMAC 快 3-5 倍，secure with provable ε-AXU bound；後與 ChaCha20 結合成 IETF AEAD 標準 (RFC 8439)，是 Proteus 預設 record-layer 認證。
 
 ## Problem
 2005 年的 MAC 主流：
@@ -57,9 +57,9 @@ Step 4: Add s and reduce
 - **長度上限**：q ≤ 2^32 blocks ≈ 64 GB per message，超過後 advantage 不可忽略。
 
 ## How it informs our protocol design
-- **G6 用 RFC 8439 ChaCha20-Poly1305**：one-time key 自動 derived from per-record nonce + ChaCha20 counter=0。
-- **G6 spec 限制 record size ≤ 16 KB**：遠低於 Poly1305 limit；給 implementation 寬裕。
-- **G6 tag verify constant-time**：用 `crypto_verify_16` (libsodium) 或等價，避免 timing-based forgery oracle。
+- **Proteus 用 RFC 8439 ChaCha20-Poly1305**：one-time key 自動 derived from per-record nonce + ChaCha20 counter=0。
+- **Proteus spec 限制 record size ≤ 16 KB**：遠低於 Poly1305 limit；給 implementation 寬裕。
+- **Proteus tag verify constant-time**：用 `crypto_verify_16` (libsodium) 或等價，避免 timing-based forgery oracle。
 
 ## Open questions
 - Multi-key Poly1305 的 tight bound？

@@ -49,10 +49,10 @@
 
 ## How it informs our protocol design
 
-- G6 **不抄 mTCP 路線**（不重寫 TCP stack），但**吸收 share-nothing thread-per-core 哲學**
-- 直接 inform G6 server 用 monoio / compio + SO_REUSEPORT × N worker + per-worker connection table
-- 對「**為何 Linux 對 G6 1Gbps 級服務夠用**」的判斷有歷史證據
-- Specialization 哲學（Marinos SIGCOMM 2014 配對）：G6 是「為 proxy 量身打造的 transport」，跟 mTCP 是 sibling 思路
+- Proteus **不抄 mTCP 路線**（不重寫 TCP stack），但**吸收 share-nothing thread-per-core 哲學**
+- 直接 inform Proteus server 用 monoio / compio + SO_REUSEPORT × N worker + per-worker connection table
+- 對「**為何 Linux 對 Proteus 1Gbps 級服務夠用**」的判斷有歷史證據
+- Specialization 哲學（Marinos SIGCOMM 2014 配對）：Proteus 是「為 proxy 量身打造的 transport」，跟 mTCP 是 sibling 思路
 
 ## Open questions
 

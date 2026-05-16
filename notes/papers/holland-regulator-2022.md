@@ -33,9 +33,9 @@ Compared to Tamaraw (100% BW, 125% latency): RegulaTor slightly higher BW but lo
 - Real-time but not "zero delay" (queues real cells when over-rate).
 
 ## How it informs our protocol design
-- **Window-rate envelope is the simplest strong WF defense** — G6 should include as a layer.
+- **Window-rate envelope is the simplest strong WF defense** — Proteus should include as a layer.
 - Combine with FRONT (front-loaded random tokens) for opening-burst variation.
-- Pareto-front position is excellent — G6 might match RegulaTor at lower BW% by adding Surakav-style decoys.
+- Pareto-front position is excellent — Proteus might match RegulaTor at lower BW% by adding Surakav-style decoys.
 
 ## Open questions
 - Optimal window size $w$ given user activity distribution? Empirical only.

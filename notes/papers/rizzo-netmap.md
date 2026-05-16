@@ -90,26 +90,26 @@ FreeBSD sendto() 一次調用花 ~950 ns（論文 Fig 2 細拆）：
 
 ## How it informs our protocol design
 
-對 G6 設計的**重要選項**：
+對 Proteus 設計的**重要選項**：
 
-### 1. **如果 G6 走 kernel-bypass 路線**
+### 1. **如果 Proteus 走 kernel-bypass 路線**
 - netmap 是 baseline candidate（簡單、open source、kernel mainstream）
 - DPDK 是更激進選項（throughput 更高但工程量大）
 - **AF_XDP（Linux 內建）是 2026 的中道選擇**——繼承 netmap zero-copy + 整合 NAPI
-- **G6 Phase III 12.4 應該 benchmark 三條路線**
+- **Proteus Phase III 12.4 應該 benchmark 三條路線**
 
 ### 2. **batched syscall 是核心優化**
 - 即使不走 zero-copy，**batching** 本身就值幾倍加速
 - io_uring 就是這個思想的 modern 化
-- G6 應該所有 syscall 都用 batched API（sendmmsg / recvmmsg / io_uring）
+- Proteus 應該所有 syscall 都用 batched API（sendmmsg / recvmmsg / io_uring）
 
 ### 3. **libpcap shim 啟示**
-- Phase III deployment 時，G6 可以提供「libpcap-compatible」shim 讓 evaluation tool（Wireshark、Zeek、Suricata）無痛接上
+- Phase III deployment 時，Proteus 可以提供「libpcap-compatible」shim 讓 evaluation tool（Wireshark、Zeek、Suricata）無痛接上
 - 這是 12.15 抗審查評測的 win-win 設計
 
 ### 4. **2KB buffer 設計選擇**
 - netmap 固定 2KB——對 MTU 1500 留 ~500 byte 給 metadata
-- G6 內部 buffer 設計可以參考——對齊 MTU 而非 PAGE_SIZE
+- Proteus 內部 buffer 設計可以參考——對齊 MTU 而非 PAGE_SIZE
 
 ### 5. **針對 GFW 的 packet generator**
 - Phase III 9.12 主動探測模擬可以基於 netmap 寫——能達 line rate 的 active prober
@@ -120,7 +120,7 @@ FreeBSD sendto() 一次調用花 ~950 ns（論文 Fig 2 細拆）：
 - **netmap 在 40/100 Gbps NIC 上 still relevant**？Neugebauer 2018 揭露 PCIe 變成 bottleneck，netmap 設計不解決這層；可能需要 DPDK + DDIO 才能跑滿
 - **vs AF_XDP**：兩者都是 zero-copy；AF_XDP 在 Linux mainline，netmap 更跨平台；長期 winner 不明
 - **NUMA-aware netmap**？多 socket 系統下 netmap ring 跨 NUMA 會掉 5-10% throughput；論文沒處理
-- **SmartNIC 卸載**：如果 NIC 內就能跑 ML inference 識別 G6 packet，netmap 級的 host-side throughput 還重要嗎？
+- **SmartNIC 卸載**：如果 NIC 內就能跑 ML inference 識別 Proteus packet，netmap 級的 host-side throughput 還重要嗎？
 - **零拷貝 + TLS**：netmap 給 plaintext packet，TLS 加密必須 copy（需要 crypto 處理）——這跟 zero-copy 哲學矛盾，kTLS 是嘗試解法
 
 ## References worth following
@@ -148,5 +148,5 @@ FreeBSD sendto() 一次調用花 ~950 ns（論文 Fig 2 細拆）：
 - **與 Click 2000**：netmap §5.6 把 Click userspace 用 netmap 加速 4 倍；證明 element-based architecture + zero-copy 可組合
 - **與 Han 2012 MegaPipe**：兩個獨立攻擊不同層——netmap bypass kernel stack，MegaPipe redesign socket API
 - **與 Neugebauer 2018 PCIe**：netmap 解 host-side overhead；6 年後 Neugebauer 揭露 PCIe 才是新 bottleneck
-- **直接 inform** Phase III 12.4 G6 資料路徑選擇（io_uring vs AF_XDP vs DPDK 的決策架構）
+- **直接 inform** Phase III 12.4 Proteus 資料路徑選擇（io_uring vs AF_XDP vs DPDK 的決策架構）
 - **直接 inform** Phase III 12.15 評測平台（用 netmap-based fast prober）

@@ -29,7 +29,7 @@
 - Doesn't address implementation bugs.
 
 ## How it informs our protocol design
-- G6Ratchet.spthy uses similar stateful pattern (KEYUPDATE epoch tracking via persistent facts).
+- ProteusRatchet.spthy uses similar stateful pattern (KEYUPDATE epoch tracking via persistent facts).
 - Confirms Tamarin handles stateful crypto + ratchet well (lesson 11.11 §1 comparison vs ProVerif).
 - Engineering style of helper lemmas adopted.
 

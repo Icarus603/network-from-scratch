@@ -37,10 +37,10 @@ Shadowsocks (SS) was the most widely deployed circumvention tool to/from mainlan
 - Mitigation suggestions (packet coalescence, entropy shaping) are partial.
 
 ## How it informs our protocol design
-- G6's CAR-1 budget directly references entropy + length features as the attack surface to defeat.
-- G6's per-packet 1280B cell padding addresses length feature.
-- G6's authentication-by-HMAC (not by AEAD attempt) addresses entropy feature: the first 32 bytes are HMAC pseudorandom, AAD-fixed, embedded in TLS ClientHello extension whose entropy is structured.
-- G6's REALITY-style cover forward addresses Stage 2 active probing.
+- Proteus's CAR-1 budget directly references entropy + length features as the attack surface to defeat.
+- Proteus's per-packet 1280B cell padding addresses length feature.
+- Proteus's authentication-by-HMAC (not by AEAD attempt) addresses entropy feature: the first 32 bytes are HMAC pseudorandom, AAD-fixed, embedded in TLS ClientHello extension whose entropy is structured.
+- Proteus's REALITY-style cover forward addresses Stage 2 active probing.
 
 ## Open questions
 - Has GFW's classifier shifted to DL-based since 2020? Public measurement gap.

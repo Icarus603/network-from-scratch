@@ -31,9 +31,9 @@ Mixmaster (Cottrell 1995) lacked replay protection, exit policies, robust path s
 - Sphinx packet format (Danezis 09) later replaced Mixminion's packet design.
 
 ## How it informs our protocol design
-- **G6 doesn't pursue Mixminion's high-latency design** for general use.
-- Cover-traffic concept (Mixminion injects per-mix dummies) generalizes to G6 light-cover mode.
-- SURB-style return-anonymity not directly relevant unless G6 adds messaging mode.
+- **Proteus doesn't pursue Mixminion's high-latency design** for general use.
+- Cover-traffic concept (Mixminion injects per-mix dummies) generalizes to Proteus light-cover mode.
+- SURB-style return-anonymity not directly relevant unless Proteus adds messaging mode.
 
 ## Open questions
 - Tor's design (low-latency successor) trades formal anonymity for usability — different design space.

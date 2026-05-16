@@ -28,7 +28,7 @@ Existing encrypted-traffic classifiers used hand-crafted features. Could DL appr
 - App categories (browsing/streaming/chat) coarser than per-app.
 
 ## How it informs our protocol design
-- G6 tunneling normalizes inner-app flow patterns at the TLS-record level; FS-Net-style attack would still see normalized flow.
+- Proteus tunneling normalizes inner-app flow patterns at the TLS-record level; FS-Net-style attack would still see normalized flow.
 - Per-category fingerprinting threat acknowledged.
 
 ## References worth following

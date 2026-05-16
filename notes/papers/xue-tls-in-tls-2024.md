@@ -30,10 +30,10 @@
 - MASQUE CONNECT-UDP with inner UDP datagrams avoids the leak entirely (no TLS record layer between inner and outer).
 
 ## How it informs our protocol design
-- G6 explicitly rejects TLS-over-TCP-with-inner-HTTPS architecture (lesson 11.4): G6-α last-resort path includes "inner padding mode" mitigation.
-- G6 primary architecture is MASQUE CONNECT-UDP precisely to architecturally evade this attack class.
-- G6 spec §11.4 / §11.11 calls out C11 (TLS-in-TLS detection) as one of the central design drivers.
-- This paper is the empirical evidence justifying G6's transport substrate choice (G6-γ over G6-α).
+- Proteus explicitly rejects TLS-over-TCP-with-inner-HTTPS architecture (lesson 11.4): Proteus-α last-resort path includes "inner padding mode" mitigation.
+- Proteus primary architecture is MASQUE CONNECT-UDP precisely to architecturally evade this attack class.
+- Proteus spec §11.4 / §11.11 calls out C11 (TLS-in-TLS detection) as one of the central design drivers.
+- This paper is the empirical evidence justifying Proteus's transport substrate choice (Proteus-γ over Proteus-α).
 
 ## Open questions
 - Can any TLS-wrapped proxy fully evade this attack via "inner-record padding"? Partial mitigations possible but not provably perfect.
