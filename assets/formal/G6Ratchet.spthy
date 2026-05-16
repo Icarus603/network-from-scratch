@@ -1,0 +1,114 @@
+/*
+  G6Ratchet — Tamarin theory for G6's KEYUPDATE ratchet
+  Models post-compromise security (PCS) of the unidirectional KDF ratchet.
+
+  See lessons/part-11-design/11.11.
+*/
+
+theory G6Ratchet
+begin
+
+builtins: hashing, symmetric-encryption
+
+functions:
+    hkdf/2,
+    label_ratchet/0,
+    label_traffic/0
+
+equations:
+    /* none beyond builtins */
+
+// ------- rules -------
+
+rule Setup_Server:
+  let
+    sk_long = ~ltk
+  in
+    [ Fr(~ltk) ]
+  --[ ServerKey($S, sk_long) ]->
+    [ !ServerLTK($S, sk_long) ]
+
+rule Handshake_Establish:
+  let
+    K0 = h(<~master, 'epoch_0'>)
+  in
+    [ !ServerLTK($S, ~ltk),
+      Fr(~master) ]
+  --[ HandshakeDone($C, $S, K0),
+      SessionStart($C, $S),
+      OutKey(K0) ]->
+    [ !Session($C, $S, K0, '0') ]
+
+rule Ratchet_Step:
+  let
+    K_new = hkdf(K_old, label_ratchet)
+  in
+    [ !Session($C, $S, K_old, idx) ]
+  --[ Ratchet($C, $S, K_old, K_new, idx),
+      OldKeyDeleted(K_old) ]->
+    [ !Session($C, $S, K_new, h(idx)) ]
+
+rule Use_Key_To_Send:
+  [ !Session($C, $S, K, idx),
+    In(~m) ]
+  --[ SentWithKey($C, $S, K, ~m),
+      OutKey(K) ]->
+    [ Out(senc(~m, K)) ]
+
+rule Reveal_Key:
+  [ !Session($C, $S, K, idx) ]
+  --[ KeyReveal($C, $S, K, idx) ]->
+    [ Out(K) ]
+
+rule Reveal_LongTerm:
+  [ !ServerLTK($S, ltk) ]
+  --[ LTKReveal($S, ltk) ]->
+    [ Out(ltk) ]
+
+// ------- properties -------
+
+/* Forward secrecy:
+   if a key K was used to send msg ~m at some session, and K was
+   never directly revealed (only later keys), then attacker can't learn ~m. */
+
+lemma forward_secrecy:
+  "All C S K m #i.
+       SentWithKey(C, S, K, m) @ i &
+       (not Ex #j. KeyReveal(C, S, K, j) @ j & j < i + 1)
+     ==> not (Ex #k. K(m) @ k)"
+
+/* Post-compromise security (PCS):
+   if a key K_n was revealed, then any FUTURE key K_{n+k} should
+   still be secret as long as no further reveal. */
+
+lemma post_compromise_security:
+  "All C S K_old K_new idx #i #j.
+       Ratchet(C, S, K_old, K_new, idx) @ i &
+       KeyReveal(C, S, K_old, idx) @ j &
+       j < i
+       /* no further key reveal after ratchet */
+       & (not Ex K' idx' #k. KeyReveal(C, S, K', idx') @ k & k > i)
+     ==> not (Ex #l. K(K_new) @ l)"
+
+/* Key uniqueness across direction & epoch */
+
+lemma key_uniqueness:
+  "All C S K_a K_b idx_a idx_b #i #j.
+       Ratchet(C, S, K_a, K_a, idx_a) @ i &
+       Ratchet(C, S, K_b, K_b, idx_b) @ j &
+       (idx_a = idx_b)
+     ==> K_a = K_b"
+
+/* Long-term key compromise does NOT affect past session keys
+   (because session key derived from per-session ephemeral input,
+    not long-term key. Sanity check.) */
+
+lemma fs_after_ltk_reveal:
+  "All C S K_session m #i #j L #k.
+       HandshakeDone(C, S, K_session) @ i &
+       SentWithKey(C, S, K_session, m) @ j &
+       LTKReveal(S, L) @ k &
+       j < k
+     ==> not (Ex #l. K(m) @ l)"
+
+end

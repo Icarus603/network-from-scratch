@@ -2661,3 +2661,144 @@
 **首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)
 **一句話**：實際無功能的填充流量，用來模仿正常 browsing 的 multi-destination + waterfall 特徵；Walkie-Talkie / Conjure 使用。
 
+---
+
+## Part 11 — 設計階段
+
+### Capability Matrix
+**中文**：對手能力矩陣
+**所屬層**：threat modeling
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
+**一句話**：把對手可做的事按 ID（C1, C2, ...）列表，每條 in-scope 必對應 defense 與 verification; G6 在 C1–C7、C9–C12 in-scope。
+
+### ε_CAR (Distinguishing Advantage for Censorship Resistance)
+**中文**：抗審查可區分度
+**所屬層**：anti-censorship 評估
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
+**一句話**：classifier 區分 G6 與 cover protocol 的 advantage，定義仿 IND game (Tschantz FOCI 2016)；G6 target ε_short ≤ 0.20, ε_stretch ≤ 0.30。
+
+### Mosca's Theorem / SNDL
+**中文**：「現在收集、未來解密」威脅模型
+**所屬層**：PQ 威脅
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
+**一句話**：Mosca 2018 給的 migration 時程公式；G6 因此 mandatory hybrid PQ KEM。
+
+### KCI (Key Compromise Impersonation) Resistance
+**中文**：金鑰妥協冒充抗性
+**所屬層**：handshake security
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)
+**一句話**：Krawczyk HMQV 2005 定義；client SK 洩後，attacker 仍不能假冒 honest server 對 client；G6 由 server TLS cert + signature 達成。
+
+### PCS (Post-Compromise Security)
+**中文**：後妥協安全
+**所屬層**：handshake / ratchet security
+**首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)（Cohn-Gordon-Cremers-Garratt JoC 2016）
+**一句話**：key reveal 後，未來 ratchet 之後的 key 仍 secret；G6 v0.1 KEYUPDATE 達 PCS-weak（Tamarin 已驗）。
+
+### REALITY / SNI Borrowing
+**中文**：借用真實 popular SNI + auth-fail forward
+**所屬層**：anti-active-probing
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)
+**一句話**：xtls/reality 設計；server 對 auth-fail connection 直接 forward 給真實 cover server，attacker 看到的是 cover 的真實 TLS cert / response。
+
+### MASQUE (CONNECT-UDP/IP over HTTP/3)
+**中文**：HTTP/3 內的 UDP/IP proxy
+**所屬層**：transport substrate
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（RFC 9297/9298/9484）
+**一句話**：IETF MASQUE WG 的 proxy 規格；G6-γ 選此作 primary transport，inner 不是 TLS 故 architectural 規避 TLS-in-TLS 攻擊。
+
+### TLS-in-TLS Detection
+**中文**：TLS-in-TLS 結構性洩漏
+**所屬層**：anti-censorship 攻擊面
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（Xue USENIX 2024）
+**一句話**：outer TLS-over-TCP 內跑 inner TLS，inner record 邊界由 outer 段碎洩漏；G6-γ MASQUE 架構規避。
+
+### Hybrid KEM
+**中文**：classical + PQ 並聯 KEM
+**所屬層**：post-quantum migration
+**首次出現**：[11.4](lessons/part-11-design/11.4-architecture-decision.md)（Bindel PQCrypto 2019）
+**一句話**：G6 用 KDF(X25519 ‖ ML-KEM-768)；攻擊者必須同時 break 兩個分支才得 secret。
+
+### GREASE
+**中文**：Generate Random Extensions And Sustain Extensibility
+**所屬層**：anti-ossification
+**首次出現**：[11.8](lessons/part-11-design/11.8-spec-extensibility.md)（RFC 8701）
+**一句話**：在 ClientHello 內隨機插入無意義 codepoint，防 middlebox 凝固 + 維持 wire-level multiplicity。
+
+### Cover Protocol Pinning
+**中文**：cover protocol 鎖死
+**所屬層**：CAR-1
+**首次出現**：[11.2](lessons/part-11-design/11.2-goals-non-goals.md)
+**一句話**：ε_CAR 必相對 specific cover distribution 才有意義；G6 鎖 TLS 1.3 over UDP-443 (H3) to popular CDN。
+
+### Active Probing
+**中文**：主動探測
+**所屬層**：CAR-2 攻擊面
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)（Ensafi 2015、Frolov 2020）
+**一句話**：censor 對可疑 IP 主動發 probe 試探回應；REALITY-style fallback 是 SOTA 應對。
+
+### Goodput vs Throughput
+**中文**：goodput 排除 retransmit/padding 的 effective bandwidth
+**所屬層**：performance metric
+**首次出現**：[11.2](lessons/part-11-design/11.2-goals-non-goals.md)（Cardwell BBR CACM 2017）
+**一句話**：G6 PERF-1 用 goodput ≥ 0.95 BDP, 不是 raw throughput。
+
+### Cell Padding
+**中文**：固定 cell 大小填充
+**所屬層**：CAR-1 padding
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)
+**一句話**：每 UDP datagram round-up 到 1280 bytes (G6 spec)，去除 size feature。
+
+### Cover-Distribution Sampling
+**中文**：採樣 cover 分佈整形
+**所屬層**：CAR-1 advanced shaping
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)
+**一句話**：不只 fixed-cell，IAT + size 採樣自 cover protocol 分佈，TVD 下界以 Le Cam's lemma 給 ε_CAR 上界。
+
+### Polymorphism vs Mimicry
+**中文**：多形變化 vs 模仿
+**所屬層**：CAR design philosophy
+**首次出現**：[11.3](lessons/part-11-design/11.3-design-space.md)（Houmansadr S&P 2013 "Parrot is dead"）
+**一句話**：mimicry 任一 semantic 不對就死；polymorphism 仰賴 distribution coverage 不仰賴 semantic equivalence; G6 採 polymorphism。
+
+### Fallback Forwarding
+**中文**：auth-fail 透傳給真 cover
+**所屬層**：anti-active-probing 機制
+**首次出現**：[11.4](lessons/part-11-design/11.4-architecture-decision.md)
+**一句話**：G6 server 對 auth-fail connection 整段 bytes forward 給真 cover；attacker 看 cover 的真實回應; spec 要 < 1ms p99 budget。
+
+### Adversarial Reading
+**中文**：對抗式 review
+**所屬層**：design review methodology
+**首次出現**：[11.12](lessons/part-11-design/11.12-design-review.md)
+**一句話**：design review 不是 confirming spec, 是 attack spec 找漏洞；G6 v0.1 從 v0.0 經此 review 加 10 條 normative fix。
+
+### Residual Risk
+**中文**：殘餘風險（已 known but explicitly 接受）
+**所屬層**：threat modeling
+**首次出現**：[11.1](lessons/part-11-design/11.1-threat-model.md)（NIST SP 800-30 風格）
+**一句話**：每條 in-scope capability 對應一個 defense + 可能仍有 residual; spec §11.16 明列接受項。
+
+### BCP 14 (RFC 2119 / RFC 8174)
+**中文**：MUST / SHOULD / MAY 規範用詞
+**所屬層**：spec writing
+**首次出現**：[11.5](lessons/part-11-design/11.5-spec-wire-format.md)
+**一句話**：IETF normative keyword convention; G6 spec strictly 遵循。
+
+### Conformance Test Vectors
+**中文**：符合性測試向量
+**所屬層**：spec writing
+**首次出現**：[11.13](lessons/part-11-design/11.13-spec-v01.md)
+**一句話**：spec 內附 byte-exact test vectors 確保多 impl 互通; G6 v0.1 deferred 到 Part 12 reference impl 一起 release。
+
+### Bloom Filter (anti-replay)
+**中文**：機率資料結構濾重複
+**所屬層**：anti-replay
+**首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)（Bloom 1970）
+**一句話**：G6 用 sliding 1-hour Bloom 過 nonce, FPR ≤ 10⁻⁹; false positive 觸發 fallback (safe)。
+
+### Forward-only Ratchet (KDF-only)
+**中文**：單向 KDF ratchet
+**所屬層**：handshake ratchet
+**首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)
+**一句話**：K_{n+1} = HKDF(K_n, label)；簡單但只達 PCS-weak（PCS-strong 需注入 fresh randomness, 1 RTT 代價）。

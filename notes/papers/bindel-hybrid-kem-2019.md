@@ -1,7 +1,7 @@
 # Hybrid Key Encapsulation Mechanisms and Authenticated Key Exchange
 **Venue / Year**: PQCrypto 2019
 **Authors**: Nina Bindel, Jacqueline Brendel, Marc Fischlin, Brian Goncalves, Douglas Stebila
-**Read on**: 2026-05-16 (in lesson 3.17)
+**Read on**: 2026-05-16 (first cited in lesson 3.17; deepened in lessons 11.3, 11.4, 11.6, 11.10 of Part 11)
 **Status**: cited from abstract + ePrint (eprint.iacr.org/2018/903). Full deep read deferred to Phase III 11.11 hybrid combiner proof.
 **One-line**: 給出第一個完整的 hybrid KEM 安全模型與形式化證明：如果其中**任一** component KEM 是 IND-CCA2，則正確 combine 後的 hybrid KEM 也是 IND-CCA2。
 
