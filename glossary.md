@@ -2471,3 +2471,193 @@
 **所屬層**：anti-censorship 設計
 **首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)、[8.10](lessons/part-8-quic-protocols/8.10-takeaways.md)
 **一句話**：對比 wire-image 隨機化, mimicry 是「假裝是 X」; Houmansadr NDSS 2013 "Parrot is Dead" 警告 mimicry 永遠落後但 MASQUE/REALITY 路線重新驗證可行。
+---
+
+# Part 9 — 審查對抗：GFW 完整研究
+
+### Active Probing
+**中文**：主動探測
+**所屬層**：censor capability
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)（Ensafi et al. IMC 2015）
+**一句話**：censor 主動向疑似 proxy server 發起 TCP/UDP connect 與 payload，觀察 response 以識別協議家族；GFW 的 confirmation 手段。
+
+### Probe Family
+**中文**：探測族
+**所屬層**：active probing taxonomy
+**首次出現**：[9.2](lessons/part-9-gfw-research/9.2-gfw-shadowsocks-detection.md)（Alice et al. IMC 2020）
+**一句話**：同類但變異的 probe 集合；GFW 對 SS 用 7 family（replay、mutation、random、truncated、concatenated）。
+
+### Probe-resistant Protocol
+**中文**：抗探測協議
+**所屬層**：design property
+**首次出現**：[9.6](lessons/part-9-gfw-research/9.6-active-probing-deep-dive.md)（Frolov, Wampler, Wustrow NDSS 2020）
+**一句話**：對 active probe 不洩漏身份的協議；obfs4 silent-hold L1，MTProto perpetual-read L2，REALITY real-backend forward L3。
+
+### Residual Censorship
+**中文**：殘留封鎖
+**所屬層**：blocking behavior
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)
+**一句話**：GFW 識別流量後對 (src_IP, dst_IP, dst_port) 在後續 90–180 秒繼續封鎖；對流量設計造成 retry 邏輯難題。
+
+### Fully-Encrypted Traffic (FET)
+**中文**：全加密協議流量
+**所屬層**：traffic class
+**首次出現**：[9.7](lessons/part-9-gfw-research/9.7-fully-encrypted-traffic-detection.md)（Wu et al. USENIX Security 2023）
+**一句話**：沒有 plaintext header 的協議流量（SS、VMess、obfs4）；GFW 2021-11 起以 5 條 byte-level heuristic 純被動偵測。
+
+### Exemption Rule
+**中文**：排除規則
+**所屬層**：FET detection
+**首次出現**：[9.7](lessons/part-9-gfw-research/9.7-fully-encrypted-traffic-detection.md)
+**一句話**：GFW FET detector 用 5 條規則（popcount、printable-ratio、protocol-prefix）作 OR-of-exemptions；命中任一即放行。
+
+### Popcount Heuristic
+**中文**：1-bit 計數啟發式
+**所屬層**：FET detection rule Ex1
+**首次出現**：[9.7](lessons/part-9-gfw-research/9.7-fully-encrypted-traffic-detection.md)
+**一句話**：對 first segment 計算 mean popcount per byte，落在 (3.4, 4.6) 範圍以外即放行；隨機 byte 期望 ≈ 4。
+
+### Probabilistic Blocking
+**中文**：機率封鎖
+**所屬層**：blocking policy
+**首次出現**：[9.7](lessons/part-9-gfw-research/9.7-fully-encrypted-traffic-detection.md)
+**一句話**：GFW 對 FET trigger 以 ~26.3% 機率封鎖，控制 collateral damage；對 evader 而言意味多次重試可能繞過。
+
+### SNI Sniffing
+**中文**：SNI 嗅探
+**所屬層**：DPI capability
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)
+**一句話**：GFW 解析 TLS ClientHello 的 server_name extension，對黑名單命中即注入 RST + 殘留封鎖。
+
+### Handshake Stealing
+**中文**：握手盜用
+**所屬層**：circumvention pattern
+**首次出現**：[9.4](lessons/part-9-gfw-research/9.4-gfw-vless-reality-status.md)（REALITY by RPRX）
+**一句話**：server 模擬 cover server 的 TLS handshake（用借用 cert + 派生 auth key 簽 ServerHello），失敗認證 fallback 給真 backend；REALITY 核心。
+
+### IP-SNI Mismatch
+**中文**：IP-SNI 對應不一致
+**所屬層**：cross-feature passive detection
+**首次出現**：[9.3](lessons/part-9-gfw-research/9.3-gfw-trojan-detection.md)
+**一句話**：client 連到 IP_S 但 ClientHello.SNI 指向 example.com，若 IP_S 不在 example.com 對應 ASN → 可疑；對 Trojan 致命的訊號。
+
+### TLS-in-TLS
+**中文**：TLS 內隧道
+**所屬層**：traffic shape leak
+**首次出現**：[9.3](lessons/part-9-gfw-research/9.3-gfw-trojan-detection.md)
+**一句話**：TLS 流量內承載另一個加密協議；packet size、burst pattern、record size 分布與真實 browsing 不同，是 traffic-shape classifier 主要 feature。
+
+### QUIC Initial Decryption
+**中文**：QUIC 起始包解密
+**所屬層**：QUIC censorship
+**首次出現**：[9.5](lessons/part-9-gfw-research/9.5-gfw-quic-http3.md)（Zohaib et al. USENIX Security 2025）
+**一句話**：QUIC v1 的 Initial packet 用 publicly-derivable key 加密；GFW 2024-04 起 at-scale 解密提取 SNI 並 block。
+
+### SNI-Slicing
+**中文**：SNI 切片
+**所屬層**：QUIC circumvention
+**首次出現**：[9.5](lessons/part-9-gfw-research/9.5-gfw-quic-http3.md)
+**一句話**：把 TLS ClientHello 的 SNI 跨多個 UDP datagram 切割，利用 GFW 不重組 Initial 的限制 bypass QUIC SNI filter；quic-go v0.52+ 已實作。
+
+### TCB Teardown
+**中文**：TCB 拆解
+**所屬層**：TCP-layer evasion
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)（Khattak et al.; Bock et al. CCS 2019）
+**一句話**：傳送格式異常但合法的 TCP segment 讓 GFW per-flow TCB 失效，後續流量 bypass DPI；Geneva 自動發現的 evasion 之一。
+
+### JA3 / JA3S
+**中文**：客戶端 / 服務器 TLS 指紋（2017 規格）
+**所屬層**：TLS fingerprint
+**首次出現**：[9.9](lessons/part-9-gfw-research/9.9-tls-fingerprinting.md)（Althouse, Salesforce 2017）
+**一句話**：對 ClientHello / ServerHello 的 (version, ciphers, extensions, curves, point_formats) hash 為 MD5；censor 用其識別罕見 mimicry tool。
+
+### JA4 / JA4+
+**中文**：JA3 後繼指紋家族（2023+）
+**所屬層**：TLS / HTTP / TCP fingerprint
+**首次出現**：[9.9](lessons/part-9-gfw-research/9.9-tls-fingerprinting.md)（Althouse, FoxIO 2023+）
+**一句話**：a-b-c 結構 SHA256-truncated，sort cipher/ext 後 hash；JA4 (TLS Client)、JA4S (Server)、JA4H (HTTP)、JA4X (Cert)、JA4SSH、JA4T (TCP)。
+
+### uTLS
+**中文**：Go crypto/tls fork，可自訂 ClientHello
+**所屬層**：TLS mimicry library
+**首次出現**：[9.9](lessons/part-9-gfw-research/9.9-tls-fingerprinting.md)（Frolov & Wustrow NDSS 2019）
+**一句話**：refraction-networking/utls，允許 caller assemble 任意 ClientHello（byte-level Chrome / Firefox preset）；現代 circumvention 必備。
+
+### Cover SNI / Cover Backend
+**中文**：偽裝域名 / 偽裝後端
+**所屬層**：circumvention deployment
+**首次出現**：[9.4](lessons/part-9-gfw-research/9.4-gfw-vless-reality-status.md)
+**一句話**：client 用熱門未被封鎖 domain 作 SNI，失敗認證時 server forward 給真實 backend；REALITY / Trojan / domain fronting 共用模式。
+
+### Domain Fronting
+**中文**：域名前置
+**所屬層**：circumvention technique
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)
+**一句話**：client TLS SNI 用 cover domain（CDN-hosted），HTTP Host header 用真正目標；CDN 把流量 route 給真 backend；2018 主流 CDN 已封閉此 path。
+
+### Refraction Networking
+**中文**：折射網路
+**所屬層**：circumvention architecture
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)
+**一句話**：ISP 合作的 station 在中轉路徑上劫持特殊 client → 改向 covert proxy；Conjure / TapDance 為代表。
+
+### nDPI
+**中文**：開源 DPI 庫
+**所屬層**：testbed tooling
+**首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)（ntop）
+**一句話**：C library，識別 ~280 protocol，per-protocol detector 寫在 `src/lib/protocols/`；testbed 離線 pcap 分析常用。
+
+### Zeek
+**中文**：network analysis framework
+**所屬層**：testbed tooling
+**首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)
+**一句話**：原 Bro，scriptable NIDS，event-driven Zeek script；TLS / HTTP / DNS 內建 dissector；testbed online flow analysis 用。
+
+### FlowPrint
+**中文**：semi-supervised app fingerprinter
+**所屬層**：traffic classification
+**首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)（van Ede et al. NDSS 2020）
+**一句話**：用 destination IP + SNI + cert 聚類 flow，semi-supervised 識別 app；89% closed-world, 93% precision on unseen apps；proxy single-destination 是其弱點。
+
+### Deep Fingerprinting (DF)
+**中文**：1D CNN website fingerprinting attack
+**所屬層**：DL traffic classification
+**首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)（Sirinam et al. CCS 2018）
+**一句話**：對 Tor traffic ±1-direction packet sequence 跑 4-block 1D CNN，~98% closed-world accuracy；hand-crafted feature 時代結束的標誌。
+
+### Geneva
+**中文**：GA-evolved censorship evasion
+**所屬層**：evasion automation
+**首次出現**：[9.1](lessons/part-9-gfw-research/9.1-gfw-architecture-overview.md)（Bock et al. CCS 2019）
+**一句話**：以 drop/tamper/duplicate/fragment 四 primitive 透過 GA 自動找 TCP-layer 評估 evasion；對 GFW、印度、Kazakhstan censor 都成功 re-derive 已知策略並發現新策略。
+
+### Honeypot Bridge
+**中文**：蜜罐橋
+**所屬層**：measurement methodology
+**首次出現**：[9.6](lessons/part-9-gfw-research/9.6-active-probing-deep-dive.md)
+**一句話**：研究者故意暴露的 proxy/bridge，用來收集 GFW prober probe；Ensafi/Alice/Wu 系列論文核心方法。
+
+### Prober Pool
+**中文**：探測 IP 池
+**所屬層**：GFW infrastructure
+**首次出現**：[9.2](lessons/part-9-gfw-research/9.2-gfw-shadowsocks-detection.md)
+**一句話**：GFW 用來發送 active probe 的 source IP 集合；2020 觀察 12k+ IP 但 TCP timestamp 顯示背後僅十幾台中央主機。
+
+### nfqueue
+**中文**：Linux 用戶空間封包處理
+**所屬層**：testbed tooling
+**首次出現**：[9.10](lessons/part-9-gfw-research/9.10-testbed-architecture.md)
+**一句話**：netfilter 把封包 queue 給 user-space 處理；Python+scapy 即可實作 testbed 級 censor decisions；性能不如 XDP 但開發簡單。
+
+### Adversarial Indistinguishability (ε)
+**中文**：對手不可區分性
+**所屬層**：protocol security goal
+**首次出現**：[9.13](lessons/part-9-gfw-research/9.13-testbed-ml-classifier.md)
+**一句話**：對 PPT 對手 A，協議流量 vs cover 流量的區分 advantage ≤ ε；circumvention 安全的 game-based 主指標。
+
+### Cover Traffic
+**中文**：偽流量
+**所屬層**：traffic defense
+**首次出現**：[9.8](lessons/part-9-gfw-research/9.8-traffic-fingerprint-ml.md)
+**一句話**：實際無功能的填充流量，用來模仿正常 browsing 的 multi-destination + waterfall 特徵；Walkie-Talkie / Conjure 使用。
+

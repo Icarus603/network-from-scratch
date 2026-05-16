@@ -659,55 +659,55 @@ TCP-over-TCP、TCP-over-everything 的問題。
 
 ## Part 9 — 審查對抗：GFW 完整研究綜述 + 自建測試平台（14 堂）
 
-### 9.1 GFW 架構與能力綜述
+### 9.1 GFW 架構與能力綜述 ✅
 - 旁路 vs in-path
 - DNS 污染、IP 封鎖、TCP RST 注入、SNI 黑名單、active probing、ML 流量分類
 - **論文集**：GFW.report 全部論文（~25 篇）
 
-### 9.2 GFW 對 SS 的識別與封鎖
+### 9.2 GFW 對 SS 的識別與封鎖 ✅
 - IMC 2020 那篇論文逐節精讀
 - 復現他們的探測實驗（在你 VPS 上）
 
-### 9.3 GFW 對 Trojan 的識別嘗試
+### 9.3 GFW 對 Trojan 的識別嘗試 ✅
 社群觀察與已知封鎖案例。
 
-### 9.4 GFW 對 VLESS+REALITY 的態度
+### 9.4 GFW 對 VLESS+REALITY 的態度 ✅
 為什麼到 2026 年還沒被大規模封。
 
-### 9.5 GFW 對 QUIC / HTTP/3 的處理
+### 9.5 GFW 對 QUIC / HTTP/3 的處理 ✅
 封 UDP / 限速 / DPI 嘗試。
 
-### 9.6 主動探測（Active Probing）完整研究
+### 9.6 主動探測（Active Probing）完整研究 ✅
 - **論文**：Examining How the Great Firewall Discovers Hidden Circumvention Servers (IMC 2015)
 - **論文**：How the Great Firewall of China Detects and Blocks Fully Encrypted Traffic (USENIX Security 2023)
 
-### 9.7 全加密流量檢測（Fully Encrypted Traffic Detection）
+### 9.7 全加密流量檢測（Fully Encrypted Traffic Detection）✅
 USENIX Security 2023 那篇打到 SS/VMess 的論文細節。
 
-### 9.8 流量指紋與 ML 分類
+### 9.8 流量指紋與 ML 分類 ✅
 - 封包大小、時序、burst、flow size 特徵
 - 經典工具：nDPI、Zeek、Beauty、FlowPrint
 - **論文**：FlowPrint (NDSS 2020)
 
-### 9.9 TLS 指紋全研究
+### 9.9 TLS 指紋全研究 ✅
 - JA3 → JA3S → JA4/JA4+ → JA4S 演化
 - uTLS 怎麼模擬 Chrome 指紋
 - **論文**：Detection of Anomalous TLS Traffic ...
 
-### 9.10 自建 GFW 模擬測試平台（一）：架構
+### 9.10 自建 GFW 模擬測試平台（一）：架構 ✅
 - 兩台 VPS：一台「客戶端側」一台「伺服器側」
 - 中間節點：Linux + tc + nftables + nDPI + Zeek + 自訂 ML 分類器
 
-### 9.11 自建測試平台（二）：被動 DPI
+### 9.11 自建測試平台（二）：被動 DPI ✅
 nDPI 識別器的部署與規則寫法。
 
-### 9.12 自建測試平台（三）：主動探測
+### 9.12 自建測試平台（三）：主動探測 ✅
 復現 IMC 2015 論文的探測手法、可程式化探測客戶端。
 
-### 9.13 自建測試平台（四）：ML 分類
+### 9.13 自建測試平台（四）：ML 分類 ✅
 訓練一個簡單 ML 分類器（CNN on packet size sequence），看能不能識別 VLESS+REALITY。
 
-### 9.14 GFW 給我們的啟示
+### 9.14 GFW 給我們的啟示 ✅
 作為協議設計者，威脅模型要包含哪些對手能力。
 
 ---
