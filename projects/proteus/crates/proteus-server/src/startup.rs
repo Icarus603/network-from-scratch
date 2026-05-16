@@ -323,6 +323,8 @@ mod tests {
             listen_beta: None,
             beta_cert_chain: None,
             beta_private_key: None,
+            beta_initial_mtu: None,
+            beta_pad_quic_to_mtu: None,
             keys: KeysCfg {
                 mlkem_pk: PathBuf::from("/dev/null"),
                 mlkem_sk: PathBuf::from("/dev/null"),

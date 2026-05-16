@@ -42,6 +42,21 @@ pub struct ServerConfig {
     /// `beta_cert_chain` — defaults to `tls.private_key` if unset.
     #[serde(default)]
     pub beta_private_key: Option<PathBuf>,
+    /// β QUIC `initial_mtu` (bytes). Default 1350 (`PerfProfile::default()`).
+    /// Bump to 1452 for max-throughput Ethernet-MTU paths matching
+    /// Hy2 / TUIC-v5; lower for VPN/mobile paths with smaller MTUs.
+    /// Ignored when `listen_beta` is unset.
+    #[serde(default)]
+    pub beta_initial_mtu: Option<u16>,
+    /// β QUIC: pad every application UDP datagram to current
+    /// path-MTU. Defense-in-depth on top of the cell-split AEAD
+    /// padding (spec §4.6). **OFF by default** because bandwidth
+    /// amplification can ratelimit on macOS loopback (lo0 pacing)
+    /// and modestly raises small-write cost. Flip to `true` for
+    /// production anti-censorship deployments where bandwidth >>
+    /// detectability.
+    #[serde(default)]
+    pub beta_pad_quic_to_mtu: Option<bool>,
     pub keys: KeysCfg,
     #[serde(default)]
     pub client_allowlist: Vec<ClientCfg>,

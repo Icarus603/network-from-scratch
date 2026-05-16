@@ -985,7 +985,18 @@ fn build_beta_endpoint(
         .map_err(|e| format!("β cert chain {cert_path:?}: {e}"))?;
     let key = proteus_transport_alpha::tls::load_private_key(&key_path)
         .map_err(|e| format!("β private key {key_path:?}: {e}"))?;
-    let endpoint = proteus_transport_beta::server::make_endpoint(bind, chain, key)
+    // Build the PerfProfile from server.yaml β tunables. Defaults
+    // match `PerfProfile::default()` (initial_mtu = 1350, no UDP
+    // padding) — operators flip on `beta_pad_quic_to_mtu: true` in
+    // production anti-censorship deployments.
+    let mut perf = proteus_transport_beta::PerfProfile::default();
+    if let Some(v) = cfg.beta_initial_mtu {
+        perf.initial_mtu = v;
+    }
+    if let Some(v) = cfg.beta_pad_quic_to_mtu {
+        perf.pad_quic_datagrams_to_mtu = v;
+    }
+    let endpoint = proteus_transport_beta::server::make_endpoint_with_perf(bind, chain, key, perf)
         .map_err(|e| format!("β endpoint: {e}"))?;
     Ok(Some(endpoint))
 }

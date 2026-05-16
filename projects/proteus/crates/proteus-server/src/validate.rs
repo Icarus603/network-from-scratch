@@ -565,6 +565,8 @@ mod tests {
             listen_beta: None,
             beta_cert_chain: None,
             beta_private_key: None,
+            beta_initial_mtu: None,
+            beta_pad_quic_to_mtu: None,
             keys: KeysCfg {
                 mlkem_pk: dir.join("mlkem.pk"),
                 mlkem_sk: dir.join("mlkem.sk"),

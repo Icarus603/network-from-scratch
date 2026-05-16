@@ -53,6 +53,22 @@ pub fn make_endpoint(
     cert_chain: Vec<CertificateDer<'static>>,
     key: PrivateKeyDer<'static>,
 ) -> Result<quinn::Endpoint, BetaError> {
+    make_endpoint_with_perf(addr, cert_chain, key, crate::PerfProfile::default())
+}
+
+/// Like `make_endpoint` but takes an explicit `PerfProfile`.
+///
+/// Use this when the operator wants to flip on UDP-layer padding
+/// (`pad_quic_datagrams_to_mtu = true`) for anti-censorship deployments,
+/// or to bump `initial_mtu` more aggressively on paths known to
+/// support Ethernet MTU. The default profile matches what
+/// `make_endpoint` ships.
+pub fn make_endpoint_with_perf(
+    addr: SocketAddr,
+    cert_chain: Vec<CertificateDer<'static>>,
+    key: PrivateKeyDer<'static>,
+    perf: crate::PerfProfile,
+) -> Result<quinn::Endpoint, BetaError> {
     let crypto = make_server_crypto(cert_chain, key)?;
     let crypto = Arc::new(
         quinn::crypto::rustls::QuicServerConfig::try_from(crypto.as_ref().clone())
@@ -68,7 +84,7 @@ pub fn make_endpoint(
         // 60s idle is the spec default; operators override via
         // server.yaml.
         .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
-    crate::apply_perf_tuning(&mut transport);
+    crate::apply_perf_tuning_with(&mut transport, perf);
     server_cfg.transport_config(Arc::new(transport));
     let endpoint = quinn::Endpoint::server(server_cfg, addr)?;
     Ok(endpoint)

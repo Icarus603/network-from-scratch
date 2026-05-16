@@ -179,6 +179,29 @@ pub async fn connect_with_timeout(
     cfg: ClientConfig,
     connect_timeout: std::time::Duration,
 ) -> Result<BetaClientSession, BetaError> {
+    connect_with_timeout_and_perf(
+        server_name,
+        server_addr,
+        extra_roots,
+        cfg,
+        connect_timeout,
+        crate::PerfProfile::default(),
+    )
+    .await
+}
+
+/// Like `connect_with_timeout` but takes an explicit `PerfProfile`.
+/// Use this to flip on UDP-layer padding
+/// (`pad_quic_datagrams_to_mtu = true`) for anti-censorship
+/// deployments, or to bump `initial_mtu` more aggressively.
+pub async fn connect_with_timeout_and_perf(
+    server_name: &str,
+    server_addr: SocketAddr,
+    extra_roots: Vec<CertificateDer<'static>>,
+    cfg: ClientConfig,
+    connect_timeout: std::time::Duration,
+    perf: crate::PerfProfile,
+) -> Result<BetaClientSession, BetaError> {
     if !matches!(cfg.profile_hint, ProfileHint::Beta) {
         return Err(BetaError::AlpnMismatch(
             vec![cfg.profile_hint.to_byte()],
@@ -201,7 +224,7 @@ pub async fn connect_with_timeout(
         // Saturate to ~10 min if the caller supplied something insane.
         std::time::Duration::from_secs(600).try_into().unwrap()
     })));
-    crate::apply_perf_tuning(&mut transport);
+    crate::apply_perf_tuning_with(&mut transport, perf);
     client_cfg.transport_config(Arc::new(transport));
 
     // Bind a UDP socket — try GFW-evasion source-port choice first.

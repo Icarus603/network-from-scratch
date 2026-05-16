@@ -18,6 +18,20 @@ listen_alpha: "0.0.0.0:8443"
 # host — clients first try β (zero-HoL, BBR) and fall back to α
 # when UDP is blocked.
 # listen_beta: "0.0.0.0:8443"
+#
+# β QUIC performance / traffic-analysis tunables. Defaults:
+#   beta_initial_mtu = 1350         (conservative, covers most paths)
+#   beta_pad_quic_to_mtu = false    (max throughput, wire-byte-length leaks)
+#
+# For production anti-censorship deployments where bandwidth >>
+# detectability:
+#   beta_initial_mtu: 1452          (max under 1500-byte Ethernet MTU)
+#   beta_pad_quic_to_mtu: true      (UDP-layer padding defeats GFW
+#                                    QUIC packet-length traffic analysis;
+#                                    defense-in-depth on top of cell-split
+#                                    AEAD padding)
+# beta_initial_mtu: 1350
+# beta_pad_quic_to_mtu: false
 
 # Prometheus exposition + container health probes (optional). The
 # same listener serves three routes:

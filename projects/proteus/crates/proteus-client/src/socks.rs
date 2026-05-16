@@ -176,12 +176,24 @@ async fn try_beta(
     // Use connect_with_timeout so quinn's internal idle-timeout
     // also clamps; the outer tokio::time::timeout serves as a
     // belt-and-suspenders bound.
-    let connect_fut = proteus_transport_beta::client::connect_with_timeout(
+    // Build the PerfProfile from client.yaml β tunables. Defaults
+    // match `PerfProfile::default()` — operators flip on
+    // `beta_pad_quic_to_mtu: true` and/or bump `beta_initial_mtu`
+    // in production deployments.
+    let mut perf = proteus_transport_beta::PerfProfile::default();
+    if let Some(v) = cfg.beta_initial_mtu {
+        perf.initial_mtu = v;
+    }
+    if let Some(v) = cfg.beta_pad_quic_to_mtu {
+        perf.pad_quic_datagrams_to_mtu = v;
+    }
+    let connect_fut = proteus_transport_beta::client::connect_with_timeout_and_perf(
         server_name,
         server_addr,
         extra_roots,
         hs_cfg,
         timeout,
+        perf,
     );
     let beta_client =
         tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)

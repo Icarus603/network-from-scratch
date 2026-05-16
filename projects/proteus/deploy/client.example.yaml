@@ -31,6 +31,18 @@ server_endpoint: "vps.example.com:8443"
 # before falling back to α. Default 3s. Tune up for high-RTT paths
 # (transcontinental: 5s), down for LAN-only deployments (1s).
 # beta_first_timeout_secs: 3
+#
+# β QUIC performance / traffic-analysis tunables. Defaults:
+#   beta_initial_mtu = 1350         (conservative, covers most paths)
+#   beta_pad_quic_to_mtu = false    (max throughput; UDP wire-length leaks)
+#
+# Production anti-censorship config (match server-side settings —
+# the choices interact with quinn's path-MTU discovery):
+#   beta_initial_mtu: 1452          (max under 1500-byte Ethernet MTU)
+#   beta_pad_quic_to_mtu: true      (UDP-layer length-uniformity defeats
+#                                    GFW QUIC datagram-size analysis)
+# beta_initial_mtu: 1350
+# beta_pad_quic_to_mtu: false
 
 # Local SOCKS5 inbound. Point your browser / curl / sing-box at this.
 socks_listen: "127.0.0.1:1080"

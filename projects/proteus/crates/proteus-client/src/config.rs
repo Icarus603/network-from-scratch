@@ -53,6 +53,17 @@ pub struct ClientConfig {
     /// a slow QUIC handshake on a marginal path still wins.
     #[serde(default)]
     pub beta_first_timeout_secs: Option<u64>,
+    /// β QUIC `initial_mtu` (bytes). Default 1350. Bump to 1452
+    /// for max-throughput Ethernet-MTU paths matching Hy2 / TUIC-v5.
+    #[serde(default)]
+    pub beta_initial_mtu: Option<u16>,
+    /// β QUIC: pad every application UDP datagram to current
+    /// path-MTU. Defense-in-depth on top of cell-split AEAD padding.
+    /// **OFF by default** because bandwidth amplification triggers
+    /// macOS loopback pacing. Flip to `true` for production anti-
+    /// censorship deployments where bandwidth >> detectability.
+    #[serde(default)]
+    pub beta_pad_quic_to_mtu: Option<bool>,
     /// Data-plane padding quantum (bytes). When non-zero, every
     /// outgoing DATA record's plaintext is wrapped as
     /// `[4-byte BE real_len | real_payload | zero-pad]` and rounded
