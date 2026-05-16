@@ -4,14 +4,21 @@ A production-grade anti-censorship transport protocol. **Strictly stronger
 security than VLESS+REALITY**, while shipping comparable raw-throughput to
 Hysteria2 / TUIC-v5 over a TCP-only carrier (TLS 1.3 outer).
 
-```
- ┌──────────────┐    TLS 1.3      ┌───────────────┐
- │  proteus     │  ╱╲╱╲╱╲╱╲╱╲╱╲  │  proteus      │
- │  client      │ ◀═══════════▶  │  server       │ ─── upstream ───▶
- │  (SOCKS5)    │   Proteus       │  (CONNECT)    │
- └──────────────┘   handshake     └───────────────┘
-                   inside TLS
-                   record stream
+```mermaid
+flowchart LR
+    subgraph LocalHost["Local host"]
+        App["Browser /<br/>any TCP app"]
+        Client["proteus-client<br/>(SOCKS5 inbound)"]
+    end
+    subgraph Internet["Internet"]
+        Server["proteus-server<br/>(CONNECT relay)"]
+        Upstream["upstream<br/>target"]
+    end
+    App -- SOCKS5 --> Client
+    Client == "TLS 1.3 outer<br/>Proteus handshake inside<br/>application_data records" ==> Server
+    Server -- TCP --> Upstream
+    classDef ours fill:#fde,stroke:#c39,stroke-width:2px
+    class Client,Server ours
 ```
 
 ---

@@ -35,8 +35,13 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rcgen = "0.13"
 
+[dev-dependencies]
+libc = "0.2"
+
 [lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so that the binary_launch integration test
+# can scope-allow `unsafe` for libc::kill(SIGTERM).
+unsafe_code = "deny"
 
 [lints.clippy]
 all = "warn"
