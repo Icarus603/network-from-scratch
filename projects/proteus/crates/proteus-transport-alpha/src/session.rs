@@ -483,6 +483,14 @@ pub struct AlphaSession<
     /// session was built over an in-memory stream (tests). Used by
     /// access logs.
     pub peer_addr: Option<std::net::SocketAddr>,
+    /// 32-bit shape-shift PRG seed the client picked for this session
+    /// (spec §22). The server captures it during handshake decode so
+    /// access logs can record what cell-size schedule was negotiated;
+    /// `None` on the client side or for legacy in-memory tests.
+    pub shape_seed: Option<u32>,
+    /// Cover-profile selector the client picked (spec §22.4); same
+    /// lifecycle as `shape_seed`.
+    pub cover_profile_id: Option<u16>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
@@ -499,6 +507,16 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
     #[must_use]
     pub fn with_peer_addr(mut self, peer: std::net::SocketAddr) -> Self {
         self.peer_addr = Some(peer);
+        self
+    }
+
+    /// Builder-style setter for the shape-shift parameters the client
+    /// advertised. Called by the server handshake after the AuthExtension
+    /// auth_tag has verified — only the bound, attested values land here.
+    #[must_use]
+    pub fn with_shape(mut self, shape_seed: u32, cover_profile_id: u16) -> Self {
+        self.shape_seed = Some(shape_seed);
+        self.cover_profile_id = Some(cover_profile_id);
         self
     }
 }
@@ -555,6 +573,8 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
             metrics,
             user_id: None,
             peer_addr: None,
+            shape_seed: None,
+            cover_profile_id: None,
         }
     }
 }

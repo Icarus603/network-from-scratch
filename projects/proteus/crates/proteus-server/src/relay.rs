@@ -99,6 +99,8 @@ where
     // so they survive the move into AlphaSender/AlphaReceiver.
     let user_id = session.user_id;
     let peer_addr = session.peer_addr;
+    let shape_seed = session.shape_seed;
+    let cover_profile_id = session.cover_profile_id;
     let session_metrics = std::sync::Arc::clone(&session.metrics);
     let access_log = cfg.access_log.clone();
     let metrics_for_alerts = cfg.metrics.clone();
@@ -146,6 +148,8 @@ where
             tx_bytes: Some(snap.tx_bytes),
             rx_bytes: Some(snap.rx_bytes),
             close_reason,
+            shape_seed,
+            cover_profile_id,
         });
     }
     outcome.map(|_| ())

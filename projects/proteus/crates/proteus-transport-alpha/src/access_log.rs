@@ -50,6 +50,12 @@ pub struct AccessLogRecord {
     /// values: `"upstream_eof"`, `"client_close"`, `"idle_timeout"`,
     /// `"upstream_dial_fail"`, `"relay_error"`, `"handler_panic"`.
     pub close_reason: Option<&'static str>,
+    /// Shape-shift PRG seed the client picked (spec §22). Useful for
+    /// forensic correlation across a session: two access-log lines
+    /// with the same `shape_seed` were emitted by the same handshake.
+    pub shape_seed: Option<u32>,
+    /// Cover-profile selector the client picked (spec §22.4).
+    pub cover_profile_id: Option<u16>,
 }
 
 impl AccessLogRecord {
@@ -84,6 +90,14 @@ impl AccessLogRecord {
         }
         if let Some(r) = self.close_reason {
             push_kv_str(&mut s, "close_reason", r);
+        }
+        if let Some(seed) = self.shape_seed {
+            // Hex form so it's grep-friendly and the same width across
+            // sessions (0x00000000 .. 0xffffffff).
+            push_kv_str(&mut s, "shape_seed", &format!("0x{seed:08x}"));
+        }
+        if let Some(c) = self.cover_profile_id {
+            push_kv_num(&mut s, "cover_profile_id", u64::from(c));
         }
         s.push('}');
         s.push('\n');
@@ -367,6 +381,8 @@ mod tests {
             tx_bytes: Some(1024),
             rx_bytes: Some(2048),
             close_reason: Some("upstream_eof"),
+            shape_seed: Some(0xdead_beef),
+            cover_profile_id: Some(2),
         };
         let line = r.to_json_line();
         assert!(line.contains(r#""user_id":"alice001""#));
@@ -375,6 +391,21 @@ mod tests {
         assert!(line.contains(r#""tx_bytes":1024"#));
         assert!(line.contains(r#""rx_bytes":2048"#));
         assert!(line.contains(r#""close_reason":"upstream_eof""#));
+        assert!(line.contains(r#""shape_seed":"0xdeadbeef""#));
+        assert!(line.contains(r#""cover_profile_id":2"#));
+    }
+
+    #[test]
+    fn shape_fields_are_omitted_when_unset() {
+        // Backward compat: legacy clients (or tests) that never set
+        // shape_seed must not get spurious `null` fields in the log.
+        let r = AccessLogRecord {
+            user_id: Some(*b"alice001"),
+            ..AccessLogRecord::default()
+        };
+        let line = r.to_json_line();
+        assert!(!line.contains("shape_seed"));
+        assert!(!line.contains("cover_profile_id"));
     }
 
     #[test]

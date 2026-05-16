@@ -1243,7 +1243,8 @@ async fn handshake_with_prefix(
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
-    );
+    )
+    .with_shape(ext.shape_seed, ext.cover_profile_id);
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
@@ -1531,7 +1532,8 @@ where
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
-    );
+    )
+    .with_shape(ext.shape_seed, ext.cover_profile_id);
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
