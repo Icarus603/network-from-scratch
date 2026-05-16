@@ -2130,3 +2130,99 @@
 **所屬層**：automated formal verification
 **首次出現**：[3.15](lessons/part-3-cryptography/3.15-formal-verification.md)（Kobeissi-Bhargavan-Beurdouche EuroS&P 2019）
 **一句話**：對所有 Noise patterns 自動 generate ProVerif models + verify 18 properties；G6 借用作 baseline。
+
+### Hyperproperty
+**中文**：超屬性（針對「軌跡集合」而非單一軌跡的 property）
+**所屬層**：formal methods foundation
+**首次出現**：[5.9](lessons/part-5-formal-methods/5.9-hyperproperties-observational-equivalence.md)（Clarkson-Schneider CSF 2008 / JCS 2010）
+**一句話**：trace property 講「每條 trace 都對」，hyperproperty 講「整個 trace set 之間的關係」；privacy / non-interference / unlinkability 全都是 hyperproperty，secrecy 才是 trace property。
+
+### Observational Equivalence
+**中文**：觀測等價（applied pi-calculus 對 privacy 的原生 primitive）
+**所屬層**：symbolic verification
+**首次出現**：[5.9](lessons/part-5-formal-methods/5.9-hyperproperties-observational-equivalence.md)（Abadi-Fournet POPL 2001）
+**一句話**：兩個 process $P \approx Q$ iff 對任意 attacker context $C[\cdot]$ 觀測結果不可區分；ProVerif `choice[A,B]` / Tamarin `diff` 都實作這條等價。
+
+### Diff-Equivalence
+**中文**：差分等價（ProVerif/Tamarin 的 biprocess equivalence）
+**所屬層**：tooling
+**首次出現**：[5.9](lessons/part-5-formal-methods/5.9-hyperproperties-observational-equivalence.md)（Blanchet-Abadi-Fournet JLAP 2008）
+**一句話**：在 spec 內用 `choice[A,B]` 或 `diff(A,B)` 同時 model 兩個 world，要求結構對齊；ECH outer/inner SNI privacy 用這條 verify。
+
+### Unlinkability
+**中文**：不可關聯性
+**所屬層**：privacy property
+**首次出現**：[5.9](lessons/part-5-formal-methods/5.9-hyperproperties-observational-equivalence.md)（Hirschi-Baelde-Delaune S&P 2016）
+**一句話**：兩個 session 來自同一 user 或不同 user 對攻擊者不可區分；WireGuard 預設不提供（peer pub key 是 linker），我們協議要設計 ratcheted pseudonym 達 session-bounded unlinkability。
+
+### HyperLTL
+**中文**：超線性時序邏輯（state-machine 級 hyperproperty）
+**所屬層**：formal methods
+**首次出現**：[5.9](lessons/part-5-formal-methods/5.9-hyperproperties-observational-equivalence.md)（Finkbeiner-Rabe-Sánchez CAV 2015）
+**一句話**：在 LTL 上加「對任意兩條 path π, π'」量化，能寫 non-interference / observational determinism；對 TLA+ transport state machine 寫 hyperinvariant 用。
+
+### PRISM / Storm
+**中文**：probabilistic model checker（精確）
+**所屬層**：tooling
+**首次出現**：[5.10](lessons/part-5-formal-methods/5.10-probabilistic-statistical-fm.md)（Kwiatkowska et al. CAV 2011 / Hensel et al. STTT 2022）
+**一句話**：對 DTMC / MDP / CTMC 算 PCTL property 的 exact probability；對 traffic vs cover 的 total variation distance 精確 compute。
+
+### Statistical Model Checking (SMC)
+**中文**：統計模型檢驗
+**所屬層**：tooling
+**首次出現**：[5.10](lessons/part-5-formal-methods/5.10-probabilistic-statistical-fm.md)（Younes-Simmons IC 2006）
+**一句話**：用 simulation + hypothesis testing 估 probabilistic property；trade exact for scale；對大 traffic model 必選。
+
+### Total Variation Distance ($d_{TV}$)
+**中文**：總變差距離
+**所屬層**：statistical foundation
+**首次出現**：[5.10](lessons/part-5-formal-methods/5.10-probabilistic-statistical-fm.md)
+**一句話**：兩個 distribution 對 optimal distinguisher 的 advantage 上界；對單包 distribution 算 $\frac{1}{2}\sum_x |P(x)-Q(x)|$；i.i.d. 多 sample 後 advantage 對 $N$ 增大趨近 1。
+
+### Wu-FEP Adversary
+**中文**：Wu-Ensafi-Crandall 對「fully encrypted protocols」的 ML classifier
+**所屬層**：threat model
+**首次出現**：[5.10](lessons/part-5-formal-methods/5.10-probabilistic-statistical-fm.md)（Wu et al. USENIX Security 2023）
+**一句話**：GFW 對 "看起來隨機" 的流量用 entropy / size / IAT 等 features 訓的 classifier；G6 形式化的對手定義基準。
+
+### Universal Composability (UC)
+**中文**：通用可組合性
+**所屬層**：cryptographic composition framework
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Canetti FOCS 2001 / journal 2020）
+**一句話**：最強的 composition framework — 協議 UC-realize ideal functionality ⇒ 在任意 environment 內 composable；但 TLS 1.3 不滿足 full UC，實務改用 weaker composition。
+
+### Multi-Stage Key Exchange (MSKE)
+**中文**：多階段密鑰交換 composition framework
+**所屬層**：cryptographic composition
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Fischlin-Günther CCS 2014；Dowling-FGS JCS 2021 TLS 1.3 完整）
+**一句話**：對協議產出的 sequence of keys (Initial/Handshake/Application/0-RTT) 各自 prove secrecy/auth/FS/replayability，再用 composition theorem 黏成 channel security。
+
+### ACCE (Authenticated Confidential Channel Establishment)
+**中文**：authenticated channel composition model
+**所屬層**：cryptographic composition
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Jager-Kohlar-Schäge-Schwenk CRYPTO 2012）
+**一句話**：「AKE-secure + record-AEAD-secure ⇒ ACCE-secure channel」；TLS 1.2/1.3 + WireGuard 都用這個 framework 證明完整 channel security。
+
+### HACL\* / Project Everest
+**中文**：F\* 寫的 verified crypto library + 整套 verified HTTPS stack
+**所屬層**：verified implementation
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Bhargavan et al. SNAPL 2017；Protzenko et al. S&P 2019）
+**一句話**：F\* spec ⇒ KreMLin 提取 verified C / Rust / WebAssembly；ChaCha20-Poly1305 / Curve25519 / Ed25519 等 production-ready；Mozilla NSS、Linux kernel 已 deploy。
+
+### Cryspen hax
+**中文**：Rust → F\* / Coq 翻譯工具
+**所屬層**：verified implementation
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)
+**一句話**：Rust subset 可被 hax 提取成 F\* model 後 mechanically verify；若我們協議選 Rust 寫 (e.g. fork quinn) 是進入 formal verification 的 ramp。
+
+### Hybrid KEM / X-Wing
+**中文**：post-quantum + classical 混合密鑰封裝
+**所屬層**：post-quantum
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Bos-Stebila et al. PQCrypto 2020；Connolly et al. CFRG draft 2024）
+**一句話**：ML-KEM-768 + X25519 用 KDF combine 成單一 shared secret；安全性繼承兩者的 min；2027-2028 ship 的 SOTA 協議默認 baseline。
+
+### KEMTLS
+**中文**：signature-free post-quantum TLS handshake
+**所屬層**：post-quantum
+**首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Schwabe-Stebila-Wiggers CCS 2020）
+**一句話**：用 KEM 取代 server signature 大幅減小 PQC handshake size；對 anti-fingerprint 的 packet size 預算也友好。

@@ -434,9 +434,9 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 ---
 
-## Part 5 — 形式化方法（8 堂）
+## Part 5 — 形式化方法（11 堂）
 
-> **深度準繩**：學完能用 TLA+ 規格化你協議的關鍵不變量；用 ProVerif 證明 secrecy/authenticity。
+> **深度準繩**：學完能用 TLA+ 規格化你協議的關鍵不變量；用 ProVerif/Tamarin 證 secrecy/authenticity；用 diff-equivalence 證 privacy；用 PRISM/SMC 證 ε-bound 對 ML traffic classifier；用 Fischlin-Günther multi-stage composition + HACL\* 接到 verified implementation。
 
 ### 5.1 為什麼要形式化 ✅
 - TLS 1.3 設計時就跟 ProVerif/Tamarin 共同進化
@@ -468,6 +468,30 @@ Phase III — 設計與實作（Part 10~12，~50 堂，6~12 個月）
 
 ### 5.8 設計協議的方法論：spec-first ✅
 從威脅模型 → 形式化規格 → 證明 → 實作的方法論流程。
+
+### 5.9 Hyperproperties 與 Observational Equivalence ✅
+- Clarkson-Schneider hyperproperty 座標 vs trace property
+- ProVerif `choice[A,B]` / Tamarin `diff` diff-equivalence
+- 對 ECH outer/inner SNI privacy 證 indistinguishability（Bhargavan-Cheval-Wood CCS 2022）
+- HyperLTL、non-interference、unlinkability（Hirschi-Baelde-Delaune S&P 2016）
+- 為 G5（identity privacy）寫機械化證明
+
+### 5.10 Probabilistic / Statistical Formal Methods ✅
+- PRISM / Storm probabilistic model checking
+- Statistical model checking (SMC) 對大 traffic model
+- Wu-FEP-class adversary 的 game-based formalization
+- Total variation distance、Pinsker 不等式
+- PRISM/SMC bound 餵 CryptoVerif 作 user-supplied axiom
+- 此堂直接 attack G6（ε-indistinguishability from cover traffic against ML classifier）
+
+### 5.11 Composition + Implementation-level FM ✅
+- Canetti UC framework + 為何 TLS 1.3 用 weaker composition
+- Fischlin-Günther multi-stage AKE composition（TLS 1.3 / QUIC 直接用）
+- ACCE（Jager-Kohlar-Schäge-Schwenk CRYPTO 2012）
+- F\* / HACL\* / Project Everest verified C / WebAssembly
+- Cryspen hax（Rust → F\*）
+- Post-quantum hybrid：X-Wing、KEMTLS、hybrid KEM composition
+- End-to-end verification claim chain 與 caveat 列表，把 5.2-5.10 黏成 verified bytes
 
 ---
 
