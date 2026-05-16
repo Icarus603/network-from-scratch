@@ -985,6 +985,7 @@ dependencies = [
 name = "proteus-transport-beta"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "ed25519-dalek",
  "ml-kem",
  "proteus-crypto",

@@ -1,8 +1,18 @@
 # Proteus
 
-A production-grade anti-censorship transport protocol. **Strictly stronger
-security than VLESS+REALITY**, while shipping comparable raw-throughput to
-Hysteria2 / TUIC-v5 over a TCP-only carrier (TLS 1.3 outer).
+A research-grade anti-censorship transport protocol in active
+development. **Cryptographically stronger than VLESS+REALITY** (post-
+quantum hybrid KEX + per-direction symmetric ratchet, neither of
+which the others have). Throughput comparable to Hysteria2 / TUIC-v5
+**under the regimes where each carrier is appropriate** — see the
+honest carrier-comparison table further down.
+
+**Status: M2.** α-profile (TCP+TLS 1.3) and β-profile (QUIC+BBR)
+carriers both work end-to-end. Multipath QUIC, ECH binding,
+`0xfe0d` ClientHello injection, MASQUE (γ-profile), and a
+netem-based adversarial benchmark against Hy2/TUIC-v5 are M3+ work.
+**Not yet production-ready for arbitrary-user deployment** — see
+the gap analysis at the bottom of this README.
 
 ```mermaid
 flowchart LR
@@ -172,15 +182,25 @@ Measured on Apple Silicon M-series, release profile (criterion, n=30):
 | AEAD seal — ChaCha20-Poly1305, 16 KiB record | **~645 MiB/s** |
 | AEAD seal — ChaCha20-Poly1305, 64 KiB record | **~648 MiB/s** |
 | AEAD open — ChaCha20-Poly1305, 1 KiB record | **~510 MiB/s** |
-| **End-to-end echo round-trip — 16 KiB records over loopback** | **~106 MiB/s (~0.85 Gbps)** |
-| **End-to-end echo round-trip — 64 KiB records over loopback** | **~116 MiB/s (~0.93 Gbps)** |
+| **α end-to-end echo (TCP)  — 16 KiB records over loopback** | **~109 MiB/s (~0.87 Gbps)** |
+| **α end-to-end echo (TCP)  — 64 KiB records over loopback** | **~120 MiB/s (~0.96 Gbps)** |
+| **β end-to-end echo (QUIC) — 16 KiB records over loopback** | **~67 MiB/s (~0.54 Gbps)** |
+| **β end-to-end echo (QUIC) — 64 KiB records over loopback** | **~57 MiB/s (~0.46 Gbps)** |
 
 The end-to-end echo numbers above measure the **full round-trip
-path**: client send → AEAD seal → BufWriter coalesce → TCP loopback →
+path**: client send → AEAD seal → BufWriter coalesce → carrier →
 server AEAD open → server send back → client AEAD open. One-way goodput
 in a real SOCKS5 relay scenario is roughly 2× this (echo doubles every
 operation). Per-core single-stream ceiling is ~5 Gbps of bulk encrypt
 throughput.
+
+**Honest carrier comparison.** On loopback (zero loss, μs RTT) α
+wins because QUIC pays TLS-record encrypt/decrypt + per-packet ACK
+processing + extra syscalls (UDP recvmsg vs TCP read), and TCP gets
+zero-cost reliability from the kernel. The β carrier exists for
+the **opposite** regime: lossy long-fat pipes, where BBR vs CUBIC
+flips the result. A netem-based head-to-head against Hy2/TUIC-v5 is
+M3 work; **no "β beats Hy2" claim is honest without those numbers**.
 The server-side handshake cost fits comfortably in the spec §17.2
 80 µs budget. Hysteria2 and TUIC-v5 use the same ChaCha20-Poly1305 cipher
 and hit the same cipher-bound ceiling; the per-handshake delta is
@@ -281,3 +301,33 @@ The wire format and handshake state machine are normatively defined in
 [`assets/spec/proteus-v1.0.md`](../../assets/spec/proteus-v1.0.md).
 Operator runbook: [`deploy/README.md`](deploy/README.md). Version
 history: [`CHANGELOG.md`](CHANGELOG.md).
+
+---
+
+## Honest gap analysis (what's NOT done yet)
+
+We don't believe in marketing-grade promises. As of M2:
+
+- ✅ **α-profile (TCP+TLS 1.3)**: production-feature-complete carrier.
+  330+ tests passing. Twenty-plus production-hardening commits ship
+  SSRF defense, abuse detectors, admin CLI, SIGHUP reload, etc.
+- ✅ **β-profile (QUIC+BBR)**: end-to-end working, BBR + tuned
+  windows wired. Loopback round-trip ~57–67 MiB/s on Apple Silicon.
+- ❌ **Multipath QUIC** (spec §10.4): not started. Needed for the
+  censorship-resistance story β was supposed to anchor.
+- ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
+  publication. Needed to hide `proteus-β-v1` ALPN in flight.
+- ❌ **`0xfe0d` ClientHello injection** (spec §4.2): needs a rustls
+  fork or a quinn raw-handshake hook.
+- ❌ **γ-profile (MASQUE / H3-over-QUIC)**: not started.
+- ❌ **Shape-shifting / cover-IAT learning** (spec §22): not started.
+- ❌ **Formal verification** (ProVerif / Tamarin handshake proof,
+  spec §11.10): placeholder only.
+- ❌ **GFW closed-beta**: no real-world adversarial testing.
+- ❌ **Independent security audit**: none.
+- ❌ **netem head-to-head benchmark vs Hy2/TUIC-v5**: not run.
+  Required before any "β beats Hy2" claim is defensible.
+
+**Cryptographic core is novel and strictly stronger** (PQ hybrid +
+ratchet — neither VLESS+REALITY nor Hy2/TUIC-v5 has these). The work
+remaining is **adversarial validation**, not protocol design.

@@ -34,6 +34,11 @@ webpki-roots = { workspace = true }
 
 [dev-dependencies]
 rcgen = "0.13"
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
+
+[[bench]]
+name = "relay_throughput_beta"
+harness = false
 
 [lints.rust]
 unsafe_code = "deny"
