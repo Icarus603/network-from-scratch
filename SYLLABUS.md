@@ -619,40 +619,40 @@ inbound/outbound/router 三段架構，讀路由匹配引擎。
 
 ## Part 8 — QUIC 系協議深度（10 堂）
 
-### 8.1 為什麼 QUIC 系協議是當前另一條主線
+### 8.1 為什麼 QUIC 系協議是當前另一條主線 ✅
 TCP-over-TCP、TCP-over-everything 的問題。
 
-### 8.2 Hysteria v1 完整解剖
+### 8.2 Hysteria v1 完整解剖 ✅
 - 自訂 Brutal 擁塞控制
 - QUIC 上的設計
 
-### 8.3 Hysteria 2 完整解剖
+### 8.3 Hysteria 2 完整解剖 ✅
 - 與 v1 的差異
 - HTTP/3 masquerading
 - **原始碼**：HyNetwork/hysteria
 
-### 8.4 TUIC v4 vs v5
+### 8.4 TUIC v4 vs v5 ✅
 - 為什麼從 v4 重新設計
 - 報文格式、流管理
 
-### 8.5 NaiveProxy 完整解剖
+### 8.5 NaiveProxy 完整解剖 ✅
 - 直接用 Chromium 的網路 stack
 - 為什麼這對 TLS 指紋抗識別有獨特優勢
 
-### 8.6 QUIC 在中國的命運
+### 8.6 QUIC 在中國的命運 ✅
 - 為什麼 GFW 對 QUIC 又愛又恨
 - 已知的 QUIC 識別與封鎖事件
 
-### 8.7 quic-go fork：讓 QUIC 更難識別
+### 8.7 quic-go fork：讓 QUIC 更難識別 ✅
 社群已有的 fork 在改什麼。
 
-### 8.8 MASQUE 深度（接 4.10）
+### 8.8 MASQUE 深度（接 4.10）✅
 為什麼這可能是下一代翻牆協議的基礎。
 
-### 8.9 自製 QUIC 變體：可行性分析
+### 8.9 自製 QUIC 變體：可行性分析 ✅
 從零寫 QUIC 是不可能的，怎麼做最小改動達到目的。
 
-### 8.10 QUIC 系給我們的啟示
+### 8.10 QUIC 系給我們的啟示 ✅
 作為協議設計者，速度方向我們從這裡學到什麼。
 
 ---

@@ -2333,3 +2333,141 @@
 **所屬層**：post-quantum
 **首次出現**：[5.11](lessons/part-5-formal-methods/5.11-composition-implementation-fm.md)（Schwabe-Stebila-Wiggers CCS 2020）
 **一句話**：用 KEM 取代 server signature 大幅減小 PQC handshake size；對 anti-fingerprint 的 packet size 預算也友好。
+
+### TCP Meltdown (Olaf Titz 2001)
+**中文**：TCP-over-TCP 重傳定時器堆疊崩潰
+**所屬層**：L4 跨層失效機制
+**首次出現**：[8.1](lessons/part-8-quic-protocols/8.1-quic-as-second-line.md)
+**一句話**：上下兩層 TCP 各自的 RTO 競爭使重傳隊列爆炸增長, throughput 指數衰減; 所有 VPN/proxy 必須 UDP-based 的物理底線。
+
+### TCP Ossification (Honda IMC 2011)
+**中文**：TCP 因 middlebox 干涉而無法演進
+**所屬層**：L4 部署現實
+**首次出現**：[8.1](lessons/part-8-quic-protocols/8.1-quic-as-second-line.md)
+**一句話**：~6.5% path 完全 strip 新 TCP option, ~14% MPTCP 異常, ~25% 修改 SEQ/ACK; QUIC 改 UDP-based 的根本原因。
+
+### QUIC Invariants (RFC 8999)
+**中文**：QUIC 跨版本不可變 wire 欄位
+**所屬層**：L4 normative spec
+**首次出現**：[8.1](lessons/part-8-quic-protocols/8.1-quic-as-second-line.md)
+**一句話**：long header bit 7, fixed bit, version 欄位, DCID/SCID format 必須跨版本固定; 我們協議若做 QUIC variant 必遵守。
+
+### QUIC v2 (RFC 9369)
+**中文**：QUIC 第二版（測試 ossification 用）
+**所屬層**：L4 spec
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)、[8.9](lessons/part-8-quic-protocols/8.9-custom-quic-variant.md)
+**一句話**：version 號 = 0x6b3343cf, initial salt 不同; GFW 2024-04 SNI 過濾 hardcoded v1, 用 v2 立即 bypass; 我們協議的 base transport candidate。
+
+### Brutal CC
+**中文**：用戶宣告速度、不退讓的擁塞控制
+**所屬層**：L4 / congestion control
+**首次出現**：[8.2](lessons/part-8-quic-protocols/8.2-hysteria-v1.md)
+**一句話**：cwnd = bps × RTT × 2 / ackRate, ackRate floor 0.8; 對單 user 高速有效, 對 shared 網路是 cheating (違反 TCP-friendly fairness)。
+
+### Hysteria v1 / v2
+**中文**：QUIC-based proxy, Brutal CC + masquerade
+**所屬層**：L7 proxy protocol
+**首次出現**：[8.2](lessons/part-8-quic-protocols/8.2-hysteria-v1.md)、[8.3](lessons/part-8-quic-protocols/8.3-hysteria-v2.md)
+**一句話**：v1 用自訂 binary handshake + XOR obfs, 易被 probe; v2 改 HTTP/3 POST /auth + Salamander obfs + masquerade backend; UDP relay 走 QUIC datagram。
+
+### Salamander Obfuscation
+**中文**：Hysteria 2 的 per-packet BLAKE2b XOR obfuscation
+**所屬層**：L4 wire image
+**首次出現**：[8.3](lessons/part-8-quic-protocols/8.3-hysteria-v2.md)
+**一句話**：8-byte random salt + BLAKE2b-256(key+salt) XOR payload; 比 v1 fixed-XOR 強, 但仍中 Wu USENIX Sec 2023 fully-encrypted detection。
+
+### TUIC v5
+**中文**：QUIC-based proxy, TLS exporter auth
+**所屬層**：L7 proxy protocol
+**首次出現**：[8.4](lessons/part-8-quic-protocols/8.4-tuic-v4-v5.md)
+**一句話**：VER|TYPE|OPT 命令格式, Auth/Connect/Packet/Dissociate/Heartbeat 5 命令; password 透過 TLS Keying Material Exporter 不出 wire; Full Cone NAT 支援。
+
+### TLS Keying Material Exporter (RFC 8446 §7.5)
+**中文**：TLS session-bound 衍生密鑰機制
+**所屬層**：L5 crypto
+**首次出現**：[8.4](lessons/part-8-quic-protocols/8.4-tuic-v4-v5.md)
+**一句話**：HKDF-Expand-Label(exporter_master_secret, "EXPORTER-XX", context, len); session-bound, replay-resistant; TUIC v5 / Channel Binding (RFC 5056) 經典應用。
+
+### Full Cone NAT (RFC 5128)
+**中文**：對外固定 source port, 接受任意 source 回包
+**所屬層**：L3-L4 NAT 行為
+**首次出現**：[8.4](lessons/part-8-quic-protocols/8.4-tuic-v4-v5.md)
+**一句話**：P2P 遊戲 / WebRTC / Valorant 必要; TUIC v5 設計上每 ASSOC_ID 固定 outbound port。
+
+### NaiveProxy
+**中文**：直接借用 Chromium net stack 的 proxy
+**所屬層**：L7 proxy protocol
+**首次出現**：[8.5](lessons/part-8-quic-protocols/8.5-naiveproxy.md)
+**一句話**：fork Chromium net/, 砍到 0.3% 原 size; TLS / H/2 fingerprint 自動跟 Chrome 同步; Caddy + forwardproxy plugin 做 server side。
+
+### Probe Resistance
+**中文**：對主動 probing 假裝不是 proxy
+**所屬層**：anti-censorship 設計
+**首次出現**：[8.5](lessons/part-8-quic-protocols/8.5-naiveproxy.md)
+**一句話**：未認證 user 看到 fallback 真 web server 內容; REALITY 在 TLS layer 做 (Part 7), NaiveProxy forwardproxy 在 H/2 application layer 做。
+
+### SNI Slicing
+**中文**：把 TLS ClientHello SNI extension 拆跨多 QUIC CRYPTO frame 上不同 UDP datagram
+**所屬層**：anti-censorship
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)、[8.7](lessons/part-8-quic-protocols/8.7-quic-go-forks.md)
+**一句話**：因 GFW 不重組 CRYPTO frame across UDP packet, SNI 拆兩半 GFW 看不到; Firefox 137、quic-go v0.52.0、Hysteria、V2Ray 2025-08 部署。
+
+### Jumbo Initial
+**中文**：QUIC Initial packet 強制跨多 UDP datagram
+**所屬層**：anti-censorship
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)
+**一句話**：Chrome 2024-09 Kyber768 commit 意外觸發, GFW 不重組 UDP fragments → 漏抓 SNI; QUIC anti-censorship 主流 bypass 技術。
+
+### Availability Attack (Zohaib 2025)
+**中文**：用 GFW SNI 過濾當武器, spoof packet 觸發任意 3-tuple 180s block
+**所屬層**：threat model
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)
+**一句話**：Mallory spoof Alice 源 IP 連 Bob, payload = QUIC Initial w/ 禁 SNI → GFW 觸發 (Alice, Bob, port) 180s drop; 對 DNS over UDP 等服務真實威脅。
+
+### Diurnal Pattern (GFW QUIC)
+**中文**：GFW QUIC 解 Initial 阻擋率隨流量負載日週期變化
+**所屬層**：observed measurement
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)
+**一句話**：早 4-6 AM ~80% 阻擋, 晚 6-9 PM ~30%; 證實 GFW 解 Initial 是計算瓶頸; 設計上可故意拉高 解 cost 利用此弱點。
+
+### apernet/quic-go
+**中文**：Hysteria 維護的 anti-censorship 改造版 quic-go
+**所屬層**：implementation
+**首次出現**：[8.7](lessons/part-8-quic-protocols/8.7-quic-go-forks.md)
+**一句話**：Xray-core 透過 github.com/apernet/quic-go import; 提供 SNI slicing / jumbo Initial / grease / 自訂 Initial salt 等 anti-censorship feature。
+
+### QUICstep
+**中文**：用 QUIC connection migration 做 SNI hiding 的 bypass
+**所屬層**：anti-censorship technique
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)、[8.10](lessons/part-8-quic-protocols/8.10-takeaways.md)
+**一句話**：handshake 走 encrypted side channel, 完成後 migrate 到 direct path; PETS 2026(1) Tehrani et al.; 我們協議須支援 connection migration。
+
+### Connection Migration (RFC 9000 §9)
+**中文**：QUIC 客戶端 IP/port 變動但 connection 持續
+**所屬層**：L4 QUIC feature
+**首次出現**：[8.6](lessons/part-8-quic-protocols/8.6-quic-in-china.md)、[8.10](lessons/part-8-quic-protocols/8.10-takeaways.md)
+**一句話**：connection 由 connection ID 識別, 不靠 5-tuple; 行動 client 換網斷不掉, 也是 anti-censorship 工具。
+
+### iCloud Private Relay
+**中文**：Apple 兩 hop oblivious proxy, CONNECT-UDP 部署
+**所屬層**：production deployment case
+**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)
+**一句話**：ingress (Apple) + egress (Cloudflare/Akamai/Fastly) 兩 hop, 無單方知道 (who, what); 在中國從 2021 起被擋 (mask-iphost.icloud.com SNI)。
+
+### Cloudflare WARP MASQUE
+**中文**：Cloudflare 從 WireGuard 遷到 MASQUE 的 production case
+**所屬層**：production deployment case
+**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)
+**一句話**：2024+ 部署 CONNECT-IP over HTTPS/QUIC, wire image = 普通 Cloudflare HTTPS; Diniboy1123/usque 是 Go 第三方 re-impl。
+
+### QUIC Version Aliasing (draft-thomson)
+**中文**：私下約定 random version 號做 anti-censorship
+**所屬層**：proposed mechanism
+**首次出現**：[8.9](lessons/part-8-quic-protocols/8.9-custom-quic-variant.md)
+**一句話**：client/server 預共享 version table, 隨機選一個; 違反 IETF spec, 風險 middlebox drop unknown version; 未被 WG 採納。
+
+### Wire Image Mimicry
+**中文**：wire 上看起來像某個合法 protocol
+**所屬層**：anti-censorship 設計
+**首次出現**：[8.8](lessons/part-8-quic-protocols/8.8-masque-deep.md)、[8.10](lessons/part-8-quic-protocols/8.10-takeaways.md)
+**一句話**：對比 wire-image 隨機化, mimicry 是「假裝是 X」; Houmansadr NDSS 2013 "Parrot is Dead" 警告 mimicry 永遠落後但 MASQUE/REALITY 路線重新驗證可行。
