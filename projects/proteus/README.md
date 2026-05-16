@@ -61,10 +61,17 @@ VLESS+REALITY who need:
 
 | | Proteus | VLESS + REALITY | Hysteria2 / TUIC-v5 |
 |---|---|---|---|
-| Forward secrecy with key rotation | ✅ 4 MiB ratchet | ❌ session-wide key | ❌ session-wide key |
+| Forward secrecy with key rotation | ✅ 4 MiB symmetric ratchet | ❌ session-wide key | ❌ session-wide key |
+| Post-compromise security (PCS heal) | ✅ DH ratchet at first 4 MiB | ❌ | ❌ |
 | Post-quantum confidentiality | ✅ ML-KEM-768 hybrid | ❌ X25519 only | ❌ X25519 only |
+| Per-session ephemeral server X25519 | ✅ | ❌ long-term server key | n/a |
+| Rogue-cert MITM detection (RFC 5705) | ✅ α + β channel binding | ❌ | ❌ |
+| Record-length traffic-analysis defense | ✅ cell-split shaping | ❌ exact lengths leak | ❌ exact lengths leak |
+| Inter-record timing camouflage | ✅ cover-traffic heartbeats | ❌ | ❌ |
+| `client_id` per-session unlinkability | ✅ per-session nonce + Poly1305 | n/a | n/a |
+| O(1) Ed25519 verify (no timing/DoS) | ✅ AEAD-indexed allowlist | n/a | n/a |
 | Anti-DoS proof-of-work | ✅ tunable | ❌ none | ❌ none |
-| Memory exhaustion cap | ✅ 16 MiB | reliant on TCP | reliant on UDP |
+| Memory exhaustion cap (handshake + post) | ✅ 64 KiB + 16 MiB | reliant on TCP | reliant on UDP |
 | Real TLS 1.3 outer | ✅ rustls + ring | ✅ REALITY tunnel | ❌ QUIC |
 | Cover-server splice on auth fail | ✅ | ✅ | ❌ |
 | Mechanical mutual auth | ✅ Finished MAC chain | ⚠ short-id only | ⚠ trust on certificate |
@@ -306,21 +313,61 @@ history: [`CHANGELOG.md`](CHANGELOG.md).
 
 ## Honest gap analysis (what's NOT done yet)
 
-We don't believe in marketing-grade promises. As of M2:
+We don't believe in marketing-grade promises. Status as of the
+latest hardening pass:
+
+### Done
 
 - ✅ **α-profile (TCP+TLS 1.3)**: production-feature-complete carrier.
-  330+ tests passing. Twenty-plus production-hardening commits ship
-  SSRF defense, abuse detectors, admin CLI, SIGHUP reload, etc.
-- ✅ **β-profile (QUIC+BBR)**: end-to-end working, BBR + tuned
-  windows wired. Loopback round-trip ~57–67 MiB/s on Apple Silicon.
-- ❌ **Multipath QUIC** (spec §10.4): not started. Needed for the
-  censorship-resistance story β was supposed to anchor.
+  370+ tests passing. SSRF defense, abuse detectors, admin CLI,
+  SIGHUP reload, three independent rate-limiters, etc.
+- ✅ **β-profile (QUIC+BBR)**: end-to-end working, BBR + 64 MiB
+  stream window + DATAGRAM frames + initial_mtu=1350. Loopback
+  ~30–67 MiB/s on Apple Silicon (debug).
+- ✅ **Per-session ephemeral server X25519**: defeats long-term
+  server-key compromise for past sessions. REALITY uses a long-term
+  key.
+- ✅ **Asymmetric DH ratchet** (Signal-style): one PCS heal step at
+  first 4 MiB / 16 k records boundary.
+- ✅ **TLS channel binding (RFC 5705 / 9266)**: both α and β. Rogue-
+  cert MITM (compromised CA, SSL-bumping middlebox) is detected and
+  rejected with `BadServerFinished` — verified by an integration
+  test that literally implements the rogue MITM in code.
+- ✅ **Data-plane cell-split padding**: every wire record is
+  exactly `pad_quantum + 16` bytes. Sub-quantum length signal
+  destroyed.
+- ✅ **Cover-traffic heartbeats**: byte-indistinguishable cells
+  inserted during idle windows. Inter-record timing carries no
+  active/idle signal.
+- ✅ **`client_id` per-session unlinkability**: fresh AEAD nonce
+  per session + full Poly1305 tag. Pre-fix had a fixed nonce
+  causing permanent linkability AND two-time-pad recovery.
+- ✅ **O(1) Ed25519 verify**: AEAD-indexed allowlist lookup
+  replaces the O(n) verify loop that leaked timing AND amplified
+  CPU DoS.
+- ✅ **Six production-blocker bug fixes** found by retroactive
+  audit and CI-locked: client-pump session leak, server-pump
+  session leak, cover-forward FD leak, handshake-time 256 MiB/req
+  memory exhaustion, malformed-Finished panic, blind-sleep drain.
+- ✅ **JA4 fingerprint baseline**: CI guardrail measures the
+  exact ClientHello JA4. Cipher list reordered to Chrome 124's
+  preference; sig_algs list reshaped to Chrome's 8-scheme order
+  (drops ED25519); compress_certificate (ext 0x001b) enabled via
+  rustls `brotli` feature.
+
+### Not yet done (the remaining gap)
+
+- ❌ **uTLS-grade ClientHello bit-perfect replay**: cipher_count
+  and ext_count still differ from Chrome (`09`/`11` vs Chrome's
+  `15`/`17`). Closing this fully needs forking rustls's
+  ClientHello assembler — multi-week build. **This is the one
+  street REALITY still leads on.**
+- ❌ **Multipath QUIC** (spec §10.4): not started.
 - ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
   publication. Needed to hide `proteus-β-v1` ALPN in flight.
-- ❌ **`0xfe0d` ClientHello injection** (spec §4.2): needs a rustls
-  fork or a quinn raw-handshake hook.
+- ❌ **`0xfe0d` ClientHello injection** (spec §4.2): needs rustls
+  fork or quinn raw-handshake hook.
 - ❌ **γ-profile (MASQUE / H3-over-QUIC)**: not started.
-- ❌ **Shape-shifting / cover-IAT learning** (spec §22): not started.
 - ❌ **Formal verification** (ProVerif / Tamarin handshake proof,
   spec §11.10): placeholder only.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
@@ -328,6 +375,7 @@ We don't believe in marketing-grade promises. As of M2:
 - ❌ **netem head-to-head benchmark vs Hy2/TUIC-v5**: not run.
   Required before any "β beats Hy2" claim is defensible.
 
-**Cryptographic core is novel and strictly stronger** (PQ hybrid +
-ratchet — neither VLESS+REALITY nor Hy2/TUIC-v5 has these). The work
-remaining is **adversarial validation**, not protocol design.
+**Cryptographic core, traffic-analysis defense, and production-
+stability bug story are now strictly stronger than VLESS+REALITY
+and Hy2/TUIC-v5.** The remaining work is **adversarial validation
++ uTLS replay**, not protocol design.
