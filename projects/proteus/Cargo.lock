@@ -970,6 +970,7 @@ dependencies = [
  "ml-kem",
  "proteus-crypto",
  "proteus-handshake",
+ "proteus-shape",
  "proteus-spec",
  "proteus-wire",
  "rand_core 0.6.4",

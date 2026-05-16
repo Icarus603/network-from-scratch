@@ -178,6 +178,8 @@ where
         ))
     })?;
 
+    let (shape_seed, cover_profile_id) = fresh_shape_params(&mut rng);
+
     let mut ext = AuthExtension {
         version: PROTEUS_VERSION_V10,
         profile_hint: config.profile_hint,
@@ -186,8 +188,8 @@ where
         client_mlkem768_ct: client_eph.mlkem_ct,
         client_id,
         timestamp_unix_seconds: now,
-        cover_profile_id: proteus_spec::COVER_PROFILE_API_POLL,
-        shape_seed: 0x4242_4242,
+        cover_profile_id,
+        shape_seed,
         anti_dos_difficulty: config.pow_difficulty,
         anti_dos_solution: pow_solution,
         client_kex_sig: sig_bytes,
@@ -362,6 +364,75 @@ async fn read_frame<R: tokio::io::AsyncRead + Unpin>(
 struct OwnedFrame {
     kind: u8,
     body: Vec<u8>,
+}
+
+/// Generate the per-session `(shape_seed, cover_profile_id)` pair.
+///
+/// Both values are wire-public — they're carried in the AuthExtension
+/// in plaintext (the auth_tag binds them but does not hide them) and
+/// both endpoints derive the same shape-shift schedule from them. The
+/// randomness here is therefore **anti-fingerprinting**, not key
+/// material: if every client picks the same constants, every session
+/// at the shaping layer looks identical and the whole shape-shift
+/// machinery devolves to a deterministic constant — exactly what we
+/// don't want.
+///
+/// Exposed as `pub` so dual-stack β reuses the same generator without
+/// duplicating policy.
+#[must_use]
+pub fn fresh_shape_params<R: rand_core::RngCore>(rng: &mut R) -> (u32, u16) {
+    let mut shape_seed_bytes = [0u8; 4];
+    rand_core::RngCore::fill_bytes(rng, &mut shape_seed_bytes);
+    let shape_seed = u32::from_be_bytes(shape_seed_bytes);
+    let mut cover_idx_byte = [0u8; 1];
+    rand_core::RngCore::fill_bytes(rng, &mut cover_idx_byte);
+    let cover_profile_id = proteus_shape::shift::SHAPES[(cover_idx_byte[0] as usize) % 5];
+    (shape_seed, cover_profile_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fresh_shape_params;
+    use std::collections::HashSet;
+
+    #[test]
+    fn fresh_shape_params_varies_across_calls() {
+        // Anti-fingerprint regression: 64 calls MUST produce more than
+        // one distinct shape_seed. Constant seed = no shape-shift
+        // randomness. We assert strictly >32 distinct values to catch
+        // both "constant" (==1) and "low-entropy" (e.g. wall-clock
+        // seconds, ==a handful) regressions.
+        let mut rng = rand_core::OsRng;
+        let mut seeds = HashSet::new();
+        for _ in 0..64 {
+            let (seed, _) = fresh_shape_params(&mut rng);
+            seeds.insert(seed);
+        }
+        assert!(
+            seeds.len() > 32,
+            "shape_seed entropy collapsed: only {} distinct seeds in 64 calls",
+            seeds.len()
+        );
+    }
+
+    #[test]
+    fn fresh_shape_params_covers_all_cover_profiles() {
+        // Cover-profile-id MUST be drawn uniformly over §22.4's 5
+        // baseline shapes. 1024 draws is overwhelmingly enough to
+        // touch all 5 if the distribution is non-degenerate.
+        let mut rng = rand_core::OsRng;
+        let mut seen = HashSet::new();
+        for _ in 0..1024 {
+            let (_, cover) = fresh_shape_params(&mut rng);
+            seen.insert(cover);
+        }
+        assert_eq!(
+            seen.len(),
+            proteus_shape::shift::SHAPES.len(),
+            "cover_profile distribution collapsed: {:?}",
+            seen
+        );
+    }
 }
 
 fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {

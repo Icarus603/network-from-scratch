@@ -12,6 +12,7 @@ proteus-spec = { path = "../proteus-spec" }
 proteus-wire = { path = "../proteus-wire" }
 proteus-crypto = { path = "../proteus-crypto" }
 proteus-handshake = { path = "../proteus-handshake" }
+proteus-shape = { path = "../proteus-shape" }
 
 ml-kem.workspace = true
 x25519-dalek.workspace = true
