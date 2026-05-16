@@ -128,8 +128,28 @@ where
                     // close is indistinguishable from "server decided
                     // to terminate" — same fingerprint as a normal
                     // server-initiated close.
+                    //
+                    // ## Indistinguishability discipline (USENIX 25 ++)
+                    //
+                    // Every close MUST be NO_ERROR (0x00) with an empty
+                    // reason phrase. Earlier revisions surfaced reasons
+                    // like "admission-denied" / "max-connections" /
+                    // "alpn-mismatch" / "bi-stream-timeout" /
+                    // "no-exporter" with distinct error codes (1, 2, 0,
+                    // 3, 4). An active GFW prober that retries the
+                    // handshake under different invariants — fresh IP
+                    // vs. blocked IP, fresh user_id vs. unknown
+                    // user_id, varied ALPN — can read the reason phrase
+                    // out of the CONNECTION_CLOSE frame (it's
+                    // unencrypted at the QUIC transport level, RFC
+                    // 9000 §19.19) and CLASSIFY the server's policy.
+                    // That distinguishes Proteus from generic QUIC
+                    // services that close with NO_ERROR + empty
+                    // reason. The diagnostic content stays in the
+                    // operator's tracing logs + Prometheus metrics —
+                    // never on the wire.
                     if !admission_ok(&ctx, &remote) {
-                        conn.close(1u32.into(), b"admission-denied");
+                        conn.close(0u32.into(), b"");
                         return;
                     }
 
@@ -146,7 +166,7 @@ where
                                 m.firewall_denied
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
-                            conn.close(2u32.into(), b"max-connections");
+                            conn.close(0u32.into(), b"");
                             return;
                         }
                     };
@@ -160,7 +180,7 @@ where
                     }) {
                         if p != ALPN {
                             warn!(alpn = ?p, "β: unexpected ALPN; closing");
-                            conn.close(0u32.into(), b"alpn-mismatch");
+                            conn.close(0u32.into(), b"");
                             return;
                         }
                     }
@@ -187,7 +207,11 @@ where
                                     m.handshake_timeouts
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
-                                conn.close(3u32.into(), b"bi-stream-timeout");
+                                // Indistinguishability: NO_ERROR + empty
+                                // reason. Same discipline as the
+                                // admission/cap branches above. Reason
+                                // visible only in operator metrics.
+                                conn.close(0u32.into(), b"");
                                 return;
                             }
                         };
@@ -215,7 +239,10 @@ where
                             remote = %remote,
                             "β: TLS exporter unavailable post-handshake; closing"
                         );
-                        conn.close(4u32.into(), b"no-exporter");
+                        // Indistinguishability: NO_ERROR + empty
+                        // reason. Diagnostic stays in the tracing log
+                        // above.
+                        conn.close(0u32.into(), b"");
                         return;
                     }
 
