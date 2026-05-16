@@ -436,7 +436,39 @@ where
         let _ = sender.shutdown().await;
     };
 
-    tokio::join!(client_to_upstream, upstream_to_client);
+    // `tokio::select!` (NOT `tokio::join!`) so a unilateral close of
+    // one direction tears down the other.
+    //
+    // Bug history: until commit 53c8dfc the client-side SOCKS5 pump
+    // used `tokio::join!` here too. When the SOCKS5 client closed
+    // its socket, the client→upstream half exited but the
+    // upstream→client half blocked forever on `recv_record()` —
+    // sessions leaked their permits permanently. The same class of
+    // bug existed here on the server: when the upstream returned
+    // EOF (e.g. an HTTP server replied with full content and closed),
+    // `upstream_to_client` exited and sent a CLOSE record, but
+    // `client_to_upstream` kept blocking on `recv_record()` because
+    // the client never sent its own CLOSE. Sessions leaked → server's
+    // `max_connections` semaphore filled up → server stopped
+    // accepting new connections.
+    //
+    // `select!` drops the losing future when one branch wins; dropping
+    // the future releases the captured `receiver` / `up_r` / etc.,
+    // unblocking the underlying read futures. Both halves are
+    // already structured to set a clean close reason before exiting,
+    // so `reason_cell` still reports correctly.
+    tokio::select! {
+        _ = client_to_upstream => {
+            // Client closed (or upstream write failed). Upstream side
+            // is dropped here as the losing future unwinds.
+        }
+        _ = upstream_to_client => {
+            // Upstream EOF (or send-to-client failed). The CLOSE
+            // record was already emitted by upstream_to_client; the
+            // client→upstream future is dropped here, cancelling its
+            // `recv_record()` cleanly.
+        }
+    }
     debug!("session closed");
     let reason = reason_cell
         .lock()
