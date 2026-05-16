@@ -721,45 +721,41 @@ nDPI 識別器的部署與規則寫法。
 
 ## Part 10 — 對抗式流量分析與反制（12 堂）
 
-### 10.1 流量分析的數學基礎
-資訊理論視角：Shannon entropy、KL divergence。
+### 10.1 流量分析的數學基礎 ✅
+資訊理論視角：Shannon entropy、KL divergence、JSD、TVD、Smith QIF、channel capacity。
 
-### 10.2 經典統計指紋
-- 封包大小直方圖、IAT (inter-arrival time)、burst pattern
-- **論文**：Walkie-Talkie: An Efficient Defense Against Passive Website Fingerprinting
+### 10.2 經典統計指紋 ✅
+Hintz 02 → Liberatore-Levine 06 → Herrmann 09 → Panchenko 11 → Cai 12 → Wang 13/14 → Panchenko 16 CUMUL → Hayes-Danezis 16 k-FP 的完整 hand-crafted feature 演化。
 
-### 10.3 ML / DL 分類器
-- CNN / LSTM / Transformer 對 packet sequence
-- **論文**：Deep Fingerprinting (CCS 2018)
+### 10.3 ML / DL 分類器 ✅
+Abe 16 → Rimmer 18 AWF → Sirinam 18 DF → Bhat 19 Var-CNN → Rahman 20 Tik-Tok → Sirinam 19 Triplet。包括 Juarez 14 critical eval、Wang 16 realistic、Cherubin 17 Bayes bound。
 
-### 10.4 對抗式樣本（adversarial examples）
-- 在流量上的對應：怎麼設計流量讓分類器分不出來
-- **論文**：Adversarial Examples for Network Traffic Classification
+### 10.4 對抗式樣本 ✅
+Mockingbird (Hou 19) → BLANKET (Nasr 21) → AWA (Sadeghzadeh 21) → Surakav (Gong 22) → Sheffey 24 adaptive eval。Traffic AE 與視覺 AE 的根本差異。
 
-### 10.5 流量混淆技術全綜述
-- padding、splitting、morphing、constant-rate
-- 各自的代價（頻寬 overhead）
+### 10.5 流量混淆技術全綜述 ✅
+BuFLO / Tamaraw / Traffic Morphing / WTF-PAD / Walkie-Talkie / FRONT / RegulaTor / TrafficSliver / Maybenot 框架。defense 對比 mega-table。
 
-### 10.6 obfs4 / meek / Snowflake 精讀
-Tor 那邊的 pluggable transport 怎麼做。
+### 10.6 Pluggable Transports 精讀 ✅
+obfs2/3/4 / ScrambleSuit / FTE / Marionette / meek / Snowflake / TapDance / Conjure / uTLS 完整 PT 家族與演化史。
 
-### 10.7 規律性破壞（regularization disruption）
-讓「沒有規律」本身不成為特徵。
+### 10.7 規律性破壞 ✅
+FEP detection (Wu 23) 後的 「look like X」 vs 「be X」 設計哲學切換；mimicry vs tunneling；REALITY fallback。
 
-### 10.8 連線級偽裝 vs 應用級偽裝
-HTTPS 偽裝、瀏覽器偽裝、合法應用偽裝。
+### 10.8 連線級偽裝 vs 應用級偽裝 ✅
+JA3/JA4 / uTLS / ECH / REALITY / MASQUE CONNECT-UDP / TLS-in-TLS detection / AppScanner / FlowPrint / FS-Net。
 
-### 10.9 Probabilistic decoy traffic
-混入假流量、cover traffic 的設計取捨。
+### 10.9 Probabilistic decoy traffic ✅
+Chaum mixnet → Mixminion → Sphinx → Loopix → Vuvuzela / Karaoke。selective vs constant-rate cover。capacity argument。
 
-### 10.10 SoK：Censorship Resistance
-**論文**：SoK: Making Sense of Censorship Resistance Systems (PoPETs 2016) 完整精讀。
+### 10.10 SoK：Censorship Resistance ✅
+Khattak 16 / Tschantz 16 SoK 6-軸 taxonomy + 4 mandate；Pulls 20 oracle、Cherubin 22 online、Wails 24 deployment。
 
-### 10.11 我們協議的反制設計：威脅 → 防禦對應表
-把 Part 9 + Part 10 學到的所有對手能力整理成防禦設計清單。
+### 10.11 威脅 → 防禦對應表 ✅
+完整 mapping：wire / connection / probing / ML / correlation / oracle 六大 threat category 對應 G6 mechanism；7 層 defense-in-depth architecture。
 
-### 10.12 反制設計的可證明性
-能不能用形式化方法證明「對某類分類器免疫」（research-level open problem）。
+### 10.12 反制設計的可證明性 ✅
+Wang 14 → Cherubin 17 Bayes → Smith QIF → DP-form attempt → randomized smoothing — provability 四件套。
 
 ---
 

@@ -2802,3 +2802,235 @@
 **所屬層**：handshake ratchet
 **首次出現**：[11.6](lessons/part-11-design/11.6-spec-handshake-state.md)
 **一句話**：K_{n+1} = HKDF(K_n, label)；簡單但只達 PCS-weak（PCS-strong 需注入 fresh randomness, 1 RTT 代價）。
+
+---
+
+## Part 10 — 對抗式流量分析
+
+### WF (Website Fingerprinting)
+**中文**：網站指紋攻擊
+**所屬層**：traffic analysis
+**首次出現**：[10.2](lessons/part-10-traffic-analysis/10.2-statistical-fingerprints.md)（Hintz 2002）
+**一句話**：即使加密，從 packet sequence 推斷 user 訪問哪個網站的攻擊家族；2002–2024 從 50% 到 99% accuracy。
+
+### Closed-world / Open-world
+**中文**：封閉世界 / 開放世界
+**所屬層**：WF threat model
+**首次出現**：[10.2](lessons/part-10-traffic-analysis/10.2-statistical-fingerprints.md)
+**一句話**：closed-world 假設 user 只訪問 monitored 清單；open-world 包含 unmonitored 大集合，是真實場景。
+
+### CUMUL
+**中文**：cumulative bytes WF feature
+**所屬層**：WF feature
+**首次出現**：[10.2](lessons/part-10-traffic-analysis/10.2-statistical-fingerprints.md)（Panchenko 2016 NDSS）
+**一句話**：把 trace direction 累加為 cumulative-bytes 曲線，resample 為 100 維 feature；簡單但極強。
+
+### k-FP
+**中文**：k-fingerprinting WF attack
+**所屬層**：WF attack
+**首次出現**：[10.2](lessons/part-10-traffic-analysis/10.2-statistical-fingerprints.md)（Hayes-Danezis 2016 USENIX Sec）
+**一句話**：175 hand-crafted features + RF leaf encoding + Hamming k-NN；同時提供 feature-importance ranking 給 defense 設計。
+
+### DF (Deep Fingerprinting)
+**中文**：深度指紋攻擊
+**所屬層**：WF attack
+**首次出現**：[10.3](lessons/part-10-traffic-analysis/10.3-deep-learning-classifiers.md)（Sirinam 2018 CCS）
+**一句話**：4-block 1D CNN on raw direction sequence；2018 後 WF 領域被 DL 接管的起點。
+
+### Tik-Tok
+**中文**：timing-channel WF attack
+**所屬層**：WF attack
+**首次出現**：[10.3](lessons/part-10-traffic-analysis/10.3-deep-learning-classifiers.md)（Rahman 2020 PoPETs）
+**一句話**：`direction × log(time)` representation + DF-style CNN；undefended Tor 99.5%、Walkie-Talkie 81%。
+
+### Bayes-optimal accuracy bound
+**中文**：貝氏最佳分類器準確度上界
+**所屬層**：QIF / WF defense bound
+**首次出現**：[10.1](lessons/part-10-traffic-analysis/10.1-information-theory.md)（Cherubin 2017 PoPETs）
+**一句話**：對任何 classifier 都成立的上界，via posterior $E_Y[\max_x P(X|Y)]$；是 「DL-proof」 的關鍵 framework。
+
+### g-leakage / QIF
+**中文**：量化資訊流框架
+**所屬層**：information-theoretic security
+**首次出現**：[10.1](lessons/part-10-traffic-analysis/10.1-information-theory.md)（Smith 2009 FoSSaCS）
+**一句話**：用 gain function $g$ 量化「對手贏的條件」， posterior vs prior vulnerability 比值即 leakage；多 $g$ 給 multi-faceted leakage report。
+
+### Channel capacity (traffic context)
+**中文**：傳輸通道容量（流量混淆語境）
+**所屬層**：information theory applied to defense
+**首次出現**：[10.1](lessons/part-10-traffic-analysis/10.1-information-theory.md)
+**一句話**：$C = \max_{p(X)} I(X; Y)$；每次 trace 最多洩漏 $C$ bits，repeated-visit attack 累積需 $H(X)/C$ traces；G6 evaluation 必 report $\hat{C}$。
+
+### BuFLO / Tamaraw
+**中文**：constant-rate channel WF defense
+**所屬層**：WF defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Dyer 2012 IEEE S&P / Cai 2014 CCS）
+**一句話**：固定 rate + fixed packet size + pad-to-L quantum；強防禦但 100%+ overhead。
+
+### Walkie-Talkie
+**中文**：supersequence padding defense
+**所屬層**：WF defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Wang-Goldberg 2017 USENIX Sec）
+**一句話**：半雙工 + 兩 site supersequence padding，理論上 50% indistinguishability for pair；Tik-Tok 用 timing 破。
+
+### WTF-PAD
+**中文**：zero-delay adaptive padding
+**所屬層**：WF defense (Tor padding spec 254 reference)
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Juarez 2016 ESORICS）
+**一句話**：empirical IAT histogram 採樣注 dummy；zero-delay；DF (2018) 破。
+
+### FRONT / GLUE
+**中文**：front-loaded random padding / page-glue defense
+**所屬層**：WF defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Gong-Wang 2020 USENIX Sec）
+**一句話**：FRONT = 在 trace 開頭注 Rayleigh-sampled dummies；GLUE = 多頁 visit 連續化消除 parsing。
+
+### RegulaTor
+**中文**：window-rate envelope defense
+**所屬層**：WF defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Holland-Hopper 2022 PoPETs）
+**一句話**：每 window 限 rate $R$，不足 pad、超過 queue；最簡單強 defense，DF 22%、Tik-Tok 31%。
+
+### TrafficSliver
+**中文**：multi-circuit traffic splitting
+**所屬層**：WF defense
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（De La Cadena 2020 CCS）
+**一句話**：把 traffic 分割到 K 個 Tor circuits；single-vantage adversary 失效，但 multi-vantage 仍 vulnerable。
+
+### Maybenot
+**中文**：traffic-defense state machine framework
+**所屬層**：WF defense framework
+**首次出現**：[10.5](lessons/part-10-traffic-analysis/10.5-defense-survey.md)（Pulls-Witwer 2023 PoPETs）
+**一句話**：把 defense 寫成 state-machine spec（state, transition, event, action）；Tor padding-v2 的標準化方向；G6 shape 層直接 adopt。
+
+### Mockingbird / BLANKET / Surakav
+**中文**：adversarial-perturbation / GAN-based defenses
+**所屬層**：WF defense (DL-aware)
+**首次出現**：[10.4](lessons/part-10-traffic-analysis/10.4-adversarial-examples.md)
+**一句話**：Mockingbird = per-trace iterative perturbation；BLANKET = universal perturbation；Surakav = GAN-based realistic decoy；Surakav 2024 對 adaptive attacker 最 robust。
+
+### obfs2 / obfs3 / obfs4 / ScrambleSuit
+**中文**：Tor PT obfuscation family
+**所屬層**：Pluggable Transport
+**首次出現**：[10.6](lessons/part-10-traffic-analysis/10.6-pluggable-transports.md)
+**一句話**：演化史：obfs2 死於 entropy；obfs3 死於 active probing；obfs4 / ScrambleSuit 用 HMAC silence 抵抗 active probing；2024 在 FEP detection 下大部分 EOL。
+
+### meek / Snowflake / Conjure
+**中文**：CDN-fronting / WebRTC / refraction-networking PT
+**所屬層**：Pluggable Transport
+**首次出現**：[10.6](lessons/part-10-traffic-analysis/10.6-pluggable-transports.md)
+**一句話**：meek = domain fronting via CDN；Snowflake = WebRTC via volunteer browsers；Conjure = ISP-deployed TAP + 「unused IP space」 phantom proxy。
+
+### FTE / Marionette
+**中文**：format-transforming / programmable mimicry
+**所屬層**：PT obfuscation
+**首次出現**：[10.6](lessons/part-10-traffic-analysis/10.6-pluggable-transports.md)（Dyer 13/15）
+**一句話**：FTE = 把 ciphertext map 到 regex-conformant string；Marionette = programmable state-machine protocol mimicry；都因 「parrot is dead」 而衰落。
+
+### uTLS
+**中文**：micro-TLS — Go TLS fingerprint parrot library
+**所屬層**：TLS layer
+**首次出現**：[10.6](lessons/part-10-traffic-analysis/10.6-pluggable-transports.md)（Frolov-Wustrow 2019 NDSS）
+**一句話**：fork Go crypto/tls 讓 ClientHello 完美 mimic Chrome/Firefox；VLESS+REALITY / Hysteria2 必用；G6 mandatory。
+
+### JA3 / JA4
+**中文**：TLS ClientHello fingerprint hash
+**所屬層**：TLS fingerprinting
+**首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
+**一句話**：JA3 = MD5(TLSVer + Cipher + Ext + Curves + ECFormats)；JA4 = 2023 後 FoxIO 新版，含 ALPN/版本/ext-hash；用 hash 識別 TLS client implementation。
+
+### REALITY
+**中文**：Xray 提出的 「proxy 到真實 TLS server」 trick
+**所屬層**：TLS / proxy fallback
+**首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Xray 2023）
+**一句話**：bridge 對 unauthenticated probe 真實 forward 給 target CDN，對 authenticated client 替換 ServerHello 建 G6 tunnel；解 「silent bridge looks like dead host」 問題。
+
+### ECH (Encrypted Client Hello)
+**中文**：加密的 TLS ClientHello SNI
+**所屬層**：TLS
+**首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)（draft-ietf-tls-esni）
+**一句話**：Outer ClientHello 用 publicly-known config-key 加密真實 SNI；Cloudflare 已部署；GFW 已開始 block ECH-enabled ClientHello。
+
+### MASQUE
+**中文**：HTTP-tunneling IETF working group
+**所屬層**：transport / H3
+**首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
+**一句話**：CONNECT-UDP (RFC 9298), CONNECT-IP, CONNECT-Ethernet 系列 RFC；H3 上 tunnel 任意 traffic；G6 transport baseline。
+
+### TLS-in-TLS detection
+**中文**：嵌套 TLS 偵測
+**所屬層**：TLS analysis
+**首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
+**一句話**：外層 TLS 與內層 TLS 的 record size pattern 仍可被識別；G6 不在 G6 tunnel 內 nest TLS。
+
+### FEP detection
+**中文**：Fully-Encrypted Protocol detection (Wu 23)
+**所屬層**：GFW 對隨機加密流量的 detection
+**首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Wu 2023 USENIX Security）
+**一句話**：首 6 packets 的 entropy + printable ratio + 缺 HTTP-like keywords + 不符 known protocol 即 flag；Shadowsocks / VMess / Trojan 隨機 wire 全死。
+
+### Mimicry vs Tunneling
+**中文**：模仿 vs 隧道
+**所屬層**：design philosophy
+**首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)
+**一句話**：mimicry = wire format 假裝像 X（FTE / Marionette）；tunneling = wire 真的是 X（meek / Snowflake / REALITY）；mimicry 「parrot is dead」 已死，tunneling 是 G6 路線。
+
+### DeepCorr
+**中文**：DL-based Tor flow correlation
+**所屬層**：traffic-analysis attack
+**首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Nasr 2018 CCS）
+**一句話**：CNN 對 entry/exit Tor flow timing 做配對；90%+ correlation accuracy；G6 timing jitter 防禦。
+
+### Watermarking attack
+**中文**：流量水印攻擊
+**所屬層**：active flow correlation
+**首次出現**：[10.7](lessons/part-10-traffic-analysis/10.7-regularization-disruption.md)（Iacovazzi 2017 survey）
+**一句話**：對手在 trace 中 inject 特定 timing/size pattern，下游檢測該 pattern 確認 same-flow；隨機 jitter 防禦。
+
+### AppScanner / FlowPrint / FS-Net
+**中文**：應用級指紋識別家族
+**所屬層**：app fingerprinting
+**首次出現**：[10.8](lessons/part-10-traffic-analysis/10.8-connection-vs-app-disguise.md)
+**一句話**：AppScanner (Taylor 16) 監督式 per-app；FlowPrint (van Ede 20) 半監督式 + destination cluster；FS-Net (Liu 19) deep flow-sequence；G6 single-tunnel 結構天然防 FlowPrint。
+
+### Loopix / Vuvuzela / Karaoke
+**中文**：formal-anonymity messaging systems
+**所屬層**：anonymous messaging
+**首次出現**：[10.9](lessons/part-10-traffic-analysis/10.9-probabilistic-decoy-traffic.md)
+**一句話**：Loopix = continuous-time mixnet with Poisson cover loops；Vuvuzela/Karaoke = round-based DP-anonymity messaging；都需大 overhead 換 formal bound。
+
+### Cover traffic / decoy / loop traffic
+**中文**：假流量 / 誘餌流量 / 迴環流量
+**所屬層**：anonymity / traffic shaping
+**首次出現**：[10.9](lessons/part-10-traffic-analysis/10.9-probabilistic-decoy-traffic.md)
+**一句話**：主動產生與真實流量不可區分的假封包以壓低 channel capacity；selective cover = G6 default light mode；constant-rate = G6 high-assurance mode。
+
+### Khattak SoK 6 軸
+**中文**：CRS 系統化的 6 維分類
+**所屬層**：methodology
+**首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Khattak 2016 PoPETs）
+**一句話**：Trust / Adversary / Routing / Obfuscation / Active probing res / Deployment；任何 CRS protocol spec 必須沿此 6 軸定位。
+
+### Tschantz mandate
+**中文**：CRS 評估方法論 4 條
+**所屬層**：methodology
+**首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Tschantz 2016 IEEE S&P）
+**一句話**：1) empirical real-censor eval；2) define adversary precisely；3) compare with existing；4) report deployment data；G6 Part 12 evaluation 必符。
+
+### Website Oracle attack
+**中文**：網站預言機攻擊
+**所屬層**：augmented WF
+**首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Pulls-Dahlberg 2020 PoPETs）
+**一句話**：WF + DNS resolver log / CT log / CDN log → 99% accuracy；G6 必 DoH-over-tunnel 防 DNS oracle。
+
+### Online WF
+**中文**：流式網站指紋
+**所屬層**：WF attack model
+**首次出現**：[10.10](lessons/part-10-traffic-analysis/10.10-sok-censorship-resistance.md)（Cherubin-Jansen-Troncoso 2022 USENIX Sec）
+**一句話**：attacker 即時分類，不等 trace 結束；first burst 60% / mid 80% / end 95%；G6 defense 必 from-first-packet。
+
+### Provability level (L0–L4)
+**中文**：可證明性分級
+**所屬層**：security framework
+**首次出現**：[10.12](lessons/part-10-traffic-analysis/10.12-provable-defense.md)
+**一句話**：L0=empirical / L1=feature-class bound (Wang 14) / L2=Bayes-optimal upper bound (Cherubin 17) / L3=DP-form / L4=computational indist；G6 目標 L2+partial L3。
