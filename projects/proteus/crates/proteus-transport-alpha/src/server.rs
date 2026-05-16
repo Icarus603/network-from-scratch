@@ -81,6 +81,37 @@ impl ServerKeys {
     }
 }
 
+/// Outcome of [`ServerCtx::try_acquire_connection`].
+pub enum ConnGate {
+    /// No `max_connections` configured — proceed unconditionally.
+    Unbounded,
+    /// Limit configured and a slot was free. Hold this permit for
+    /// the lifetime of the connection; dropping it releases the slot.
+    Allowed(tokio::sync::OwnedSemaphorePermit),
+    /// Limit configured and the cap is hit. The caller MUST route the
+    /// connection to cover (or drop it).
+    Rejected,
+}
+
+/// Helper used by every accept loop: spawn a cover-forward task that
+/// splices `stream` to `ctx.cover_endpoint` (if configured), otherwise
+/// drop the stream. Idempotent + non-blocking.
+fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream) {
+    if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
+        let metrics = ctx.metrics().cloned();
+        tokio::spawn(async move {
+            let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
+            if r.is_ok() {
+                if let Some(m) = metrics {
+                    m.cover_forwards
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        });
+    }
+    // Else: stream drops here, TCP RST/FIN closes silently.
+}
+
 /// Per-server state shared across connections.
 pub struct ServerCtx {
     keys: ServerKeys,
@@ -102,6 +133,16 @@ pub struct ServerCtx {
     /// Optional shared metrics handle for hot-path counters (cover
     /// forwards, rate-limit drops, handshake timeouts).
     metrics: Option<Arc<crate::metrics::ServerMetrics>>,
+    /// Optional bounded-concurrency semaphore. When set, the server
+    /// will hold at most `max_connections` simultaneous accepted
+    /// connections (a hard cap, evaluated **before** the handshake
+    /// begins). Connections that would exceed this cap are routed
+    /// straight to the cover endpoint or dropped.
+    ///
+    /// Production deployments SHOULD set this — without it, a SYN
+    /// flood that survives the rate limiter can still OOM the
+    /// server by parking unbounded per-connection ML-KEM allocations.
+    conn_limit: Option<Arc<tokio::sync::Semaphore>>,
 }
 
 impl ServerCtx {
@@ -117,6 +158,50 @@ impl ServerCtx {
             tcp_keepalive_secs: 30,
             pow_difficulty: 0,
             metrics: None,
+            conn_limit: None,
+        }
+    }
+
+    /// Cap the maximum number of *in-flight* accepted connections.
+    /// Connections beyond this cap are routed to the cover endpoint
+    /// (if configured) or dropped silently. Set this to roughly
+    /// `min(fd_ulimit / 4, RAM_MB * 1000)` — each in-flight handshake
+    /// reserves ~16 KiB plus the ML-KEM scratch space.
+    #[must_use]
+    pub fn with_max_connections(mut self, n: usize) -> Self {
+        self.conn_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
+        self
+    }
+
+    /// Try to acquire a connection slot. Three-valued:
+    /// - `ConnGate::Unbounded` — no limit configured, proceed.
+    /// - `ConnGate::Allowed(permit)` — limit configured, slot acquired.
+    ///   Drop the permit when the connection completes.
+    /// - `ConnGate::Rejected` — limit exhausted; reject this connection.
+    pub fn try_acquire_connection(&self) -> ConnGate {
+        match &self.conn_limit {
+            Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+                Ok(permit) => ConnGate::Allowed(permit),
+                Err(_) => ConnGate::Rejected,
+            },
+            None => ConnGate::Unbounded,
+        }
+    }
+
+    /// Whether a connection limit is configured.
+    #[must_use]
+    pub fn has_connection_limit(&self) -> bool {
+        self.conn_limit.is_some()
+    }
+
+    /// Read the available permits for the connection limit (or
+    /// `usize::MAX` when no limit is configured). Used by tests and
+    /// the `/metrics` exposition.
+    #[must_use]
+    pub fn available_connection_slots(&self) -> usize {
+        match &self.conn_limit {
+            Some(sem) => sem.available_permits(),
+            None => usize::MAX,
         }
     }
 
@@ -271,23 +356,28 @@ where
                 m.rate_limited
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
-                let metrics = ctx.metrics().cloned();
-                tokio::spawn(async move {
-                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
-                    if r.is_ok() {
-                        if let Some(m) = metrics {
-                            m.cover_forwards
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
+            route_to_cover_or_drop(&ctx, stream);
             continue;
         }
+
+        let permit = match ctx.try_acquire_connection() {
+            ConnGate::Unbounded => None,
+            ConnGate::Allowed(p) => Some(p),
+            ConnGate::Rejected => {
+                tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS)");
+                if let Some(m) = ctx.metrics() {
+                    m.conn_limit_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                route_to_cover_or_drop(&ctx, stream);
+                continue;
+            }
+        };
+
         let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
 
         tokio::spawn(async move {
+            let _permit_held = permit; // drop releases the slot on task exit.
             let deadline = ctx.handshake_deadline();
             let outcome =
                 tokio::time::timeout(deadline, handshake_over_tls(stream, &acceptor, &ctx)).await;
@@ -355,23 +445,28 @@ where
                 m.rate_limited
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
-                let metrics = ctx.metrics().cloned();
-                tokio::spawn(async move {
-                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
-                    if r.is_ok() {
-                        if let Some(m) = metrics {
-                            m.cover_forwards
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
+            route_to_cover_or_drop(&ctx, stream);
             continue;
         }
+
+        let permit = match ctx.try_acquire_connection() {
+            ConnGate::Unbounded => None,
+            ConnGate::Allowed(p) => Some(p),
+            ConnGate::Rejected => {
+                tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS-reloadable)");
+                if let Some(m) = ctx.metrics() {
+                    m.conn_limit_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                route_to_cover_or_drop(&ctx, stream);
+                continue;
+            }
+        };
+
         let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
 
         tokio::spawn(async move {
+            let _permit_held = permit;
             let deadline = ctx.handshake_deadline();
             let outcome = tokio::time::timeout(
                 deadline,
@@ -432,25 +527,30 @@ where
                 m.rate_limited
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
-            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
-                let metrics = ctx.metrics().cloned();
-                tokio::spawn(async move {
-                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
-                    if r.is_ok() {
-                        if let Some(m) = metrics {
-                            m.cover_forwards
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                    }
-                });
-            }
+            route_to_cover_or_drop(&ctx, stream);
             continue;
         }
+
+        // ---- Global concurrency cap (OOM defense) ----
+        let permit = match ctx.try_acquire_connection() {
+            ConnGate::Unbounded => None,
+            ConnGate::Allowed(p) => Some(p),
+            ConnGate::Rejected => {
+                tracing::warn!(peer = %peer, "max_connections reached; routing to cover");
+                if let Some(m) = ctx.metrics() {
+                    m.conn_limit_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                route_to_cover_or_drop(&ctx, stream);
+                continue;
+            }
+        };
 
         // ---- Apply TCP keepalive (idle session reaper) ----
         let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
 
         tokio::spawn(async move {
+            let _permit_held = permit;
             let cover_target = ctx.cover_endpoint().map(str::to_string);
             let deadline = ctx.handshake_deadline();
             let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;

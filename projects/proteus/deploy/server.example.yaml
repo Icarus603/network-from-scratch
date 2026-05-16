@@ -15,6 +15,15 @@ listen_alpha: "0.0.0.0:8443"
 # drains us before the drain_secs window expires.
 metrics_listen: "127.0.0.1:9090"
 
+# Global hard cap on simultaneous accepted connections (OOM defense).
+# Each in-flight Proteus handshake reserves ~16 KiB plus ML-KEM scratch
+# (~4 KiB temp). At 4096, peak transient memory ≈ 80 MiB worst-case —
+# safe on a 1 GiB VPS. Tune toward `min(nofile_ulimit / 4, RAM_MB)`.
+# Connections beyond this cap are byte-spliced to cover_endpoint so an
+# attacker can't distinguish a saturated server from a generic HTTPS
+# proxy. Unset = unlimited (NOT recommended for production).
+max_connections: 4096
+
 # Per-source-IP token-bucket rate limit. Burst = max handshakes that may
 # arrive instantaneously from one IP; refill = steady-state rate. With
 # the defaults below a single client gets 10 burst handshakes, then 5/s

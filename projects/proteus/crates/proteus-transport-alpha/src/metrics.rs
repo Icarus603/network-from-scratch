@@ -92,6 +92,7 @@ pub struct ServerMetrics {
     pub handshakes_failed: AtomicU64,
     pub handshake_timeouts: AtomicU64,
     pub rate_limited: AtomicU64,
+    pub conn_limit_rejected: AtomicU64,
     pub cover_forwards: AtomicU64,
     pub total_tx_bytes: AtomicU64,
     pub total_rx_bytes: AtomicU64,
@@ -117,6 +118,7 @@ impl Default for ServerMetrics {
             handshakes_failed: AtomicU64::new(0),
             handshake_timeouts: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
+            conn_limit_rejected: AtomicU64::new(0),
             cover_forwards: AtomicU64::new(0),
             total_tx_bytes: AtomicU64::new(0),
             total_rx_bytes: AtomicU64::new(0),
@@ -165,6 +167,9 @@ impl ServerMetrics {
              # HELP proteus_rate_limited_total Connections rejected by per-IP rate limiter.\n\
              # TYPE proteus_rate_limited_total counter\n\
              proteus_rate_limited_total {}\n\
+             # HELP proteus_conn_limit_rejected_total Connections rejected because max_connections was reached.\n\
+             # TYPE proteus_conn_limit_rejected_total counter\n\
+             proteus_conn_limit_rejected_total {}\n\
              # HELP proteus_cover_forwards_total Connections forwarded to the cover endpoint.\n\
              # TYPE proteus_cover_forwards_total counter\n\
              proteus_cover_forwards_total {}\n\
@@ -194,6 +199,7 @@ impl ServerMetrics {
             s(&self.handshakes_failed),
             s(&self.handshake_timeouts),
             s(&self.rate_limited),
+            s(&self.conn_limit_rejected),
             s(&self.cover_forwards),
             s(&self.total_tx_bytes),
             s(&self.total_rx_bytes),

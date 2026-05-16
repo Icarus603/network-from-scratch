@@ -71,6 +71,17 @@ pub struct ServerConfig {
     /// Default 30s; systemd's `TimeoutStopSec` should be ≥ this + 5s.
     #[serde(default)]
     pub drain_secs: Option<u64>,
+
+    /// Hard cap on the number of *in-flight* accepted connections.
+    /// Connections beyond this cap are routed to the cover endpoint
+    /// (if configured) or dropped silently. Production deployments
+    /// SHOULD set this — without it a sufficiently large SYN flood
+    /// that survives the rate limiter can OOM the process by parking
+    /// unbounded per-connection ML-KEM scratch space. A reasonable
+    /// default for a 1 GiB VPS is `4096`; tune relative to your
+    /// `nofile` ulimit (one connection ≈ one FD).
+    #[serde(default)]
+    pub max_connections: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

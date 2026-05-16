@@ -132,6 +132,15 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
         ctx = ctx.with_pow_difficulty(d);
     }
+    if let Some(n) = cfg.max_connections {
+        info!(max = n, "max_connections cap configured");
+        ctx = ctx.with_max_connections(n);
+    } else {
+        warn!(
+            "no max_connections configured — server may be vulnerable to \
+             accept-flood OOM. Set max_connections in server.yaml."
+        );
+    }
 
     // Server-aggregated metrics — wire into ctx so the hot-path
     // increments the right counters.
