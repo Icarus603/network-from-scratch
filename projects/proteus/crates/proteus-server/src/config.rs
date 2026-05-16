@@ -32,10 +32,27 @@ pub struct ServerConfig {
     #[serde(default)]
     pub cover_endpoint: Option<String>,
     /// Optional Prometheus exposition listener, e.g. `"127.0.0.1:9090"`.
-    /// When set, the server exposes `/metrics` over plain HTTP. Bind
-    /// only to a private address; the endpoint has no auth.
+    /// When set, the server exposes `/metrics`, `/healthz`, `/readyz`
+    /// over plain HTTP. Bind only to a private address (loopback or
+    /// VPN) — only the bearer-token gate below stands between the
+    /// listener and the world.
     #[serde(default)]
     pub metrics_listen: Option<String>,
+
+    /// Optional bearer-token file for the `/metrics` endpoint. When
+    /// set, every `GET /metrics` request must include the header
+    /// `Authorization: Bearer <token>` where `<token>` is the first
+    /// line of this file (trailing whitespace stripped).
+    ///
+    /// `/healthz` and `/readyz` are NEVER gated regardless — k8s /
+    /// ECS / GCP load-balancer probes don't carry tokens.
+    ///
+    /// Strongly recommended when `metrics_listen` is bound to
+    /// anything other than 127.0.0.1. Generate a 32-byte token:
+    ///   openssl rand -hex 32 > /etc/proteus/metrics.token
+    ///   chmod 0600 /etc/proteus/metrics.token
+    #[serde(default)]
+    pub metrics_token_file: Option<PathBuf>,
 
     /// Per-source-IP rate limit (handshakes/sec, burst). Production
     /// SHOULD set this; without it a single attacker IP can saturate

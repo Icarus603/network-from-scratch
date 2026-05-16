@@ -166,8 +166,41 @@ readinessProbe:
   failureThreshold: 2
 ```
 
-Bind only to a private interface (loopback or VPN). The endpoint has no
-authentication.
+### Authentication
+
+`/healthz` and `/readyz` are **never** authenticated — orchestrator
+probes (kubelet, ECS, GCP HCs) don't carry tokens, and the bodies
+only leak `alive` / `dead` / `ready` / `draining`.
+
+`/metrics` is authenticated when `metrics_token_file` is configured:
+
+```yaml
+metrics_listen: "0.0.0.0:9090"           # exposed beyond loopback
+metrics_token_file: /etc/proteus/metrics.token
+```
+
+```bash
+# Generate a 32-byte token:
+sudo openssl rand -hex 32 | sudo tee /etc/proteus/metrics.token
+sudo chmod 0600 /etc/proteus/metrics.token
+sudo chown proteus:proteus /etc/proteus/metrics.token
+```
+
+Prometheus scrape:
+
+```yaml
+- job_name: proteus
+  bearer_token_file: /etc/prometheus/proteus-metrics.token
+  static_configs:
+    - targets: ['proteus.internal:9090']
+```
+
+Bind only to a private interface (loopback or VPN). When
+`metrics_listen` is non-loopback **and** `metrics_token_file` is unset,
+the binary warns at startup that `/metrics` is world-readable. When
+`metrics_token_file` is set, comparisons are constant-time
+(`subtle::ConstantTimeEq`) and the in-memory token is wiped on
+process exit via `zeroize`.
 
 ## Graceful shutdown
 

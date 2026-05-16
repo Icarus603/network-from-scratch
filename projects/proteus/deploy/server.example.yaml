@@ -5,15 +5,31 @@
 # CAP_NET_BIND_SERVICE (see systemd unit).
 listen_alpha: "0.0.0.0:8443"
 
-# Prometheus exposition + container health probes (optional). Bind to a
-# private address; the endpoint has no authentication. Comment out to
-# disable. The same listener serves three routes:
+# Prometheus exposition + container health probes (optional). The
+# same listener serves three routes:
 #   GET /metrics — Prometheus 0.0.4 text exposition.
 #   GET /healthz — Kubernetes liveness probe (200 alive, 503 dead).
 #   GET /readyz  — Kubernetes readiness probe (200 ready, 503 draining).
 # On SIGTERM, /readyz immediately flips to 503 so the load balancer
 # drains us before the drain_secs window expires.
+# Loopback (127.0.0.1) is safe without auth. For any other interface,
+# configure `metrics_token_file` below — otherwise the binary warns
+# loudly at startup that /metrics is world-readable.
 metrics_listen: "127.0.0.1:9090"
+
+# Optional bearer-token gate for /metrics. The file's first line is
+# the secret (trailing whitespace stripped). /healthz and /readyz are
+# never gated. Generate a fresh 32-byte token:
+#   openssl rand -hex 32 > /etc/proteus/metrics.token
+#   chmod 0600 /etc/proteus/metrics.token
+#   chown proteus:proteus /etc/proteus/metrics.token
+# Then Prometheus scrape config:
+#   - job_name: proteus
+#     bearer_token_file: /etc/prometheus/proteus-metrics.token
+#     static_configs:
+#       - targets: ['proteus.internal:9090']
+# Comment out to disable auth (only safe on loopback).
+# metrics_token_file: /etc/proteus/metrics.token
 
 # Source-IP firewall (CIDR allow/deny). Evaluated BEFORE rate-limit
 # and max_connections. Denied connections are byte-spliced to the cover

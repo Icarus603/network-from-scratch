@@ -170,10 +170,45 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     let ctx = Arc::new(ctx);
 
     if let Some(metrics_addr) = cfg.metrics_listen.clone() {
+        // Load the bearer-token gate (if configured). Failing to read
+        // the token file is fatal — silently downgrading to "no auth"
+        // would expose /metrics on whatever interface the operator
+        // chose, defeating the whole point of configuring auth.
+        let auth = match cfg.metrics_token_file.as_ref() {
+            Some(path) => {
+                let raw = std::fs::read_to_string(path)
+                    .map_err(|e| format!("metrics_token_file {path:?}: {e}"))?;
+                let token = raw.trim();
+                match proteus_transport_alpha::metrics_http::MetricsAuth::new(token) {
+                    Some(a) => {
+                        info!(path = ?path, "/metrics bearer-token auth configured");
+                        Some(a)
+                    }
+                    None => {
+                        return Err(format!(
+                            "metrics_token_file {path:?} is empty — refusing to start \
+                             with a missing token but auth configured"
+                        )
+                        .into());
+                    }
+                }
+            }
+            None => {
+                if !is_loopback_addr(&metrics_addr) {
+                    warn!(
+                        addr = %metrics_addr,
+                        "metrics_listen is non-loopback but metrics_token_file is unset — \
+                         /metrics is exposed without authentication"
+                    );
+                }
+                None
+            }
+        };
         let metrics = Arc::clone(&metrics);
         tokio::spawn(async move {
             if let Err(e) =
-                proteus_transport_alpha::metrics_http::serve(&metrics_addr, metrics).await
+                proteus_transport_alpha::metrics_http::serve_with_auth(&metrics_addr, metrics, auth)
+                    .await
             {
                 error!(error = %e, "metrics endpoint exited");
             }
@@ -440,6 +475,20 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     }
 
     Ok(())
+}
+
+/// Return true if `addr` parses as a loopback `host:port` (127/8
+/// or ::1). Used to decide whether to warn the operator that
+/// `/metrics` is exposed without auth — loopback-only is fine, any
+/// other interface really should require a token.
+///
+/// Best-effort: bind strings that fail to parse fall through to
+/// `false` (we'll log the warning, which is the safe default).
+fn is_loopback_addr(addr: &str) -> bool {
+    match addr.parse::<std::net::SocketAddr>() {
+        Ok(sa) => sa.ip().is_loopback(),
+        Err(_) => false,
+    }
 }
 
 /// Build a [`proteus_transport_alpha::firewall::Firewall`] from a
