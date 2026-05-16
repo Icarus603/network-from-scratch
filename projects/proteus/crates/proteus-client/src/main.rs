@@ -44,6 +44,15 @@ enum Cmd {
         #[arg(long, default_value = "/etc/proteus/client.yaml")]
         config: PathBuf,
     },
+    /// Preflight: parse `client.yaml`, check every referenced file
+    /// exists and decodes to the right size, sanity-check β coherence.
+    /// Exit code 0 on green, 1 on any FAIL — suitable for CI / Ansible
+    /// pre-deploy gates.
+    Validate {
+        /// Path to the YAML file to validate. Positional, like the
+        /// server-side `proteus-server validate <path>`.
+        path: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -58,6 +67,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Keygen { out } => keygen::run(&out)?,
         Cmd::Run { config } => run(&config).await?,
+        Cmd::Validate { path } => {
+            let code = proteus_client::validate::cli_run(&path).await?;
+            std::process::exit(code);
+        }
     }
     Ok(())
 }
