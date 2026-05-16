@@ -250,6 +250,43 @@ and signal again. No scenario will brick the running process.
 gets truncated under us, so further appends start at the beginning
 of the file). SIGUSR1 + rename gives sharper rotation boundaries.
 
+## Pre-deploy validation (`proteus-server validate`)
+
+Every YAML edit should be dry-run-checked before SIGHUP or
+`systemctl restart` so a typo doesn't brick the service:
+
+```bash
+sudoedit /etc/proteus/server.yaml
+sudo -u proteus proteus-server validate --config /etc/proteus/server.yaml
+echo $?  # 0 = green, 1 = at least one failure
+```
+
+The preflight parses the YAML, opens every referenced file (server
+keys, TLS cert + key, client allowlist Ed25519 pubs, metrics token,
+firewall CIDRs), runs the same TLS-acceptor build as the production
+path (catches cert/key-type mismatch), and prints a coloured per-check
+report:
+
+```
+preflight check: "/etc/proteus/server.yaml"
+  [ok]   YAML parses
+  [ok]   listen_alpha parses (0.0.0.0:8443)
+  [ok]   keys.mlkem_pk exists and readable ("/etc/proteus/keys/server_lt.mlkem768.pk")
+  ...
+  [ok]   tls.cert_chain parses (3 certs)
+  [ok]   tls.private_key parses
+  [ok]   tls.acceptor builds (cert/key match)
+  [ok]   cover_endpoint parses (www.cloudflare.com:443)
+  [ok]   firewall: 2 allow, 1 deny rules parse
+  [ok]   metrics_token_file readable ("/etc/proteus/metrics.token")
+  ----
+  14 passed, 0 warnings, 0 failed
+```
+
+Suitable for CI / Ansible / Terraform pre-deploy gating. The
+preflight does NOT bind sockets or talk to the cover endpoint — it
+only verifies what can be verified locally.
+
 ## TLS certificate hot-reload (SIGHUP)
 
 `proteus-server` installs a SIGHUP handler that re-reads the

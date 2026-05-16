@@ -67,6 +67,16 @@ enum Cmd {
         #[arg(long, default_value = "/etc/proteus/server.yaml")]
         config: PathBuf,
     },
+    /// Dry-run check: parse the YAML, load every referenced file,
+    /// parse the TLS cert/key, parse the firewall CIDRs, and print
+    /// a pass/fail report. Exits 0 on green (warnings only), 1 on
+    /// any failure. Suitable for CI / Ansible / Terraform pre-deploy
+    /// gating and for verifying a `SIGHUP`-style edit before signaling.
+    Validate {
+        /// Path to YAML config file.
+        #[arg(long, default_value = "/etc/proteus/server.yaml")]
+        config: PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -82,6 +92,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Keygen { out } => keygen::run(&out)?,
         Cmd::Gencert { dns_name, out } => gencert::run(&dns_name, &out)?,
         Cmd::Run { config } => run(&config).await?,
+        Cmd::Validate { config } => {
+            let ok = proteus_server::validate::run(&config).await?;
+            if !ok {
+                std::process::exit(1);
+            }
+        }
     }
     Ok(())
 }
@@ -213,7 +229,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 }
             }
             None => {
-                if !is_loopback_addr(&metrics_addr) {
+                if !proteus_server::is_loopback(&metrics_addr) {
                     warn!(
                         addr = %metrics_addr,
                         "metrics_listen is non-loopback but metrics_token_file is unset — \
@@ -556,20 +572,6 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     }
 
     Ok(())
-}
-
-/// Return true if `addr` parses as a loopback `host:port` (127/8
-/// or ::1). Used to decide whether to warn the operator that
-/// `/metrics` is exposed without auth — loopback-only is fine, any
-/// other interface really should require a token.
-///
-/// Best-effort: bind strings that fail to parse fall through to
-/// `false` (we'll log the warning, which is the safe default).
-fn is_loopback_addr(addr: &str) -> bool {
-    match addr.parse::<std::net::SocketAddr>() {
-        Ok(sa) => sa.ip().is_loopback(),
-        Err(_) => false,
-    }
 }
 
 /// Build a [`proteus_transport_alpha::firewall::Firewall`] from a
