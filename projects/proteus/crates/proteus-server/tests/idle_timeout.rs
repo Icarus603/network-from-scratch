@@ -87,6 +87,7 @@ async fn idle_session_reaps_within_deadline() {
         client_id_sk,
         user_id: *b"idletest",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream = TcpStream::connect(proxy_addr).await.unwrap();
     let mut session = timeout(STEP, client::handshake_over_tcp(stream, &client_cfg))
@@ -210,6 +211,7 @@ async fn active_session_not_killed_by_idle_timeout() {
         client_id_sk,
         user_id: *b"activeOK",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream = TcpStream::connect(proxy_addr).await.unwrap();
     let mut session = timeout(STEP, client::handshake_over_tcp(stream, &client_cfg))

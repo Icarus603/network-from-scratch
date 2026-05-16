@@ -123,6 +123,7 @@ async fn abuse_detector_fires_once_per_burst_on_repeated_byte_cap_hits() {
         client_id_sk: client_sk,
         user_id: *b"abuser01",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     // Session 1: cap hit. Counter goes to 0 (below threshold).

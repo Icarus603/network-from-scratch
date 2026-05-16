@@ -35,6 +35,11 @@ pub struct ClientConfig {
     /// distributed via the same channel as the keys). 0 = no work.
     /// spec §8.3.
     pub pow_difficulty: u8,
+    /// Profile-hint byte the client embeds in its AuthExtension.
+    /// Defaults to `ProfileHint::Alpha` for backward compatibility;
+    /// the proteus-transport-beta crate overrides this to
+    /// `ProfileHint::Beta`. spec §4.1.
+    pub profile_hint: ProfileHint,
 }
 
 impl ClientConfig {
@@ -54,6 +59,7 @@ impl ClientConfig {
             client_id_sk,
             user_id,
             pow_difficulty: 0,
+            profile_hint: ProfileHint::Alpha,
         }
     }
 }
@@ -174,7 +180,7 @@ where
 
     let mut ext = AuthExtension {
         version: PROTEUS_VERSION_V10,
-        profile_hint: ProfileHint::Alpha,
+        profile_hint: config.profile_hint,
         client_nonce,
         client_x25519_pub: client_eph.x25519_pub,
         client_mlkem768_ct: client_eph.mlkem_ct,

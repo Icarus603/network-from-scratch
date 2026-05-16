@@ -25,6 +25,10 @@
 //!   (spec §4.5.2), 16-byte tag.
 //! - State machine (spec §5.1) — every legitimate transition is taken.
 
+// Re-export so callers don't need a direct `proteus_wire` dep just
+// to reference the ProfileHint enum on ClientConfig.
+pub use proteus_wire::ProfileHint;
+
 pub mod abuse_detector;
 pub mod access_log;
 pub mod client;

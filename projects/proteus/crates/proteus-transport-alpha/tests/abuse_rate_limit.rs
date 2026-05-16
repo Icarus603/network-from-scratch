@@ -83,6 +83,7 @@ async fn abuse_detector_fires_once_per_burst_on_rate_limit_hits() {
         client_id_sk: client_sk,
         user_id: *b"abuser02",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     // Session 1 succeeds (1 token in the bucket).

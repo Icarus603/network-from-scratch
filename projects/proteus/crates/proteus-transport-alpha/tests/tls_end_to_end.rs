@@ -82,6 +82,7 @@ async fn tls_wrapped_handshake_and_echo_round_trip() {
         client_id_sk,
         user_id: *b"tls_test",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream = TcpStream::connect(addr).await.unwrap();
     let mut session = timeout(

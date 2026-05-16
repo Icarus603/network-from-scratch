@@ -98,6 +98,7 @@ async fn access_log_emits_one_record_per_session() {
         client_id_sk: client_sk,
         user_id: *b"logtest1",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream = TcpStream::connect(proxy_addr).await.unwrap();
     let mut session = timeout(STEP, client::handshake_over_tcp(stream, &client_cfg))

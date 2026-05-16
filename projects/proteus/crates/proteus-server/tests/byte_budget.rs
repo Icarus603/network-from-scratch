@@ -85,6 +85,7 @@ async fn byte_budget_tears_down_session_when_cap_hit() {
         client_id_sk: proteus_crypto::sig::generate(&mut rng),
         user_id: *b"budtest1",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream = TcpStream::connect(proxy_addr).await.unwrap();
     let mut session = timeout(STEP, client::handshake_over_tcp(stream, &client_cfg))

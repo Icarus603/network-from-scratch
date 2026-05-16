@@ -74,6 +74,7 @@ fn make_client_cfg(server_keys: &ServerKeys) -> ClientConfig {
         client_id_sk: proteus_crypto::sig::generate(&mut rng),
         user_id: *b"filtest1",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     }
 }
 

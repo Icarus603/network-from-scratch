@@ -90,6 +90,7 @@ async fn per_user_limit_blocks_third_session_for_same_user() {
         client_id_sk: client_sk,
         user_id: *b"limited1",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     assert!(
@@ -156,6 +157,7 @@ async fn per_user_limit_is_fair_across_users() {
         client_id_sk: alice_sk,
         user_id: *b"alice000",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let bob_cfg = ClientConfig {
         server_mlkem_pk_bytes: mlkem_pk_bytes,
@@ -164,6 +166,7 @@ async fn per_user_limit_is_fair_across_users() {
         client_id_sk: bob_sk,
         user_id: *b"bob00000",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     assert!(

@@ -92,6 +92,7 @@ async fn sighup_style_reload_swaps_cert_without_dropping_inflight() {
         client_id_sk: proteus_crypto::sig::generate(&mut OsRng),
         user_id: *user_id,
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let stream1 = TcpStream::connect(addr).await.unwrap();
     let mut session1 = timeout(

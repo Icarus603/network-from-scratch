@@ -995,7 +995,11 @@ async fn handshake_with_prefix(
         }
     };
 
-    if !matches!(ext.profile_hint, ProfileHint::Alpha) {
+    // Carrier-hint check: this handshake function is shared between
+    // α (TCP) and β (QUIC) — both deliver the same inner protocol.
+    // Reject the γ hint (MASQUE-only) here, but allow α + β so the
+    // proteus-transport-beta crate can reuse the exact code path.
+    if matches!(ext.profile_hint, ProfileHint::Gamma) {
         let mut original = proteus_wire::alpha::encode_handshake(
             proteus_wire::alpha::FRAME_CLIENT_HELLO,
             &ch_frame_body,
@@ -1299,7 +1303,9 @@ where
         .step(proteus_handshake::state::Event::RecvClientHelloWithAuthExt)
         .expect("Init→AuthParsed");
 
-    if !matches!(ext.profile_hint, ProfileHint::Alpha) {
+    // Accept α or β here; reject γ. See `handshake_buffered` for the
+    // matching check on the cover-forwarding path.
+    if matches!(ext.profile_hint, ProfileHint::Gamma) {
         return Err(AlphaError::Wire(proteus_wire::WireError::BadProfileHint(
             ext.profile_hint.to_byte(),
         )));

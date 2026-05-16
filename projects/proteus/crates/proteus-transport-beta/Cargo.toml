@@ -1,0 +1,42 @@
+[package]
+name = "proteus-transport-beta"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Proteus profile-β (QUIC over UDP) transport — M2 scaffolding: QUIC carrier with Proteus inner stream framing"
+
+[dependencies]
+proteus-spec = { path = "../proteus-spec" }
+proteus-wire = { path = "../proteus-wire" }
+proteus-crypto = { path = "../proteus-crypto" }
+proteus-handshake = { path = "../proteus-handshake" }
+proteus-transport-alpha = { path = "../proteus-transport-alpha" }
+
+ml-kem.workspace = true
+x25519-dalek.workspace = true
+ed25519-dalek.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+zeroize.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+
+tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+tracing = "0.1"
+
+# QUIC carrier. quinn 0.11 is the current stable (2026-05 cutoff).
+# We use the ring-backed rustls provider to match what α uses.
+quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { workspace = true }
+webpki-roots = { workspace = true }
+
+[dev-dependencies]
+rcgen = "0.13"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+all = "warn"

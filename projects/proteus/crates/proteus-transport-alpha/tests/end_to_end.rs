@@ -90,6 +90,7 @@ async fn handshake_and_echo_round_trip() {
         client_id_sk,
         user_id: *b"alice_01",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     let mut session = connect_with_retry(&addr.to_string(), &client_cfg).await;
@@ -142,6 +143,7 @@ async fn ratchet_round_trip() {
         client_id_sk,
         user_id: *b"ratchet1",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let mut session = connect_with_retry(&addr.to_string(), &client_cfg).await;
 
@@ -199,6 +201,7 @@ async fn large_payload_stress() {
         client_id_sk,
         user_id: *b"stress01",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let mut session = connect_with_retry(&addr.to_string(), &client_cfg).await;
 
@@ -301,6 +304,7 @@ async fn close_round_trip() {
         client_id_sk,
         user_id: *b"close_01",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
     let mut session = connect_with_retry(&addr.to_string(), &client_cfg).await;
     timeout(STEP, session.sender.send_record(b"ping"))

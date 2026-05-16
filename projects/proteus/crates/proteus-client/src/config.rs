@@ -102,6 +102,7 @@ impl ClientConfig {
             client_id_sk,
             user_id,
             pow_difficulty: self.pow_difficulty.unwrap_or(0),
+            profile_hint: proteus_transport_alpha::ProfileHint::Alpha,
         })
     }
 }

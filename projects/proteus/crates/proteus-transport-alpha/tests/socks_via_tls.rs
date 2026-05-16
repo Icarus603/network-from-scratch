@@ -185,6 +185,7 @@ async fn socks_request_via_tls_to_echo_upstream() {
         client_id_sk,
         user_id: *b"socks_e2",
         pow_difficulty: 0,
+        profile_hint: proteus_wire::ProfileHint::Alpha,
     };
 
     let tcp = TcpStream::connect(proxy_addr).await.unwrap();
