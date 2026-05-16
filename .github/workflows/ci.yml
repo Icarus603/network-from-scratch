@@ -1,0 +1,109 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "projects/proteus/**"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "projects/proteus/**"
+      - ".github/workflows/ci.yml"
+
+defaults:
+  run:
+    working-directory: projects/proteus
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: projects/proteus
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: cargo test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: projects/proteus
+      - run: cargo test --workspace --no-fail-fast
+
+  release-build:
+    name: release build (Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: projects/proteus
+      - run: cargo build --workspace --release --bins
+      - name: Smoke-test binaries
+        run: |
+          ./target/release/proteus-server --version
+          ./target/release/proteus-client --version
+          ./target/release/proteus-server --help
+          ./target/release/proteus-client --help
+      - name: Smoke-test keygen + gencert
+        run: |
+          mkdir -p /tmp/smoke/keys /tmp/smoke/keys/tls /tmp/smoke/client-keys
+          ./target/release/proteus-server keygen --out /tmp/smoke/keys
+          ./target/release/proteus-server gencert --dns-name proteus.test --out /tmp/smoke/keys/tls
+          ./target/release/proteus-client keygen --out /tmp/smoke/client-keys
+          test -f /tmp/smoke/keys/server_lt.mlkem768.pk
+          test -f /tmp/smoke/keys/server_lt.mlkem768.sk
+          test -f /tmp/smoke/keys/server_lt.pq.fingerprint
+          test -f /tmp/smoke/keys/tls/fullchain.pem
+          test -f /tmp/smoke/keys/tls/privkey.pem
+          test -f /tmp/smoke/client-keys/client.ed25519.sk
+          # Verify 0600 mode on secrets.
+          [ "$(stat -c %a /tmp/smoke/keys/server_lt.mlkem768.sk)" = "600" ]
+          [ "$(stat -c %a /tmp/smoke/keys/tls/privkey.pem)" = "600" ]
+
+  audit:
+    name: cargo audit (RustSec advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit --deny warnings
+
+  deny:
+    name: cargo deny (licenses / bans / sources)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install --locked cargo-deny
+      - run: cargo deny check
