@@ -185,6 +185,41 @@ authentication.
 For longer drain windows, raise both `drain_secs` in `server.yaml` and
 `TimeoutStopSec` in the systemd unit override.
 
+## TLS certificate hot-reload (SIGHUP)
+
+`proteus-server` installs a SIGHUP handler that re-reads the
+`tls.cert_chain` and `tls.private_key` files from disk and atomically
+swaps in the new cert. **In-flight sessions keep their existing TLS
+keys**; only connections accepted after the reload use the new cert.
+
+This means Let's Encrypt renewal becomes a zero-downtime operation:
+
+```bash
+# Run inside the certbot deploy-hook directory.
+# /etc/letsencrypt/renewal-hooks/deploy/proteus-reload.sh
+#!/bin/sh
+set -e
+RENEWED=/etc/letsencrypt/live/vps.example.com
+cp -f "$RENEWED/fullchain.pem" /etc/proteus/keys/tls/fullchain.pem
+cp -f "$RENEWED/privkey.pem"   /etc/proteus/keys/tls/privkey.pem
+chown proteus:proteus /etc/proteus/keys/tls/*.pem
+chmod 0600 /etc/proteus/keys/tls/privkey.pem
+systemctl kill --signal=HUP proteus-server
+```
+
+If the reload fails (bad PEM, missing file, key/cert mismatch) the
+server logs an error at `ERROR` level and **continues serving with the
+old cert** — production keeps running, the operator gets a chance to
+fix the file and try again. There is no scenario in which a failed
+reload bricks the running server.
+
+Verify success in journald:
+
+```bash
+sudo journalctl -u proteus-server -n 5 | grep 'TLS cert'
+# May 16 12:34:56 vps proteus-server[1234]: INFO ... TLS cert reloaded successfully
+```
+
 ## Security checklist before going live
 
 - [ ] `proteus-server keygen` ran on the **server itself** (never copy

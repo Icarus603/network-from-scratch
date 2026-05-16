@@ -73,7 +73,7 @@ pub struct ServerConfig {
     pub drain_secs: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct TlsCfg {
     /// PEM-encoded full chain (server cert first, then intermediates).
     pub cert_chain: PathBuf,

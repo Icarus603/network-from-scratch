@@ -51,6 +51,8 @@ pow_difficulty: 0
 # block the server runs plain TCP and passive DPI immediately identifies
 # the protocol. Point `cert_chain` at a real Let's Encrypt full-chain
 # PEM and `private_key` at the matching PKCS8 private key.
+# After renewal, send SIGHUP (e.g. `systemctl kill --signal=HUP proteus-server`)
+# to hot-swap the cert — in-flight sessions are unaffected.
 tls:
   cert_chain: /etc/proteus/keys/tls/fullchain.pem
   private_key: /etc/proteus/keys/tls/privkey.pem

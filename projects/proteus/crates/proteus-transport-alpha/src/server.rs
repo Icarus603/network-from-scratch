@@ -236,6 +236,10 @@ impl ServerCtx {
 /// TCP stream when TLS itself fails (e.g. client doesn't speak TLS),
 /// so probes that don't even reach the TLS handshake still see the
 /// configured cover server's response.
+///
+/// Use [`serve_tls_reloadable`] instead if you want SIGHUP-driven
+/// certificate hot-reload — this variant pins one fixed
+/// [`TlsAcceptor`] for the lifetime of the process.
 pub async fn serve_tls<F, Fut>(
     listener: TcpListener,
     ctx: Arc<ServerCtx>,
@@ -287,6 +291,93 @@ where
             let deadline = ctx.handshake_deadline();
             let outcome =
                 tokio::time::timeout(deadline, handshake_over_tls(stream, &acceptor, &ctx)).await;
+            match outcome {
+                Ok(Ok(session)) => handle(session).await,
+                Ok(Err(e)) => {
+                    tracing::debug!(peer = %peer, error = %e, "TLS/Proteus handshake failed");
+                    if let Some(m) = ctx.metrics() {
+                        m.handshakes_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        timeout_secs = deadline.as_secs(),
+                        "TLS handshake deadline elapsed"
+                    );
+                    if let Some(m) = ctx.metrics() {
+                        m.handshake_timeouts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+}
+
+/// Like [`serve_tls`] but takes a [`crate::tls::ReloadableAcceptor`].
+/// The current `TlsAcceptor` is cloned cheaply on every accept, so a
+/// SIGHUP-triggered [`crate::tls::ReloadableAcceptor::reload`] takes
+/// effect on the very next connection without disturbing any
+/// in-flight session.
+pub async fn serve_tls_reloadable<F, Fut>(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    acceptor: crate::tls::ReloadableAcceptor,
+    handle: F,
+) -> std::io::Result<()>
+where
+    F: Fn(
+            AlphaSession<
+                tokio::io::ReadHalf<crate::tls::ServerStream>,
+                tokio::io::WriteHalf<crate::tls::ServerStream>,
+            >,
+        ) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let ctx = Arc::clone(&ctx);
+        // Read-lock the current acceptor. After this clone the
+        // operator is free to swap in a new cert; we keep ours for
+        // the duration of this connection.
+        let current_acceptor = acceptor.current();
+        let handle = handle.clone();
+
+        if !ctx.check_rate_limit(peer.ip()) {
+            tracing::debug!(peer = %peer, "rate-limited; routing to cover (TLS path)");
+            if let Some(m) = ctx.metrics() {
+                m.rate_limited
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
+                let metrics = ctx.metrics().cloned();
+                tokio::spawn(async move {
+                    let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
+                    if r.is_ok() {
+                        if let Some(m) = metrics {
+                            m.cover_forwards
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                });
+            }
+            continue;
+        }
+        let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
+
+        tokio::spawn(async move {
+            let deadline = ctx.handshake_deadline();
+            let outcome = tokio::time::timeout(
+                deadline,
+                handshake_over_tls(stream, &current_acceptor, &ctx),
+            )
+            .await;
             match outcome {
                 Ok(Ok(session)) => handle(session).await,
                 Ok(Err(e)) => {

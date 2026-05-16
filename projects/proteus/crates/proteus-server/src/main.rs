@@ -150,8 +150,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
-    // Optionally build the TLS 1.3 outer wrapper.
-    let acceptor = match cfg.tls.as_ref() {
+    // Optionally build the TLS 1.3 outer wrapper, wrapped in a
+    // ReloadableAcceptor so SIGHUP can swap in a freshly-renewed
+    // Let's Encrypt cert without disturbing in-flight sessions.
+    let reloadable_acceptor = match cfg.tls.as_ref() {
         Some(tls_cfg) => {
             info!(cert = ?tls_cfg.cert_chain, "loading TLS cert chain");
             let chain = proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
@@ -160,8 +162,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let acceptor = proteus_transport_alpha::tls::build_acceptor(chain, key)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            info!("TLS 1.3 outer wrapper enabled");
-            Some(acceptor)
+            info!("TLS 1.3 outer wrapper enabled (SIGHUP triggers reload)");
+            Some(proteus_transport_alpha::tls::ReloadableAcceptor::new(
+                acceptor,
+            ))
         }
         None => {
             warn!(
@@ -215,6 +219,54 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
 
+    // SIGHUP — reload TLS cert chain + private key from disk. Used by
+    // certbot deploy-hooks after Let's Encrypt renewal. In-flight
+    // sessions are unaffected; the new cert takes effect on the very
+    // next accept().
+    if let (Some(tls_cfg), Some(reloadable)) = (cfg.tls.clone(), reloadable_acceptor.clone()) {
+        tokio::spawn(async move {
+            let mut sighup =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        error!(error = %e, "install SIGHUP handler failed");
+                        return;
+                    }
+                };
+            while sighup.recv().await.is_some() {
+                info!(cert = ?tls_cfg.cert_chain, "SIGHUP — reloading TLS cert chain");
+                let chain = match proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
+                {
+                    Ok(c) => c,
+                    Err(e) => {
+                        // Reload failed — keep the old acceptor and
+                        // log loudly. The operator can fix the file
+                        // and signal again.
+                        error!(error = %e, "TLS reload: cert chain load failed; keeping old cert");
+                        continue;
+                    }
+                };
+                let key = match proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key)
+                {
+                    Ok(k) => k,
+                    Err(e) => {
+                        error!(error = %e, "TLS reload: private key load failed; keeping old cert");
+                        continue;
+                    }
+                };
+                let new_acceptor = match proteus_transport_alpha::tls::build_acceptor(chain, key) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        error!(error = %e, "TLS reload: build_acceptor failed; keeping old cert");
+                        continue;
+                    }
+                };
+                reloadable.reload(new_acceptor);
+                info!("TLS cert reloaded successfully");
+            }
+        });
+    }
+
     let serve_fut: std::pin::Pin<
         Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>,
     > = {
@@ -241,7 +293,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
             }
         };
-        match acceptor {
+        match reloadable_acceptor.clone() {
             Some(acceptor) => {
                 let metrics = Arc::clone(&metrics);
                 let on_session_tls =
@@ -270,7 +322,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                         }
                     };
-                Box::pin(server::serve_tls(listener, ctx, acceptor, on_session_tls))
+                Box::pin(server::serve_tls_reloadable(
+                    listener,
+                    ctx,
+                    acceptor,
+                    on_session_tls,
+                ))
             }
             None => Box::pin(server::serve(listener, ctx, on_session_tcp)),
         }

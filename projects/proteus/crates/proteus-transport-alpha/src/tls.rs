@@ -169,6 +169,63 @@ pub fn server_name(s: &str) -> Result<ServerName<'static>, TlsError> {
     ServerName::try_from(s.to_string()).map_err(|_| TlsError::BadServerName(s.to_string()))
 }
 
+/// Reloadable wrapper around a [`TlsAcceptor`].
+///
+/// Production deployments using Let's Encrypt see certificate renewal
+/// every ~60 days, and the operator absolutely **cannot** afford to
+/// restart the server to pick up the new cert — every in-flight
+/// session would tear down. With [`ReloadableAcceptor`] the operator
+/// just calls [`Self::reload`] (typically from a SIGHUP handler) and
+/// every connection accepted *after* the reload uses the new cert
+/// while sessions opened before keep their existing TLS keys.
+///
+/// Implementation: a `std::sync::RwLock<TlsAcceptor>`. The inner
+/// `TlsAcceptor` is a thin `Arc<ServerConfig>` so cloning it on every
+/// accept is essentially free (one atomic increment). The lock is
+/// acquired in read mode on the hot path (accept) and write mode only
+/// on reload, which is a rare operator action.
+#[derive(Clone)]
+pub struct ReloadableAcceptor {
+    inner: Arc<std::sync::RwLock<TlsAcceptor>>,
+}
+
+impl ReloadableAcceptor {
+    /// Wrap an initial acceptor.
+    #[must_use]
+    pub fn new(initial: TlsAcceptor) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(initial)),
+        }
+    }
+
+    /// Clone the current acceptor. Hot-path call — cheap.
+    #[must_use]
+    pub fn current(&self) -> TlsAcceptor {
+        // `expect` is safe: the only way the lock gets poisoned is if
+        // a writer panics while holding the write lock, which would
+        // mean the server is in an unrecoverable state anyway.
+        self.inner
+            .read()
+            .expect("ReloadableAcceptor lock poisoned")
+            .clone()
+    }
+
+    /// Swap in a new acceptor. Any future accept will use the new
+    /// cert; in-flight sessions keep their existing TLS state.
+    pub fn reload(&self, new_acceptor: TlsAcceptor) {
+        *self
+            .inner
+            .write()
+            .expect("ReloadableAcceptor lock poisoned") = new_acceptor;
+    }
+}
+
+impl From<TlsAcceptor> for ReloadableAcceptor {
+    fn from(a: TlsAcceptor) -> Self {
+        Self::new(a)
+    }
+}
+
 /// Install rustls's default ring-backed crypto provider exactly once.
 /// Calling multiple times is a no-op.
 fn install_default_crypto_provider() {
@@ -201,5 +258,32 @@ mod tests {
         install_default_crypto_provider();
         install_default_crypto_provider();
         install_default_crypto_provider();
+    }
+
+    #[test]
+    fn reloadable_acceptor_swaps_cheaply() {
+        use rcgen::generate_simple_self_signed;
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let mk = || {
+            let ck = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+            let cert = CertificateDer::from(ck.cert.der().to_vec());
+            let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
+            build_acceptor(vec![cert], key).unwrap()
+        };
+
+        let initial = mk();
+        let reloadable = ReloadableAcceptor::new(initial);
+
+        // Cloning current() is cheap (Arc clone) — repeat many times.
+        for _ in 0..1024 {
+            let _ = reloadable.current();
+        }
+        // Reload — same operation that SIGHUP triggers in production.
+        reloadable.reload(mk());
+        for _ in 0..1024 {
+            let _ = reloadable.current();
+        }
+        reloadable.reload(mk());
     }
 }
