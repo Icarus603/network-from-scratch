@@ -78,6 +78,21 @@ VLESS+REALITY who need:
 | `cargo deny` / `cargo audit` clean | ✅ | n/a | n/a |
 | Reproducible release build (Cargo.lock pinned) | ✅ | n/a | n/a |
 
+**GFW 2026 QUIC SNI Inspector evasion** (USENIX Sec '25 paper "Exposing and Circumventing
+SNI-based QUIC Censorship of the Great Firewall of China" — applied to β only;
+α uses TLS 1.3 + REALITY-comparable cover):
+
+| | Proteus β | VLESS + REALITY | Hysteria2 / TUIC-v5 |
+|---|---|---|---|
+| Source port ≤ destination port (#1) | ✅ bind walks `[dst-7 .. dst]` | n/a (TCP) | ❌ ephemeral src |
+| Prefix-noise before QUIC Initial (#2) | ✅ 16 random bytes first-flight | n/a (TCP) | ❌ |
+| Connection migration (#4 — 180 s 5-tuple drop escape) | ✅ `migrate()` + low source-port rebind | n/a (TCP) | ⚠ supported but no GFW-specific port pick |
+| UDP datagram length uniformity | ✅ pad-to-MTU (operator opt-in) | n/a | ❌ |
+| JA4 cipher_count toward Chrome | ⚠ 09 (Chrome 15) | ❌ rustls default | n/a (no TLS handshake on wire) |
+| JA4 cipher wire-order Chrome-aligned | ✅ 0x1301 first | ❌ rustls default 0x1302 first | n/a |
+| compress_certificate (ext 0x001b) | ✅ rustls `brotli` feature | ❌ | n/a |
+| ML-KEM-768 hybrid handshake (PQ) | ✅ X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
+
 ---
 
 ## Quick start (Linux VPS)
@@ -222,21 +237,27 @@ cargo bench -p proteus-crypto
 ## Test coverage
 
 ```
-proteus-crypto       19  hybrid KEX, asymmetric ratchet, AEAD, HKDF, sig
-proteus-handshake    16  state machine, replay window, auth_tag
-proteus-shape        10  cell padding, shape-shift PRG
-proteus-spec          5  byte-sum invariants, codepoint round-trips
-proteus-server        2  keygen correctness (sk/pk paired, fingerprint matches)
-proteus-transport    21  cover, metrics, rate-limit, pow
-proteus-wire         19  encoders + decoders
-proteus-wire fuzz    10  30 000 random-byte sequences, no panics
-proteus-wire alpha    -  (in proteus-wire above)
-e2e end_to_end        4  handshake + 16 MiB stress + ratchet + CLOSE round-trip
-e2e pow_handshake     2  PoW success + PoW reject
-e2e socks_via_tls     1  full TLS + SOCKS5-CONNECT relay through echo upstream
-e2e tls_end_to_end    1  TLS-wrapped handshake + AEAD echo
-─────────────────────────
-                    110  passing, 0 failing
+proteus-crypto                19   hybrid KEX, asymmetric ratchet, AEAD, HKDF, sig
+proteus-handshake             16   state machine, replay window, auth_tag
+proteus-shape                 10   cell padding, shape-shift PRG
+proteus-spec                   5   byte-sum invariants, codepoint round-trips
+proteus-wire                  19   encoders + decoders
+proteus-wire fuzz             10   30 000 random-byte sequences, no panics
+proteus-fingerprint            5   JA4 parser + α ClientHello baseline
+proteus-transport-alpha      133   session, cover, metrics, rate-limit, pow,
+                                   cell-split padding, channel binding, ratchet
+proteus-transport-beta        25   QUIC e2e, channel binding, GFW evasion
+                                   (source-port + prefix-noise + migration),
+                                   pad-to-MTU wire test, datagram e2e, throughput
+proteus-server (binary)       38   admin CLI, abuse alert, access log, drain,
+                                   byte budget, idle timeout, alpha/beta coexist,
+                                   outbound filter SSRF, validate CLI, β perf YAML
+proteus-client (binary)       11   binary launch (α + β), dual-stack happy-eyeballs,
+                                   concurrency cap
+e2e integrations              10   end_to_end (handshake + 16 MiB + ratchet),
+                                   pow_handshake, socks_via_tls, tls_end_to_end
+─────────────────────────────────
+                             391   passing, 0 failing
 ```
 
 ---
@@ -354,6 +375,19 @@ latest hardening pass:
   preference; sig_algs list reshaped to Chrome's 8-scheme order
   (drops ED25519); compress_certificate (ext 0x001b) enabled via
   rustls `brotli` feature.
+- ✅ **USENIX Sec '25 GFW evasion #1, #2, #4** (β QUIC): source
+  port ≤ destination port (walks `[max(1024, dst-7) .. dst]` with
+  ephemeral fallback); 16-byte prefix-noise datagram before the
+  QUIC Initial so the GFW's "inspect first datagram only"
+  optimization misclassifies the flow; `BetaClientSession::migrate()`
+  escapes the GFW's 180-second 5-tuple drop via `Endpoint::rebind()`.
+  All three wire-verified by dedicated regression tests.
+- ✅ **β UDP datagram-length uniformity** (defense-in-depth on top
+  of cell-split AEAD padding): operator opt-in
+  `beta_pad_quic_to_mtu: true` in `server.yaml` / `client.yaml`
+  pads every application UDP datagram to `initial_mtu`. Wire-
+  measured regression test asserts post-handshake datagrams are
+  all the configured MTU.
 
 ### Not yet done (the remaining gap)
 
