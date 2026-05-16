@@ -7,7 +7,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use proteus_transport_alpha::client::{handshake_over_split, ClientConfig};
+use proteus_transport_alpha::client::{
+    handshake_over_split_bound, ClientConfig, CHANNEL_BINDING_LEN, TLS_EXPORTER_LABEL,
+};
 use proteus_transport_alpha::session::AlphaSession;
 use proteus_transport_alpha::ProfileHint;
 use rustls::pki_types::CertificateDer;
@@ -141,8 +143,24 @@ pub async fn connect_with_timeout(
     let conn = endpoint.connect(server_addr, server_name)?.await?;
     info!(remote = %conn.remote_address(), "β QUIC handshake complete");
 
+    // ----- TLS channel binding (RFC 5705 / 9266) -----
+    // Mirror the α-profile binding (commit 906ab22): extract the QUIC
+    // outer-TLS exporter and mix it into the inner Proteus transcript.
+    // A MITM bridging two distinct QUIC sessions sees different
+    // exporters on each side; the inner Finished MAC cannot be
+    // relayed → handshake aborts. quinn-proto uses a different
+    // exporter shape than rustls (always passes Some(context)) so
+    // α and β bindings are deliberately not interchangeable.
+    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+    conn.export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
+        .map_err(|_| {
+            BetaError::Io(std::io::Error::other(
+                "β: QUIC exporter unavailable post-handshake",
+            ))
+        })?;
+
     let (send, recv) = conn.open_bi().await?;
-    let session = handshake_over_split(recv, send, &cfg).await?;
+    let session = handshake_over_split_bound(recv, send, &cfg, Some(binding)).await?;
     Ok(BetaClientSession {
         session,
         connection: conn,

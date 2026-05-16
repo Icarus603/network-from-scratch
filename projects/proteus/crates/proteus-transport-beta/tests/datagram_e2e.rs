@@ -61,11 +61,27 @@ async fn datagram_round_trip_both_directions() {
         // closure. Use a one-shot channel and a custom serve loop
         // because the prebuilt server::serve doesn't expose conn.
         let conn = endpoint.accept().await.expect("accept").await.unwrap();
+        // Extract the channel-binding tag from the same outer QUIC
+        // session the client sees (commit 906ab22 wired this for α,
+        // this commit wires it for β). The production `serve` loop
+        // does this automatically; here we replicate it inline because
+        // the test bypasses `serve` to access the Connection handle.
+        let mut binding = [0u8; proteus_transport_alpha::client::CHANNEL_BINDING_LEN];
+        conn.export_keying_material(
+            &mut binding[..],
+            proteus_transport_alpha::client::TLS_EXPORTER_LABEL,
+            b"",
+        )
+        .expect("β QUIC exporter");
         let (send, recv) = conn.accept_bi().await.expect("accept_bi");
-        let session =
-            proteus_transport_alpha::server::handshake_over_split(recv, send, &server_ctx)
-                .await
-                .expect("server handshake");
+        let session = proteus_transport_alpha::server::handshake_over_split_bound(
+            recv,
+            send,
+            &server_ctx,
+            Some(binding),
+        )
+        .await
+        .expect("server handshake");
         let chan = Channel::from_session(&session, conn.clone()).expect("from_session");
 
         // Send the channel handle (clone) back so main can use the

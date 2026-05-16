@@ -7,8 +7,9 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use proteus_transport_alpha::client::{CHANNEL_BINDING_LEN, TLS_EXPORTER_LABEL};
 use proteus_transport_alpha::server::{
-    admission_ok, handshake_over_split, user_admission_ok, ConnGate, ServerCtx,
+    admission_ok, handshake_over_split_bound, user_admission_ok, ConnGate, ServerCtx,
 };
 use proteus_transport_alpha::session::AlphaSession;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
@@ -175,9 +176,36 @@ where
                             }
                         };
 
+                    // ----- TLS channel binding (RFC 5705 / 9266) -----
+                    // Extract the QUIC outer-TLS exporter and feed it into
+                    // the inner Proteus handshake transcript so a MITM
+                    // bridging two distinct QUIC sessions (rogue cert,
+                    // SSL-bumping middlebox of the QUIC variety) cannot
+                    // relay the inner Finished MAC chain. Same threat
+                    // model + same defense as the α-profile path —
+                    // identical to commit 906ab22 but using quinn's
+                    // `export_keying_material` instead of rustls's.
+                    //
+                    // The two carriers use DIFFERENT binding bytes (rustls
+                    // exporter for α; quinn-proto exporter for β), and
+                    // they are not interchangeable. That's a feature: a
+                    // β-rogue cannot replay an α capture and vice versa.
+                    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+                    if conn
+                        .export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
+                        .is_err()
+                    {
+                        warn!(
+                            remote = %remote,
+                            "β: TLS exporter unavailable post-handshake; closing"
+                        );
+                        conn.close(4u32.into(), b"no-exporter");
+                        return;
+                    }
+
                     // Run the Proteus handshake, also bounded by the
                     // wall-clock deadline. Same semantics as α.
-                    let hs_fut = handshake_over_split(recv, send, &ctx);
+                    let hs_fut = handshake_over_split_bound(recv, send, &ctx, Some(binding));
                     let session = match tokio::time::timeout(ctx.handshake_deadline(), hs_fut).await
                     {
                         Ok(Ok(s)) => s.with_peer_addr(remote),
