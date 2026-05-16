@@ -308,6 +308,47 @@ URL, wrong/missing token, server down). Suitable for `watch -n 5
 proteus-server admin status` over an SSH session or as a probe in
 Ansible / Nomad health checks.
 
+### Counter deltas (`admin diff` / `admin watch`)
+
+`status` shows totals. When triaging a fresh DoS the real question
+is "how many rejections happened in the last 30 seconds?". Two
+modes:
+
+**One-shot delta between two saved scrapes:**
+
+```bash
+curl http://127.0.0.1:9090/metrics > /tmp/before
+sleep 30
+curl http://127.0.0.1:9090/metrics > /tmp/after
+proteus-server admin diff --before /tmp/before --after /tmp/after \
+                          --interval-secs 30
+```
+
+**Live-watch loop (Ctrl-C to exit):**
+
+```bash
+proteus-server admin watch --interval-secs 5
+```
+
+Either prints per-counter deltas plus per-second rates, e.g.:
+
+```
+============================================================
+ proteus-server delta over 30.0s — LIVE / READY
+============================================================
+ Defense pipeline (rejections delta)
+  firewall_denied                          5 (  0.17/s)
+  handshake_budget_rejected                0 (  0.00/s)
+  rate_limited                            10 (  0.33/s)
+  ...
+  total_rejected                          15 (  0.50/s)
+```
+
+If a counter drops between scrapes (process restart, manual reset),
+the output displays a `⚠ counter reset detected` banner — operators
+know to discard the rate numbers for that interval. The display
+saturates clamped to 0, never wraps.
+
 ## Pre-deploy validation (`proteus-server validate`)
 
 Every YAML edit should be dry-run-checked before SIGHUP or

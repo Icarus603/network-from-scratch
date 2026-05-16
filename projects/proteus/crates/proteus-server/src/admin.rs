@@ -351,6 +351,306 @@ pub fn run(
     Ok(())
 }
 
+/// Counter-delta between two snapshots. Positive numbers only:
+/// counters can only go up over time (the gauges `in_flight`, `up`,
+/// `ready` are absolute values, not deltas — we surface them as
+/// `now: N` instead).
+///
+/// "After minus before" semantics. A negative would mean the counter
+/// reset between scrapes (process restart); we saturate-clamp to 0
+/// and surface a banner warning.
+#[derive(Debug, Default, Clone)]
+pub struct MetricsDelta {
+    /// Wall-clock seconds between the two scrapes. Used to render
+    /// per-second rates ("3 rejected/s").
+    pub interval_secs: f64,
+    pub sessions_accepted: u64,
+    pub handshakes_succeeded: u64,
+    pub handshakes_failed: u64,
+    pub handshake_timeouts: u64,
+    pub handshake_budget_rejected: u64,
+    pub rate_limited: u64,
+    pub conn_limit_rejected: u64,
+    pub firewall_denied: u64,
+    pub user_rate_rejected: u64,
+    pub cover_forwards: u64,
+    pub tx_bytes: u64,
+    pub rx_bytes: u64,
+    pub aead_drops: u64,
+    pub ratchets: u64,
+    pub session_idle_reaped: u64,
+    pub session_byte_budget_exhausted: u64,
+    /// Snapshot at the END of the interval (for gauges).
+    pub now_in_flight: u64,
+    pub now_up: u64,
+    pub now_ready: u64,
+    /// True if any counter went DOWN between scrapes — almost
+    /// certainly a process restart. Operators want to know.
+    pub counter_reset: bool,
+}
+
+impl MetricsDelta {
+    /// Compute `(b - a)` clamped to non-negative. If `b` is older
+    /// than `a` by clock skew the `interval_secs` may be ≤ 0; the
+    /// caller can decide whether to render rates.
+    #[must_use]
+    pub fn between(a: &MetricsSnapshot, b: &MetricsSnapshot, interval_secs: f64) -> Self {
+        let mut counter_reset = false;
+        // `delta_counter` clamps b<a to 0 and records the reset.
+        let delta = |before: u64, after: u64, reset: &mut bool| -> u64 {
+            if after < before {
+                *reset = true;
+                0
+            } else {
+                after - before
+            }
+        };
+        Self {
+            interval_secs,
+            sessions_accepted: delta(a.sessions_accepted, b.sessions_accepted, &mut counter_reset),
+            handshakes_succeeded: delta(
+                a.handshakes_succeeded,
+                b.handshakes_succeeded,
+                &mut counter_reset,
+            ),
+            handshakes_failed: delta(a.handshakes_failed, b.handshakes_failed, &mut counter_reset),
+            handshake_timeouts: delta(
+                a.handshake_timeouts,
+                b.handshake_timeouts,
+                &mut counter_reset,
+            ),
+            handshake_budget_rejected: delta(
+                a.handshake_budget_rejected,
+                b.handshake_budget_rejected,
+                &mut counter_reset,
+            ),
+            rate_limited: delta(a.rate_limited, b.rate_limited, &mut counter_reset),
+            conn_limit_rejected: delta(
+                a.conn_limit_rejected,
+                b.conn_limit_rejected,
+                &mut counter_reset,
+            ),
+            firewall_denied: delta(a.firewall_denied, b.firewall_denied, &mut counter_reset),
+            user_rate_rejected: delta(
+                a.user_rate_rejected,
+                b.user_rate_rejected,
+                &mut counter_reset,
+            ),
+            cover_forwards: delta(a.cover_forwards, b.cover_forwards, &mut counter_reset),
+            tx_bytes: delta(a.tx_bytes, b.tx_bytes, &mut counter_reset),
+            rx_bytes: delta(a.rx_bytes, b.rx_bytes, &mut counter_reset),
+            aead_drops: delta(a.aead_drops, b.aead_drops, &mut counter_reset),
+            ratchets: delta(a.ratchets, b.ratchets, &mut counter_reset),
+            session_idle_reaped: delta(
+                a.session_idle_reaped,
+                b.session_idle_reaped,
+                &mut counter_reset,
+            ),
+            session_byte_budget_exhausted: delta(
+                a.session_byte_budget_exhausted,
+                b.session_byte_budget_exhausted,
+                &mut counter_reset,
+            ),
+            now_in_flight: b.in_flight_sessions,
+            now_up: b.up,
+            now_ready: b.ready,
+            counter_reset,
+        }
+    }
+
+    /// Sum of all rejection deltas — one-glance "is anything being
+    /// rejected RIGHT NOW?".
+    #[must_use]
+    pub fn total_rejected(&self) -> u64 {
+        self.firewall_denied
+            .saturating_add(self.handshake_budget_rejected)
+            .saturating_add(self.rate_limited)
+            .saturating_add(self.conn_limit_rejected)
+            .saturating_add(self.user_rate_rejected)
+    }
+}
+
+impl fmt::Display for MetricsDelta {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let live_marker = if self.now_up == 1 { "LIVE" } else { "DOWN" };
+        let ready_marker = if self.now_ready == 1 {
+            "READY"
+        } else {
+            "DRAINING"
+        };
+        writeln!(
+            f,
+            "============================================================"
+        )?;
+        writeln!(
+            f,
+            " proteus-server delta over {:.1}s — {live_marker} / {ready_marker}",
+            self.interval_secs,
+        )?;
+        writeln!(
+            f,
+            "============================================================"
+        )?;
+        if self.counter_reset {
+            writeln!(
+                f,
+                " ⚠  counter reset detected between scrapes — likely a process restart"
+            )?;
+            writeln!(
+                f,
+                "------------------------------------------------------------"
+            )?;
+        }
+
+        let interval = if self.interval_secs <= 0.0 {
+            1.0
+        } else {
+            self.interval_secs
+        };
+
+        macro_rules! row_rate {
+            ($label:expr, $value:expr) => {{
+                let rate = $value as f64 / interval;
+                writeln!(f, "  {:<32} {:>9} ({:>6.2}/s)", $label, $value, rate)
+            }};
+        }
+        macro_rules! row {
+            ($label:expr, $value:expr) => {
+                writeln!(f, "  {:<32} {}", $label, $value)
+            };
+        }
+
+        writeln!(f, " Sessions (delta)")?;
+        row!("in_flight_sessions (gauge)", self.now_in_flight)?;
+        row_rate!("sessions_accepted", self.sessions_accepted)?;
+        row_rate!("handshakes_succeeded", self.handshakes_succeeded)?;
+        row_rate!("handshakes_failed", self.handshakes_failed)?;
+        row_rate!("handshake_timeouts", self.handshake_timeouts)?;
+        writeln!(f)?;
+
+        writeln!(f, " Defense pipeline (rejections delta)")?;
+        row_rate!("firewall_denied", self.firewall_denied)?;
+        row_rate!("handshake_budget_rejected", self.handshake_budget_rejected)?;
+        row_rate!("rate_limited", self.rate_limited)?;
+        row_rate!("conn_limit_rejected", self.conn_limit_rejected)?;
+        row_rate!("user_rate_rejected", self.user_rate_rejected)?;
+        row_rate!("cover_forwards", self.cover_forwards)?;
+        row_rate!("total_rejected", self.total_rejected())?;
+        writeln!(f)?;
+
+        writeln!(f, " Session teardown (delta)")?;
+        row_rate!("session_idle_reaped", self.session_idle_reaped)?;
+        row_rate!(
+            "session_byte_budget_exhausted",
+            self.session_byte_budget_exhausted
+        )?;
+        writeln!(f)?;
+
+        writeln!(f, " Throughput (delta)")?;
+        let tx_rate = self.tx_bytes as f64 / interval;
+        let rx_rate = self.rx_bytes as f64 / interval;
+        writeln!(
+            f,
+            "  {:<32} {:>9} ({}/s)",
+            "tx_bytes",
+            self.tx_bytes,
+            human_bytes_rate(tx_rate)
+        )?;
+        writeln!(
+            f,
+            "  {:<32} {:>9} ({}/s)",
+            "rx_bytes",
+            self.rx_bytes,
+            human_bytes_rate(rx_rate)
+        )?;
+        row_rate!("ratchets", self.ratchets)?;
+        row_rate!("aead_drops", self.aead_drops)?;
+        writeln!(
+            f,
+            "============================================================"
+        )?;
+        Ok(())
+    }
+}
+
+fn human_bytes_rate(per_sec: f64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = 1024.0 * KIB;
+    const GIB: f64 = 1024.0 * MIB;
+    if per_sec >= GIB {
+        format!("{:.2} GiB", per_sec / GIB)
+    } else if per_sec >= MIB {
+        format!("{:.2} MiB", per_sec / MIB)
+    } else if per_sec >= KIB {
+        format!("{:.2} KiB", per_sec / KIB)
+    } else {
+        format!("{per_sec:.1} B")
+    }
+}
+
+/// Driver for `admin diff` — read two saved exposition bodies from
+/// disk, compute the delta, print. Both files are expected to be
+/// the raw `/metrics` text; the operator captures them with e.g.
+/// `proteus-server admin status --raw > /tmp/before` (we don't ship
+/// `--raw` today but `curl` works fine).
+pub fn run_diff(
+    a_path: &Path,
+    b_path: &Path,
+    interval_secs: f64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let a_text = std::fs::read_to_string(a_path).map_err(|e| format!("read {a_path:?}: {e}"))?;
+    let b_text = std::fs::read_to_string(b_path).map_err(|e| format!("read {b_path:?}: {e}"))?;
+    let a = MetricsSnapshot::parse(&a_text);
+    let b = MetricsSnapshot::parse(&b_text);
+    let d = MetricsDelta::between(&a, &b, interval_secs);
+    let _ = std::io::stdout().write_all(d.to_string().as_bytes());
+    Ok(())
+}
+
+/// Driver for `admin watch` — loop forever scraping `/metrics` at
+/// `interval`, printing deltas between successive scrapes. The
+/// FIRST iteration prints the absolute snapshot (no delta source);
+/// subsequent iterations print the delta. Ctrl-C exits cleanly.
+pub fn run_watch(
+    url: &str,
+    token: Option<&str>,
+    timeout: Duration,
+    interval: Duration,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut prev: Option<(MetricsSnapshot, std::time::Instant)> = None;
+    loop {
+        let body = http_get(url, token, timeout)?;
+        let now = std::time::Instant::now();
+        let cur = MetricsSnapshot::parse(&body);
+        // ANSI clear-screen + cursor-home, so `watch`-like output
+        // doesn't accumulate. Skipped when stdout isn't a TTY (a
+        // pipe would record the escape codes).
+        if is_tty_stdout() {
+            let _ = std::io::stdout().write_all(b"\x1b[2J\x1b[H");
+        }
+        match &prev {
+            None => {
+                let _ = std::io::stdout().write_all(cur.to_string().as_bytes());
+            }
+            Some((before, t0)) => {
+                let secs = now.duration_since(*t0).as_secs_f64();
+                let d = MetricsDelta::between(before, &cur, secs);
+                let _ = std::io::stdout().write_all(d.to_string().as_bytes());
+            }
+        }
+        prev = Some((cur, now));
+        std::thread::sleep(interval);
+    }
+}
+
+fn is_tty_stdout() -> bool {
+    // Conservative check: `cargo test` captures stdout, and CI is
+    // usually non-TTY. We use `IsTerminal` from std (1.70+) which is
+    // already MSRV-clean.
+    use std::io::IsTerminal;
+    std::io::stdout().is_terminal()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +831,128 @@ proteus_some_future_counter_total 43
         let r = read_token_file(&p);
         assert!(r.is_err(), "empty/whitespace-only token must fail");
         let _ = std::fs::remove_file(&p);
+    }
+
+    // ----- MetricsDelta -----
+
+    #[test]
+    fn delta_subtracts_each_counter() {
+        let a = MetricsSnapshot::parse(SAMPLE);
+        let mut b = a.clone();
+        b.sessions_accepted += 17;
+        b.firewall_denied += 3;
+        b.tx_bytes += 4096;
+        let d = MetricsDelta::between(&a, &b, 10.0);
+        assert_eq!(d.sessions_accepted, 17);
+        assert_eq!(d.firewall_denied, 3);
+        assert_eq!(d.tx_bytes, 4096);
+        // Other counters are zero.
+        assert_eq!(d.rate_limited, 0);
+        assert!(!d.counter_reset);
+    }
+
+    #[test]
+    fn delta_detects_counter_reset() {
+        let a = MetricsSnapshot::parse(SAMPLE);
+        // Simulate a process restart: every counter drops to a small
+        // fresh value.
+        let b = MetricsSnapshot {
+            sessions_accepted: 1,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 30.0);
+        assert!(d.counter_reset, "must flag counter_reset");
+        // Clamped to 0, not wrapping.
+        assert_eq!(d.handshakes_succeeded, 0);
+        assert_eq!(d.firewall_denied, 0);
+    }
+
+    #[test]
+    fn delta_carries_current_gauges() {
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot {
+            in_flight_sessions: 42,
+            up: 1,
+            ready: 1,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 5.0);
+        assert_eq!(d.now_in_flight, 42);
+        assert_eq!(d.now_up, 1);
+        assert_eq!(d.now_ready, 1);
+    }
+
+    #[test]
+    fn delta_total_rejected_sums_correctly() {
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot {
+            firewall_denied: 3,
+            handshake_budget_rejected: 5,
+            rate_limited: 7,
+            conn_limit_rejected: 11,
+            user_rate_rejected: 13,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 1.0);
+        assert_eq!(d.total_rejected(), 3 + 5 + 7 + 11 + 13);
+    }
+
+    #[test]
+    fn delta_display_renders_rates() {
+        // 60 sessions accepted over 30s = 2.0/s.
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot {
+            sessions_accepted: 60,
+            up: 1,
+            ready: 1,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 30.0);
+        let out = d.to_string();
+        assert!(out.contains("delta over 30.0s"));
+        assert!(out.contains("LIVE / READY"));
+        // Format is `sessions_accepted   60 (  2.00/s)`.
+        assert!(out.contains("2.00/s"), "expected 2.00/s rate: {out}");
+    }
+
+    #[test]
+    fn delta_display_renders_reset_banner() {
+        let a = MetricsSnapshot::parse(SAMPLE);
+        let b = MetricsSnapshot::default(); // every counter wiped
+        let d = MetricsDelta::between(&a, &b, 30.0);
+        let out = d.to_string();
+        assert!(
+            out.contains("counter reset"),
+            "expected reset banner: {out}"
+        );
+    }
+
+    #[test]
+    fn delta_handles_zero_interval_without_dividing_by_zero() {
+        let a = MetricsSnapshot::default();
+        let b = MetricsSnapshot {
+            sessions_accepted: 10,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 0.0);
+        // Display must not panic and must not emit `inf`.
+        let out = d.to_string();
+        assert!(!out.contains("inf"), "got: {out}");
+    }
+
+    #[test]
+    fn delta_throughput_renders_in_human_units() {
+        let a = MetricsSnapshot::default();
+        // 10 MiB over 10s → 1.0 MiB/s.
+        let b = MetricsSnapshot {
+            tx_bytes: 10 * 1024 * 1024,
+            up: 1,
+            ready: 1,
+            ..MetricsSnapshot::default()
+        };
+        let d = MetricsDelta::between(&a, &b, 10.0);
+        let out = d.to_string();
+        assert!(out.contains("1.00 MiB/s"), "expected 1 MiB/s: {out}");
     }
 
     #[test]

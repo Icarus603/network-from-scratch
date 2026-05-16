@@ -104,6 +104,48 @@ enum AdminCmd {
         #[arg(long, default_value_t = 5)]
         timeout_secs: u64,
     },
+    /// Compute counter deltas between two saved scrape bodies. Use
+    /// when you want to see "what changed in the last N seconds"
+    /// without leaving a live watcher running.
+    ///
+    /// Capture scrapes with:
+    ///   curl http://127.0.0.1:9090/metrics > /tmp/before
+    ///   sleep 30
+    ///   curl http://127.0.0.1:9090/metrics > /tmp/after
+    ///   proteus-server admin diff --before /tmp/before --after /tmp/after \
+    ///                             --interval-secs 30
+    Diff {
+        /// Path to the OLDER scrape body.
+        #[arg(long)]
+        before: PathBuf,
+        /// Path to the NEWER scrape body.
+        #[arg(long)]
+        after: PathBuf,
+        /// Wall-clock seconds between the two scrapes. Used to
+        /// render per-second rates. Defaults to 1 (treat deltas as
+        /// raw counts).
+        #[arg(long, default_value_t = 1.0)]
+        interval_secs: f64,
+    },
+    /// Live delta loop: scrapes /metrics at the given interval and
+    /// prints deltas between successive scrapes. First iteration is
+    /// the absolute snapshot (no delta source yet). Clears the
+    /// screen on every iteration when stdout is a TTY. Ctrl-C to
+    /// exit.
+    Watch {
+        /// URL of the metrics endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:9090/metrics")]
+        url: String,
+        /// Optional bearer-token file (or PROTEUS_METRICS_TOKEN).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Per-request HTTP timeout in seconds.
+        #[arg(long, default_value_t = 5)]
+        timeout_secs: u64,
+        /// Refresh interval in seconds.
+        #[arg(long, default_value_t = 5)]
+        interval_secs: u64,
+    },
 }
 
 #[tokio::main]
@@ -139,6 +181,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     &url,
                     token.as_deref(),
                     std::time::Duration::from_secs(timeout_secs),
+                )?;
+            }
+            AdminCmd::Diff {
+                before,
+                after,
+                interval_secs,
+            } => {
+                proteus_server::admin::run_diff(&before, &after, interval_secs)?;
+            }
+            AdminCmd::Watch {
+                url,
+                token_file,
+                timeout_secs,
+                interval_secs,
+            } => {
+                let token = match token_file {
+                    Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                };
+                proteus_server::admin::run_watch(
+                    &url,
+                    token.as_deref(),
+                    std::time::Duration::from_secs(timeout_secs),
+                    std::time::Duration::from_secs(interval_secs),
                 )?;
             }
         },
