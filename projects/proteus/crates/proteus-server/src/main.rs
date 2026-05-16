@@ -874,11 +874,61 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             // stops sending new traffic. Existing in-flight sessions
             // continue to run during the drain window.
             metrics.ready.store(false, std::sync::atomic::Ordering::Relaxed);
-            info!(secs = drain_secs, "draining outstanding sessions, /readyz now reports 503");
-            // tokio::spawn'd session tasks are detached; we give them
-            // a window to flush. Production deployment should set
-            // systemd's `TimeoutStopSec` to drain_secs + 5s of margin.
-            tokio::time::sleep(std::time::Duration::from_secs(drain_secs)).await;
+            info!(
+                secs = drain_secs,
+                in_flight = metrics.in_flight_sessions.load(std::sync::atomic::Ordering::Relaxed),
+                "draining outstanding sessions, /readyz now reports 503"
+            );
+
+            // Wait for ALL in-flight sessions to drain — but bound
+            // by drain_secs as a hard ceiling. Previously this was
+            // an unconditional `tokio::time::sleep(drain_secs)`,
+            // which had two operational problems:
+            //
+            //   1. If sessions finished in <drain_secs, the binary
+            //      still slept the full window — slow rolling
+            //      restarts, systemd TimeoutStopSec margin wasted.
+            //   2. If sessions took >drain_secs, they were killed
+            //      mid-flight without a chance to even log the
+            //      truncation.
+            //
+            // Now we poll the in_flight_sessions counter on a tight
+            // tick. As soon as it hits zero we exit (fast restart);
+            // if drain_secs elapses with sessions still in flight,
+            // we log the count and exit anyway (preserving the
+            // hard upper-bound systemd expects via TimeoutStopSec).
+            let drain_fut = async {
+                loop {
+                    let n = metrics
+                        .in_flight_sessions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    if n == 0 {
+                        return;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+            };
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(drain_secs),
+                drain_fut,
+            )
+            .await
+            {
+                Ok(()) => info!("drain complete (zero in-flight), exiting"),
+                Err(_) => {
+                    let still_running = metrics
+                        .in_flight_sessions
+                        .load(std::sync::atomic::Ordering::Relaxed);
+                    warn!(
+                        in_flight = still_running,
+                        drain_secs,
+                        "drain window elapsed with sessions still in flight; exiting anyway. \
+                         Production deployment should bump drain_secs OR audit why sessions \
+                         are not finishing within the configured window."
+                    );
+                }
+            }
+
             // Final liveness flip — we are about to exit; any further
             // /healthz probe should see 503.
             metrics.alive.store(false, std::sync::atomic::Ordering::Relaxed);
