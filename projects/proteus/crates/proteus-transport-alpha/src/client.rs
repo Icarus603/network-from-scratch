@@ -82,8 +82,35 @@ pub async fn handshake_over_tcp(
     handshake_over_split(read, write, config).await
 }
 
+/// TLS exporter label used for channel binding. Spec §5.10 (RFC 5705 /
+/// RFC 9266 idiom — a stable, profile-specific label so the inner
+/// Proteus handshake's binding tag cannot collide with any other
+/// protocol layered over the same TLS session).
+pub const TLS_EXPORTER_LABEL: &[u8] = b"EXPORTER-Proteus-Channel-Binding-v1";
+
+/// Length of the TLS exporter-derived channel-binding tag.
+pub const CHANNEL_BINDING_LEN: usize = 32;
+
 /// Run a Proteus α handshake over a TLS 1.3 outer wrapper. The
 /// `server_dns_name` MUST match the server's TLS certificate's SAN.
+///
+/// **Channel binding (RFC 5705 / 9266)**: after the outer TLS 1.3
+/// handshake completes, we extract a 32-byte exporter (RFC 5705
+/// `EXPORTER-Proteus-Channel-Binding-v1`) and feed it into the inner
+/// Proteus transcript before any inner frame is written. The inner
+/// Finished MAC chain therefore commits to the outer TLS session.
+///
+/// Threat-model gain over REALITY: a MITM holding a rogue cert
+/// (compromised CA, corporate SSL-bumping appliance, captive portal)
+/// terminates the outer TLS toward the client with one session and
+/// re-originates a fresh outer TLS toward the server with another.
+/// The two TLS sessions have DIFFERENT exporters by construction
+/// (TLS 1.3 exporter is derived from per-session master_secret),
+/// so the client's inner Finished MAC commits to exporter_A but
+/// the server validates against exporter_B → mismatch → handshake
+/// aborted before any data flows. REALITY has no such binding;
+/// a rogue cert that fools both endpoints lets a MITM bridge them
+/// transparently.
 pub async fn handshake_over_tls(
     stream: TcpStream,
     connector: &tokio_rustls::TlsConnector,
@@ -101,15 +128,52 @@ pub async fn handshake_over_tls(
     let tls_stream = crate::tls::client_handshake(connector, sn, stream)
         .await
         .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
+    // Extract the TLS exporter BEFORE splitting the stream (after split
+    // we lose access to the rustls ClientConnection). On TLS 1.3 the
+    // exporter is fully usable post-handshake; rustls will return Err
+    // if the handshake is somehow not complete — surface that.
+    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+    {
+        let (_io, conn) = tls_stream.get_ref();
+        conn.export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, None)
+            .map_err(|e| {
+                AlphaError::Io(std::io::Error::other(format!(
+                    "TLS exporter unavailable: {e}"
+                )))
+            })?;
+    }
     let (read, write) = tokio::io::split(tls_stream);
-    handshake_over_split(read, write, config).await
+    handshake_over_split_bound(read, write, config, Some(binding)).await
 }
 
 /// Inner handshake driver, generic over any AsyncRead/AsyncWrite split.
+///
+/// Equivalent to `handshake_over_split_bound(.., None)` — no channel
+/// binding mixed in. Use the bound variant when you have an outer TLS
+/// session whose exporter you can extract.
 pub async fn handshake_over_split<R, W>(
     read: R,
     write: W,
     config: &ClientConfig,
+) -> AlphaResult<AlphaSession<R, W>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    handshake_over_split_bound(read, write, config, None).await
+}
+
+/// Inner handshake driver with optional TLS channel-binding tag.
+/// When `channel_binding` is `Some(tag)`, the 32-byte tag is mixed
+/// into the inner transcript via a synthetic frame so the inner
+/// Finished MAC chain commits to it. The peer MUST mix in the same
+/// tag, derived from its own side of the same TLS session, or the
+/// MACs will not match.
+pub async fn handshake_over_split_bound<R, W>(
+    read: R,
+    write: W,
+    config: &ClientConfig,
+    channel_binding: Option<[u8; CHANNEL_BINDING_LEN]>,
 ) -> AlphaResult<AlphaSession<R, W>>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -243,6 +307,22 @@ where
     write.write_all(&ch_frame).await?;
 
     let mut transcript = Transcript::new();
+    // Channel binding (RFC 5705 / 9266): mix the outer-TLS exporter
+    // tag into the transcript FIRST so the inner Finished MAC chain
+    // commits to it. We do NOT send the tag on the wire — both
+    // endpoints compute it independently from their own end of the
+    // TLS session. A MITM holding a rogue cert sees one exporter
+    // toward the client and a DIFFERENT one toward the server, so
+    // their relayed inner Finished will not validate. Bind tag is
+    // length-prefixed so the receiver can't be tricked by length
+    // ambiguity if a future extension adds more pre-transcript
+    // material.
+    if let Some(binding) = channel_binding {
+        let mut pre = Vec::with_capacity(2 + CHANNEL_BINDING_LEN);
+        pre.extend_from_slice(b"cb"); // 2-byte label so future pre-transcript items can be added
+        pre.extend_from_slice(&binding);
+        transcript.update(&pre);
+    }
     transcript.update(&ch_payload);
 
     // ----- 3. Read ServerHello -----

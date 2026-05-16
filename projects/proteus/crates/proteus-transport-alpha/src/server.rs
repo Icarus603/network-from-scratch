@@ -1433,17 +1433,52 @@ pub async fn handshake_over_tls(
     let tls_stream = crate::tls::server_handshake(acceptor, stream)
         .await
         .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
+    // Extract the same exporter tag the client will see on its side
+    // of this TLS session — RFC 5705 / RFC 9266 channel binding.
+    // A MITM bridging two distinct TLS sessions sees different
+    // exporters on each side and therefore cannot relay the inner
+    // Finished MAC chain (which now commits to the exporter via the
+    // transcript hash on both ends).
+    let mut binding = [0u8; crate::client::CHANNEL_BINDING_LEN];
+    {
+        let (_io, conn) = tls_stream.get_ref();
+        conn.export_keying_material(&mut binding[..], crate::client::TLS_EXPORTER_LABEL, None)
+            .map_err(|e| {
+                AlphaError::Io(std::io::Error::other(format!(
+                    "TLS exporter unavailable: {e}"
+                )))
+            })?;
+    }
     let (read, write) = tokio::io::split(tls_stream);
-    handshake_over_split(read, write, ctx).await
+    handshake_over_split_bound(read, write, ctx, Some(binding)).await
 }
 
 /// Run the server-side Proteus handshake over an already-split
 /// AsyncRead/AsyncWrite pair (any transport: raw TCP, TLS-wrapped TCP,
 /// in-memory pipe, etc.).
+///
+/// Wrapper around `handshake_over_split_bound(.., None)` — no channel
+/// binding. Use the bound variant when an outer TLS exporter is
+/// available.
 pub async fn handshake_over_split<R, W>(
     read: R,
     write: W,
     ctx: &Arc<ServerCtx>,
+) -> AlphaResult<AlphaSession<R, W>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
+    handshake_over_split_bound(read, write, ctx, None).await
+}
+
+/// Server-side handshake driver with optional TLS channel-binding tag.
+/// Symmetric to `client::handshake_over_split_bound`.
+pub async fn handshake_over_split_bound<R, W>(
+    read: R,
+    write: W,
+    ctx: &Arc<ServerCtx>,
+    channel_binding: Option<[u8; crate::client::CHANNEL_BINDING_LEN]>,
 ) -> AlphaResult<AlphaSession<R, W>>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -1588,6 +1623,17 @@ where
 
     // ----- 7. Build ServerHello with server X25519 share -----
     let mut transcript = Transcript::new();
+    // Mirror the client's channel-binding mix-in. See client.rs for
+    // the rationale; both ends MUST hash the SAME tag before any
+    // wire frame goes into the transcript, otherwise their inner
+    // Finished MAC chains diverge — which is exactly the failure
+    // mode we want when a MITM bridges two distinct TLS sessions.
+    if let Some(binding) = channel_binding {
+        let mut pre = Vec::with_capacity(2 + crate::client::CHANNEL_BINDING_LEN);
+        pre.extend_from_slice(b"cb");
+        pre.extend_from_slice(&binding);
+        transcript.update(&pre);
+    }
     transcript.update(&ch.body);
     // SH carries the EPHEMERAL pub (PFS) — see `handshake_with_cover`.
     let sh_body = &server_x25519_eph_pub;

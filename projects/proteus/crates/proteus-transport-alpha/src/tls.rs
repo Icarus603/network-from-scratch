@@ -163,6 +163,21 @@ pub fn build_connector_with_ca(ca_path: &Path) -> Result<TlsConnector, TlsError>
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
+/// Build a client-side TLS 1.3 connector that pins a single CA passed
+/// as a DER-encoded `CertificateDer`. Same as `build_connector_with_ca`
+/// but skips the PEM-on-disk step — useful for tests that mint a
+/// cert in-memory via rcgen.
+pub fn build_connector_with_ca_der(ca: CertificateDer<'static>) -> Result<TlsConnector, TlsError> {
+    install_default_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    roots.add(ca)?;
+    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
 /// Parse a server-name string into the rustls type. Wraps the awkward
 /// `ServerName::try_from` API.
 pub fn server_name(s: &str) -> Result<ServerName<'static>, TlsError> {
