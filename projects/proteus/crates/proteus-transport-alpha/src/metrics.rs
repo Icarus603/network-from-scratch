@@ -93,6 +93,7 @@ pub struct ServerMetrics {
     pub handshake_timeouts: AtomicU64,
     pub rate_limited: AtomicU64,
     pub conn_limit_rejected: AtomicU64,
+    pub firewall_denied: AtomicU64,
     pub cover_forwards: AtomicU64,
     pub total_tx_bytes: AtomicU64,
     pub total_rx_bytes: AtomicU64,
@@ -119,6 +120,7 @@ impl Default for ServerMetrics {
             handshake_timeouts: AtomicU64::new(0),
             rate_limited: AtomicU64::new(0),
             conn_limit_rejected: AtomicU64::new(0),
+            firewall_denied: AtomicU64::new(0),
             cover_forwards: AtomicU64::new(0),
             total_tx_bytes: AtomicU64::new(0),
             total_rx_bytes: AtomicU64::new(0),
@@ -170,6 +172,9 @@ impl ServerMetrics {
              # HELP proteus_conn_limit_rejected_total Connections rejected because max_connections was reached.\n\
              # TYPE proteus_conn_limit_rejected_total counter\n\
              proteus_conn_limit_rejected_total {}\n\
+             # HELP proteus_firewall_denied_total Connections denied by CIDR firewall (allow/deny rules).\n\
+             # TYPE proteus_firewall_denied_total counter\n\
+             proteus_firewall_denied_total {}\n\
              # HELP proteus_cover_forwards_total Connections forwarded to the cover endpoint.\n\
              # TYPE proteus_cover_forwards_total counter\n\
              proteus_cover_forwards_total {}\n\
@@ -200,6 +205,7 @@ impl ServerMetrics {
             s(&self.handshake_timeouts),
             s(&self.rate_limited),
             s(&self.conn_limit_rejected),
+            s(&self.firewall_denied),
             s(&self.cover_forwards),
             s(&self.total_tx_bytes),
             s(&self.total_rx_bytes),

@@ -93,6 +93,35 @@ pub enum ConnGate {
     Rejected,
 }
 
+/// Hot-path admission check: returns `false` if the connection should
+/// be routed to cover (and the loop should `continue`), `true` if the
+/// connection may proceed to handshake.
+///
+/// Order matches the spec admission pipeline:
+/// 1. CIDR firewall (cheapest, configured by operator).
+/// 2. Per-IP rate limiter.
+/// 3. (Caller handles max_connections separately because it needs to
+///    hold a permit through the spawned task.)
+fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
+    if ctx.firewall().is_active() && !ctx.firewall().admit(peer.ip()) {
+        tracing::warn!(peer = %peer, "firewall denied; routing to cover");
+        if let Some(m) = ctx.metrics() {
+            m.firewall_denied
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return false;
+    }
+    if !ctx.check_rate_limit(peer.ip()) {
+        tracing::debug!(peer = %peer, "rate-limited; routing to cover");
+        if let Some(m) = ctx.metrics() {
+            m.rate_limited
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return false;
+    }
+    true
+}
+
 /// Helper used by every accept loop: spawn a cover-forward task that
 /// splices `stream` to `ctx.cover_endpoint` (if configured), otherwise
 /// drop the stream. Idempotent + non-blocking.
@@ -143,6 +172,10 @@ pub struct ServerCtx {
     /// flood that survives the rate limiter can still OOM the
     /// server by parking unbounded per-connection ML-KEM allocations.
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
+    /// Optional source-IP firewall (CIDR allow/deny). Evaluated
+    /// before the rate limiter. Inactive firewalls (zero rules) are
+    /// effectively a no-op on the hot path.
+    firewall: crate::firewall::Firewall,
 }
 
 impl ServerCtx {
@@ -159,7 +192,23 @@ impl ServerCtx {
             pow_difficulty: 0,
             metrics: None,
             conn_limit: None,
+            firewall: crate::firewall::Firewall::new(),
         }
+    }
+
+    /// Install a source-IP firewall (CIDR allow/deny). Evaluated
+    /// before the rate limiter; denied connections are routed to
+    /// cover so the deny path stays REALITY-grade indistinguishable.
+    #[must_use]
+    pub fn with_firewall(mut self, fw: crate::firewall::Firewall) -> Self {
+        self.firewall = fw;
+        self
+    }
+
+    /// Read the firewall. The accept loop uses this to gate every
+    /// connection. Non-public so the firewall stays owned by the ctx.
+    pub(crate) fn firewall(&self) -> &crate::firewall::Firewall {
+        &self.firewall
     }
 
     /// Cap the maximum number of *in-flight* accepted connections.
@@ -350,12 +399,7 @@ where
         let acceptor = acceptor.clone();
         let handle = handle.clone();
 
-        if !ctx.check_rate_limit(peer.ip()) {
-            tracing::debug!(peer = %peer, "rate-limited; routing to cover (TLS path)");
-            if let Some(m) = ctx.metrics() {
-                m.rate_limited
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+        if !admission_ok(&ctx, &peer) {
             route_to_cover_or_drop(&ctx, stream);
             continue;
         }
@@ -439,12 +483,7 @@ where
         let current_acceptor = acceptor.current();
         let handle = handle.clone();
 
-        if !ctx.check_rate_limit(peer.ip()) {
-            tracing::debug!(peer = %peer, "rate-limited; routing to cover (TLS path)");
-            if let Some(m) = ctx.metrics() {
-                m.rate_limited
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+        if !admission_ok(&ctx, &peer) {
             route_to_cover_or_drop(&ctx, stream);
             continue;
         }
@@ -520,13 +559,8 @@ where
         let ctx = Arc::clone(&ctx);
         let handle = handle.clone();
 
-        // ---- Per-IP rate limit (DoS defense) ----
-        if !ctx.check_rate_limit(peer.ip()) {
-            tracing::debug!(peer = %peer, "rate-limited; routing to cover");
-            if let Some(m) = ctx.metrics() {
-                m.rate_limited
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            }
+        // ---- Source-IP firewall + per-IP rate limit (DoS defense) ----
+        if !admission_ok(&ctx, &peer) {
             route_to_cover_or_drop(&ctx, stream);
             continue;
         }

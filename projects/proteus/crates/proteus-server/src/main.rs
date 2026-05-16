@@ -141,6 +141,24 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
              accept-flood OOM. Set max_connections in server.yaml."
         );
     }
+    if let Some(fw_cfg) = cfg.firewall.as_ref() {
+        let mut fw = proteus_transport_alpha::firewall::Firewall::new();
+        if let Err(e) = fw.extend_allow(&fw_cfg.allow) {
+            return Err(format!("firewall.allow parse error: {e}").into());
+        }
+        if let Err(e) = fw.extend_deny(&fw_cfg.deny) {
+            return Err(format!("firewall.deny parse error: {e}").into());
+        }
+        if fw.is_active() {
+            info!(
+                rules = fw.rule_count(),
+                allow_count = fw_cfg.allow.len(),
+                deny_count = fw_cfg.deny.len(),
+                "CIDR firewall configured"
+            );
+            ctx = ctx.with_firewall(fw);
+        }
+    }
 
     // Server-aggregated metrics — wire into ctx so the hot-path
     // increments the right counters.

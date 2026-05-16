@@ -72,6 +72,21 @@ pub struct ServerConfig {
     #[serde(default)]
     pub drain_secs: Option<u64>,
 
+    /// CIDR firewall rules. Evaluated before rate-limit / max-connections.
+    /// Denied connections are routed to `cover_endpoint` so an attacker
+    /// cannot distinguish "you're blocked" from a generic HTTPS proxy.
+    /// Example:
+    ///   firewall:
+    ///     allow:
+    ///       - 10.0.0.0/8
+    ///       - 198.51.100.0/24
+    ///     deny:
+    ///       - 192.0.2.42/32       # known abusive client
+    ///       - 198.51.100.13/32    # banned for AUP violation
+    /// Order: deny wins. Empty allowlist = "no allowlist policy".
+    #[serde(default)]
+    pub firewall: Option<FirewallCfg>,
+
     /// Hard cap on the number of *in-flight* accepted connections.
     /// Connections beyond this cap are routed to the cover endpoint
     /// (if configured) or dropped silently. Production deployments
@@ -82,6 +97,18 @@ pub struct ServerConfig {
     /// `nofile` ulimit (one connection ≈ one FD).
     #[serde(default)]
     pub max_connections: Option<usize>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct FirewallCfg {
+    /// CIDR rules — only sources matching one of these are admitted.
+    /// Empty = "no allowlist policy" (admit unless denied).
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// CIDR rules — sources matching any of these are denied.
+    /// Empty = "no denylist".
+    #[serde(default)]
+    pub deny: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

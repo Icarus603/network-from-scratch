@@ -28,6 +28,7 @@
 pub mod client;
 pub mod cover;
 pub mod error;
+pub mod firewall;
 pub mod metrics;
 pub mod metrics_http;
 pub mod pow;
