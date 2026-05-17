@@ -11,6 +11,7 @@ members = [
     "crates/proteus-fingerprint",
     "crates/proteus-server",
     "crates/proteus-client",
+    "crates/proteus-bench",
 ]
 
 [workspace.package]

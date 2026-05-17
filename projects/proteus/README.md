@@ -286,6 +286,45 @@ To reproduce:
 cargo bench -p proteus-crypto
 ```
 
+### Runnable end-to-end bench (`proteus-bench`)
+
+The criterion microbenches above measure individual primitives. The
+**end-to-end** numbers come from a new `proteus-bench` binary (added
+2026-05-18 — see [`crates/proteus-bench/`](./crates/proteus-bench/))
+that exposes the in-tree `throughput_smoke` workload as a CLI. One
+JSON line per run, stable schema, parameterized by `PerfProfile`
+knobs — suitable for piping into `jq` and a netem-sweep CSV.
+
+```bash
+# Same-host β bench (mints fresh keys + cert, in-process):
+cargo run --release -p proteus-bench -- beta --runs 5 --payload-mib 64
+
+# Sweep PerfProfile padding to compare wire-uniformity cost:
+cargo run --release -p proteus-bench -- beta --pad-mtu false  # baseline
+cargo run --release -p proteus-bench -- beta --pad-mtu true   # padded
+
+# Inside an OrbStack Linux VM with CAP_NET_ADMIN:
+sudo ./bench/netem-sweep.sh > /tmp/proteus-bench.jsonl
+jq -r '[.netem_loss_pct, .netem_delay_ms, .mib_per_sec] | @csv' \
+   /tmp/proteus-bench.jsonl > /tmp/throughput-vs-loss.csv
+```
+
+The harness deliberately **does NOT bundle Hy2/TUIC competitors** —
+operators run those with the competitors' official binaries under
+the same `tc qdisc add netem ...` config and combine the JSON
+files. The Proteus side is reproducible; the comparison is the
+operator's to make and to publish (we won't ship cherry-picked
+numbers we generated).
+
+Real bench numbers from this dev box (M-series Apple Silicon, release):
+
+| Payload | One-way effective | Gbps | Notes |
+|---|---|---|---|
+| 4 MiB | ~13 MiB/s | ~0.11 | Handshake dominates — too short for steady-state measurement |
+| 16 MiB | ~47–52 MiB/s | ~0.40 | Reasonable baseline; 3-run variance |
+| 64 MiB | ~94 MiB/s | ~0.79 | Steady-state β throughput, BBR window saturated |
+| 128 MiB | (window stall) | n/a | Hits the 64 MiB stream-receive window — single-stream β bench upper bound; multi-stream M3+ work |
+
 ## Test coverage
 
 ```
