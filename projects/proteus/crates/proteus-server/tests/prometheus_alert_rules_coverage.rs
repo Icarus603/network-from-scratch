@@ -147,6 +147,22 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         // refactor.
         "proteus_cover_forwards_rejected_total",
         "proteus_cover_forwards_total",
+        // Iter-38: SIGHUP reload-failing alerts. Each of the 4
+        // SIGHUP-reloadable surfaces (firewall, rate_limit,
+        // user_rate_limit, handshake_budget) ships with a
+        // matching Prometheus alert. A future refactor that
+        // removes any one of these metrics from the binary's
+        // /metrics surface should break THIS test immediately
+        // so the alert rule + the in-process alerts-check
+        // evaluator stay synchronized.
+        "proteus_firewall_reload_attempts_total",
+        "proteus_firewall_reload_succeeded_total",
+        "proteus_rate_limit_reload_attempts_total",
+        "proteus_rate_limit_reload_succeeded_total",
+        "proteus_user_rate_limit_reload_attempts_total",
+        "proteus_user_rate_limit_reload_succeeded_total",
+        "proteus_handshake_budget_reload_attempts_total",
+        "proteus_handshake_budget_reload_succeeded_total",
     ]
     .into_iter()
     .collect();

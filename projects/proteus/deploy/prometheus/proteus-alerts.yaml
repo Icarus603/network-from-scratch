@@ -109,6 +109,84 @@ groups:
         {{ $labels.instance }}. Likely cause: new cert file is
         malformed or unreadable. Old cert is still being served.
 
+- name: proteus-sighup-reload
+  interval: 1m
+  rules:
+
+  # Iter-38: four SIGHUP-reloadable surfaces (firewall, rate_limit,
+  # user_rate_limit, handshake_budget) each emit
+  # (attempts_total, succeeded_total) counter pairs that the
+  # operator can subtract to detect a silent edit-didn't-apply
+  # failure. TLS cert reload has its own (mtime-driven, above)
+  # rule; these are operator-edit-driven. WARN-not-CRIT because
+  # the previous-known-good config is still in effect — service
+  # is up, just running the wrong config.
+  #
+  # Symmetric with the client-side ProteusClientPoolReloadFailing
+  # (deploy/prometheus/proteus-client-alerts.yaml).
+
+  - alert: ProteusFirewallReloadFailing
+    expr: |
+      (proteus_firewall_reload_attempts_total
+       - proteus_firewall_reload_succeeded_total) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server SIGHUP firewall reload silently failing"
+      description: |
+        On {{ $labels.instance }}: attempts_total exceeds
+        succeeded_total. At least one SIGHUP reload of the
+        allow/deny lists failed to apply. The running firewall
+        is still the pre-SIGHUP version; the operator's edit
+        didn't take effect. Check journalctl for the parse error.
+
+  - alert: ProteusRateLimitReloadFailing
+    expr: |
+      (proteus_rate_limit_reload_attempts_total
+       - proteus_rate_limit_reload_succeeded_total) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server SIGHUP rate-limit reload silently failing"
+      description: |
+        Global rate-limit config reload on
+        {{ $labels.instance }} attempted but did not fully
+        succeed. The previous-known-good rate-limit policy is
+        still in effect. Check journalctl for the parse error.
+
+  - alert: ProteusUserRateLimitReloadFailing
+    expr: |
+      (proteus_user_rate_limit_reload_attempts_total
+       - proteus_user_rate_limit_reload_succeeded_total) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server SIGHUP per-user rate-limit reload silently failing"
+      description: |
+        Per-user rate-limit config reload on
+        {{ $labels.instance }} attempted but did not fully
+        succeed. Per-user buckets still use the pre-SIGHUP
+        limits — the operator's edit didn't apply. Check
+        journalctl for the parse error.
+
+  - alert: ProteusHandshakeBudgetReloadFailing
+    expr: |
+      (proteus_handshake_budget_reload_attempts_total
+       - proteus_handshake_budget_reload_succeeded_total) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server SIGHUP handshake-budget reload silently failing"
+      description: |
+        Handshake budget config reload on
+        {{ $labels.instance }} attempted but did not fully
+        succeed. Pre-SIGHUP budget is still in effect. Check
+        journalctl for the parse error.
+
 - name: proteus-runtime-health
   interval: 30s
   rules:

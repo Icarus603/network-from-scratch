@@ -276,6 +276,76 @@ pub fn evaluate(body: &str) -> Report {
         });
     }
 
+    // ──── ProteusSighupReloadFailing (×4 limiter+firewall) ────
+    // Four SIGHUP-reloadable surfaces, each backed by its own
+    // (attempts_total, succeeded_total) counter pair. The TLS
+    // file-watcher has its own dedicated alert above
+    // (ProteusTlsAutoReloadFailing) because it's mtime-driven,
+    // not SIGHUP-driven; these four are operator-edit driven and
+    // share the same "silent edit didn't take effect" failure
+    // mode the client-side ProteusClientPoolReloadFailing covers
+    // for server_endpoints.
+    //
+    // WARN-not-CRIT because the previous-known-good config is
+    // still running; the operator's edit is silently ineffective
+    // but service isn't down.
+    //
+    // Suppress entirely when att == 0 (no SIGHUP yet), matching
+    // the convention used for ProteusClientNoRecentDialSuccess /
+    // ProteusClientPoolReloadFailing.
+    for (rule_name, metric_prefix, friendly) in [
+        (
+            "ProteusFirewallReloadFailing",
+            "proteus_firewall_reload",
+            "firewall (allow/deny lists)",
+        ),
+        (
+            "ProteusRateLimitReloadFailing",
+            "proteus_rate_limit_reload",
+            "global rate-limit config",
+        ),
+        (
+            "ProteusUserRateLimitReloadFailing",
+            "proteus_user_rate_limit_reload",
+            "per-user rate-limit config",
+        ),
+        (
+            "ProteusHandshakeBudgetReloadFailing",
+            "proteus_handshake_budget_reload",
+            "handshake budget config",
+        ),
+    ] {
+        let att = g(&format!("{metric_prefix}_attempts_total")).unwrap_or(0.0);
+        let ok = g(&format!("{metric_prefix}_succeeded_total")).unwrap_or(0.0);
+        if att > 0.0 {
+            let gap = att - ok;
+            if gap > 0.0 {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Warn,
+                    message: format!(
+                        "{} reload attempt(s) on {friendly}, only {} succeeded ({} failed) — running config is still the pre-SIGHUP version. Check journalctl for the parse error.",
+                        att as u64,
+                        ok as u64,
+                        gap as u64,
+                    ),
+                    equivalent_promql:
+                        "(<prefix>_attempts_total - <prefix>_succeeded_total) > 0",
+                });
+            } else {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Pass,
+                    message: format!(
+                        "all {} {friendly} reload attempt(s) succeeded",
+                        att as u64
+                    ),
+                    equivalent_promql: "",
+                });
+            }
+        }
+    }
+
     // ──── ProteusPanic ────
     if let Some(v) = g("proteus_panics_total") {
         let sev = if v > 0.0 {
@@ -801,5 +871,124 @@ mod tests {
             .find(|c| c.rule_name == "ProteusCoverForwardStorm")
             .expect("ProteusCoverForwardStorm check must fire even below threshold");
         assert_eq!(c.severity, CheckSeverity::Pass);
+    }
+
+    // ──── iter-38: SIGHUP reload-failing checks (×4) ────
+    //
+    // The 4 SIGHUP-reloadable surfaces (firewall, rate_limit,
+    // user_rate_limit, handshake_budget) each get a dedicated rule.
+    // Mirrors the client-side ProteusClientPoolReloadFailing
+    // contract: WARN-on-gap, PASS-on-no-gap with att>0, suppress
+    // entirely on att == 0.
+
+    #[test]
+    fn iter38_evaluate_emits_warn_when_firewall_reload_failing() {
+        let body = body_with(
+            "proteus_up 1\nproteus_firewall_reload_attempts_total 7\nproteus_firewall_reload_succeeded_total 5",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusFirewallReloadFailing")
+            .expect("ProteusFirewallReloadFailing check must fire on gap > 0");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+        assert!(c.message.contains("7 reload"), "{}", c.message);
+        assert!(c.message.contains("5 succeeded"), "{}", c.message);
+        assert!(c.message.contains("2 failed"), "{}", c.message);
+        assert!(c.message.contains("firewall"), "{}", c.message);
+    }
+
+    #[test]
+    fn iter38_evaluate_emits_warn_when_rate_limit_reload_failing() {
+        let body = body_with(
+            "proteus_up 1\nproteus_rate_limit_reload_attempts_total 3\nproteus_rate_limit_reload_succeeded_total 1",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusRateLimitReloadFailing")
+            .expect("ProteusRateLimitReloadFailing check must fire");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+    }
+
+    #[test]
+    fn iter38_evaluate_emits_warn_when_user_rate_limit_reload_failing() {
+        let body = body_with(
+            "proteus_up 1\nproteus_user_rate_limit_reload_attempts_total 10\nproteus_user_rate_limit_reload_succeeded_total 9",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusUserRateLimitReloadFailing")
+            .expect("ProteusUserRateLimitReloadFailing check must fire");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+    }
+
+    #[test]
+    fn iter38_evaluate_emits_warn_when_handshake_budget_reload_failing() {
+        let body = body_with(
+            "proteus_up 1\nproteus_handshake_budget_reload_attempts_total 2\nproteus_handshake_budget_reload_succeeded_total 0",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeBudgetReloadFailing")
+            .expect("ProteusHandshakeBudgetReloadFailing check must fire");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+    }
+
+    #[test]
+    fn iter38_evaluate_passes_when_all_reloads_succeeded() {
+        let body = body_with(
+            "proteus_up 1\nproteus_firewall_reload_attempts_total 4\nproteus_firewall_reload_succeeded_total 4",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusFirewallReloadFailing")
+            .expect("must emit PASS when gap == 0 and att > 0");
+        assert_eq!(c.severity, CheckSeverity::Pass);
+    }
+
+    #[test]
+    fn iter38_evaluate_suppresses_check_when_no_reload_attempted() {
+        // att == 0 → no SIGHUP yet → check should NOT be emitted
+        // (matching ProteusClientPoolReloadFailing convention).
+        let body = body_with(
+            "proteus_up 1\nproteus_firewall_reload_attempts_total 0\nproteus_firewall_reload_succeeded_total 0",
+        );
+        let r = evaluate(&body);
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name == "ProteusFirewallReloadFailing");
+        assert!(
+            !any,
+            "must NOT emit ProteusFirewallReloadFailing when no reload attempted yet"
+        );
+    }
+
+    #[test]
+    fn iter38_reload_failing_warn_does_not_force_crit_exit() {
+        // WARN-only — operator's edit silently didn't apply but
+        // the previous-known-good config is still being served.
+        // Must not escalate exit code from 0.
+        let body = body_with(
+            "proteus_up 1\nproteus_firewall_reload_attempts_total 5\nproteus_firewall_reload_succeeded_total 3\nproteus_rate_limit_reload_attempts_total 8\nproteus_rate_limit_reload_succeeded_total 4",
+        );
+        let r = evaluate(&body);
+        assert_eq!(
+            r.exit_code(),
+            0,
+            "reload-failing is WARN-only; must not force exit=1"
+        );
+        let (_, w, cr) = r.counts();
+        assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
+        assert_eq!(cr, 0);
     }
 }
