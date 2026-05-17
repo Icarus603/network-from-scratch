@@ -7,6 +7,8 @@
 
 pub mod admin;
 pub mod config;
+pub mod ip_reputation;
+pub mod preflight;
 pub mod relay;
 pub mod startup;
 pub mod validate;

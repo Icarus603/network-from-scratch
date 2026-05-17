@@ -106,7 +106,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 
 | # | Attack line | Status | Proteus coverage |
 |---|---|---|---|
-| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ⚠ partial — need P0 `--check-ip-reputation` preflight + uTLS bit-perfect ClientHello |
+| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ❌ uTLS bit-perfect ClientHello still gap |
 | 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; TODO: multi-VPS HA + topology doc |
 | 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ❌ cover-endpoint pool + probe-anomaly detector |
@@ -116,7 +116,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 
 **Roadmap priorities driven by this threat intel**:
 
-- **P0** (must precede any "production-ready" claim): ECH integration, IP reputation preflight tool, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, `deploy/README.md` anti-relay topology warning.
+- **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, `deploy/README.md` anti-relay topology warning.
 - **P1** (M3): uTLS bit-perfect ClientHello, cover-endpoint pool, carrier auto-switch, multi-VPS HA client.
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
@@ -165,7 +165,19 @@ sudo install -m 0644 alice.ed25519.pk /etc/proteus/keys/clients/
 sudo install -m 0644 deploy/server.example.yaml /etc/proteus/server.yaml
 sudoedit /etc/proteus/server.yaml
 
-# 7. systemd unit
+# 7. Preflight: classify the VPS IP against our offline reputation table.
+#    Catches the most common operator mistakes — bound to a special-use
+#    IP, picked an over-collected commercial-cloud range — BEFORE the
+#    server is exposed. 2026 GFW threat-intel main lines 1+4.
+proteus-server preflight check-ip-reputation \
+    --config /etc/proteus/server.yaml \
+    --public-ip "$(curl -s https://api.ipify.org)"
+# Exit code 0 on PASS/WARN; 1 on FAIL. Operators can suppress the WARN
+# (e.g. fresh DigitalOcean droplet known to be unburned) by accepting
+# the exit code and proceeding. Operators with a known-burned-IP list
+# can feed it as --watchlist /etc/proteus/burned-ips.txt.
+
+# 8. systemd unit
 sudo install -m 0644 deploy/systemd/proteus-server.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now proteus-server

@@ -82,6 +82,47 @@ enum Cmd {
         #[command(subcommand)]
         cmd: AdminCmd,
     },
+    /// Offline IP-reputation preflight. Classifies the deployment IP
+    /// against a curated cloud-prefix table + special-use ranges +
+    /// optional operator watchlist, and prints an actionable report.
+    /// Designed for the 2026 GFW threat model where Tiangou-class
+    /// commercial DPI shares a cross-deployment IP blocklist; running
+    /// this BEFORE deploying a fresh VPS catches the most common
+    /// "I picked an already-burned IP" mistakes offline (no external
+    /// network probes — see crates/proteus-server/src/ip_reputation.rs
+    /// for the metadata-leakage rationale).
+    ///
+    /// Exit code 0 on PASS / WARN only; 1 on any FAIL.
+    Preflight {
+        #[command(subcommand)]
+        cmd: PreflightCmd,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum PreflightCmd {
+    /// Classify the deployment's public IP against our offline
+    /// reputation table.
+    ///
+    /// IP source priority: `--public-ip` literal > `--config`
+    /// listen_alpha literal bind > FAIL with guidance.
+    CheckIpReputation {
+        /// Path to YAML config; the listen address is inspected for a
+        /// literal public-IP bind. Optional when `--public-ip` is set.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Operator override: classify THIS IP directly, regardless
+        /// of config. Use this for pre-provisioning checks (you know
+        /// the VPS IP from the cloud console, but haven't written
+        /// `server.yaml` yet).
+        #[arg(long)]
+        public_ip: Option<std::net::IpAddr>,
+        /// Optional path to a text-format operator watchlist of
+        /// known-burned CIDRs. Each non-comment line is `CIDR
+        /// reason text`. Lines starting with `#` are skipped.
+        #[arg(long)]
+        watchlist: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -178,6 +219,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 std::process::exit(1);
             }
         }
+        Cmd::Preflight { cmd } => match cmd {
+            PreflightCmd::CheckIpReputation {
+                config,
+                public_ip,
+                watchlist,
+            } => {
+                let input = proteus_server::preflight::PreflightInput {
+                    config_path: config,
+                    public_ip_override: public_ip,
+                    watchlist_path: watchlist,
+                };
+                let code = proteus_server::preflight::cli_run(input)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+        },
         Cmd::Admin { cmd } => match cmd {
             AdminCmd::Status {
                 url,

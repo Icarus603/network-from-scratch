@@ -54,7 +54,13 @@ Tiangou 的 SSL/TLS 攔截 + ML 行為分析 ≠ 古典 DPI 簽名匹配。我�
 
 **TODO**：
 1. **uTLS 集成（M3）**：fork rustls 的 ClientHello assembler，把 cipher_count / ext_count 補上去，徹底消滅 JA4 殘餘差異。這是 README 已標 ❌ 的單一 leading gap。
-2. **IP 健康預檢工具**：`proteus-server preflight --check-ip-reputation`，部署前查 VPS IP 是否已在已知 GFW 黑名單（Censys / Shodan / GFW.report 的 IP feed）。**這是 operator-level 防禦，但我們必須提供工具**。
+2. ~~**IP 健康預檢工具**~~ ✅ **DONE 2026-05-17**：`proteus-server preflight check-ip-reputation` 已實作。
+   - 完全離線（不外洩 operator metadata 給任何第三方 IP-reputation API）
+   - 三層分類：RFC 5735/6890 special-use（FAIL）/ 商用雲 prefix table（WARN，含 DigitalOcean / Vultr / Linode / Hetzner / OVH / RamNode / BandwagonHost 等 90+ 條 CIDR）/ 其他（PASS，推定 residential 或低採樣 provider）
+   - Operator 可加 `--watchlist /path/to/burned.txt` 注入自家已知燒過的 CIDR（自家 OPSEC 記錄）
+   - CLI: `proteus-server preflight check-ip-reputation --config /etc/proteus/server.yaml --public-ip <vps-ip>`
+   - 35 個測試覆蓋（18 ip_reputation unit + 10 preflight unit + 7 CLI binary）
+   - **誠實標註的限制**：商用雲 prefix table 不窮舉（< 100 條），absence-of-WARN 不等於 clean。Geedge 共享黑名單組成是 OSINT 推測，不是來自洩漏的權威清單。
 3. **新增 spec §11 威脅模型小節**：明確列入「Tiangou-class 商用 DPI + 跨部署黑名單」作為 Tier-1 對手。
 
 ---
@@ -254,7 +260,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 
 | 對抗向量 | 覆蓋 | Roadmap 位置 |
 |---|---|---|
-| Tiangou 商用 DPI（共享黑名單）| ⚠️ 部分 | TODO: IP preflight tool |
+| Tiangou 商用 DPI（共享黑名單）| ✅ `proteus-server preflight check-ip-reputation` 離線分類 + operator watchlist | — |
 | Tiangou ML 行為分析 | ✅ cell-split + heartbeats | — |
 | uTLS bit-perfect ClientHello | ❌ | M3（README ❌ 已標）|
 | 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）| TODO: deployment doc + multi-VPS HA |
@@ -266,7 +272,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | Active probing（時序層）| ⚠️ 部分 | TODO: cover pool + anomaly detector |
 | CONNECTION_CLOSE 信號 | ✅ NO_ERROR/empty (本 commit 已 lock-in) | — |
 | 應用層 probe（cover URL 反覆探測）| ❌ | TODO: cover_endpoints pool |
-| IP 範圍預封 | ❌ | TODO: preflight tool + 文檔警告 |
+| IP 範圍預封 | ✅ preflight 對 90+ 條 commercial-cloud CIDR 直接 WARN（外加 operator watchlist 覆蓋自家燒過的範圍）| — |
 | UDP/QUIC throttling | ⚠️ α 可用，β 沒 fallback | TODO: carrier auto-switch (M3) |
 | γ profile (MASQUE) | ❌ | M3+ (spec §10.3) |
 | DoH/DoT 識別（bootstrap）| ✅ `bootstrap_dns: { direct_ip: <ip> }` + validate WARN | — |
@@ -280,10 +286,12 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 **P0（必須在「上線生產環境」前完成）**：
 
 1. **ECH 集成**（主線 3） —— 沒有 ECH 等於 SNI 公開，所有 wire-level trick 都治標
-2. **`proteus-server preflight --check-ip-reputation`**（主線 1 + 4）—— 不檢查就讓 operator 拿被封 IP 上線等於送死
+2. ~~**`proteus-server preflight --check-ip-reputation`**（主線 1 + 4）~~ ✅ **DONE 2026-05-17** —— `ip_reputation.rs` + `preflight.rs` + CLI subcommand + 35 個測試
 3. ~~**`bootstrap_dns: direct_ip`**（主線 6）~~ ✅ **DONE 2026-05-17** —— bootstrap.rs + validate WARN + client.example.yaml 全部就位
 4. ~~**β prefix-noise 調整前 6 字節為可印**（主線 7）~~ ✅ **DONE 2026-05-17 (commit a187ea4)**
 5. **`deploy/README.md` topology 警告**（主線 2）—— operator 教育 + 反中轉模型（使用者本次澄清：是個人乾淨 VPS 直連節點，*非*中轉，所以這一條對使用者場景已天然滿足。但 README 仍應寫清楚，避免後續 operator 走錯架構。）
+
+**P0 status**：5 個中已完成 3 個。剩餘 2 個：ECH（多週工程，需要 fork rustls）+ `deploy/README.md` 反中轉警告（純文檔，可下次 iteration 完成）。
 
 **P1（M3 前需完成）**：
 
