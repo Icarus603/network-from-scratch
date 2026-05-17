@@ -273,7 +273,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | Active probing（請求層）| ✅ cover-server splice | — |
 | Active probing（時序層）| ✅ cover-endpoint pool with per-src-IP /24 affinity + probe-anomaly detector（per-/24 sliding-window counter + Prometheus alert，fire-once-per-burst，2026-05-18 done）| — |
 | CONNECTION_CLOSE 信號 | ✅ NO_ERROR/empty (本 commit 已 lock-in) | — |
-| 應用層 probe（cover URL 反覆探測）| ✅ `cover_endpoints:` pool 配置 + per-src-IP /24 affinity（同一觀察者多輪 probe 看到一致的 cover URL，跨不同 src IP 分流；2026-05-18 done）| — |
+| 應用層 probe（cover URL 反覆探測）| ✅ `cover_endpoints:` pool + per-src-IP /24 affinity + probe-anomaly detector + **recent-fires Prometheus 暴露**（`proteus_probe_anomaly_recent_secs{prefix="…"}` labelled gauge：operator 在 Grafana 直接看到「哪些 /24 在 probe 我們」，不用 grep log；2026-05-18）| — |
 | IP 範圍預封 | ✅ preflight 對 90+ 條 commercial-cloud CIDR 直接 WARN（外加 operator watchlist 覆蓋自家燒過的範圍）| — |
 | UDP/QUIC throttling | ✅ α + `CarrierHealth` 自動 carrier 切換 + suppression 時段定期 probe 恢復（2026-05-18 done）| ❌ throughput-adapt（β 慢但活著的情況）still TODO |
 | γ profile (MASQUE) | ❌ | M3+ (spec §10.3) |

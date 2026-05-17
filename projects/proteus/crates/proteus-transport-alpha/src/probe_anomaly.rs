@@ -63,6 +63,59 @@ pub struct ProbeAnomalyDetector {
     /// continue) and increments `dropped_prefix_inserts`.
     max_prefixes: usize,
     dropped_prefix_inserts: std::sync::atomic::AtomicU64,
+    /// Bounded ring buffer of the most recent N anomaly fires.
+    /// Operators consult this via `proteus-server admin status` (or
+    /// the `proteus_probe_anomaly_recent_*` Prometheus gauges) to
+    /// identify exactly which /24 (v4) / /48 (v6) prefixes are
+    /// currently tripping the detector — the most operationally
+    /// critical question ("WHICH IP do I blackhole-route?") that the
+    /// raw counter `probe_anomalies_fired_total` cannot answer on
+    /// its own.
+    ///
+    /// Bounded so the buffer can't grow without bound under
+    /// continuous attacks; the cap matches `DEFAULT_RECENT_FIRES_CAP`.
+    /// Locked with a separate mutex from `events` so the hot path
+    /// (record_at) doesn't contend with the warm path (Prometheus
+    /// scrape) any more than necessary.
+    recent_fires: Mutex<VecDeque<RecentFire>>,
+    recent_fires_cap: usize,
+}
+
+/// One row in the recent-fires ring buffer. Cheap to clone, suitable
+/// for read-side accessor surfaces (Prometheus exporter, admin CLI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RecentFire {
+    pub prefix: PrefixKey,
+    pub family: IpFamily,
+    pub fired_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IpFamily {
+    V4,
+    V6,
+}
+
+impl RecentFire {
+    /// Render the prefix in the conventional `a.b.c.0/24` or
+    /// `a:b:c::/48` form for human-readable output (admin CLI,
+    /// Prometheus label values, log lines).
+    #[must_use]
+    pub fn prefix_string(&self) -> String {
+        match self.family {
+            IpFamily::V4 => format!(
+                "{}.{}.{}.0/24",
+                self.prefix[0], self.prefix[1], self.prefix[2]
+            ),
+            IpFamily::V6 => {
+                // /48 = first 3 hextets; the rest is all-zero.
+                let h0 = u16::from_be_bytes([self.prefix[0], self.prefix[1]]);
+                let h1 = u16::from_be_bytes([self.prefix[2], self.prefix[3]]);
+                let h2 = u16::from_be_bytes([self.prefix[4], self.prefix[5]]);
+                format!("{h0:x}:{h1:x}:{h2:x}::/48")
+            }
+        }
+    }
 }
 
 type PrefixKey = [u8; 6]; // 3 bytes for v4 (zero-padded), 6 bytes for v6
@@ -89,17 +142,39 @@ pub const DEFAULT_THRESHOLD: usize = 8;
 /// memory ceilings elsewhere in the codebase).
 pub const DEFAULT_MAX_PREFIXES: usize = 16 * 1024;
 
+/// Default cap on the recent-fires ring buffer (64 entries × ~32
+/// bytes each ≈ 2 KiB). 64 is enough that an operator paging
+/// through `proteus-server admin status` sees the active offenders
+/// even during a multi-/24 attack burst, without unbounded
+/// memory growth under sustained sieve probing.
+pub const DEFAULT_RECENT_FIRES_CAP: usize = 64;
+
 impl ProbeAnomalyDetector {
     /// Build a detector with the supplied sliding-window length +
-    /// threshold + bookkeeping cap.
+    /// threshold + bookkeeping cap. The recent-fires ring buffer
+    /// uses [`DEFAULT_RECENT_FIRES_CAP`]; operators who need a larger
+    /// buffer (very busy servers) can use `new_with_recent_cap`.
     #[must_use]
     pub fn new(window: Duration, threshold: usize, max_prefixes: usize) -> Self {
+        Self::new_with_recent_cap(window, threshold, max_prefixes, DEFAULT_RECENT_FIRES_CAP)
+    }
+
+    /// Build a detector with an explicit recent-fires ring buffer cap.
+    #[must_use]
+    pub fn new_with_recent_cap(
+        window: Duration,
+        threshold: usize,
+        max_prefixes: usize,
+        recent_fires_cap: usize,
+    ) -> Self {
         Self {
             window,
             threshold,
             events: Mutex::new(HashMap::new()),
             max_prefixes,
             dropped_prefix_inserts: std::sync::atomic::AtomicU64::new(0),
+            recent_fires: Mutex::new(VecDeque::with_capacity(recent_fires_cap.max(1))),
+            recent_fires_cap: recent_fires_cap.max(1),
         }
     }
 
@@ -186,9 +261,103 @@ impl ProbeAnomalyDetector {
         // same burst are silent until the window goes empty.
         if state.timestamps.len() >= self.threshold && !state.alerted {
             state.alerted = true;
+            // Drop the per-prefix events lock BEFORE acquiring the
+            // recent-fires lock so the two never sit contended at
+            // the same time. The lock-order discipline is one-way:
+            // events → recent_fires, never the reverse.
+            let family = match ip {
+                IpAddr::V4(_) => IpFamily::V4,
+                IpAddr::V6(_) => IpFamily::V6,
+            };
+            let fire = RecentFire {
+                prefix: key,
+                family,
+                fired_at: now,
+            };
+            drop(events);
+            self.push_recent_fire(fire);
             return Some(key);
         }
         None
+    }
+
+    /// Append `fire` to the ring buffer, evicting the oldest entry
+    /// when the cap is reached.
+    fn push_recent_fire(&self, fire: RecentFire) {
+        let mut ring = self
+            .recent_fires
+            .lock()
+            .expect("ProbeAnomalyDetector recent_fires mutex poisoned");
+        if ring.len() >= self.recent_fires_cap {
+            ring.pop_front();
+        }
+        ring.push_back(fire);
+    }
+
+    /// Snapshot the recent-fires ring buffer, oldest-first.
+    /// Operationally exposed via `proteus-server admin status` JSON
+    /// and the Prometheus `proteus_probe_anomaly_recent_*` lines so
+    /// the operator can identify exactly which /24 prefixes are
+    /// currently tripping the detector (the "WHICH IP do I
+    /// blackhole-route?" question the bare counter can't answer).
+    #[must_use]
+    pub fn recent_fires(&self) -> Vec<RecentFire> {
+        self.recent_fires
+            .lock()
+            .map(|r| r.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Render a Prometheus exposition snippet for the detector's
+    /// own gauges + the recent-fires ring (as a labelled gauge
+    /// per recent prefix, value = seconds since fire). The
+    /// `proteus_probe_anomalies_fired_total` counter is exposed by
+    /// `ServerMetrics::prometheus()` separately; this snippet adds
+    /// the diagnostic surfaces the counter alone doesn't carry.
+    ///
+    /// Designed to be appended to `ServerMetrics::prometheus()`
+    /// output by the HTTP handler when a detector is configured.
+    #[must_use]
+    pub fn prometheus_extension(&self, now: Instant) -> String {
+        let tracked = self.tracked();
+        let dropped = self.dropped_prefix_inserts();
+        let mut out = String::with_capacity(512);
+        out.push_str(
+            "# HELP proteus_probe_anomaly_tracked_prefixes Number of distinct /24 (v4) / /48 (v6) prefixes currently in the detector's sliding window.\n",
+        );
+        out.push_str("# TYPE proteus_probe_anomaly_tracked_prefixes gauge\n");
+        out.push_str(&format!(
+            "proteus_probe_anomaly_tracked_prefixes {tracked}\n"
+        ));
+        out.push_str(
+            "# HELP proteus_probe_anomaly_dropped_inserts_total Times the detector refused to track a new prefix because max_prefixes was reached (IP-sweep defense).\n",
+        );
+        out.push_str("# TYPE proteus_probe_anomaly_dropped_inserts_total counter\n");
+        out.push_str(&format!(
+            "proteus_probe_anomaly_dropped_inserts_total {dropped}\n"
+        ));
+        // Recent fires: one gauge line per entry, value = seconds
+        // since fire (operator can sort/topk in PromQL).
+        let fires = self.recent_fires();
+        out.push_str(
+            "# HELP proteus_probe_anomaly_recent_secs Seconds since the most recent anomaly fire for this prefix. One line per prefix in the bounded ring buffer.\n",
+        );
+        out.push_str("# TYPE proteus_probe_anomaly_recent_secs gauge\n");
+        for fire in &fires {
+            let secs_ago = now
+                .checked_duration_since(fire.fired_at)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            // Sanitize prefix string for Prometheus label values:
+            // colons in v6 are fine; `"` and `\` would need escaping
+            // but our format produces neither.
+            out.push_str(&format!(
+                "proteus_probe_anomaly_recent_secs{{prefix=\"{}\"}} {}\n",
+                fire.prefix_string(),
+                secs_ago,
+            ));
+        }
+        out
     }
 
     /// Diagnostic accessor: how many distinct prefixes the detector
@@ -383,7 +552,130 @@ mod tests {
         assert_eq!(DEFAULT_WINDOW, Duration::from_secs(300));
         assert_eq!(DEFAULT_THRESHOLD, 8);
         assert_eq!(DEFAULT_MAX_PREFIXES, 16 * 1024);
+        assert_eq!(DEFAULT_RECENT_FIRES_CAP, 64);
         let det = ProbeAnomalyDetector::with_defaults();
         assert_eq!(det.tracked(), 0);
+        assert!(det.recent_fires().is_empty());
+    }
+
+    // ---------- recent-fires ring + Prometheus extension ----------
+
+    #[test]
+    fn recent_fires_starts_empty_records_on_burst() {
+        let det = ProbeAnomalyDetector::new(Duration::from_secs(60), 3, 1024);
+        assert!(det.recent_fires().is_empty());
+        let t = Instant::now();
+        // 2 below threshold — no fire, no recent-fires entry.
+        det.record_at(ip4(198, 51, 100, 1), t);
+        det.record_at(ip4(198, 51, 100, 2), t);
+        assert!(det.recent_fires().is_empty());
+        // 3rd at threshold — fires AND appears in the ring.
+        let fired = det.record_at(ip4(198, 51, 100, 3), t);
+        assert!(fired.is_some());
+        let recent = det.recent_fires();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].family, IpFamily::V4);
+        assert_eq!(&recent[0].prefix[..3], &[198, 51, 100]);
+        assert_eq!(recent[0].prefix_string(), "198.51.100.0/24");
+    }
+
+    #[test]
+    fn recent_fires_fire_once_per_burst_does_not_duplicate_in_ring() {
+        let det = ProbeAnomalyDetector::new(Duration::from_secs(60), 2, 1024);
+        let t = Instant::now();
+        det.record_at(ip4(10, 0, 0, 1), t);
+        det.record_at(ip4(10, 0, 0, 1), t);
+        // Several more in the same burst should be silent — the ring
+        // must NOT receive duplicate entries even though we're
+        // calling record_at repeatedly.
+        for i in 0..10 {
+            det.record_at(ip4(10, 0, 0, 1), t + Duration::from_millis(i));
+        }
+        assert_eq!(
+            det.recent_fires().len(),
+            1,
+            "ring buffer recorded duplicate fires within the same burst",
+        );
+    }
+
+    #[test]
+    fn recent_fires_ring_caps_at_configured_size_evicting_oldest() {
+        // Cap ring at 3 so we can verify FIFO eviction behavior with
+        // a small number of /24s.
+        let det = ProbeAnomalyDetector::new_with_recent_cap(
+            Duration::from_secs(60),
+            2,
+            1024,
+            3, // recent_fires_cap = 3
+        );
+        let t0 = Instant::now();
+        for net_idx in 0..5u8 {
+            // 2 events per /24 → each fires once.
+            det.record_at(ip4(10, 0, net_idx, 1), t0);
+            det.record_at(ip4(10, 0, net_idx, 2), t0);
+        }
+        let recent = det.recent_fires();
+        assert_eq!(recent.len(), 3, "cap of 3 not honored");
+        // FIFO: oldest evicted — only nets 2, 3, 4 should remain.
+        assert_eq!(recent[0].prefix[2], 2);
+        assert_eq!(recent[1].prefix[2], 3);
+        assert_eq!(recent[2].prefix[2], 4);
+    }
+
+    #[test]
+    fn recent_fires_ring_records_ipv6_with_slash48_rendering() {
+        let det = ProbeAnomalyDetector::new(Duration::from_secs(60), 2, 1024);
+        let t = Instant::now();
+        let p1: IpAddr = "2001:db8:cafe::1".parse().unwrap();
+        let p2: IpAddr = "2001:db8:cafe::2".parse().unwrap();
+        det.record_at(p1, t);
+        det.record_at(p2, t);
+        let recent = det.recent_fires();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].family, IpFamily::V6);
+        assert_eq!(recent[0].prefix_string(), "2001:db8:cafe::/48");
+    }
+
+    #[test]
+    fn prometheus_extension_emits_expected_lines() {
+        let det = ProbeAnomalyDetector::new(Duration::from_secs(60), 2, 1024);
+        let t0 = Instant::now();
+        det.record_at(ip4(203, 0, 113, 1), t0);
+        det.record_at(ip4(203, 0, 113, 2), t0);
+        // 5 seconds later, scrape happens.
+        let scrape_at = t0 + Duration::from_secs(5);
+        let body = det.prometheus_extension(scrape_at);
+
+        // Gauges and counters must be present with HELP/TYPE rows.
+        assert!(body.contains("# HELP proteus_probe_anomaly_tracked_prefixes"));
+        assert!(body.contains("# TYPE proteus_probe_anomaly_tracked_prefixes gauge"));
+        assert!(body.contains("proteus_probe_anomaly_tracked_prefixes 1"));
+
+        assert!(body.contains("# HELP proteus_probe_anomaly_dropped_inserts_total"));
+        assert!(body.contains("# TYPE proteus_probe_anomaly_dropped_inserts_total counter"));
+        assert!(body.contains("proteus_probe_anomaly_dropped_inserts_total 0"));
+
+        // Recent-fire row with the prefix label + ~5s elapsed.
+        assert!(body.contains("# TYPE proteus_probe_anomaly_recent_secs gauge"));
+        assert!(
+            body.contains("proteus_probe_anomaly_recent_secs{prefix=\"203.0.113.0/24\"} 5"),
+            "expected labelled recent_secs line in:\n{body}"
+        );
+    }
+
+    #[test]
+    fn prometheus_extension_with_no_fires_still_emits_zero_lines() {
+        let det = ProbeAnomalyDetector::with_defaults();
+        let body = det.prometheus_extension(Instant::now());
+        assert!(body.contains("proteus_probe_anomaly_tracked_prefixes 0"));
+        assert!(body.contains("proteus_probe_anomaly_dropped_inserts_total 0"));
+        // No recent-secs lines should appear (just the HELP/TYPE
+        // header which is fine — Prometheus tolerates empty
+        // metric families).
+        let recent_count = body
+            .lines()
+            .filter(|l| l.starts_with("proteus_probe_anomaly_recent_secs{"))
+            .count();
+        assert_eq!(recent_count, 0);
     }
 }

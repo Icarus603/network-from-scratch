@@ -115,18 +115,34 @@ pub async fn serve_with_auth(
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full(addr, metrics, auth, None).await
+}
+
+/// Full variant of [`serve_with_auth`] that optionally takes a
+/// `ProbeAnomalyDetector` so the `/metrics` exposition includes
+/// the detector's diagnostic gauges + recent-fires lines. Use this
+/// from the production binary when a detector is configured.
+pub async fn serve_with_auth_full(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
+    let probe_anomaly_enabled = probe_anomaly.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
+        probe_anomaly = probe_anomaly_enabled,
         "metrics endpoint bound",
     );
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
-        tokio::spawn(handle_connection(stream, metrics, auth));
+        let probe_anomaly = probe_anomaly.clone();
+        tokio::spawn(handle_connection(stream, metrics, auth, probe_anomaly));
     }
 }
 
@@ -146,11 +162,25 @@ pub async fn serve_on_listener_with_auth(
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full(listener, metrics, auth, None).await
+}
+
+/// Full-featured variant: the caller may supply a
+/// `ProbeAnomalyDetector` so the `/metrics` exposition includes the
+/// detector's gauges + recent-fires diagnostic lines. Use this when
+/// the server has a detector wired (almost always recommended).
+pub async fn serve_on_listener_full(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
-        tokio::spawn(handle_connection(stream, metrics, auth));
+        let probe_anomaly = probe_anomaly.clone();
+        tokio::spawn(handle_connection(stream, metrics, auth, probe_anomaly));
     }
 }
 
@@ -158,6 +188,7 @@ async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -165,7 +196,8 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render(head, &metrics, auth.as_ref());
+    let (status_line, content_type, body) =
+        render_full(head, &metrics, auth.as_ref(), probe_anomaly.as_deref());
     let response = format!(
         "{status_line}\
          Content-Type: {content_type}\r\n\
@@ -217,6 +249,24 @@ pub fn render(
     metrics: &ServerMetrics,
     auth: Option<&MetricsAuth>,
 ) -> (&'static str, &'static str, String) {
+    render_full(request_head, metrics, auth, None)
+}
+
+/// Full-featured variant of [`render`] that optionally appends a
+/// `ProbeAnomalyDetector`'s diagnostic Prometheus lines to the
+/// `/metrics` body. Operators with the detector configured get
+/// `proteus_probe_anomaly_tracked_prefixes`,
+/// `proteus_probe_anomaly_dropped_inserts_total`, and one
+/// `proteus_probe_anomaly_recent_secs{prefix="…"}` gauge line per
+/// recent fire — the "WHICH /24 is the prober coming from?" signal
+/// the bare counter can't carry.
+#[must_use]
+pub fn render_full(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
         if let Some(expected) = auth {
@@ -230,11 +280,11 @@ pub fn render(
                 );
             }
         }
-        (
-            "HTTP/1.1 200 OK\r\n",
-            "text/plain; version=0.0.4",
-            metrics.prometheus(),
-        )
+        let mut body = metrics.prometheus();
+        if let Some(det) = probe_anomaly {
+            body.push_str(&det.prometheus_extension(std::time::Instant::now()));
+        }
+        ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
         if metrics.alive.load(Ordering::Relaxed) {
             ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())

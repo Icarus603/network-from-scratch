@@ -509,10 +509,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         };
         let metrics = Arc::clone(&metrics);
+        // Pull the probe-anomaly detector out of the ServerCtx so
+        // the /metrics endpoint exposes the detector's diagnostic
+        // gauges + recent-fires labelled lines. Operators get the
+        // "WHICH /24 fired?" signal without grepping logs.
+        let probe_anomaly = ctx.probe_anomaly().cloned();
         tokio::spawn(async move {
-            if let Err(e) =
-                proteus_transport_alpha::metrics_http::serve_with_auth(&metrics_addr, metrics, auth)
-                    .await
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full(
+                &metrics_addr,
+                metrics,
+                auth,
+                probe_anomaly,
+            )
+            .await
             {
                 error!(error = %e, "metrics endpoint exited");
             }
