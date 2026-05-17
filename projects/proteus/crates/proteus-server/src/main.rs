@@ -114,6 +114,22 @@ enum Cmd {
         /// Output format: `text` (default) or `json`.
         #[arg(long, default_value = "text")]
         format: String,
+        /// When set to `chrome-124`, append a COMPONENT-LEVEL
+        /// diff vs Chrome 124's ClientHello (cipher / extension /
+        /// sig_algs / ALPN / supported_versions lists with
+        /// per-item add/remove/reorder bullets). This is the
+        /// operator-facing surface for closing the uTLS gap:
+        /// the JA4 hash alone tells you "they differ"; the
+        /// component diff tells you "remove cipher 0xc0a8, add
+        /// extension 0x4469 at position 16, swap sig_alg
+        /// positions 2↔3". When uTLS-replay ships and the diff
+        /// hits zero, the whole tool becomes the gate.
+        ///
+        /// Empty string (default) skips the diff section.
+        /// Currently the only supported target is `chrome-124`;
+        /// follow-on iterations add `firefox-124`, `safari-17`.
+        #[arg(long, default_value = "")]
+        target: String,
     },
 }
 
@@ -460,8 +476,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         },
-        Cmd::Fingerprint { format } => {
-            let code = run_fingerprint_cmd(&format).await?;
+        Cmd::Fingerprint { format, target } => {
+            let code = run_fingerprint_cmd(&format, &target).await?;
             std::process::exit(code);
         }
     }
@@ -472,7 +488,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// live ClientHello JA4 via a loopback handshake, diffs it against
 /// the curated browser reference table, prints the result in the
 /// operator-selected format, and returns the exit code.
-async fn run_fingerprint_cmd(format: &str) -> Result<i32, Box<dyn std::error::Error>> {
+async fn run_fingerprint_cmd(
+    format: &str,
+    target: &str,
+) -> Result<i32, Box<dyn std::error::Error>> {
     // Mint a fresh throwaway leaf so we don't need the operator's
     // production cert to run this offline command. JA4 is computed
     // entirely from the CLIENT side, so the cert is irrelevant
@@ -490,10 +509,34 @@ async fn run_fingerprint_cmd(format: &str) -> Result<i32, Box<dyn std::error::Er
     let cert = params.self_signed(&key_pair)?;
     let leaf = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
 
-    let observed = proteus_server::tls_fingerprint_observer::observe_live_ja4(leaf).await;
+    let observed = proteus_server::tls_fingerprint_observer::observe_live_ja4(leaf.clone()).await;
     let live_ja4 = observed.ja4.clone();
     let matches_baseline = observed.matches_baseline();
     let closest = proteus_fingerprint::find_closest(&live_ja4);
+
+    // Optional component-level diff against a target browser.
+    // Only fires when the operator passed --target chrome-124
+    // (or future target labels). The deep-diff capture re-runs
+    // the loopback observer because the underlying observer
+    // doesn't return the raw bytes; the cost is one extra
+    // ~50ms handshake, only when the operator asked.
+    let component_diff = match target {
+        "" => None,
+        "chrome-124" => {
+            proteus_server::tls_fingerprint_observer::observe_live_ja4_with_components(leaf)
+                .await
+                .map(|(_ja4, components)| {
+                    proteus_fingerprint::ja4_diff::ComponentDiff::compute(
+                        &components,
+                        &proteus_fingerprint::ja4_diff::CHROME_124,
+                    )
+                })
+        }
+        other => {
+            eprintln!("unknown --target {other:?}; supported: chrome-124 (or empty for no diff)");
+            return Ok(2);
+        }
+    };
 
     match format {
         "json" => {
@@ -514,6 +557,36 @@ async fn run_fingerprint_cmd(format: &str) -> Result<i32, Box<dyn std::error::Er
                     r#","closest_browser":"{}","closest_version":"{}","closest_platform":"{}","closest_ja4":"{}","closest_exact":{}"#,
                     b.browser, b.version, b.platform, b.ja4, exact
                 );
+            }
+            if let Some(diff) = component_diff.as_ref() {
+                let _ = write!(
+                    s,
+                    r#","component_diff_target":"chrome-124","component_diff_all_match":{}"#,
+                    diff.all_match
+                );
+                for (field_name, field) in [
+                    ("ciphers", &diff.ciphers),
+                    ("extensions", &diff.extensions),
+                    ("signature_algorithms", &diff.signature_algorithms),
+                    ("alpn_offered", &diff.alpn_offered),
+                    ("supported_versions", &diff.supported_versions),
+                ] {
+                    let _ = write!(s, r#","diff_{field_name}":{{"only_in_ours":["#);
+                    for (i, item) in field.only_in_ours.iter().enumerate() {
+                        if i > 0 {
+                            s.push(',');
+                        }
+                        let _ = write!(s, r#""{}""#, item.replace('"', "\\\""));
+                    }
+                    s.push_str(r#"],"only_in_theirs":["#);
+                    for (i, item) in field.only_in_theirs.iter().enumerate() {
+                        if i > 0 {
+                            s.push(',');
+                        }
+                        let _ = write!(s, r#""{}""#, item.replace('"', "\\\""));
+                    }
+                    s.push_str("]}");
+                }
             }
             s.push('}');
             s.push('\n');
@@ -564,6 +637,12 @@ async fn run_fingerprint_cmd(format: &str) -> Result<i32, Box<dyn std::error::Er
                     "  {:<8} {:<6} {:<32} {}",
                     b.browser, b.version, b.platform, b.ja4
                 );
+            }
+            if let Some(diff) = component_diff.as_ref() {
+                println!();
+                println!("=================================================");
+                println!("Component-level diff vs Chrome 124 (uTLS-gap visibility):");
+                print!("{}", diff.render_text());
             }
         }
     }

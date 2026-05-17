@@ -43,6 +43,8 @@
 
 pub mod browser_reference;
 pub mod ja4;
+pub mod ja4_diff;
 
 pub use browser_reference::{find_closest, BrowserFingerprint, BROWSERS};
-pub use ja4::{Ja4, Ja4Error, GREASE_VALUES};
+pub use ja4::{Ja4, Ja4Components, Ja4Error, GREASE_VALUES};
+pub use ja4_diff::{ComponentDiff, FieldDiff, TargetComponents, CHROME_124};

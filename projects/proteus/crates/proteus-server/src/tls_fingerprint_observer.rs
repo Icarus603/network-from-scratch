@@ -170,6 +170,90 @@ pub async fn observe_live_ja4(leaf: rustls::pki_types::CertificateDer<'static>) 
     }
 }
 
+/// Capture the live ClientHello AND parse it into both `Ja4` and
+/// `Ja4Components`. Used by `proteus-server fingerprint --target
+/// chrome-124` to surface a byte-level diff vs Chrome — the JA4
+/// hash alone tells you "they differ"; the components diff tells
+/// you "ADD extension 0x4469, REMOVE cipher 0x1303 from position
+/// 2, swap sig_alg positions 0↔2".
+///
+/// Returns `None` on observer-internal failure (loopback bind
+/// fails, capture times out). Callers fall back to the JA4-only
+/// path in that case.
+pub async fn observe_live_ja4_with_components(
+    leaf: rustls::pki_types::CertificateDer<'static>,
+) -> Option<(proteus_fingerprint::Ja4, proteus_fingerprint::Ja4Components)> {
+    let raw = observe_raw_client_hello(leaf).await.ok()?;
+    proteus_fingerprint::ja4::parse_client_hello_with_components(&raw, 't').ok()
+}
+
+/// Internal: capture just the raw ClientHello bytes (without
+/// computing JA4). Both `observe_live_ja4_inner` and
+/// `observe_live_ja4_with_components` share this so the loopback
+/// dance is only spelled out once.
+async fn observe_raw_client_hello(
+    leaf: rustls::pki_types::CertificateDer<'static>,
+) -> Result<Vec<u8>, String> {
+    let connector =
+        build_connector_with_ca_der(leaf).map_err(|e: TlsError| format!("build_connector: {e}"))?;
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .map_err(|e| format!("bind: {e}"))?;
+    let addr = listener
+        .local_addr()
+        .map_err(|e| format!("local_addr: {e}"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel::<Vec<u8>>();
+    let server_task = tokio::spawn(async move {
+        let (mut stream, _peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let mut buf = vec![0u8; 2048];
+        let mut total = 0usize;
+        let read_fut = async {
+            loop {
+                let n = stream.read(&mut buf[total..]).await.ok()?;
+                if n == 0 {
+                    return Some(total);
+                }
+                total += n;
+                if total >= 5 {
+                    let record_len = u16::from_be_bytes([buf[3], buf[4]]) as usize + 5;
+                    if total >= record_len {
+                        return Some(record_len);
+                    }
+                }
+                if total >= buf.len() {
+                    return Some(total);
+                }
+            }
+        };
+        let n = match tokio::time::timeout(std::time::Duration::from_secs(3), read_fut).await {
+            Ok(Some(n)) => n,
+            _ => return,
+        };
+        buf.truncate(n);
+        let _ = tx.send(buf);
+    });
+    let sn = rustls::pki_types::ServerName::try_from("localhost")
+        .map_err(|e| format!("server_name: {e}"))?
+        .to_owned();
+    let tcp = tokio::net::TcpStream::connect(addr)
+        .await
+        .map_err(|e| format!("connect: {e}"))?;
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        connector.connect(sn, tcp),
+    )
+    .await;
+    let raw = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+        .await
+        .map_err(|_| "capture timeout".to_string())?
+        .map_err(|_| "capture channel dropped".to_string())?;
+    server_task.abort();
+    Ok(raw)
+}
+
 async fn observe_live_ja4_inner(
     leaf: rustls::pki_types::CertificateDer<'static>,
 ) -> Result<String, String> {

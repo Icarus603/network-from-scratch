@@ -104,6 +104,41 @@ impl fmt::Display for Ja4 {
     }
 }
 
+/// Richer view of a ClientHello, exposing the raw component lists
+/// the JA4 hash collapses. Use this when the caller wants to do
+/// a byte-level diff between two ClientHellos (e.g. operator-
+/// facing "how do I make ours look like Chrome's?" tooling) — the
+/// JA4 hash alone only tells you "they differ", not "which extension
+/// is missing".
+///
+/// All `Vec<u16>` lists are in **wire order** with GREASE values
+/// already filtered out (so the entries are exactly what JA4
+/// counts toward `cipher_count` / `ext_count`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ja4Components {
+    /// Cipher suites in wire order (post-GREASE-filter).
+    pub ciphers: Vec<u16>,
+    /// Extensions in wire order (post-GREASE-filter). Note: JA4
+    /// SORTS these before hashing and excludes SNI (0x0000) +
+    /// ALPN (0x0010), but here we preserve the wire order +
+    /// keep every entry so diff tools can show "you sent ext
+    /// X at position N; Chrome sends Y at position N".
+    pub extensions: Vec<u16>,
+    /// Signature algorithms from extension 0x000d, in wire order
+    /// (NOT sorted — JA4 spec is positional for sig_algs).
+    pub signature_algorithms: Vec<u16>,
+    /// All ALPN entries in the ALPN extension (extension
+    /// 0x0010), in wire order. JA4's `alpn_tag` only captures
+    /// first+last char of the FIRST entry; diff tooling wants
+    /// the whole list.
+    pub alpn_offered: Vec<Vec<u8>>,
+    /// `supported_versions` (ext 0x002b) — list of u16 TLS
+    /// versions in wire order.
+    pub supported_versions: Vec<u16>,
+    /// True iff the SNI extension (0x0000) was present.
+    pub sni_present: bool,
+}
+
 /// Parse a TLS 1.2/1.3 ClientHello from a raw byte stream and
 /// compute its JA4 fingerprint.
 ///
@@ -329,6 +364,135 @@ pub fn parse_client_hello(record_bytes: &[u8], transport: char) -> Result<Ja4, J
         cipher_hash,
         ext_hash,
     })
+}
+
+/// Like [`parse_client_hello`] but ALSO returns the raw component
+/// lists ([`Ja4Components`]) so callers can do byte-level diffs.
+///
+/// The `Ja4` half is byte-for-byte identical to what
+/// `parse_client_hello` would return — this is a strict
+/// superset, no semantics differ.
+pub fn parse_client_hello_with_components(
+    record_bytes: &[u8],
+    transport: char,
+) -> Result<(Ja4, Ja4Components), Ja4Error> {
+    // Walk the ClientHello a second time to capture the raw
+    // component lists. We deliberately re-parse rather than
+    // refactor the existing parse_client_hello into a helper
+    // that returns both: the existing function is the canonical
+    // baseline that every prior test pins, and changing its
+    // internal flow risks introducing a subtle hash-input drift.
+    // The cost of a second walk is negligible (ClientHellos are
+    // <2 KiB).
+    let ja4 = parse_client_hello(record_bytes, transport)?;
+
+    // Re-parse for the raw lists. The skeleton mirrors
+    // parse_client_hello but we keep ALL component lists.
+    if record_bytes.len() < 5 {
+        return Err(Ja4Error::Truncated {
+            offset: 0,
+            wanted: 5,
+        });
+    }
+    let record_len = u16::from_be_bytes([record_bytes[3], record_bytes[4]]) as usize;
+    let hs = &record_bytes[5..5 + record_len];
+    let hs_len = u32::from_be_bytes([0, hs[1], hs[2], hs[3]]) as usize;
+    let ch = &hs[4..4 + hs_len];
+
+    let mut cur = Cursor::new(ch);
+    let _legacy_version = cur.read_u16_be()?;
+    let _random = cur.read_n(32)?;
+    let sid_len = cur.read_u8()? as usize;
+    let _sid = cur.read_n(sid_len)?;
+
+    let ciphers_len = cur.read_u16_be()? as usize;
+    let ciphers_bytes = cur.read_n(ciphers_len)?;
+    let mut ciphers = Vec::with_capacity(ciphers_len / 2);
+    for chunk in ciphers_bytes.chunks_exact(2) {
+        let c = u16::from_be_bytes([chunk[0], chunk[1]]);
+        if !is_grease(c) {
+            ciphers.push(c);
+        }
+    }
+
+    let comp_len = cur.read_u8()? as usize;
+    let _comp = cur.read_n(comp_len)?;
+
+    let mut extensions: Vec<u16> = Vec::new();
+    let mut signature_algorithms: Vec<u16> = Vec::new();
+    let mut alpn_offered: Vec<Vec<u8>> = Vec::new();
+    let mut supported_versions: Vec<u16> = Vec::new();
+    let mut sni_present = false;
+    if cur.remaining() >= 2 {
+        let ext_total = cur.read_u16_be()? as usize;
+        let ext_bytes = cur.read_n(ext_total)?;
+        let mut ec = Cursor::new(ext_bytes);
+        while ec.remaining() >= 4 {
+            let ext_type = ec.read_u16_be()?;
+            let ext_len = ec.read_u16_be()? as usize;
+            let ext_data = ec.read_n(ext_len)?;
+            if is_grease(ext_type) {
+                continue;
+            }
+            extensions.push(ext_type);
+            match ext_type {
+                0x0000 => sni_present = true,
+                0x000d => {
+                    let mut sec = Cursor::new(ext_data);
+                    if sec.remaining() >= 2 {
+                        let list_len = sec.read_u16_be()? as usize;
+                        let list = sec.read_n(list_len)?;
+                        for ch in list.chunks_exact(2) {
+                            let a = u16::from_be_bytes([ch[0], ch[1]]);
+                            if !is_grease(a) {
+                                signature_algorithms.push(a);
+                            }
+                        }
+                    }
+                }
+                0x0010 => {
+                    let mut sec = Cursor::new(ext_data);
+                    if sec.remaining() >= 2 {
+                        let _list_len = sec.read_u16_be()?;
+                        while sec.remaining() >= 1 {
+                            let one_len = sec.read_u8()? as usize;
+                            if sec.remaining() < one_len {
+                                break;
+                            }
+                            let one = sec.read_n(one_len)?;
+                            alpn_offered.push(one.to_vec());
+                        }
+                    }
+                }
+                0x002b => {
+                    let mut sec = Cursor::new(ext_data);
+                    if sec.remaining() >= 1 {
+                        let list_len = sec.read_u8()? as usize;
+                        let list = sec.read_n(list_len)?;
+                        for ch in list.chunks_exact(2) {
+                            let v = u16::from_be_bytes([ch[0], ch[1]]);
+                            if !is_grease(v) {
+                                supported_versions.push(v);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    Ok((
+        ja4,
+        Ja4Components {
+            ciphers,
+            extensions,
+            signature_algorithms,
+            alpn_offered,
+            supported_versions,
+            sni_present,
+        },
+    ))
 }
 
 fn sha256_prefix_12(data: &[u8]) -> String {
