@@ -335,6 +335,36 @@ pub struct ServerMetrics {
     /// path works. Set ONCE at startup; the gauge reports the
     /// LAST self-test outcome for the lifetime of the process.
     pub startup_self_test_passed: AtomicBool,
+    /// **Most-recent PERIODIC self-test outcome** — true if the
+    /// last background self-test cycle passed, false otherwise.
+    /// Distinct from `startup_self_test_passed` (which is the
+    /// boot-time gate): this is what `/healthz` consults to flip
+    /// to 503 when the running binary's crypto path has degraded
+    /// (RNG starvation, deadlock in the accept loop, disk full →
+    /// AEAD entropy reads failing, etc.).
+    ///
+    /// Initialized to `true` so operators with no periodic
+    /// self-test configured don't see false /healthz=503 events.
+    /// The periodic task overwrites this every cycle.
+    pub last_periodic_self_test_passed: AtomicBool,
+    /// **Unix seconds of the last SUCCESSFUL periodic self-test**.
+    /// 0 = no successful test yet. /healthz consults this to fire
+    /// 503 when the last success is more than `3 × interval`
+    /// ago — a frozen self-test task (hung tokio, GC pause, etc.)
+    /// is operationally equivalent to a failed test.
+    pub last_periodic_self_test_unix_seconds: AtomicU64,
+    /// Cumulative periodic self-test cycles attempted.
+    pub periodic_self_test_attempts_total: AtomicU64,
+    /// Cumulative periodic self-test cycles that returned `Err`.
+    /// Operators alert on `failed > 0` for the strongest "crypto
+    /// stack went bad mid-flight" signal.
+    pub periodic_self_test_failed_total: AtomicU64,
+    /// Configured periodic self-test interval (seconds). 0 = no
+    /// periodic test wired (the `last_periodic_*` gauges stay at
+    /// their init values; /healthz ignores the staleness rule).
+    /// Set ONCE at startup by `main.rs::run`; /healthz reads it
+    /// to apply the "stale = unhealthy" rule.
+    pub periodic_self_test_interval_secs: AtomicU64,
     /// Upstream dial requests blocked by the outbound destination
     /// filter. Includes SSRF-style attempts (`169.254.169.254`,
     /// RFC 1918, loopback, IPv6 ULA / mapped-v4 bypass) and
@@ -406,6 +436,15 @@ impl Default for ServerMetrics {
             user_quarantine_rejected: AtomicU64::new(0),
             user_quota_admission_rejected: AtomicU64::new(0),
             startup_self_test_passed: AtomicBool::new(false),
+            // Initialize the periodic-self-test gauge to `true` so
+            // /healthz doesn't flip to 503 on operators who never
+            // configured a periodic test. The background task
+            // overwrites this every cycle when configured.
+            last_periodic_self_test_passed: AtomicBool::new(true),
+            last_periodic_self_test_unix_seconds: AtomicU64::new(0),
+            periodic_self_test_attempts_total: AtomicU64::new(0),
+            periodic_self_test_failed_total: AtomicU64::new(0),
+            periodic_self_test_interval_secs: AtomicU64::new(0),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             firewall_reload_attempts: AtomicU64::new(0),
@@ -512,6 +551,18 @@ impl ServerMetrics {
              # HELP proteus_startup_self_test_passed 1 if the loopback self-handshake passed at startup, 0 otherwise.\n\
              # TYPE proteus_startup_self_test_passed gauge\n\
              proteus_startup_self_test_passed {}\n\
+             # HELP proteus_last_periodic_self_test_passed 1 if the most recent BACKGROUND self-test cycle passed, 0 otherwise. /healthz returns 503 when this is 0.\n\
+             # TYPE proteus_last_periodic_self_test_passed gauge\n\
+             proteus_last_periodic_self_test_passed {}\n\
+             # HELP proteus_last_periodic_self_test_unix_seconds Unix timestamp of the last SUCCESSFUL periodic self-test. 0 = none yet.\n\
+             # TYPE proteus_last_periodic_self_test_unix_seconds gauge\n\
+             proteus_last_periodic_self_test_unix_seconds {}\n\
+             # HELP proteus_periodic_self_test_attempts_total Cumulative periodic self-test cycles attempted.\n\
+             # TYPE proteus_periodic_self_test_attempts_total counter\n\
+             proteus_periodic_self_test_attempts_total {}\n\
+             # HELP proteus_periodic_self_test_failed_total Cumulative periodic self-test cycles that returned Err — alert on rate(...) > 0 to spot live crypto-stack degradation.\n\
+             # TYPE proteus_periodic_self_test_failed_total counter\n\
+             proteus_periodic_self_test_failed_total {}\n\
              # HELP proteus_outbound_blocked_total Upstream dials blocked by the outbound destination filter.\n\
              # TYPE proteus_outbound_blocked_total counter\n\
              proteus_outbound_blocked_total {}\n\
@@ -571,6 +622,16 @@ impl ServerMetrics {
             s(&self.user_quarantine_rejected),
             s(&self.user_quota_admission_rejected),
             u64::from(self.startup_self_test_passed.load(Ordering::Relaxed)),
+            u64::from(
+                self.last_periodic_self_test_passed
+                    .load(Ordering::Relaxed),
+            ),
+            self.last_periodic_self_test_unix_seconds
+                .load(Ordering::Relaxed),
+            self.periodic_self_test_attempts_total
+                .load(Ordering::Relaxed),
+            self.periodic_self_test_failed_total
+                .load(Ordering::Relaxed),
             s(&self.outbound_blocked),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),

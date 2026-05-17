@@ -1557,13 +1557,70 @@ pub fn render_full_v10(
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
-        if metrics.alive.load(Ordering::Relaxed) {
-            ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())
+        // /healthz now consults three gates:
+        //   1. `alive` — accept loop bound the listener (set once
+        //      at startup, flipped to false during graceful drain).
+        //   2. `last_periodic_self_test_passed` — most recent
+        //      background self-test outcome (true by default; set
+        //      false by the periodic task on a failed cycle).
+        //   3. Staleness — if the periodic interval is configured
+        //      (>0) AND the last successful test is more than
+        //      3× interval ago, treat as failed even if the gauge
+        //      still says true. Catches a hung self-test task /
+        //      tokio runtime deadlock that prevents the periodic
+        //      task from running at all.
+        //
+        // Operators load-balancing in front of Proteus alert on
+        // a healthz=503 to immediately route around a degraded
+        // instance instead of waiting for real users to hit the
+        // failure.
+        let alive = metrics.alive.load(Ordering::Relaxed);
+        let periodic_passed = metrics
+            .last_periodic_self_test_passed
+            .load(Ordering::Relaxed);
+        let interval_secs = metrics
+            .periodic_self_test_interval_secs
+            .load(Ordering::Relaxed);
+        let stale = if interval_secs > 0 {
+            let last_pass = metrics
+                .last_periodic_self_test_unix_seconds
+                .load(Ordering::Relaxed);
+            if last_pass == 0 {
+                // Never ran successfully yet. NOT stale-failed
+                // immediately — give the periodic task the first
+                // window-length to produce a result. Operators see
+                // the gauge at 0 + alive=true and know the
+                // periodic task is initializing.
+                false
+            } else {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                now.saturating_sub(last_pass) > interval_secs.saturating_mul(3)
+            }
         } else {
+            false
+        };
+        if alive && periodic_passed && !stale {
+            ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())
+        } else if !alive {
             (
                 "HTTP/1.1 503 Service Unavailable\r\n",
                 "text/plain",
                 "dead\n".to_string(),
+            )
+        } else if !periodic_passed {
+            (
+                "HTTP/1.1 503 Service Unavailable\r\n",
+                "text/plain",
+                "self_test_failed\n".to_string(),
+            )
+        } else {
+            (
+                "HTTP/1.1 503 Service Unavailable\r\n",
+                "text/plain",
+                "self_test_stale\n".to_string(),
             )
         }
     } else if matches_path(request_head, "/diagnose") {
@@ -1678,6 +1735,94 @@ mod tests {
         let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
         assert!(status.starts_with("HTTP/1.1 200"));
         assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn healthz_503_when_periodic_self_test_failed() {
+        // alive=true, but the periodic self-test most recently
+        // failed → /healthz 503 with `self_test_failed` body.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(false, Ordering::Relaxed);
+        let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(body, "self_test_failed\n");
+    }
+
+    #[test]
+    fn healthz_503_when_periodic_self_test_stale() {
+        // alive=true, last test passed but it was a LONG time ago
+        // (well past 3× interval) → /healthz 503 with
+        // `self_test_stale` body.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        // Interval = 60s; last success = 2000s ago. 2000 > 180,
+        // so the staleness rule should fire.
+        m.periodic_self_test_interval_secs
+            .store(60, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        m.last_periodic_self_test_unix_seconds
+            .store(now.saturating_sub(2000), Ordering::Relaxed);
+        let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(body, "self_test_stale\n");
+    }
+
+    #[test]
+    fn healthz_200_when_periodic_interval_set_but_no_success_yet() {
+        // Interval > 0 but last_periodic_self_test_unix_seconds=0
+        // (the periodic task hasn't completed its first cycle).
+        // We do NOT immediately 503; give the task the first
+        // window-length to produce a result. Operators see the
+        // gauge at 0 + alive=true and know the periodic task is
+        // initializing.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.periodic_self_test_interval_secs
+            .store(60, Ordering::Relaxed);
+        // last_periodic_self_test_passed defaults to true; OK.
+        let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
+        assert_eq!(status, "HTTP/1.1 200 OK\r\n");
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn healthz_200_when_periodic_test_recent_and_fresh() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        m.periodic_self_test_interval_secs
+            .store(60, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // 10s ago — well within 3×60=180.
+        m.last_periodic_self_test_unix_seconds
+            .store(now.saturating_sub(10), Ordering::Relaxed);
+        let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
+        assert_eq!(status, "HTTP/1.1 200 OK\r\n");
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn healthz_503_when_not_alive_takes_priority_over_self_test() {
+        // alive=false → "dead\n" even if the self-test passed.
+        // alive is the strongest signal.
+        let m = ServerMetrics::default();
+        m.alive.store(false, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        let (status, _ctype, body) = render("GET /healthz HTTP/1.1\r\n\r\n", &m, None);
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(body, "dead\n");
     }
 
     #[test]

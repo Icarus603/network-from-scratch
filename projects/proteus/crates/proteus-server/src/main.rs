@@ -1018,6 +1018,129 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // Periodic self-test (optional). Runs the same loopback
+    // handshake the startup self-test ran, every N seconds. On
+    // failure, flips `last_periodic_self_test_passed = false` so
+    // `/healthz` returns 503 — load balancers route traffic away
+    // from this degraded instance until the test recovers.
+    //
+    // Re-reads keys from disk every cycle: cheap (file I/O) and
+    // ALSO catches a chmod-broken-keys-file mid-run.
+    let periodic_interval_secs = cfg.periodic_self_test_interval_secs.unwrap_or(0);
+    if periodic_interval_secs > 0 {
+        // Publish the configured interval so /healthz can apply
+        // the staleness rule (3× interval = unhealthy).
+        metrics
+            .periodic_self_test_interval_secs
+            .store(periodic_interval_secs, std::sync::atomic::Ordering::Relaxed);
+        // Deadline for each cycle = the interval itself (max
+        // bound; a cycle that takes longer than the interval is
+        // operationally a hang). Cap at 30s for sanity so an
+        // operator who sets a long interval (e.g. 600s) doesn't
+        // wait forever for a failing test to time out.
+        let cycle_deadline = std::time::Duration::from_secs(periodic_interval_secs.min(30));
+        let metrics_for_test = Arc::clone(&metrics);
+        let config_path = config_path.to_path_buf();
+        info!(
+            interval_secs = periodic_interval_secs,
+            cycle_deadline_secs = cycle_deadline.as_secs(),
+            "periodic self-test wired (background cycle + /healthz integration)"
+        );
+        tokio::spawn(async move {
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(periodic_interval_secs));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                interval.tick().await;
+                metrics_for_test
+                    .periodic_self_test_attempts_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Re-load the YAML + keys each cycle. Operators
+                // who hot-edit keys + SIGHUP get the freshest
+                // state; operators who don't pay the disk-I/O
+                // cost (microseconds) every cycle.
+                let fresh_keys = match ServerConfig::load(&config_path).await {
+                    Ok(c) => match load_server_keys(&c) {
+                        Ok(k) => k,
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "periodic self-test: key reload FAILED — \
+                                 flipping /healthz to 503"
+                            );
+                            metrics_for_test
+                                .last_periodic_self_test_passed
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                            metrics_for_test
+                                .periodic_self_test_failed_total
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            continue;
+                        }
+                    },
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            "periodic self-test: config reload FAILED — \
+                             flipping /healthz to 503"
+                        );
+                        metrics_for_test
+                            .last_periodic_self_test_passed
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_test
+                            .periodic_self_test_failed_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        continue;
+                    }
+                };
+                match proteus_server::startup_self_test::run_self_test(fresh_keys, cycle_deadline)
+                    .await
+                {
+                    Ok(outcome) => {
+                        let now = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0);
+                        metrics_for_test
+                            .last_periodic_self_test_passed
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_test
+                            .last_periodic_self_test_unix_seconds
+                            .store(now, std::sync::atomic::Ordering::Relaxed);
+                        // Only INFO-log on transitions or
+                        // unusual durations; otherwise the loop
+                        // is too chatty for journald.
+                        if outcome.total > std::time::Duration::from_millis(100) {
+                            info!(
+                                total_ms = outcome.total.as_millis() as u64,
+                                handshake_ms = outcome.handshake.as_millis() as u64,
+                                roundtrip_ms = outcome.roundtrip.as_millis() as u64,
+                                "periodic self-test passed (note: > 100ms — investigate)"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        metrics_for_test
+                            .last_periodic_self_test_passed
+                            .store(false, std::sync::atomic::Ordering::Relaxed);
+                        metrics_for_test
+                            .periodic_self_test_failed_total
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        error!(
+                            error = %e,
+                            "periodic self-test FAILED — /healthz now returning 503"
+                        );
+                    }
+                }
+            }
+        });
+    } else {
+        info!(
+            "periodic_self_test_interval_secs unset/0 — /healthz returns 200 \
+             based on accept-loop liveness alone. For production, set a value \
+             (e.g. 60) so /healthz reflects live crypto health."
+        );
+    }
+
     // Graceful-shutdown signal handlers.
     let shutdown = {
         let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())

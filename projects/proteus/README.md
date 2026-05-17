@@ -735,6 +735,59 @@ startup log as a `handshake_ms` jump even when the handshake
 still succeeds. Operators paying attention to startup timings
 notice these BEFORE they impact real users.
 
+### Periodic self-test — /healthz reflects LIVE crypto health
+
+The startup self-test runs ONCE and never again. What about
+regressions that develop AFTER the binary starts? Disk fills up
+→ RNG entropy reads start failing intermittently. A long-running
+process accumulates state that degrades. Operator's clock
+drifts past the replay window. `/healthz` today returns 200
+based on `alive` (set once at startup) — even if the binary is
+deadlocked, OOM'd, or has a frozen accept loop, `/healthz`
+still says 200, so load balancers keep routing real traffic to
+a dying server.
+
+```yaml
+periodic_self_test_interval_secs: 60   # 0 = disabled (default)
+```
+
+A background tokio task runs the same loopback handshake every
+N seconds against freshly-loaded keys. On failure:
+
+1. `last_periodic_self_test_passed` gauge flips to 0.
+2. `/healthz` immediately returns **503 `self_test_failed`** —
+   load balancers route traffic away from this instance.
+3. `proteus_periodic_self_test_failed_total` increments —
+   alert on `rate(...) > 0`.
+
+Plus a staleness rule: if the last successful test was more
+than `3 × interval_secs` ago, `/healthz` returns
+**503 `self_test_stale`**. This catches a hung self-test task
+(tokio deadlock, GC pause, OOM-killed thread) where the gauge
+is technically still `true` from the last success but the
+binary has stopped running the cycle.
+
+Re-loads keys from disk every cycle: cheap (file I/O,
+microseconds) and ALSO catches a `chmod 000` on the key file
+mid-run.
+
+Operator-visible Prometheus surface:
+
+```
+proteus_last_periodic_self_test_passed              # gauge — most recent outcome
+proteus_last_periodic_self_test_unix_seconds        # gauge — last success time
+proteus_periodic_self_test_attempts_total           # counter — cycles run
+proteus_periodic_self_test_failed_total             # counter — cycles that failed
+```
+
+Recommended production values:
+- `periodic_self_test_interval_secs: 60` — 1-minute cadence.
+  Operators get the LB stale-rule fire after 3 minutes
+  (180s = 3 × 60s) — fast enough to limit user-visible damage,
+  slow enough not to thrash on transient blips.
+- For low-traffic personal VPNs, `300` (5 min) is fine; the
+  staleness window then is 15 min.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

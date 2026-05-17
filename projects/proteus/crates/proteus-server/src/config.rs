@@ -374,6 +374,26 @@ pub struct ServerConfig {
     #[serde(default)]
     pub startup_self_test_timeout_secs: Option<u64>,
 
+    /// Periodic self-test interval in seconds. The binary runs
+    /// the same loopback handshake every N seconds in a
+    /// background task. On failure, `/healthz` immediately flips
+    /// to 503 so load balancers route traffic away from this
+    /// (degraded) instance.
+    ///
+    /// Catches mid-flight crypto-stack degradation: disk full →
+    /// AEAD entropy reads failing, accept-loop deadlock, GC
+    /// pause that hangs the runtime, clock drift past the replay
+    /// window. Without this, /healthz is set-once-at-startup and
+    /// returns 200 even if the binary is silently broken.
+    ///
+    /// 0 (default) = periodic self-test DISABLED (back-compat for
+    /// existing deployments). Recommended production value:
+    /// 30-300 seconds. The /healthz stale-rule fires when the
+    /// last success was more than `3 × interval` ago, so a 60s
+    /// interval gives the LB ~3min to route around a hung node.
+    #[serde(default)]
+    pub periodic_self_test_interval_secs: Option<u64>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -1215,6 +1235,35 @@ startup_self_test_timeout_secs: 0\n\
 ";
         let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(cfg.startup_self_test_timeout_secs, Some(0));
+    }
+
+    #[test]
+    fn periodic_self_test_interval_parses_when_supplied() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+periodic_self_test_interval_secs: 60\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.periodic_self_test_interval_secs, Some(60));
+    }
+
+    #[test]
+    fn periodic_self_test_interval_defaults_to_none() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.periodic_self_test_interval_secs, None);
     }
 
     #[test]
