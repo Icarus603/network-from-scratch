@@ -128,6 +128,24 @@ server_endpoint: "vps.example.com:8443"
 # Local SOCKS5 inbound. Point your browser / curl / sing-box at this.
 socks_listen: "127.0.0.1:1080"
 
+# Opt-in admin / observability endpoint. When set, exposes:
+#   GET /healthz     — 200 once SOCKS5 has bound; 503 before.
+#   GET /status      — text snapshot (CarrierHealth + EndpointPool state).
+#   GET /status.json — JSON snapshot (line-delimited).
+#
+# Operator workflow: `proteus-client status` (queries /status by
+# default). Mirrors what `proteus-server admin status` does for the
+# server side — answers "is β suppressed right now? which VPS am I
+# dialing?" without grepping journalctl.
+#
+# *** NO AUTHENTICATION. Bind loopback only. ***
+# Non-loopback binds emit a startup `warn!` and `proteus-client
+# validate` flags them with WARN — they're allowed for trusted-LAN
+# deploys but not recommended.
+#
+# Default: unset = admin endpoint disabled, no extra port bound.
+# admin_listen: "127.0.0.1:9091"
+
 # Your user ID — must match an entry in the server's `client_allowlist`.
 user_id: "alice001"
 

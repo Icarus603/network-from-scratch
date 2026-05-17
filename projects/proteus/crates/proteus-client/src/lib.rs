@@ -6,6 +6,7 @@
 //! mod socks;` internally — both compile to the same module
 //! instances thanks to Cargo's bin+lib coexistence.
 
+pub mod admin;
 pub mod bootstrap;
 pub mod carrier_health;
 pub mod config;

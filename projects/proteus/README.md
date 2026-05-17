@@ -198,6 +198,35 @@ proteus-client run --config ~/.proteus.yaml
 curl --socks5 127.0.0.1:1080 https://www.example.com/
 ```
 
+### Client observability (`proteus-client status`)
+
+Set `admin_listen: "127.0.0.1:9091"` in `client.yaml` to enable an
+opt-in loopback HTTP surface mirroring what `proteus-server admin
+status` provides for the server side:
+
+```bash
+# In a running terminal (with admin_listen set):
+proteus-client status              # human-readable text
+proteus-client status --format json # parseable JSON
+
+# Or curl directly:
+curl -s http://127.0.0.1:9091/status
+curl -s http://127.0.0.1:9091/status.json | jq .
+curl -s http://127.0.0.1:9091/healthz   # 200 alive / 503 starting
+```
+
+Surfaces:
+
+- **CarrierHealth (β)**: configured? healthy / SUPPRESSED?
+  seconds remaining in the back-off window? current failure streak?
+- **EndpointPool (multi-VPS)**: per-entry health — addr, suppressed?,
+  failure streak. Operator sees "which VPS am I dialing right now"
+  without grepping logs.
+
+No authentication on this endpoint — bind loopback only.
+`proteus-client validate` emits a WARN when `admin_listen` is bound
+to a non-loopback interface.
+
 ---
 
 ## Layout

@@ -231,6 +231,41 @@ pub async fn run(path: &Path) -> PreflightReport {
         ));
     }
 
+    // admin_listen is operator-opt-in; validate the format and warn
+    // when a non-loopback bind is configured (matches the runtime
+    // warn! line so operators see the same caution at preflight time).
+    if let Some(admin_addr) = cfg.admin_listen.as_deref() {
+        match parse_host_port(admin_addr) {
+            Some((host, _port)) => {
+                // Cheap textual loopback check: covers IPv4 127.x.x.x
+                // (the conventional `127.0.0.1` and oddballs like
+                // `127.0.0.99` that bind to loopback), IPv6 `::1`, and
+                // the literal `localhost` (system resolver maps to
+                // loopback on every sensible system). Wildcard binds
+                // (`0.0.0.0`, `::`, empty) are flagged non-loopback.
+                let loopback_ip = host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback());
+                let is_loopback = loopback_ip || host.eq_ignore_ascii_case("localhost");
+                if is_loopback {
+                    r.push_pass(format!("admin_listen = {admin_addr} (loopback, no auth)"));
+                } else {
+                    r.push_warn(format!(
+                        "admin_listen = {admin_addr} is NON-loopback. The endpoint has no \
+                         authentication; bind 127.0.0.1 / [::1] unless you have a specific \
+                         operational reason. Anyone who can reach this address can read your \
+                         in-process CarrierHealth + EndpointPool state."
+                    ));
+                }
+            }
+            None => {
+                r.push_fail(format!(
+                    "admin_listen does not parse as host:port: {admin_addr:?}"
+                ));
+            }
+        }
+    }
+
     if cfg.user_id.is_empty() {
         r.push_fail("user_id is empty");
     } else if cfg.user_id.len() > 8 {

@@ -184,6 +184,26 @@ pub struct ClientConfig {
     /// ```
     #[serde(default)]
     pub bootstrap_dns: Option<BootstrapDnsCfg>,
+    /// Opt-in loopback admin endpoint. When set (typical:
+    /// `admin_listen: "127.0.0.1:9091"`), the client exposes:
+    ///
+    /// - `GET /healthz`     — 200 once SOCKS5 has bound; 503 before.
+    /// - `GET /status`      — text snapshot (CarrierHealth +
+    ///   EndpointPool state).
+    /// - `GET /status.json` — JSON snapshot, line-delimited.
+    ///
+    /// **No authentication.** Always bind loopback (`127.0.0.1:N` /
+    /// `[::1]:N`); on a personal-VPN client deployment, anyone who
+    /// can reach `127.0.0.1` is already running as the same user.
+    /// Binding non-loopback emits a startup `warn!` but does not
+    /// refuse — operators occasionally want to expose the surface
+    /// for an over-SSH `curl` from another host on a trusted LAN.
+    ///
+    /// Default: `None` — admin endpoint disabled, no extra port
+    /// bound. The `proteus-client status` subcommand only works
+    /// when this is set.
+    #[serde(default)]
+    pub admin_listen: Option<String>,
 }
 
 /// Bootstrap DNS resolution policy. See [`ClientConfig::bootstrap_dns`].

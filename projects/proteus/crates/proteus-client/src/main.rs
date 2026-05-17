@@ -22,10 +22,12 @@ use tracing_subscriber::EnvFilter;
 
 mod keygen;
 
+use proteus_client::admin::{self, AliveFlag};
 use proteus_client::carrier_health::CarrierHealth;
 use proteus_client::config::ClientConfig;
 use proteus_client::endpoint_pool::EndpointPool;
 use proteus_client::socks;
+use std::sync::atomic::AtomicBool;
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Proteus α-profile client")]
@@ -55,6 +57,24 @@ enum Cmd {
         /// server-side `proteus-server validate <path>`.
         path: PathBuf,
     },
+    /// Query a running `proteus-client`'s admin endpoint for the
+    /// in-process health snapshot (CarrierHealth + EndpointPool
+    /// state). Requires the client to have been started with
+    /// `admin_listen:` set in `client.yaml`.
+    ///
+    /// Mirrors the server-side `proteus-server admin status`
+    /// workflow — operator answers "is my client actually working?"
+    /// without grepping journalctl for transition logs.
+    Status {
+        /// Admin endpoint URL. Default points at the recommended
+        /// loopback bind. Format: `http://HOST:PORT`. The client
+        /// will append `/status` (text) or `/status.json` (JSON).
+        #[arg(long, default_value = "http://127.0.0.1:9091")]
+        url: String,
+        /// Output format: `text` (default) or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -73,8 +93,91 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let code = proteus_client::validate::cli_run(&path).await?;
             std::process::exit(code);
         }
+        Cmd::Status { url, format } => status_cmd(&url, &format).await?,
     }
     Ok(())
+}
+
+/// `proteus-client status` — hit a running client's admin endpoint
+/// and print the snapshot. Uses a hand-rolled HTTP/1.1 client (no
+/// reqwest pull-in for one GET) — keeps the binary's dep surface
+/// tight.
+async fn status_cmd(url: &str, format: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let path = match format {
+        "text" | "human" => "/status",
+        "json" => "/status.json",
+        other => {
+            return Err(format!("unknown --format {other:?} (expected 'text' or 'json')").into());
+        }
+    };
+    let (host, port, base_path) = parse_http_url(url)?;
+    let request_path = if base_path == "/" {
+        path.to_string()
+    } else {
+        // Compose; an operator who wrote `http://host:port/proxy` gets
+        // `/proxy/status` etc. Unusual but harmless to support.
+        format!("{base_path}{path}")
+    };
+    let req = format!(
+        "GET {request_path} HTTP/1.1\r\n\
+         Host: {host}:{port}\r\n\
+         User-Agent: proteus-client-status/1\r\n\
+         Accept: */*\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await?;
+    let mut buf = Vec::with_capacity(4096);
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
+    // Split off the headers; print only the body so a `--format json`
+    // call yields parseable JSON straight to stdout.
+    let s = std::str::from_utf8(&buf).map_err(|e| format!("non-UTF8 response: {e}"))?;
+    let (status_line, body) = split_http_response(s)?;
+    if !status_line.starts_with("HTTP/1.1 200") {
+        return Err(format!("admin endpoint returned: {status_line}").into());
+    }
+    // Body already ends with newline from the server side; don't add another.
+    print!("{body}");
+    Ok(())
+}
+
+/// Parse `http://host:port` or `http://host:port/path`. We only
+/// accept HTTP (not HTTPS) — the admin endpoint is loopback-only.
+/// Returns `(host, port, path)`; `path` defaults to `"/"`.
+fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
+    let rest = url
+        .strip_prefix("http://")
+        .ok_or_else(|| format!("only http:// URLs supported (got {url:?})"))?;
+    let (authority, path) = match rest.find('/') {
+        Some(ix) => (&rest[..ix], rest[ix..].to_string()),
+        None => (rest, "/".to_string()),
+    };
+    let (host, port) = match authority.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|e| format!("bad port in {url:?}: {e}"))?,
+        ),
+        None => {
+            return Err(format!(
+                "URL must include explicit port (got {url:?}); admin endpoint requires `host:port`"
+            ));
+        }
+    };
+    Ok((host, port, path))
+}
+
+/// Split a complete HTTP/1.1 response on `\r\n\r\n` and return
+/// `(first status line, body)`. The status line is the first line of
+/// the response (everything up to the first `\r\n`).
+fn split_http_response(s: &str) -> Result<(&str, &str), String> {
+    let break_at = s
+        .find("\r\n\r\n")
+        .ok_or_else(|| "no header/body separator in HTTP response".to_string())?;
+    let status_end = s
+        .find("\r\n")
+        .ok_or_else(|| "no status line in HTTP response".to_string())?;
+    Ok((&s[..status_end], &s[break_at + 4..]))
 }
 
 async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -92,6 +195,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // Lives across CONNECTs so back-off survives the SOCKS5
     // request boundary — see `carrier_health.rs` for the policy.
     let health = Arc::new(CarrierHealth::new());
+
+    // Process-wide alive flag. Flipped to true once the SOCKS5
+    // listener has bound (above). The admin endpoint reads this for
+    // /healthz. We flip BEFORE spawning the admin task so the
+    // first scrape after admin-listener bind sees alive=true.
+    let alive: AliveFlag = Arc::new(AtomicBool::new(true));
 
     // Multi-VPS HA endpoint pool (operator-opt-in via
     // `server_endpoints: [...]` in client.yaml). When unset or
@@ -111,6 +220,30 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
         pool
     };
+
+    // Admin HTTP endpoint (operator-opt-in via `admin_listen:` in
+    // client.yaml). When set, spawn a loopback HTTP server exposing
+    // /healthz + /status + /status.json. Disabled by default so
+    // operators who don't want the extra port don't pay for it.
+    if let Some(admin_addr) = cfg.admin_listen.clone() {
+        let alive_for_admin = Arc::clone(&alive);
+        let health_for_admin = Arc::clone(&health);
+        let pool_for_admin = endpoint_pool.clone();
+        let beta_configured = cfg.server_endpoint_beta.is_some();
+        tokio::spawn(async move {
+            if let Err(e) = admin::serve(
+                admin_addr,
+                alive_for_admin,
+                Some(health_for_admin),
+                beta_configured,
+                pool_for_admin,
+            )
+            .await
+            {
+                warn!(error = %e, "client admin endpoint exited");
+            }
+        });
+    }
 
     // ----- Concurrency cap -----
     //
@@ -271,4 +404,59 @@ async fn socks5_general_failure(mut sock: tokio::net::TcpStream) {
     let reply: [u8; 10] = [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
     let _ = sock.write_all(&reply).await;
     let _ = sock.shutdown().await;
+}
+
+#[cfg(test)]
+mod cli_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn parse_http_url_accepts_well_formed_loopback() {
+        let (h, p, path) = parse_http_url("http://127.0.0.1:9091").unwrap();
+        assert_eq!(h, "127.0.0.1");
+        assert_eq!(p, 9091);
+        assert_eq!(path, "/");
+    }
+
+    #[test]
+    fn parse_http_url_extracts_path_when_present() {
+        let (h, p, path) = parse_http_url("http://localhost:9091/sub").unwrap();
+        assert_eq!(h, "localhost");
+        assert_eq!(p, 9091);
+        assert_eq!(path, "/sub");
+    }
+
+    #[test]
+    fn parse_http_url_rejects_https() {
+        let err = parse_http_url("https://example.com:443").unwrap_err();
+        assert!(err.contains("http://"), "should reject https: {err}");
+    }
+
+    #[test]
+    fn parse_http_url_rejects_missing_port() {
+        let err = parse_http_url("http://example.com/path").unwrap_err();
+        assert!(err.contains("port"), "should reject missing port: {err}");
+    }
+
+    #[test]
+    fn split_http_response_returns_status_and_body() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let (status, body) = split_http_response(raw).unwrap();
+        assert_eq!(status, "HTTP/1.1 200 OK");
+        assert_eq!(body, "hello");
+    }
+
+    #[test]
+    fn split_http_response_handles_empty_body() {
+        let raw = "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n";
+        let (status, body) = split_http_response(raw).unwrap();
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable");
+        assert_eq!(body, "");
+    }
+
+    #[test]
+    fn split_http_response_rejects_truncated_response() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n";
+        assert!(split_http_response(raw).is_err());
+    }
 }
