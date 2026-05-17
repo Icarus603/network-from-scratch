@@ -77,6 +77,58 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — validate-time operator-trap detection (iter 46-57)
+
+Eleven new preflight checks in `proteus-server validate` /
+`proteus-client validate`, every one catching a class of
+silent-failure-at-deploy-time that was previously missed:
+
+- **Server TLS cert-expiry** — EXPIRED leaf cert → FAIL,
+  <14 days → WARN, otherwise PASS (matches the runtime
+  `ProteusTlsCertExpired` / `ProteusTlsCertExpiringSoon`
+  alerts; previously these only fired AFTER deploy).
+- **Client trusted_ca cert-expiry** — same three-state policy
+  for `tls.trusted_ca` pinning bundles. Multi-CA bundles
+  report the EARLIEST notAfter (any expiring entry is the
+  actionable signal).
+- **β cert-expiry on split α/β paths** — `beta_cert_chain` +
+  `beta_private_key` get expiry coverage independent of α
+  when explicitly split.
+- **All-zero key/pubkey sentinel** — `keys.*` and
+  `client_allowlist[*].ed25519_pk` files with uniformly-zero
+  content → FAIL (catastrophic security failure: secret keys
+  become trivially-forgeable identities; allowlist pubkeys
+  auth-pass any client presenting the zero key).
+- **access_log + 3 other runtime-written paths probed for
+  write permission** — operator's `/var/log/proteus` exists
+  but is owned by root:root mode 0700 while proteus runs as
+  proteus:proteus → previously validate said green, binary
+  exited at startup. Now FAIL with `chown -R` recovery hint.
+  Covers `access_log`, `restart_state_file`,
+  `user_quotas.persistence_path`,
+  `user_quarantine.persistence_path`.
+- **knock_psk_file parse check** — runs the same
+  `knock_keygen::load()` the binary uses at startup, surfaces
+  the same diagnostic at preflight (was fatal-at-startup).
+- **Secret-key file mode warn** — Unix mode bits on `*_sk`
+  files; group-or-other-readable → WARN with `chmod 0600`
+  hint (host-preflight is the FAIL gate for the same class;
+  validate is early-warning).
+- **Pool ↔ tls.server_name SNI consistency** — pool entries
+  with hostnames diverging from `tls.server_name` → WARN
+  (cert verification would fail at dispatch with no obvious
+  cause). IP literals are correctly skipped (operator
+  deliberately decoupled routing-address from cert-identity).
+- **user_id whitespace + non-ASCII** — YAML-quoted
+  `user_id: "alice "` becomes byte-string "alice " (6 bytes);
+  server allowlist's `user_id: alice` (5 bytes) never matches
+  → FAIL with unquote-or-strip hint. Non-ASCII → WARN
+  (paste-not-retype reminder).
+- **Allowlist duplicate user_id** — `client_allowlist`
+  with two `alice` entries → FAIL with both indices. The
+  runtime `.find()` returns the FIRST match; the second
+  entry is dead code (key-rotation gone backwards trap).
+
 ### Added — stability hardening
 
 - `panic = "unwind"` workspace release profile (replaces
