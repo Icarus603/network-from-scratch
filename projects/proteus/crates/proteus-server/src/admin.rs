@@ -120,6 +120,18 @@ pub struct MetricsSnapshot {
     pub config_cover_endpoint_pool_size: u64,
     /// `proteus_config_client_allowlist_size` (gauge).
     pub config_client_allowlist_size: u64,
+    /// **Process-lifecycle gauges.** Sourced from
+    /// `proteus_process_start_unix_seconds` (Unix-seconds wall-
+    /// clock start) and `proteus_process_uptime_seconds`
+    /// (monotonic uptime). `None` when the metrics endpoint
+    /// doesn't expose process-lifecycle (older server / test rig
+    /// without process_info wired).
+    pub process_start_unix_seconds: Option<u64>,
+    pub process_uptime_seconds: Option<u64>,
+    /// **Build metadata** parsed from `proteus_build_info{...}`.
+    /// `(version, rustc, target)` triple. Empty Strings preserve
+    /// what's on the wire; `None` means the gauge wasn't present.
+    pub process_build_info: Option<BuildInfo>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -152,6 +164,16 @@ pub struct AutoDenyEntry {
     pub prefix: String,
     /// Seconds remaining before the entry auto-expires.
     pub expires_in_secs: u64,
+}
+
+/// Build metadata parsed from `proteus_build_info{version="…",
+/// rustc="…",target="…"} 1`. Empty fields are preserved (the
+/// emitter may legitimately emit `""` for fields it doesn't know).
+#[derive(Debug, Clone, Default)]
+pub struct BuildInfo {
+    pub version: String,
+    pub rustc: String,
+    pub target: String,
 }
 
 /// Output format for `admin status` / `diff` / `watch`. The
@@ -219,6 +241,8 @@ impl MetricsSnapshot {
                     if present {
                         s.config_active_sections.insert(section);
                     }
+                } else if let Some(bi) = parse_build_info(name, value) {
+                    s.process_build_info = Some(bi);
                 }
                 continue;
             }
@@ -299,6 +323,12 @@ impl MetricsSnapshot {
                 }
                 "proteus_config_client_allowlist_size" => {
                     s.config_client_allowlist_size = v;
+                }
+                "proteus_process_start_unix_seconds" => {
+                    s.process_start_unix_seconds = Some(v);
+                }
+                "proteus_process_uptime_seconds" => {
+                    s.process_uptime_seconds = Some(v);
                 }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
@@ -536,6 +566,33 @@ impl MetricsSnapshot {
             self.config_client_allowlist_size,
             false,
         );
+        // Process-lifecycle: Option<u64> emitted as JSON null when
+        // the metrics endpoint didn't expose them (old server / non-
+        // v5 path). Scripts use `(.process_uptime_seconds // 0)` to
+        // gate.
+        s.push_str(r#","process_start_unix_seconds":"#);
+        match self.process_start_unix_seconds {
+            Some(v) => s.push_str(&v.to_string()),
+            None => s.push_str("null"),
+        }
+        s.push_str(r#","process_uptime_seconds":"#);
+        match self.process_uptime_seconds {
+            Some(v) => s.push_str(&v.to_string()),
+            None => s.push_str("null"),
+        }
+        s.push_str(r#","process_build_info":"#);
+        match &self.process_build_info {
+            Some(bi) => {
+                s.push_str(r#"{"version":""#);
+                json_escape_str(&bi.version, &mut s);
+                s.push_str(r#"","rustc":""#);
+                json_escape_str(&bi.rustc, &mut s);
+                s.push_str(r#"","target":""#);
+                json_escape_str(&bi.target, &mut s);
+                s.push_str(r#""}"#);
+            }
+            None => s.push_str("null"),
+        }
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -815,6 +872,51 @@ impl fmt::Display for MetricsSnapshot {
             writeln!(f)?;
         }
 
+        // Process-lifecycle block. Quiet by default (older server
+        // scrapes); when ANY of the three fields is present, render
+        // the whole block. Uptime is computed at scrape time on the
+        // server so the rendered value is from that moment — we
+        // don't subtract again here.
+        if self.process_start_unix_seconds.is_some()
+            || self.process_uptime_seconds.is_some()
+            || self.process_build_info.is_some()
+        {
+            writeln!(f, " Process")?;
+            if let Some(ts) = self.process_start_unix_seconds {
+                row!("start_unix_seconds", ts)?;
+            }
+            if let Some(up) = self.process_uptime_seconds {
+                let h = up / 3600;
+                let m = (up % 3600) / 60;
+                let sec = up % 60;
+                row!("uptime", format!("{up}s ({h}h {m}m {sec}s)"))?;
+            }
+            if let Some(bi) = &self.process_build_info {
+                row!(
+                    "build",
+                    format!(
+                        "version={} rustc={} target={}",
+                        if bi.version.is_empty() {
+                            "(unset)"
+                        } else {
+                            &bi.version
+                        },
+                        if bi.rustc.is_empty() {
+                            "(unset)"
+                        } else {
+                            &bi.rustc
+                        },
+                        if bi.target.is_empty() {
+                            "(unset)"
+                        } else {
+                            &bi.target
+                        }
+                    )
+                )?;
+            }
+            writeln!(f)?;
+        }
+
         writeln!(f, " Session teardown causes")?;
         row!("session_idle_reaped", self.session_idle_reaped)?;
         row!(
@@ -939,6 +1041,33 @@ fn parse_auto_deny_remaining(name: &str, value: &str) -> Option<AutoDenyEntry> {
         prefix,
         expires_in_secs: secs,
     })
+}
+
+/// Parse one `proteus_build_info{version="…",rustc="…",target="…"} 1`
+/// line. Returns `None` for non-matching names or malformed labels.
+/// Tolerates missing labels (sets the corresponding field to "") so
+/// a server that only knows `version` still produces a usable
+/// snapshot.
+fn parse_build_info(name: &str, _value: &str) -> Option<BuildInfo> {
+    let metric_prefix = "proteus_build_info{";
+    let rest = name.strip_prefix(metric_prefix)?;
+    let rest = rest.strip_suffix('}')?;
+    let mut bi = BuildInfo::default();
+    // Labels are `key="value"` pairs separated by `,`. Split on `,`
+    // OUTSIDE quotes; emitter output is well-formed so simple split
+    // suffices.
+    for pair in rest.split(',') {
+        let (k, v) = pair.split_once('=')?;
+        let k = k.trim();
+        let v = v.trim().strip_prefix('"')?.strip_suffix('"')?;
+        match k {
+            "version" => bi.version = v.to_string(),
+            "rustc" => bi.rustc = v.to_string(),
+            "target" => bi.target = v.to_string(),
+            _ => {} // ignore unknown labels for forward compat
+        }
+    }
+    Some(bi)
 }
 
 /// Parse one `proteus_config_section_active{section="..."} 0|1` line
@@ -2523,6 +2652,112 @@ proteus_rate_limit_reload_succeeded_total 3\n";
         assert!(t.contains("3 (3 ok)"), "{t}");
         // user_rate_limit had zero attempts → not rendered.
         assert!(!t.contains("user_rate_limit"), "{t}");
+    }
+
+    // ----- Process-lifecycle parse / render tests -----
+
+    #[test]
+    fn snapshot_parses_process_lifecycle_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_process_start_unix_seconds 1747526400\n\
+proteus_process_uptime_seconds 3725\n\
+proteus_build_info{version=\"0.1.0\",rustc=\"1.85.0\",target=\"aarch64-apple-darwin\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.process_start_unix_seconds, Some(1_747_526_400));
+        assert_eq!(s.process_uptime_seconds, Some(3725));
+        let bi = s.process_build_info.unwrap();
+        assert_eq!(bi.version, "0.1.0");
+        assert_eq!(bi.rustc, "1.85.0");
+        assert_eq!(bi.target, "aarch64-apple-darwin");
+    }
+
+    #[test]
+    fn snapshot_process_lifecycle_defaults_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert!(s.process_start_unix_seconds.is_none());
+        assert!(s.process_uptime_seconds.is_none());
+        assert!(s.process_build_info.is_none());
+    }
+
+    #[test]
+    fn snapshot_build_info_tolerates_partial_labels() {
+        let body = "proteus_up 1\nproteus_build_info{version=\"0.1.0\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let bi = s.process_build_info.unwrap();
+        assert_eq!(bi.version, "0.1.0");
+        assert!(bi.rustc.is_empty());
+        assert!(bi.target.is_empty());
+    }
+
+    #[test]
+    fn snapshot_json_emits_process_lifecycle_null_when_absent() {
+        let s = MetricsSnapshot::parse("proteus_up 1\n");
+        let j = s.to_json();
+        assert!(j.contains(r#""process_start_unix_seconds":null"#), "{j}");
+        assert!(j.contains(r#""process_uptime_seconds":null"#), "{j}");
+        assert!(j.contains(r#""process_build_info":null"#), "{j}");
+    }
+
+    #[test]
+    fn snapshot_json_emits_process_lifecycle_values_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_process_start_unix_seconds 1747526400\n\
+proteus_process_uptime_seconds 100\n\
+proteus_build_info{version=\"0.2.0\",rustc=\"\",target=\"\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(
+            j.contains(r#""process_start_unix_seconds":1747526400"#),
+            "{j}"
+        );
+        assert!(j.contains(r#""process_uptime_seconds":100"#), "{j}");
+        assert!(
+            j.contains(r#""process_build_info":{"version":"0.2.0","rustc":"","target":""}"#),
+            "{j}"
+        );
+    }
+
+    #[test]
+    fn snapshot_text_omits_process_block_when_absent() {
+        let s = MetricsSnapshot::parse("proteus_up 1\n");
+        let t = format!("{s}");
+        assert!(!t.contains(" Process"), "{t}");
+    }
+
+    #[test]
+    fn snapshot_text_renders_process_block_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_process_start_unix_seconds 1747526400\n\
+proteus_process_uptime_seconds 3725\n\
+proteus_build_info{version=\"0.1.0\",rustc=\"1.85.0\",target=\"x86_64-unknown-linux-gnu\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains(" Process"), "{t}");
+        assert!(t.contains("start_unix_seconds"), "{t}");
+        assert!(t.contains("1747526400"), "{t}");
+        // Humanized uptime: 3725s = 1h 2m 5s
+        assert!(t.contains("3725s"), "{t}");
+        assert!(t.contains("1h"), "{t}");
+        // Build line shows version + rustc + target.
+        assert!(t.contains("version=0.1.0"), "{t}");
+        assert!(t.contains("rustc=1.85.0"), "{t}");
+        assert!(t.contains("target=x86_64-unknown-linux-gnu"), "{t}");
+    }
+
+    #[test]
+    fn snapshot_text_build_block_shows_unset_for_empty_fields() {
+        let body = "\
+proteus_up 1\n\
+proteus_build_info{version=\"0.1.0\",rustc=\"\",target=\"\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains("version=0.1.0"), "{t}");
+        assert!(t.contains("rustc=(unset)"), "{t}");
+        assert!(t.contains("target=(unset)"), "{t}");
     }
 
     // ----- Config-presence parse / render tests -----

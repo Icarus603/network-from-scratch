@@ -599,8 +599,25 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // gauge in cases where the underlying runtime didn't change,
         // which is confusing rather than helpful.
         let config_presence_block = Some(std::sync::Arc::new(cfg.presence().prometheus()));
+        // Process-lifecycle metrics — start time captured here so
+        // the gauge reflects "when the metrics endpoint came up"
+        // (≈ process start, within a few ms of binary main()). The
+        // version comes from CARGO_PKG_VERSION baked at compile
+        // time. `rustc` and `target` are best-effort: passed as
+        // empty strings unless the operator wired a build script;
+        // the rendered labels are still valid Prometheus (empty
+        // label values are spec-allowed) and operators querying
+        // `proteus_build_info{version="0.1.0"}` get the answer
+        // they want even without the other fields.
+        let process_info = Some(std::sync::Arc::new(
+            proteus_transport_alpha::process_info::ProcessInfo::capture(
+                env!("CARGO_PKG_VERSION"),
+                option_env!("RUSTC_VERSION").unwrap_or(""),
+                option_env!("TARGET").unwrap_or(""),
+            ),
+        ));
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v4(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v5(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -608,6 +625,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 auto_deny,
                 tls_for_metrics,
                 config_presence_block,
+                process_info,
             )
             .await
             {

@@ -285,6 +285,22 @@ section's content but cannot toggle its presence — adding a brand-
 new section requires a restart) so the alert fires only when the
 process restarts with a different config shape than intended.
 
+PromQL example — alert when fleet hasn't picked up the new binary
+version, or when a process restarted unexpectedly recently:
+
+```promql
+# Stragglers from a 0.2.0 rollout.
+proteus_build_info{version!="0.2.0"} == 1
+
+# Recently-restarted processes (likely OOM kill or crash).
+(time() - proteus_process_start_unix_seconds) < 300
+```
+
+The build-info gauge is the Prometheus-canonical "always 1" gauge
+with metadata in labels — same shape as `go_info` etc. `version`,
+`rustc`, and `target` are exposed; absent fields render as `""`
+without breaking parsers.
+
 ### SIGHUP-driven `server_endpoints` hot-reload
 
 Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,

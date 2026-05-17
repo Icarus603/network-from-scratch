@@ -193,12 +193,45 @@ pub async fn serve_with_auth_full_v4(
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
     config_presence: Option<Arc<String>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v5(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        None,
+    )
+    .await
+}
+
+/// v5 of [`serve_with_auth_full`] — adds an optional
+/// `ProcessInfo` so the `/metrics` exposition includes the
+/// process-lifecycle gauges (`proteus_process_start_unix_seconds`,
+/// `proteus_process_uptime_seconds`, `proteus_build_info`).
+/// Operators query `proteus_build_info{version!="X.Y.Z"}` to find
+/// instances that didn't pick up a fleet rollout, and
+/// `(time() - proteus_process_start_unix_seconds) < 60` to detect
+/// processes that just restarted (e.g. after an OOM kill).
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v5(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
     let auto_deny_enabled = auto_deny.is_some();
     let tls_observability = tls_acceptor.is_some();
     let config_presence_enabled = config_presence.is_some();
+    let process_info_enabled = process_info.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -206,6 +239,7 @@ pub async fn serve_with_auth_full_v4(
         auto_deny = auto_deny_enabled,
         tls_observability,
         config_presence = config_presence_enabled,
+        process_info = process_info_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -216,6 +250,7 @@ pub async fn serve_with_auth_full_v4(
         let auto_deny = auto_deny.clone();
         let tls_acceptor = tls_acceptor.clone();
         let config_presence = config_presence.clone();
+        let process_info = process_info.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -224,6 +259,7 @@ pub async fn serve_with_auth_full_v4(
             auto_deny,
             tls_acceptor,
             config_presence,
+            process_info,
         ));
     }
 }
@@ -310,6 +346,32 @@ pub async fn serve_on_listener_full_v4(
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
     config_presence: Option<Arc<String>>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full_v5(
+        listener,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        None,
+    )
+    .await
+}
+
+/// v5 of [`serve_on_listener_full`] — adds the process-lifecycle
+/// block. See [`serve_with_auth_full_v5`] for rationale.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_on_listener_full_v5(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
@@ -318,6 +380,7 @@ pub async fn serve_on_listener_full_v4(
         let auto_deny = auto_deny.clone();
         let tls_acceptor = tls_acceptor.clone();
         let config_presence = config_presence.clone();
+        let process_info = process_info.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -326,10 +389,12 @@ pub async fn serve_on_listener_full_v4(
             auto_deny,
             tls_acceptor,
             config_presence,
+            process_info,
         ));
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_connection(
     mut stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
@@ -338,6 +403,7 @@ async fn handle_connection(
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
     config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -345,7 +411,7 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v4(
+    let (status_line, content_type, body) = render_full_v5(
         head,
         &metrics,
         auth.as_ref(),
@@ -353,6 +419,7 @@ async fn handle_connection(
         auto_deny.as_deref(),
         tls_acceptor.as_ref(),
         config_presence.as_deref().map(String::as_str),
+        process_info.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -466,7 +533,8 @@ pub fn render_full_v3(
 
 /// v4 of [`render_full`] — adds an optional `config_presence` block
 /// emitted verbatim into the `/metrics` body AFTER the existing
-/// extensions. See [`serve_with_auth_full_v4`] for the rationale.
+/// extensions. Back-compat shim — forwards to [`render_full_v5`]
+/// with `process_info = None`.
 #[must_use]
 pub fn render_full_v4(
     request_head: &str,
@@ -476,6 +544,34 @@ pub fn render_full_v4(
     auto_deny: Option<&crate::auto_deny::AutoDenyList>,
     tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
     config_presence: Option<&str>,
+) -> (&'static str, &'static str, String) {
+    render_full_v5(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        None,
+    )
+}
+
+/// v5 of [`render_full`] — adds optional process-lifecycle gauges
+/// (`proteus_process_start_unix_seconds`, `_uptime_seconds`,
+/// `proteus_build_info`). See [`serve_with_auth_full_v5`] for the
+/// rationale.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v5(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -503,6 +599,9 @@ pub fn render_full_v4(
         }
         if let Some(cp) = config_presence {
             body.push_str(cp);
+        }
+        if let Some(pi) = process_info {
+            body.push_str(&pi.prometheus());
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
