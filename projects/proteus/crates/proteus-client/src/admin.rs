@@ -110,12 +110,21 @@ pub struct EndpointPoolView {
     pub entries: Vec<EndpointEntryView>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct EndpointEntryView {
     pub addr: String,
     pub failure_streak: u32,
     pub suppressed: bool,
     pub suppression_secs_remaining: Option<u64>,
+    /// Lifetime attempts against this entry (sourced from
+    /// `EndpointHealth::counters().attempts`). Operators read the
+    /// per-entry success rate as `successes / attempts` and demote
+    /// chronic-flaky entries based on it.
+    pub attempts_total: u64,
+    /// Lifetime successes against this entry.
+    pub successes_total: u64,
+    /// Lifetime failures against this entry.
+    pub failures_total: u64,
 }
 
 impl ClientStatusSnapshot {
@@ -220,11 +229,22 @@ impl ClientStatusSnapshot {
                     } else {
                         None
                     };
+                    // Read the new per-entry cumulative counters.
+                    // Default to zero-valued if the EndpointHealth
+                    // can't be fetched (shouldn't happen — index is
+                    // from diagnostic_snapshot's enumeration).
+                    let counters = p
+                        .endpoint_health(ix)
+                        .map(|h| h.counters())
+                        .unwrap_or_default();
                     EndpointEntryView {
                         addr,
                         failure_streak: streak,
                         suppressed,
                         suppression_secs_remaining: secs,
+                        attempts_total: counters.attempts,
+                        successes_total: counters.successes,
+                        failures_total: counters.failures,
                     }
                 })
                 .collect();
@@ -298,6 +318,11 @@ impl ClientStatusSnapshot {
                         }
                         None => s.push_str("null"),
                     }
+                    let _ = write!(
+                        s,
+                        r#","attempts_total":{},"successes_total":{},"failures_total":{}"#,
+                        e.attempts_total, e.successes_total, e.failures_total
+                    );
                     s.push('}');
                 }
                 s.push(']');
@@ -393,9 +418,12 @@ impl std::fmt::Display for ClientStatusSnapshot {
                     };
                     writeln!(
                         f,
-                        "   [{ix}] {addr}: {state}, streak={streak}",
+                        "   [{ix}] {addr}: {state}, streak={streak}, dials={attempts} ({succ} ok, {fail} failed)",
                         addr = e.addr,
-                        streak = e.failure_streak
+                        streak = e.failure_streak,
+                        attempts = e.attempts_total,
+                        succ = e.successes_total,
+                        fail = e.failures_total,
                     )?;
                 }
             }
@@ -641,12 +669,14 @@ mod tests {
                         failure_streak: 0,
                         suppressed: false,
                         suppression_secs_remaining: None,
+                        ..EndpointEntryView::default()
                     },
                     EndpointEntryView {
                         addr: "backup:8443".into(),
                         failure_streak: 7,
                         suppressed: true,
                         suppression_secs_remaining: Some(120),
+                        ..EndpointEntryView::default()
                     },
                 ],
             }),
@@ -676,6 +706,7 @@ mod tests {
                     failure_streak: 0,
                     suppressed: false,
                     suppression_secs_remaining: None,
+                    ..EndpointEntryView::default()
                 }],
             }),
             ..ClientStatusSnapshot::default()
@@ -729,6 +760,7 @@ mod tests {
                     failure_streak: 2,
                     suppressed: false,
                     suppression_secs_remaining: None,
+                    ..EndpointEntryView::default()
                 }],
             }),
             ..ClientStatusSnapshot::default()
@@ -1002,6 +1034,84 @@ mod tests {
     fn text_renders_concurrency_disabled_note_when_cap_off() {
         let s = format!("{}", empty_snap());
         assert!(s.contains("Concurrency: cap disabled"), "{s}");
+    }
+
+    #[test]
+    fn json_pool_entry_includes_per_endpoint_counters() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![EndpointEntryView {
+                    addr: "vps1:8443".into(),
+                    failure_streak: 0,
+                    suppressed: false,
+                    suppression_secs_remaining: None,
+                    attempts_total: 100,
+                    successes_total: 97,
+                    failures_total: 3,
+                }],
+            }),
+            ..ClientStatusSnapshot::default()
+        };
+        let s = snap.to_json();
+        assert!(
+            s.contains(r#""attempts_total":100"#),
+            "missing per-entry attempts: {s}"
+        );
+        assert!(s.contains(r#""successes_total":97"#), "{s}");
+        assert!(s.contains(r#""failures_total":3"#), "{s}");
+    }
+
+    #[test]
+    fn text_pool_entry_renders_per_endpoint_counters() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![EndpointEntryView {
+                    addr: "vps2:8443".into(),
+                    failure_streak: 5,
+                    suppressed: true,
+                    suppression_secs_remaining: Some(30),
+                    attempts_total: 50,
+                    successes_total: 20,
+                    failures_total: 30,
+                }],
+            }),
+            ..ClientStatusSnapshot::default()
+        };
+        let s = format!("{snap}");
+        assert!(
+            s.contains("dials=50 (20 ok, 30 failed)"),
+            "expected per-entry dial counts in: {s}"
+        );
+    }
+
+    #[test]
+    fn capture_from_pool_includes_counters_after_dispatch_bumps() {
+        // Drive a real pool — bump record_attempt + record_success
+        // through the EndpointHealth API, then capture the snapshot
+        // and assert the per-entry counters propagated. This is the
+        // pure-snapshot version of the e2e test that drives the same
+        // through TCP.
+        let pool = crate::endpoint_pool::EndpointPool::new(vec!["a:1".into(), "b:2".into()])
+            .expect("pool");
+        let h0 = pool.endpoint_health(0).unwrap();
+        let h1 = pool.endpoint_health(1).unwrap();
+        h0.record_attempt();
+        h0.record_attempt();
+        h0.record_success();
+        h0.record_success();
+        h1.record_attempt();
+        h1.record_failure(Instant::now());
+
+        let snap = ClientStatusSnapshot::capture(true, None, false, Some(&pool), Instant::now());
+        let entries = snap.pool.expect("pool").entries;
+        assert_eq!(entries[0].attempts_total, 2);
+        assert_eq!(entries[0].successes_total, 2);
+        assert_eq!(entries[0].failures_total, 0);
+        assert_eq!(entries[1].attempts_total, 1);
+        assert_eq!(entries[1].successes_total, 0);
+        assert_eq!(entries[1].failures_total, 1);
     }
 
     #[test]

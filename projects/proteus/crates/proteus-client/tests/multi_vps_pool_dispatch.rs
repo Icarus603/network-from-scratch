@@ -225,7 +225,13 @@ async fn socks5_round_trip_via_pool(
         .unwrap()
         .unwrap();
     let _ = sock.shutdown().await;
-    server_task.abort();
+    // Wait for the dispatch task to fully complete before returning.
+    // Without this, `record_success` (called AFTER pump returns) may
+    // not have fired by the time the caller inspects pool counters —
+    // a race the per-endpoint counter assertions in
+    // pool_dispatch_* tests expose. We bound the wait to STEP so a
+    // genuine hang (relay deadlock) still surfaces.
+    let _ = timeout(STEP, server_task).await;
     buf
 }
 
@@ -290,6 +296,33 @@ async fn pool_dispatch_falls_to_backup_when_primary_handshake_fails() {
         "backup entry should have zero failure_streak after success; got {backup_streak}",
     );
 
+    // Per-endpoint cumulative counters: primary was attempted (and
+    // failed), backup was attempted (and succeeded). The operator
+    // reads these on /status to demote primary if its success rate
+    // stays low across many CONNECTs.
+    let primary_counters = pool.endpoint_health(0).unwrap().counters();
+    let backup_counters = pool.endpoint_health(1).unwrap().counters();
+    assert!(
+        primary_counters.attempts >= 1,
+        "primary should have at least one attempt: {primary_counters:?}"
+    );
+    assert!(
+        primary_counters.failures >= 1,
+        "primary should have at least one failure: {primary_counters:?}"
+    );
+    assert_eq!(
+        backup_counters.attempts, 1,
+        "backup should have exactly one attempt: {backup_counters:?}"
+    );
+    assert_eq!(
+        backup_counters.successes, 1,
+        "backup should have exactly one success: {backup_counters:?}"
+    );
+    assert_eq!(
+        backup_counters.failures, 0,
+        "backup should have zero failures: {backup_counters:?}"
+    );
+
     let _ = std::fs::remove_dir_all(&keys_dir);
 }
 
@@ -339,6 +372,19 @@ async fn pool_dispatch_uses_primary_when_primary_works() {
     // first time, backup was never attempted.
     assert_eq!(pool.endpoint_health(0).unwrap().failure_streak(), 0);
     assert_eq!(pool.endpoint_health(1).unwrap().failure_streak(), 0);
+
+    // Per-endpoint cumulative counters: primary handled the dial,
+    // backup was never tried — the operator's `/status` shows the
+    // asymmetry that justifies keeping backup as second-choice.
+    let primary_counters = pool.endpoint_health(0).unwrap().counters();
+    let backup_counters = pool.endpoint_health(1).unwrap().counters();
+    assert_eq!(primary_counters.attempts, 1, "{primary_counters:?}");
+    assert_eq!(primary_counters.successes, 1, "{primary_counters:?}");
+    assert_eq!(primary_counters.failures, 0, "{primary_counters:?}");
+    assert_eq!(
+        backup_counters.attempts, 0,
+        "backup must NOT be attempted when primary works: {backup_counters:?}"
+    );
 
     let _ = std::fs::remove_dir_all(&keys_dir);
 }

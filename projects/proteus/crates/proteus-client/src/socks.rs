@@ -315,6 +315,16 @@ async fn dispatch_via_pool(
         }
         any_endpoint_attempted = true;
         let endpoint_health = pool.endpoint_health(entry).unwrap();
+        // Cumulative per-endpoint attempt counter — bumped BEFORE the
+        // dial so a panicking attempt still counts as one try (the
+        // matching outcome counter just won't bump in that case, and
+        // the operator sees `attempts - successes - failures > 0`
+        // as the "something crashed mid-dial" signal). The dispatch
+        // path is what knows the operator's per-VPS routing intent,
+        // so the counter is bumped here rather than inside
+        // EndpointHealth's decide() — keeps the health state machine
+        // a pure policy primitive and the counter pure observability.
+        endpoint_health.record_attempt();
 
         // Per-entry attempt: same β-first → α-fallback as
         // single_endpoint_dispatch, but with endpoint_override.
@@ -371,7 +381,25 @@ async fn dispatch_via_pool(
         // state. Matches `EndpointPool::dispatch_with` fallback.
         tracing::warn!("pool: every entry suppressed; forcing primary probe");
         let primary = pool.diagnostic_snapshot(now)[0].0.clone();
-        attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock).await?;
+        // Forced-probe still counts as an attempt against the
+        // primary's cumulative counter — the operator's view of
+        // "VPS-A handled N CONNECTs" must include the times we
+        // dialed it from desperation, not just the policy-driven
+        // tries above.
+        let primary_health = pool
+            .endpoint_health(0)
+            .expect("pool has at least one entry");
+        primary_health.record_attempt();
+        let result = attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock).await;
+        match &result {
+            Ok(()) => {
+                primary_health.record_success();
+            }
+            Err(_) => {
+                primary_health.record_failure(std::time::Instant::now());
+            }
+        }
+        result?;
         return Ok(());
     }
     Err(last_err.unwrap_or(SocksError::Socks("pool dispatch produced no result")))

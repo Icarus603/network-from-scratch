@@ -220,8 +220,9 @@ Surfaces:
 - **CarrierHealth (β)**: configured? healthy / SUPPRESSED?
   seconds remaining in the back-off window? current failure streak?
 - **EndpointPool (multi-VPS)**: per-entry health — addr, suppressed?,
-  failure streak. Operator sees "which VPS am I dialing right now"
-  without grepping logs.
+  failure streak, **plus cumulative per-entry counters** (attempts,
+  successes, failures). Operator demotes chronic-flaky entries based
+  on the per-VPS success-rate, not just the global aggregate.
 - **Concurrency**: `in_flight / max_inflight` — how saturated is the
   session-slot semaphore right now?
 - **Dials**: cumulative `attempted` / `succeeded` / `failed`

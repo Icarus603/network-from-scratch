@@ -63,6 +63,21 @@ use crate::carrier_health::{INITIAL_SUPPRESSION, MAX_SUPPRESSION, PROBE_INTERVAL
 /// (3) — same "transient blip vs sustained issue" boundary.
 pub const DEFAULT_ENDPOINT_FAILURE_THRESHOLD: u32 = 3;
 
+/// Snapshot of the three cumulative per-endpoint counters. Operators
+/// read these to demote chronically-flaky endpoints — "VPS-A handled
+/// 99 % of attempts vs VPS-B handled 60 %" tells them which entry
+/// to investigate. Returned by [`EndpointHealth::counters`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EndpointCounters {
+    /// Lifetime CONNECT attempts (every dispatcher try, regardless
+    /// of outcome).
+    pub attempts: u64,
+    /// Subset of `attempts` that succeeded.
+    pub successes: u64,
+    /// Subset of `attempts` that failed.
+    pub failures: u64,
+}
+
 /// One endpoint's health record. Atomic-only; cheap to share across
 /// per-CONNECT spawned tasks via `Arc`.
 ///
@@ -80,6 +95,23 @@ pub struct EndpointHealth {
     suppressed_connect_count: AtomicU32,
     failure_threshold: u32,
     epoch: Instant,
+    /// Lifetime cumulative CONNECT attempts against this endpoint.
+    /// Bumped by the dispatcher EVERY time it tries this entry,
+    /// regardless of outcome (success / failure / fall-through to
+    /// next entry). Operators read this for per-VPS demote
+    /// decisions ("VPS-A handled 99% of attempts vs VPS-B handled
+    /// 60% — investigate VPS-B before raising the threshold"). Wraps
+    /// freely past u64::MAX which would take 5+ billion years at
+    /// 10 ns/dial.
+    attempts_total: AtomicU64,
+    /// Subset of `attempts_total` that returned Ok from the
+    /// dispatcher. The gap `attempts - successes - failures` is
+    /// always zero in normal operation (we bump exactly one outcome
+    /// per attempt). Operators alert when the gap grows — that's
+    /// an outcome-recording bug.
+    successes_total: AtomicU64,
+    /// Subset of `attempts_total` that returned Err.
+    failures_total: AtomicU64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -108,6 +140,28 @@ impl EndpointHealth {
             suppressed_connect_count: AtomicU32::new(0),
             failure_threshold: failure_threshold.max(1),
             epoch: Instant::now(),
+            attempts_total: AtomicU64::new(0),
+            successes_total: AtomicU64::new(0),
+            failures_total: AtomicU64::new(0),
+        }
+    }
+
+    /// Record one CONNECT attempt against this endpoint, regardless
+    /// of outcome. Bumps `attempts_total`. The matching outcome bump
+    /// (`record_success` / `record_failure`) MUST follow.
+    pub fn record_attempt(&self) {
+        self.attempts_total.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Snapshot of the three cumulative per-endpoint counters.
+    /// Atomic per-field; readers don't need consistency across the
+    /// triple (they're cumulative totals).
+    #[must_use]
+    pub fn counters(&self) -> EndpointCounters {
+        EndpointCounters {
+            attempts: self.attempts_total.load(Ordering::Relaxed),
+            successes: self.successes_total.load(Ordering::Relaxed),
+            failures: self.failures_total.load(Ordering::Relaxed),
         }
     }
 
@@ -136,6 +190,11 @@ impl EndpointHealth {
         let prev_deadline_ns = self.suppression_deadline_ns.swap(0, Ordering::AcqRel);
         self.failure_streak.store(0, Ordering::Relaxed);
         self.suppressed_connect_count.store(0, Ordering::Relaxed);
+        // Cumulative counter — bumped on every success regardless of
+        // transition. The transition signal stays the function's
+        // return value so the dispatch site's noise-discipline rules
+        // (one info! per recovery) still hold.
+        self.successes_total.fetch_add(1, Ordering::Relaxed);
         prev_deadline_ns != 0
     }
 
@@ -151,6 +210,11 @@ impl EndpointHealth {
     /// suppression window (the second case is logged at `debug!` by
     /// the caller if desired).
     pub fn record_failure(&self, now: Instant) -> Option<u64> {
+        // Cumulative failure counter — bumped on every failure,
+        // regardless of whether this one engages suppression. The
+        // return value continues to signal the engagement transition
+        // for the dispatch site's structured warn! log.
+        self.failures_total.fetch_add(1, Ordering::Relaxed);
         let streak = self.failure_streak.fetch_add(1, Ordering::Relaxed) + 1;
         if streak < self.failure_threshold {
             return None;
@@ -380,6 +444,75 @@ mod tests {
         }
         // Wraps back to Probe.
         assert_eq!(h.decide(t), EndpointDecision::Probe);
+    }
+
+    /// Cumulative attempt counter starts at zero and increments on
+    /// each call to record_attempt(), independent of success/failure
+    /// counters.
+    #[test]
+    fn endpoint_counters_start_at_zero() {
+        let h = EndpointHealth::new();
+        let c = h.counters();
+        assert_eq!(c.attempts, 0);
+        assert_eq!(c.successes, 0);
+        assert_eq!(c.failures, 0);
+    }
+
+    #[test]
+    fn endpoint_counters_attempt_independent_of_outcome() {
+        let h = EndpointHealth::with_threshold(2);
+        let t = Instant::now();
+        h.record_attempt();
+        h.record_attempt();
+        h.record_attempt();
+        // No outcome recorded yet — counters reflect the asymmetry.
+        let c = h.counters();
+        assert_eq!(c.attempts, 3);
+        assert_eq!(c.successes, 0);
+        assert_eq!(c.failures, 0);
+        // Now record outcomes for the 3 attempts: 2 ok, 1 failed.
+        h.record_success();
+        h.record_success();
+        h.record_failure(t);
+        let c = h.counters();
+        assert_eq!(c.attempts, 3);
+        assert_eq!(c.successes, 2);
+        assert_eq!(c.failures, 1);
+        assert_eq!(c.attempts, c.successes + c.failures);
+    }
+
+    /// Every record_success bumps the cumulative success counter,
+    /// regardless of whether it transitions out of suppression.
+    #[test]
+    fn endpoint_counter_success_bumps_on_every_call() {
+        let h = EndpointHealth::with_threshold(2);
+        let t = Instant::now();
+        h.record_success(); // not previously suppressed → returns false
+        h.record_success();
+        // Drive into suppression then recover.
+        h.record_failure(t);
+        h.record_failure(t);
+        let lifted = h.record_success(); // transition out
+        assert!(lifted);
+        assert_eq!(h.counters().successes, 3);
+    }
+
+    /// Every record_failure bumps the cumulative failure counter,
+    /// regardless of whether it engages new suppression or extends
+    /// an existing window.
+    #[test]
+    fn endpoint_counter_failure_bumps_on_every_call() {
+        let h = EndpointHealth::with_threshold(2);
+        let t = Instant::now();
+        h.record_failure(t); // sub-threshold
+        let engaged1 = h.record_failure(t); // engages (window=15s)
+        assert!(engaged1.is_some());
+        let engaged2 = h.record_failure(t); // extends, returns None
+        assert!(engaged2.is_none());
+        let engaged3 = h.record_failure(t); // extends, returns None
+        assert!(engaged3.is_none());
+        // 4 failures total → 4 counter bumps.
+        assert_eq!(h.counters().failures, 4);
     }
 
     #[test]
