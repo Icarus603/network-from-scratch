@@ -259,17 +259,38 @@ where
     let sig_bytes = sig::sign(&config.client_id_sk, &sig_msg);
 
     // Solve the server-advertised proof-of-work puzzle (spec §8.3).
-    // For difficulty 0 (default) this returns [0; 7] in O(1).
-    let pow_solution = crate::pow::solve(
-        &config.server_pq_fingerprint,
-        &client_nonce,
-        config.pow_difficulty,
-    )
-    .ok_or_else(|| {
-        AlphaError::Io(std::io::Error::other(
-            "anti-DoS puzzle search space exhausted",
-        ))
-    })?;
+    // For difficulty 0 (default) this returns [0; 7] in O(1) and we
+    // skip spawn_blocking entirely.
+    //
+    // Iter-16: when difficulty > 0, we OFFLOAD the solve to a
+    // blocking-pool worker via `tokio::task::spawn_blocking`.
+    // Pre-iter-16 the CPU-bound search ran inside this async fn,
+    // blocking the runtime worker for up to 60 s (the deadline
+    // inside `pow::solve`). On a single-threaded runtime that
+    // froze EVERY other task; on multi-threaded runtimes it
+    // burned one worker for the whole solve, starving other
+    // SOCKS5 CONNECTs. Offloading restores async-friendliness:
+    // the runtime continues servicing other tasks while the
+    // solver burns a blocking-pool thread.
+    let pow_solution = if config.pow_difficulty == 0 {
+        [0u8; 7]
+    } else {
+        let fp = config.server_pq_fingerprint;
+        let nonce = client_nonce;
+        let d = config.pow_difficulty;
+        let res = tokio::task::spawn_blocking(move || crate::pow::solve(&fp, &nonce, d))
+            .await
+            .map_err(|e| {
+                AlphaError::Io(std::io::Error::other(format!(
+                    "PoW solver task panicked or was cancelled: {e}"
+                )))
+            })?;
+        res.ok_or_else(|| {
+            AlphaError::Io(std::io::Error::other(
+                "anti-DoS puzzle search space exhausted or solver deadline elapsed",
+            ))
+        })?
+    };
 
     let (shape_seed, cover_profile_id) = fresh_shape_params(&mut rng);
 
