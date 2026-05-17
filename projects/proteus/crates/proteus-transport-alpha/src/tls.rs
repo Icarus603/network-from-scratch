@@ -175,6 +175,27 @@ pub async fn server_handshake(
     Ok(acceptor.accept(stream).await?)
 }
 
+/// Generic server-handshake variant that accepts any
+/// AsyncRead+AsyncWrite IO. Lets the Path-A
+/// `PrependedStream` (a `TcpStream` with a peeked-bytes
+/// prefix) flow through rustls just like a bare `TcpStream`.
+///
+/// Returns a `ServerTlsStream<S>` parameterized on the
+/// caller-supplied IO type rather than the legacy
+/// `ServerStream = ServerTlsStream<TcpStream>` alias.
+/// Downstream consumers that need the legacy alias continue
+/// using `server_handshake`; the new Path-A path uses this
+/// variant.
+pub async fn server_handshake_io<S>(
+    acceptor: &TlsAcceptor,
+    stream: S,
+) -> Result<tokio_rustls::server::TlsStream<S>, TlsError>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    Ok(acceptor.accept(stream).await?)
+}
+
 /// Client handshake: drive the TLS 1.3 handshake against `server_name`.
 pub async fn client_handshake(
     connector: &TlsConnector,

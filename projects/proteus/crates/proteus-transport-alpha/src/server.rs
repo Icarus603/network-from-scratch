@@ -1361,6 +1361,150 @@ where
     }
 }
 
+/// Path-A variant of [`serve_tls_reloadable`] that runs the
+/// `knock_dispatch` gate BEFORE TLS termination.
+///
+/// Three-way routing per connection:
+/// - Gate `Pass` → wrap the TcpStream in a `PrependedStream`
+///   (re-yields the peeked ClientHello bytes) and run
+///   `handshake_over_tls_io` → existing per-session `handle`
+///   callback.
+/// - Gate `RouteToCover` → already handled by the dispatcher
+///   (cover splice). Nothing more to do.
+/// - Gate `Drop` → close silently.
+///
+/// When `dispatch_cfg.psk` is `None`, the gate short-circuits
+/// to `Pass` without sniffing — operators who haven't opted
+/// into Path A see the same byte-for-byte accept-loop behavior
+/// as `serve_tls_reloadable`.
+pub async fn serve_tls_reloadable_with_gate<F, Fut>(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    acceptor: crate::tls::ReloadableAcceptor,
+    dispatch_cfg: Arc<crate::knock_dispatch::DispatchConfig>,
+    handle: F,
+) -> std::io::Result<()>
+where
+    F: Fn(
+            AlphaSession<
+                tokio::io::ReadHalf<
+                    tokio_rustls::server::TlsStream<crate::knock_dispatch::PrependedStream>,
+                >,
+                tokio::io::WriteHalf<
+                    tokio_rustls::server::TlsStream<crate::knock_dispatch::PrependedStream>,
+                >,
+            >,
+        ) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let (stream, peer) = listener.accept().await?;
+        let ctx = Arc::clone(&ctx);
+        let current_acceptor = acceptor.current();
+        let handle = handle.clone();
+        let dispatch_cfg = Arc::clone(&dispatch_cfg);
+
+        if !admission_ok(&ctx, &peer) {
+            route_to_cover_or_drop(&ctx, stream, &peer);
+            continue;
+        }
+
+        let permit = match ctx.try_acquire_connection() {
+            ConnGate::Unbounded => None,
+            ConnGate::Allowed(p) => Some(p),
+            ConnGate::Rejected => {
+                if matches!(
+                    max_connections_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(peer = %peer, "max_connections reached; routing to cover (Path-A TLS)");
+                }
+                if let Some(m) = ctx.metrics() {
+                    m.conn_limit_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                route_to_cover_or_drop(&ctx, stream, &peer);
+                continue;
+            }
+        };
+
+        let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
+        let _ = stream.set_nodelay(true);
+
+        tokio::spawn(async move {
+            let _permit_held = permit;
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let routing =
+                crate::knock_dispatch::dispatch_or_local_terminate(stream, &dispatch_cfg, now_secs)
+                    .await;
+
+            let prepended = match routing {
+                crate::knock_dispatch::PathARouting::TerminateLocally(s) => s,
+                crate::knock_dispatch::PathARouting::RoutedToCover {
+                    reason,
+                    splice_outcome,
+                } => {
+                    tracing::debug!(
+                        peer = %peer,
+                        ?reason,
+                        cover_ok = splice_outcome.is_ok(),
+                        "Path-A: connection routed to cover"
+                    );
+                    return;
+                }
+                crate::knock_dispatch::PathARouting::Dropped { reason } => {
+                    tracing::debug!(peer = %peer, ?reason, "Path-A: connection dropped");
+                    return;
+                }
+            };
+
+            let deadline = ctx.handshake_deadline();
+            let hs_start = std::time::Instant::now();
+            let outcome = tokio::time::timeout(
+                deadline,
+                handshake_over_tls_io(prepended, &current_acceptor, &ctx),
+            )
+            .await;
+            match outcome {
+                Ok(Ok(session)) => {
+                    let elapsed = hs_start.elapsed();
+                    let session = session
+                        .with_peer_addr(peer)
+                        .with_handshake_duration(elapsed);
+                    if user_admission_ok(&ctx, &session) {
+                        handle(session).await;
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::debug!(peer = %peer, error = %e, "Path-A TLS/Proteus handshake failed");
+                    if let Some(m) = ctx.metrics() {
+                        m.handshakes_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        timeout_secs = deadline.as_secs(),
+                        "Path-A TLS handshake deadline elapsed"
+                    );
+                    if let Some(m) = ctx.metrics() {
+                        m.handshake_timeouts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+}
+
 /// Listen on `addr` and serve α-profile handshakes. `handle` is invoked
 /// per established session.
 ///
@@ -2051,6 +2195,56 @@ pub async fn handshake_over_tls(
     let tls_stream = crate::tls::server_handshake(acceptor, stream)
         .await
         .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
+    handshake_over_tls_stream_post_accept(tls_stream, ctx).await
+}
+
+/// Generic-IO variant of [`handshake_over_tls`]. Accepts any
+/// `AsyncRead + AsyncWrite` instead of being bound to
+/// `TcpStream`. Used by the Path-A integration to drive
+/// rustls over a [`crate::knock_dispatch::PrependedStream`]
+/// (a TcpStream with a peeked-bytes prefix so the TLS
+/// terminator sees the original ClientHello bytes after the
+/// gate has consumed them for the knock check).
+///
+/// Same channel-binding extraction + same downstream
+/// `handshake_over_split_bound` call as the legacy
+/// `handshake_over_tls` — just lifted off the concrete
+/// `TcpStream` type.
+pub async fn handshake_over_tls_io<S>(
+    stream: S,
+    acceptor: &tokio_rustls::TlsAcceptor,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<
+    AlphaSession<
+        tokio::io::ReadHalf<tokio_rustls::server::TlsStream<S>>,
+        tokio::io::WriteHalf<tokio_rustls::server::TlsStream<S>>,
+    >,
+>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let tls_stream = crate::tls::server_handshake_io(acceptor, stream)
+        .await
+        .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
+    handshake_over_tls_stream_post_accept(tls_stream, ctx).await
+}
+
+/// Shared post-TLS-accept logic (channel binding extraction +
+/// split + inner Proteus handshake). Generic over the
+/// post-accept TLS stream type so both `handshake_over_tls`
+/// and `handshake_over_tls_io` route through the same code.
+async fn handshake_over_tls_stream_post_accept<S>(
+    tls_stream: tokio_rustls::server::TlsStream<S>,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<
+    AlphaSession<
+        tokio::io::ReadHalf<tokio_rustls::server::TlsStream<S>>,
+        tokio::io::WriteHalf<tokio_rustls::server::TlsStream<S>>,
+    >,
+>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     // Extract the same exporter tag the client will see on its side
     // of this TLS session — RFC 5705 / RFC 9266 channel binding.
     // A MITM bridging two distinct TLS sessions sees different
