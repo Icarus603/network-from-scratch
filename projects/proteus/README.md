@@ -1533,8 +1533,31 @@ semantics over keep-running-with-one-session-down (default keeps
 running so a single hot-path panic doesn't tear down every other
 in-flight user).
 
-**systemd Type=notify + WatchdogSec=** — the bundled
-`proteus-server.service` ships `Type=notify` + `WatchdogSec=30s`.
+**systemd Type=notify + WatchdogSec= + cgroup caps** — the
+bundled `proteus-server.service` (and the new symmetric
+`proteus-client.service`) ship `Type=notify` + `WatchdogSec=30s`,
+plus cgroup-level resource caps:
+
+  * `MemoryHigh=512M` (client `256M`) — soft cap; kernel
+    throttles allocations above this, giving the binary a chance
+    to shed load before the hard limit fires
+  * `MemoryMax=1G` (client `512M`) — hard cap; kernel kills the
+    binary when exceeded, surfaced on the next start via
+    `restart_tracker.previous_run_unclean = 1`
+  * `TasksMax=8192` (client `4096`) — cgroup fork-bomb defense,
+    complementary to the existing process-level `LimitNPROC=`
+  * `OOMScoreAdjust=-100` — kernel prefers killing other
+    processes during system-wide OOM (a long-lived proxy that's
+    stayed under MemoryHigh shouldn't be the first victim)
+
+Without these, an unbounded memory leak / DoS-induced task
+spawn could OOM the entire host (taking SSH down with it). With
+them, the kernel kills proteus-server specifically when it
+crosses the limit AND the `previous_run_unclean` gauge makes
+the OOM-kill visible on the next start. Operators on
+larger/smaller boxes override via
+`sudo systemctl edit proteus-server` (drop-in `[Service]` with
+e.g. `MemoryMax=4G`).
 The binary uses [`proteus-sd-notify`](crates/proteus-sd-notify/)
 (zero-dep, `unsafe_code = "forbid"`) to send:
 

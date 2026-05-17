@@ -472,10 +472,24 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             };
             while sighup.recv().await.is_some() {
                 info!("SIGHUP received — reloading server_endpoints from disk");
+                // sd_notify(RELOADING=1) — symmetric with the
+                // server-side SIGHUP path. systemctl status shows
+                // "reloading" instead of "active (running)" while
+                // we work; READY=1 at the end of the block flips
+                // it back. MUST be paired — leaving RELOADING=1
+                // hanging would pin the unit in the reloading
+                // state until the next restart.
+                let _ = proteus_sd_notify::notify_reloading().await;
+                let _ = proteus_sd_notify::notify_status("reloading endpoint pool (SIGHUP)").await;
                 let fresh_cfg = match ClientConfig::load(&config_path).await {
                     Ok(c) => c,
                     Err(e) => {
                         warn!(error = %e, "SIGHUP: config reload failed; keeping current pool");
+                        let _ = proteus_sd_notify::notify_ready().await;
+                        let _ = proteus_sd_notify::notify_status(
+                            "SIGHUP reload FAILED (config parse) — current pool preserved",
+                        )
+                        .await;
                         continue;
                     }
                 };
@@ -493,6 +507,13 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     "endpoint pool reloaded (carryover preserved per-entry counters \
                      for unchanged addrs)"
                 );
+                let _ = proteus_sd_notify::notify_ready().await;
+                let _ = proteus_sd_notify::notify_status(&format!(
+                    "ready (last SIGHUP: {} → {} endpoints)",
+                    prev.len(),
+                    new.len()
+                ))
+                .await;
             }
         });
     }

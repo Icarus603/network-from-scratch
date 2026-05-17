@@ -94,6 +94,45 @@ SocketBindAllow=tcp:8443
 LimitNOFILE=1048576
 LimitNPROC=4096
 
+# Cgroup-level resource caps. Without these, a runaway memory
+# leak or a DoS-induced task spawn can OOM the host (taking SSH
+# down with it). With them, the kernel kills proteus-server
+# specifically when it crosses the limit — and our restart-
+# tracker observability (proteus_previous_run_unclean=1) makes
+# the OOM-kill visible on the next start.
+#
+# MemoryHigh    — soft cap; kernel throttles allocations above
+#                 this without killing. Gives the binary a chance
+#                 to refuse new sessions / shed load gracefully
+#                 before the hard cap triggers.
+# MemoryMax     — hard cap; kernel kills the process when this
+#                 is exceeded. 2× MemoryHigh leaves drain
+#                 headroom but bounds the worst case.
+# TasksMax      — kernel-cgroup tasks ceiling. LimitNPROC is the
+#                 process-level rlimit; TasksMax is the
+#                 belt-and-braces cgroup version. Both matter:
+#                 LimitNPROC catches a fork bomb in the parent
+#                 process, TasksMax catches it after a privilege
+#                 boundary.
+#
+# Defaults assume a 1-2 GB VPS. For larger boxes, scale up
+# proportionally. To override per-deploy:
+#   sudo systemctl edit proteus-server
+#   # in the drop-in: [Service] / MemoryMax=4G / TasksMax=16384
+MemoryHigh=512M
+MemoryMax=1G
+TasksMax=8192
+
+# OOM score adjustment. -100 lowers Proteus's score so the OOM
+# killer prefers other processes first (within reason — the
+# allowed range is -1000..1000). A long-lived proxy that's
+# stayed under MemoryHigh shouldn't be the first thing killed
+# when an unrelated process triggers system-wide OOM. Operators
+# who'd rather kill Proteus first (e.g. on a multi-tenant box
+# where the proxy is the lower-priority workload) can override
+# via `systemctl edit`.
+OOMScoreAdjust=-100
+
 # Logging.
 Environment=RUST_LOG=proteus_server=info,proteus_transport_alpha=info
 StandardOutput=journal
