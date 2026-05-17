@@ -27,7 +27,7 @@ subtle.workspace = true
 
 tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs"] }
 
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 libc = "0.2"
 tracing = "0.1"
 

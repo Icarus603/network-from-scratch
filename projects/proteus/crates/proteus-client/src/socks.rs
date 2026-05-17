@@ -967,13 +967,19 @@ async fn try_alpha(
         // Iter-14: apply nodelay + TCP keepalive on the outbound
         // socket so long-idle Proteus sessions survive NAT
         // idle-timer reaping and small writes don't wait on
-        // Nagle when the path is high-RTT. Both options are
-        // best-effort; failures are logged and proceeded past
-        // since they're defense-in-depth not correctness.
-        let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
-            &tcp,
-            cfg.tcp_keepalive_secs.unwrap_or(30),
-        );
+        // Nagle when the path is high-RTT. Iter-28: ALSO apply
+        // TCP_USER_TIMEOUT (Linux-only) so an actively-sending
+        // session whose VPS goes silent mid-stream gets
+        // terminated within ~120s instead of holding the FD
+        // for the kernel's ~15-minute retransmit deadline.
+        // Both are best-effort.
+        let keepalive_secs = cfg.tcp_keepalive_secs.unwrap_or(30);
+        let dial_opts =
+            proteus_transport_alpha::socket_opts::apply_dial_socket_opts_with_user_timeout(
+                &tcp,
+                keepalive_secs,
+                keepalive_secs.saturating_mul(4),
+            );
         if let Some(e) = dial_opts.nodelay_err {
             tracing::warn!(error = %e, "client→server TCP_NODELAY failed (proceeding)");
         }
@@ -981,6 +987,12 @@ async fn try_alpha(
             tracing::warn!(
                 error = %e,
                 "client→server TCP keepalive failed (proceeding — session may silently die in NAT idle)"
+            );
+        }
+        if let Some(e) = dial_opts.user_timeout_err {
+            tracing::warn!(
+                error = %e,
+                "client→server TCP_USER_TIMEOUT failed (proceeding — actively-sending session may hold FD for ~15min if VPS goes silent mid-stream)"
             );
         }
         // Bound the TLS+Proteus handshake under the same outer
@@ -1018,10 +1030,12 @@ async fn try_alpha(
     let tcp = tokio::time::timeout(alpha_timeout, tokio::net::TcpStream::connect(server_addr))
         .await
         .map_err(|_| SocksError::Socks("α TCP connect (plaintext) timed out"))??;
-    // Same iter-14 socket-opts pattern as the TLS branch above.
-    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
+    // Same iter-14 + iter-28 socket-opts pattern as the TLS branch above.
+    let keepalive_secs = cfg.tcp_keepalive_secs.unwrap_or(30);
+    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts_with_user_timeout(
         &tcp,
-        cfg.tcp_keepalive_secs.unwrap_or(30),
+        keepalive_secs,
+        keepalive_secs.saturating_mul(4),
     );
     if let Some(e) = dial_opts.nodelay_err {
         tracing::warn!(error = %e, "client→server (plaintext) TCP_NODELAY failed (proceeding)");
@@ -1030,6 +1044,12 @@ async fn try_alpha(
         tracing::warn!(
             error = %e,
             "client→server (plaintext) TCP keepalive failed (proceeding)"
+        );
+    }
+    if let Some(e) = dial_opts.user_timeout_err {
+        tracing::warn!(
+            error = %e,
+            "client→server (plaintext) TCP_USER_TIMEOUT failed (proceeding)"
         );
     }
     let session = tokio::time::timeout(alpha_timeout, p_client::handshake_over_tcp(tcp, &hs_cfg))

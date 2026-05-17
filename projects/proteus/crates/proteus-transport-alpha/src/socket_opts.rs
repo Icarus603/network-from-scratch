@@ -90,6 +90,70 @@ pub fn apply_tcp_keepalive(stream: &TcpStream, interval_secs: u64) -> std::io::R
     // untouched and continues to serve I/O.
 }
 
+/// Apply `TCP_USER_TIMEOUT` (Linux/Android/Fuchsia/Cygwin
+/// only — no-op on macOS, BSD, Windows). Iter-28.
+///
+/// `TCP_USER_TIMEOUT` (RFC 5482) caps how long the kernel
+/// will keep an actively-sending socket in `ESTABLISHED`
+/// when the peer's acks are absent. Default Linux behavior
+/// is the retransmit deadline (~15 min). With this set, an
+/// actively-sending session whose peer goes silent
+/// (kernel hang, route disappeared mid-flight, mid-tunnel
+/// NAT box restarted) gets terminated within
+/// `timeout_secs` instead of holding the FD + per-user
+/// semaphore slot + relay-pump task for ~15 minutes.
+///
+/// Distinct from `apply_tcp_keepalive` (iter-14):
+///   * keepalive detects DEAD IDLE sessions — the peer is
+///     silent and WE'RE silent; kernel sends probes on the
+///     idle timer.
+///   * user_timeout detects DEAD ACTIVE sessions — WE'RE
+///     trying to send but the peer's acks aren't coming
+///     back; kernel forcibly closes after the timeout.
+///
+/// Both are needed for full production-stability coverage.
+/// On macOS / BSD / Windows this fn silently no-ops (returns
+/// `Ok(())`) — the underlying socket option doesn't exist on
+/// those platforms, but the binary still compiles + the
+/// keepalive defense is in place. Production Proteus
+/// deployments target Linux VPSes; macOS is only for local
+/// dev where the missing user_timeout doesn't matter.
+///
+/// `timeout_secs` should typically equal the operator's
+/// `tcp_keepalive_secs` × a small multiple (3-5×). Setting
+/// it equal to the keepalive interval is too aggressive —
+/// every transient packet loss would trigger a close.
+/// Setting it much larger (>5×) loses the production-
+/// stability win the option exists for.
+pub fn apply_tcp_user_timeout_if_supported(
+    stream: &TcpStream,
+    timeout: Duration,
+) -> std::io::Result<()> {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        #[allow(unsafe_code)] // tightly-scoped: dup(2) + OwnedFd wrapper only
+        {
+            use std::os::fd::{AsRawFd, FromRawFd};
+            let fd = stream.as_raw_fd();
+            // SAFETY: dup(2) returns a fresh fd that we own.
+            let dup_fd = unsafe { libc::dup(fd) };
+            if dup_fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: dup_fd is a freshly-owned valid fd.
+            let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) };
+            let sock = socket2::Socket::from(owned);
+            return sock.set_tcp_user_timeout(Some(timeout));
+        }
+    }
+    // No-op on macOS / BSD / Windows — option doesn't exist.
+    #[allow(unreachable_code)]
+    {
+        let _ = (stream, timeout);
+        Ok(())
+    }
+}
+
 /// Convenience: apply BOTH `TCP_NODELAY` AND TCP keepalive to a
 /// freshly-connected outbound stream. This is the canonical
 /// "I just dialed and got a TcpStream, set production socket
@@ -116,11 +180,47 @@ pub fn apply_dial_socket_opts(stream: &TcpStream, keepalive_secs: u64) -> DialSo
     DialSocketOpts {
         nodelay_err,
         keepalive_err,
+        user_timeout_err: None,
     }
 }
 
-/// Result of [`apply_dial_socket_opts`]. Both fields are
-/// `None` on full success.
+/// Iter-28: extended variant of [`apply_dial_socket_opts`]
+/// that ALSO applies `TCP_USER_TIMEOUT` (Linux-only — see
+/// [`apply_tcp_user_timeout_if_supported`] for the rationale).
+///
+/// `user_timeout_secs` is independent of `keepalive_secs`:
+/// keepalive detects DEAD IDLE sessions; user_timeout
+/// detects DEAD ACTIVE sessions (peer's acks stopped
+/// arriving mid-stream). A reasonable production default:
+/// `user_timeout_secs = keepalive_secs * 4` (e.g. 30s
+/// keepalive → 120s user_timeout). Setting them equal is
+/// too aggressive; setting user_timeout >> keepalive loses
+/// the iter-28 win.
+///
+/// Use this on long-lived production sockets (SOCKS5 →
+/// VPS dial, server → upstream dial). Short-lived RPC
+/// sockets (metrics-http scrape, admin endpoint) don't
+/// benefit and can stick with `apply_dial_socket_opts`.
+#[must_use]
+pub fn apply_dial_socket_opts_with_user_timeout(
+    stream: &TcpStream,
+    keepalive_secs: u64,
+    user_timeout_secs: u64,
+) -> DialSocketOpts {
+    let nodelay_err = stream.set_nodelay(true).err();
+    let keepalive_err = apply_tcp_keepalive(stream, keepalive_secs).err();
+    let user_timeout_err =
+        apply_tcp_user_timeout_if_supported(stream, Duration::from_secs(user_timeout_secs)).err();
+    DialSocketOpts {
+        nodelay_err,
+        keepalive_err,
+        user_timeout_err,
+    }
+}
+
+/// Result of [`apply_dial_socket_opts`] (and the iter-28
+/// `_with_user_timeout` variant). All fields are `None` on
+/// full success.
 #[derive(Debug, Default)]
 pub struct DialSocketOpts {
     /// Error from `TcpStream::set_nodelay`, if any. `None` =
@@ -135,13 +235,27 @@ pub struct DialSocketOpts {
     /// makes silent-death-through-NAT possible but doesn't
     /// break in-active-use connections.
     pub keepalive_err: Option<std::io::Error>,
+    /// Iter-28: error from [`apply_tcp_user_timeout_if_supported`],
+    /// if any. `None` = either the timeout was set OR the
+    /// platform doesn't support `TCP_USER_TIMEOUT` (macOS, BSD,
+    /// Windows). On Linux this is the production hardening that
+    /// caps how long an actively-sending socket waits for peer
+    /// acks before forcibly closing. `Some(e)` means the setsockopt
+    /// failed on a platform that supports the option — log + proceed.
+    pub user_timeout_err: Option<std::io::Error>,
 }
 
 impl DialSocketOpts {
-    /// True iff both options applied successfully.
+    /// True iff all three options applied successfully (or
+    /// the platform didn't support an option and silently
+    /// no-oped it — that case returns `None` in the
+    /// corresponding field, indistinguishable from "applied
+    /// successfully").
     #[must_use]
     pub fn all_ok(&self) -> bool {
-        self.nodelay_err.is_none() && self.keepalive_err.is_none()
+        self.nodelay_err.is_none()
+            && self.keepalive_err.is_none()
+            && self.user_timeout_err.is_none()
     }
 }
 
@@ -328,5 +442,70 @@ mod tests {
     #[test]
     fn econnreset_classified_as_fatal() {
         assert!(!is_transient_accept_error(Some(104)));
+    }
+
+    // ---- iter-28: TCP_USER_TIMEOUT tests ----
+
+    /// `apply_tcp_user_timeout_if_supported` MUST return Ok
+    /// on every supported platform — and silently no-op on
+    /// macOS/BSD/Windows. This test runs on the developer's
+    /// macOS and asserts the no-op path; on Linux CI it
+    /// would exercise the real setsockopt path. Both paths
+    /// must return Ok for a fresh loopback socket.
+    #[tokio::test]
+    async fn apply_tcp_user_timeout_succeeds_on_loopback() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let r = apply_tcp_user_timeout_if_supported(&stream, Duration::from_secs(120));
+        assert!(
+            r.is_ok(),
+            "apply_tcp_user_timeout_if_supported should Ok (or no-op) on loopback, got {r:?}"
+        );
+        let _ = accept_task.await;
+    }
+
+    /// `apply_dial_socket_opts_with_user_timeout` applies all
+    /// three options. On macOS the user_timeout no-ops
+    /// (returns Ok internally → field stays None), so
+    /// `all_ok()` is true. On Linux all three setsockopts
+    /// fire successfully.
+    #[tokio::test]
+    async fn apply_dial_socket_opts_with_user_timeout_all_three_options() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let opts = apply_dial_socket_opts_with_user_timeout(&stream, 30, 120);
+        assert!(
+            opts.all_ok(),
+            "iter-28: all_ok must be true on loopback, got {opts:?}"
+        );
+        let _ = accept_task.await;
+    }
+
+    /// Iter-28 invariant: the legacy
+    /// `apply_dial_socket_opts` (no user_timeout) MUST still
+    /// produce `user_timeout_err = None`. That's the back-
+    /// compat contract — callers using the legacy fn name
+    /// shouldn't see a spurious "user_timeout_err: Some(...)"
+    /// surface.
+    #[tokio::test]
+    async fn legacy_apply_dial_socket_opts_leaves_user_timeout_err_unset() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept_task = tokio::spawn(async move {
+            let _ = listener.accept().await;
+        });
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let opts = apply_dial_socket_opts(&stream, 30);
+        assert!(opts.user_timeout_err.is_none());
+        assert!(opts.all_ok());
+        let _ = accept_task.await;
     }
 }

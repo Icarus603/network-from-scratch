@@ -431,6 +431,21 @@ session_idle_secs: 600
 # pad_quantum: 64
 
 # TCP keepalive interval (idle-session reaper). Default 30s.
+#
+# Iter-28 hardening: the binary AUTO-DERIVES `TCP_USER_TIMEOUT`
+# (Linux-only, RFC 5482) as `tcp_keepalive_secs * 4` on every
+# outbound upstream-dial socket. Keepalive handles DEAD IDLE
+# (peer + we are both silent → kernel probes on the idle
+# timer); user_timeout handles DEAD ACTIVE (we're sending,
+# peer's acks stopped → kernel forcibly closes after the
+# timeout instead of waiting for the kernel's ~15-min
+# retransmit deadline). Together they catch both classes of
+# wedged-peer connection.
+#
+# On macOS/BSD/Windows the user_timeout half silently no-ops
+# (the socket option doesn't exist) — the binary still
+# compiles and the keepalive defense is in place. Production
+# Proteus deployments are Linux VPSes where both apply.
 tcp_keepalive_secs: 30
 
 # Optional persistent restart-history tracker (~200-byte JSON file

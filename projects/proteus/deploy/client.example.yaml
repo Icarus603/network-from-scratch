@@ -240,6 +240,17 @@ pow_difficulty: 0
 #     wire-encrypted inside the TLS stream).
 #   - Default 30 is the right value for the typical
 #     residential-ISP-to-VPS deployment this project targets.
+#
+# Iter-28 hardening: the binary AUTO-DERIVES `TCP_USER_TIMEOUT`
+# (Linux-only, RFC 5482) as `tcp_keepalive_secs * 4` on every
+# outbound client→server dial. Keepalive handles DEAD IDLE
+# (peer + we are both silent → kernel probes on the idle
+# timer); user_timeout handles DEAD ACTIVE (we're actively
+# sending — e.g. uploading a large file — and the VPS
+# disappears mid-stream → kernel forcibly closes after the
+# timeout instead of waiting ~15 min for the retransmit
+# deadline). On macOS this fn silently no-ops (option doesn't
+# exist); on Linux production both apply.
 # tcp_keepalive_secs: 30
 
 # α (TCP/TLS) dial timeout (seconds). Bounds the WHOLE α

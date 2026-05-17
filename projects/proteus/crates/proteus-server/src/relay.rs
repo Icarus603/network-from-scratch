@@ -432,9 +432,21 @@ where
     // `socket_opts::apply_dial_socket_opts` helper; pre-iter-14
     // we only set nodelay and left keepalive disabled, leading
     // to the silent-half-open class of bugs.
-    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
+    //
+    // Iter-28: ALSO apply TCP_USER_TIMEOUT (Linux-only) so an
+    // actively-sending upstream socket whose peer goes silent
+    // mid-stream (peer kernel hang, route disappeared, mid-tunnel
+    // NAT restarted) gets terminated within ~120s instead of the
+    // kernel's ~15-minute retransmit deadline. iter-14 keepalive
+    // covers DEAD IDLE; iter-28 user_timeout covers DEAD ACTIVE.
+    // Auto-derive: 4× the keepalive interval — close enough to
+    // catch wedged peers fast, far enough to absorb normal packet
+    // loss without false-positives.
+    let keepalive_secs = cfg.tcp_keepalive_secs.unwrap_or(30);
+    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts_with_user_timeout(
         &upstream,
-        cfg.tcp_keepalive_secs.unwrap_or(30),
+        keepalive_secs,
+        keepalive_secs.saturating_mul(4),
     );
     if let Some(e) = dial_opts.nodelay_err {
         warn!(error = %e, host = %target.0, "upstream TCP_NODELAY failed (proceeding)");
@@ -444,6 +456,13 @@ where
             error = %e,
             host = %target.0,
             "upstream TCP keepalive failed (proceeding — connection may silently die in NAT idle)"
+        );
+    }
+    if let Some(e) = dial_opts.user_timeout_err {
+        warn!(
+            error = %e,
+            host = %target.0,
+            "upstream TCP_USER_TIMEOUT failed (proceeding — actively-sending socket may hold FD for ~15min on wedged peer)"
         );
     }
     let (mut up_r, mut up_w) = upstream.into_split();
