@@ -2277,56 +2277,96 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         }
 
                         // 2b. Per-IP rate-limit hot-swap.
-                        if let Some(rl) = fresh_cfg.rate_limit.as_ref() {
-                            if ctx_for_reload.reload_rate_limit(rl.burst, rl.refill_per_sec) {
+                        //
+                        // Iter-41 false-positive fix: bump succeeded
+                        // on EVERY non-failure outcome so the
+                        // (attempts - succeeded) gap is a true
+                        // failure signal, not a "the operator
+                        // doesn't use this section" signal.
+                        // Pre-iter-41 every SIGHUP from an operator
+                        // who didn't configure rate_limit bumped
+                        // attempts but never succeeded → gap grew
+                        // forever → ProteusRateLimitReloadFailing
+                        // (iter-38 alert) fired permanently as a
+                        // false positive. The "edit ignored — no
+                        // limiter at startup" branch ALSO now bumps
+                        // succeeded; that's still warn!-logged so
+                        // the operator sees the message in journal,
+                        // but we don't pin a perma-alert on it.
+                        match fresh_cfg.rate_limit.as_ref() {
+                            Some(rl) => {
+                                if ctx_for_reload.reload_rate_limit(rl.burst, rl.refill_per_sec) {
+                                    info!(
+                                        burst = rl.burst,
+                                        refill = rl.refill_per_sec,
+                                        "per-IP rate limit hot-reloaded"
+                                    );
+                                } else {
+                                    warn!(
+                                        "rate_limit edit ignored — no per-IP limiter was \
+                                         installed at startup. Restart the binary to install one."
+                                    );
+                                }
                                 m.rate_limit_reload_succeeded
                                     .fetch_add(1, Ordering::Relaxed);
-                                info!(
-                                    burst = rl.burst,
-                                    refill = rl.refill_per_sec,
-                                    "per-IP rate limit hot-reloaded"
-                                );
-                            } else {
-                                warn!(
-                                    "rate_limit edit ignored — no per-IP limiter was \
-                                     installed at startup. Restart the binary to install one."
-                                );
+                            }
+                            None => {
+                                // No rate_limit block in config — nothing to do.
+                                // Count as success (the reload attempt completed
+                                // without error; there was nothing to reload).
+                                m.rate_limit_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                         }
 
                         // 2c. Per-user rate-limit hot-swap.
-                        if let Some(u) = fresh_cfg.user_rate_limit.as_ref() {
-                            if ctx_for_reload.reload_user_rate_limit(u.burst, u.refill_per_sec) {
+                        match fresh_cfg.user_rate_limit.as_ref() {
+                            Some(u) => {
+                                if ctx_for_reload.reload_user_rate_limit(u.burst, u.refill_per_sec)
+                                {
+                                    info!(
+                                        burst = u.burst,
+                                        refill = u.refill_per_sec,
+                                        "per-user rate limit hot-reloaded"
+                                    );
+                                } else {
+                                    warn!(
+                                        "user_rate_limit edit ignored — no per-user limiter \
+                                         was installed at startup. Restart to install one."
+                                    );
+                                }
                                 m.user_rate_limit_reload_succeeded
                                     .fetch_add(1, Ordering::Relaxed);
-                                info!(
-                                    burst = u.burst,
-                                    refill = u.refill_per_sec,
-                                    "per-user rate limit hot-reloaded"
-                                );
-                            } else {
-                                warn!(
-                                    "user_rate_limit edit ignored — no per-user limiter \
-                                     was installed at startup. Restart to install one."
-                                );
+                            }
+                            None => {
+                                m.user_rate_limit_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                         }
 
                         // 2d. Global handshake-budget hot-swap.
-                        if let Some(b) = fresh_cfg.handshake_budget.as_ref() {
-                            if ctx_for_reload.reload_handshake_budget(b.burst, b.refill_per_sec) {
+                        match fresh_cfg.handshake_budget.as_ref() {
+                            Some(b) => {
+                                if ctx_for_reload
+                                    .reload_handshake_budget(b.burst, b.refill_per_sec)
+                                {
+                                    info!(
+                                        burst = b.burst,
+                                        refill = b.refill_per_sec,
+                                        "global handshake budget hot-reloaded"
+                                    );
+                                } else {
+                                    warn!(
+                                        "handshake_budget edit ignored — no global limiter \
+                                         was installed at startup. Restart to install one."
+                                    );
+                                }
                                 m.handshake_budget_reload_succeeded
                                     .fetch_add(1, Ordering::Relaxed);
-                                info!(
-                                    burst = b.burst,
-                                    refill = b.refill_per_sec,
-                                    "global handshake budget hot-reloaded"
-                                );
-                            } else {
-                                warn!(
-                                    "handshake_budget edit ignored — no global limiter \
-                                     was installed at startup. Restart to install one."
-                                );
+                            }
+                            None => {
+                                m.handshake_budget_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
                         }
                     }
