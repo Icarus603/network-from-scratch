@@ -66,7 +66,37 @@ x509-parser = "0.18"
 opt-level = 3
 lto = "thin"
 codegen-units = 1
-panic = "abort"
+# iter-24: `panic = "unwind"` (was "abort"). Production servers
+# (nginx, envoy, HAProxy) all unwind per-connection so an isolated
+# panic in one per-task closure doesn't tear down the whole
+# process. tokio::spawn naturally catches panics in its tasks via
+# the JoinHandle Future — with unwind, the task ends cleanly and
+# the runtime continues servicing other connections. With abort,
+# a single malformed connection's logic bug would kill every
+# other in-flight session AND the accept loop AND the metrics
+# endpoint AND the periodic self-test — and would make the
+# iter-18/19/20/21 EMFILE-survival hardening moot.
+#
+# `proteus_panic_hook::install()` (called from both binaries'
+# main()) still fires on every panic: it increments the
+# Prometheus counter (`proteus_panics_total`) and emits a
+# structured WARN log with file:line:col. Operators alert on
+# `rate(proteus_panics_total[5m]) > 0` to spot panics in flight
+# even when individual sessions survived.
+#
+# Optional `RUST_PANIC_ABORT=1` env var (handled inside
+# panic_hook) re-aborts AFTER counting + logging, for operators
+# who specifically want the fail-fast semantics (e.g.
+# fuzz-testing harness, debug-build deployments). The default is
+# now "survive" because production stability outweighs the
+# fail-fast preference.
+#
+# Binary-size cost: ~30-50 KB of unwinding tables, negligible
+# next to the ~15-20 MB of bundled rustls + quinn + ml-kem.
+# Per-call codegen cost: a few extra instructions per non-leaf
+# function — measured workspace throughput smoke unchanged
+# between abort and unwind profiles.
+panic = "unwind"
 strip = "symbols"
 
 [profile.dev]
