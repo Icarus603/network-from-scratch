@@ -60,8 +60,9 @@
 //! is non-empty and we haven't vacuumed in `VACUUM_INTERVAL`.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::Notify;
 
@@ -152,6 +153,36 @@ pub struct UserQuarantineList {
     /// the tear-down path actually fired — the "we caught a
     /// mid-burst exfiltrator" counter.
     sessions_torn_down_total: std::sync::atomic::AtomicU64,
+    /// Optional persistence path.
+    ///
+    /// When set, every successful `insert` (fresh or refresh) calls
+    /// `persist()` to write the current map to disk as JSON Lines,
+    /// atomically via temp-file + rename. On startup, the binary
+    /// calls [`Self::load_from_disk`] to seed the in-memory map
+    /// from the file — so a banned user_id STAYS banned across
+    /// process restarts (systemd restart, OOM kill, operator
+    /// deploy).
+    ///
+    /// Without persistence, a stolen credential gets a fresh attack
+    /// window of `ttl` minutes every time the binary restarts —
+    /// the operator's biggest pain point for long-lived
+    /// deployments. The IP-based auto_deny.rs has the same gap,
+    /// but its TTL is typically tighter (probe detection refires
+    /// fast) so the gap matters less.
+    persistence_path: Mutex<Option<PathBuf>>,
+    /// Cumulative count of successful disk writes. Bumped after
+    /// each `persist()` that completes (rename succeeds). The
+    /// matching `_failed_total` below catches errors. Together
+    /// they let operators alert on `attempts > succeeded` —
+    /// silent-write-failure visibility, same shape as the
+    /// SIGHUP-reload counters on ServerMetrics.
+    persist_attempts_total: std::sync::atomic::AtomicU64,
+    persist_failed_total: std::sync::atomic::AtomicU64,
+    /// Cumulative entries loaded from disk at startup via
+    /// `load_from_disk`. Bumped during the load, surfaced as a
+    /// gauge so operators see "we restored N entries on startup"
+    /// without grepping logs.
+    loaded_from_disk: std::sync::atomic::AtomicU64,
 }
 
 impl UserQuarantineList {
@@ -180,7 +211,246 @@ impl UserQuarantineList {
             refused_inserts_total: std::sync::atomic::AtomicU64::new(0),
             quarantine_hits_total: std::sync::atomic::AtomicU64::new(0),
             sessions_torn_down_total: std::sync::atomic::AtomicU64::new(0),
+            persistence_path: Mutex::new(None),
+            persist_attempts_total: std::sync::atomic::AtomicU64::new(0),
+            persist_failed_total: std::sync::atomic::AtomicU64::new(0),
+            loaded_from_disk: std::sync::atomic::AtomicU64::new(0),
         }
+    }
+
+    /// Builder: enable on-insert persistence to the given file
+    /// path. Every successful insert (fresh or refresh) writes the
+    /// current map to disk atomically (temp file + rename). Pair
+    /// with [`Self::load_from_disk`] at startup to seed the
+    /// in-memory map from a previous run.
+    ///
+    /// File format: JSON Lines, one entry per row, with a
+    /// versioned header on the first line. Operator-readable +
+    /// hand-editable for emergency unbans.
+    #[must_use]
+    pub fn with_persistence(self, path: PathBuf) -> Self {
+        {
+            let mut g = self
+                .persistence_path
+                .lock()
+                .expect("persistence_path poisoned");
+            *g = Some(path);
+        }
+        self
+    }
+
+    /// Cumulative persist attempts (counter).
+    #[must_use]
+    pub fn persist_attempts_total(&self) -> u64 {
+        self.persist_attempts_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cumulative persist failures (counter).
+    #[must_use]
+    pub fn persist_failed_total(&self) -> u64 {
+        self.persist_failed_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Count of entries restored from disk on startup (gauge —
+    /// set once during `load_from_disk`).
+    #[must_use]
+    pub fn loaded_from_disk(&self) -> u64 {
+        self.loaded_from_disk
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Load a previously-persisted list from `path`. Filters out
+    /// already-expired entries (vs. wall-clock now). On any I/O
+    /// or parse error, logs the error and returns an empty list
+    /// at the configured TTL/max — operators get a working
+    /// quarantine, not a startup-fail. The bumped
+    /// `persist_failed_total` counter surfaces the issue without
+    /// blocking the binary.
+    ///
+    /// `path` is ALSO stored on the returned instance, so
+    /// subsequent inserts persist back to the same file (no need
+    /// for the caller to chain `with_persistence` separately).
+    #[must_use]
+    pub fn load_from_disk(path: PathBuf, ttl: Duration, max_entries: usize) -> Self {
+        let list = Self::new(ttl, max_entries).with_persistence(path.clone());
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    // Fresh start — file doesn't exist yet. Not
+                    // an error; just an empty restore.
+                    tracing::info!(
+                        path = ?path,
+                        "user_quarantine: no persistence file yet (fresh start)"
+                    );
+                } else {
+                    tracing::warn!(
+                        path = ?path,
+                        error = %e,
+                        "user_quarantine: read persistence file failed; starting empty"
+                    );
+                    list.persist_failed_total
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                return list;
+            }
+        };
+        let now_instant = Instant::now();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        let mut loaded = 0u64;
+        let mut skipped_expired = 0u64;
+        let mut g = list.inner.lock().expect("inner lock poisoned during load");
+        for (lineno, line) in raw.lines().enumerate() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Header line — version sentinel. Tolerate absence
+            // (legacy files) and unknown-but-present (forward
+            // compat).
+            if line.starts_with(r#"{"kind":"header""#) {
+                continue;
+            }
+            match parse_entry_line(line) {
+                Ok((uid, expires_unix, triggered_by)) => {
+                    if expires_unix <= now_unix {
+                        skipped_expired += 1;
+                        continue;
+                    }
+                    let remaining = Duration::from_secs(expires_unix - now_unix);
+                    let expires_at = now_instant + remaining;
+                    g.insert(
+                        uid,
+                        QuarantineEntry {
+                            expires_at,
+                            triggered_by_kind: triggered_by,
+                        },
+                    );
+                    loaded += 1;
+                    if g.len() >= max_entries {
+                        tracing::warn!(
+                            "user_quarantine: load hit max_entries cap ({max_entries}); truncating restore"
+                        );
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = ?path,
+                        lineno = lineno + 1,
+                        error = %e,
+                        "user_quarantine: skipping unparseable persistence line"
+                    );
+                }
+            }
+        }
+        drop(g);
+        list.loaded_from_disk
+            .store(loaded, std::sync::atomic::Ordering::Relaxed);
+        tracing::info!(
+            path = ?path,
+            loaded,
+            skipped_expired,
+            "user_quarantine: restored state from disk"
+        );
+        list
+    }
+
+    /// Write the current map to disk atomically. Called
+    /// automatically inside `insert_at` when persistence is wired.
+    /// Operators rarely need to call this directly — exposed for
+    /// tests + a future `admin quarantine snapshot` CLI.
+    pub fn persist(&self) -> std::io::Result<()> {
+        self.persist_attempts_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = {
+            let g = self
+                .persistence_path
+                .lock()
+                .expect("persistence_path poisoned");
+            match g.as_ref() {
+                Some(p) => p.clone(),
+                None => return Ok(()), // no-op when persistence not wired
+            }
+        };
+        // Snapshot the map outside the disk I/O so the inner
+        // mutex isn't held across a potentially-slow fsync.
+        let now_instant = Instant::now();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        let entries: Vec<(String, u64, &'static str)> = {
+            let g = self.inner.lock().expect("inner lock poisoned");
+            g.iter()
+                .filter_map(|(uid, e)| {
+                    if e.expires_at <= now_instant {
+                        return None;
+                    }
+                    let remaining = (e.expires_at - now_instant).as_secs();
+                    let expires_unix = now_unix.saturating_add(remaining);
+                    Some((
+                        crate::per_user_bandwidth::render_user_id_pub(uid),
+                        expires_unix,
+                        e.triggered_by_kind,
+                    ))
+                })
+                .collect()
+        };
+        let mut body = String::with_capacity(96 + entries.len() * 80);
+        body.push_str(
+            r#"{"kind":"header","schema_version":1,"format":"proteus_user_quarantine_v1"}"#,
+        );
+        body.push('\n');
+        for (uid_render, expires_unix, triggered_by) in &entries {
+            // user_id rendering already escapes `"` and `\`; the
+            // `triggered_by` label is a static enum string from
+            // AbuseFireKind::as_label() so it's safe verbatim.
+            body.push_str(&format!(
+                r#"{{"user_id":"{uid_render}","expires_unix_seconds":{expires_unix},"triggered_by":"{triggered_by}"}}"#
+            ));
+            body.push('\n');
+        }
+        // Atomic write: write to a temp file in the same directory
+        // (so rename is on the same filesystem), fsync, rename. On
+        // any error, bump the failure counter — but DON'T panic;
+        // the in-memory map is still authoritative.
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let mut tmp = parent.join(format!(
+            ".proteus_user_quarantine.{}.tmp",
+            std::process::id()
+        ));
+        if let Some(file_name) = path.file_name() {
+            tmp = parent.join(format!(
+                ".{}.{}.tmp",
+                file_name.to_string_lossy(),
+                std::process::id()
+            ));
+        }
+        if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
+            self.persist_failed_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(path = ?tmp, error = %e, "user_quarantine: temp write failed");
+            return Err(e);
+        }
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            self.persist_failed_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                from = ?tmp,
+                to = ?path,
+                error = %e,
+                "user_quarantine: atomic rename failed"
+            );
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        Ok(())
     }
 
     /// Register a new in-flight session for `user_id`. Returns an
@@ -322,6 +592,9 @@ impl UserQuarantineList {
             // sessions up needs them killed, not just blocked
             // from opening new ones.
             self.tear_down_user(&user_id);
+            // Persist refresh — the bumped expiry is the freshest
+            // signal and must survive a restart.
+            let _ = self.persist();
             return true;
         }
         if g.len() >= self.max_entries {
@@ -344,6 +617,9 @@ impl UserQuarantineList {
         // water — they don't get to finish their current upload
         // before the quarantine takes effect.
         self.tear_down_user(&user_id);
+        // Persist the fresh insert so the ban survives a process
+        // restart (the gap this whole iteration closes).
+        let _ = self.persist();
         true
     }
 
@@ -572,6 +848,51 @@ impl UserQuarantineList {
             "proteus_user_quarantine_sessions_torn_down_total {}",
             self.sessions_torn_down_total()
         );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_persist_attempts_total \
+             Cumulative disk-persistence write attempts. Bumped on \
+             every insert when persistence is wired."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_user_quarantine_persist_attempts_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_persist_attempts_total {}",
+            self.persist_attempts_total()
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_persist_failed_total \
+             Disk-persistence write failures. Alert on \
+             `attempts - succeeded > 0` (i.e. `failed > 0`) — bans \
+             will not survive a restart if persistence is silently \
+             failing."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_user_quarantine_persist_failed_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_persist_failed_total {}",
+            self.persist_failed_total()
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_loaded_from_disk \
+             Entries restored from the on-disk persistence file at \
+             process startup. Operators read this on a fresh process \
+             to confirm prior bans were restored."
+        );
+        let _ = writeln!(s, "# TYPE proteus_user_quarantine_loaded_from_disk gauge");
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_loaded_from_disk {}",
+            self.loaded_from_disk()
+        );
         s
     }
 
@@ -602,6 +923,97 @@ impl UserQuarantineList {
         }
         s
     }
+}
+
+/// Map a `triggered_by` label loaded from disk back to the
+/// `&'static str` form the in-memory struct expects. Only known
+/// AbuseFireKind labels are accepted; an unknown label is mapped
+/// to the static `"unknown"` so the entry is preserved (we don't
+/// want to drop a valid quarantine just because a future
+/// detector-kind name shows up in an old file).
+fn intern_triggered_by(label: &str) -> &'static str {
+    match label {
+        "byte_budget" => crate::abuse_fires::AbuseFireKind::ByteBudget.as_label(),
+        "rate_limit" => crate::abuse_fires::AbuseFireKind::RateLimit.as_label(),
+        "per_user_bandwidth_rate" => {
+            crate::abuse_fires::AbuseFireKind::PerUserBandwidthRate.as_label()
+        }
+        "test_trigger" => "test_trigger",
+        "manual" => "manual",
+        _ => "unknown",
+    }
+}
+
+/// Parse one persisted entry line. Hand-rolled (vs. pulling in
+/// serde_json) because the schema is tiny + fixed; the parser
+/// only has to find three field values: `user_id`,
+/// `expires_unix_seconds`, `triggered_by`. Returns Err on any
+/// malformation — the caller drops the line and logs.
+fn parse_entry_line(line: &str) -> Result<([u8; 8], u64, &'static str), String> {
+    // user_id field — first quoted value AFTER `"user_id":"`
+    let uid_str =
+        extract_string_field(line, "user_id").ok_or_else(|| "missing user_id field".to_string())?;
+    let uid = decode_user_id(&uid_str)?;
+    let expires_unix = extract_u64_field(line, "expires_unix_seconds")
+        .ok_or_else(|| "missing expires_unix_seconds field".to_string())?;
+    let triggered_by = extract_string_field(line, "triggered_by")
+        .ok_or_else(|| "missing triggered_by field".to_string())?;
+    Ok((uid, expires_unix, intern_triggered_by(&triggered_by)))
+}
+
+/// Find a `"name":"value"` pair in `s` and return the `value`
+/// portion (with surrounding quotes stripped). Returns None if
+/// the field isn't present.
+fn extract_string_field(s: &str, name: &str) -> Option<String> {
+    let needle = format!(r#""{name}":""#);
+    let start = s.find(&needle)? + needle.len();
+    // Find the next un-escaped `"`. The producer side already
+    // strips `"` and `\` from user-supplied strings via the
+    // render_user_id_pub ASCII-or-hex filter; the triggered_by
+    // field is a const enum string. So we don't need to handle
+    // escapes here — a future format change that needs escapes
+    // would also bump the schema_version sentinel.
+    let rest = &s[start..];
+    let end = rest.find('"')?;
+    Some(rest[..end].to_string())
+}
+
+/// Find a `"name":N` (integer, no quotes) field and parse it as u64.
+fn extract_u64_field(s: &str, name: &str) -> Option<u64> {
+    let needle = format!(r#""{name}":"#);
+    let start = s.find(&needle)? + needle.len();
+    let rest = &s[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(rest.len());
+    rest[..end].parse().ok()
+}
+
+/// Decode a user_id string back to `[u8; 8]`. The producer uses
+/// the same `render_user_id_pub` strategy as the per-user
+/// bandwidth labels: printable-ASCII verbatim (trimmed of nulls)
+/// or `hex:<16hexchars>` for non-printable / escape-needing bytes.
+fn decode_user_id(s: &str) -> Result<[u8; 8], String> {
+    if let Some(hex) = s.strip_prefix("hex:") {
+        if hex.len() != 16 {
+            return Err(format!("hex user_id must be 16 chars; got {}", hex.len()));
+        }
+        let mut out = [0u8; 8];
+        for i in 0..8 {
+            out[i] = u8::from_str_radix(&hex[i * 2..i * 2 + 2], 16)
+                .map_err(|e| format!("hex user_id decode at byte {i}: {e}"))?;
+        }
+        return Ok(out);
+    }
+    // Printable-ASCII form. Pad with NULs to 8 bytes (matches
+    // the producer's trim_trailing_nulls inverse).
+    let bytes = s.as_bytes();
+    if bytes.len() > 8 {
+        return Err(format!("printable user_id > 8 bytes: {}", bytes.len()));
+    }
+    let mut out = [0u8; 8];
+    out[..bytes.len()].copy_from_slice(bytes);
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -894,6 +1306,187 @@ mod tests {
         let q = UserQuarantineList::new(secs(60), 4096);
         let s = q.prometheus();
         assert!(s.contains("proteus_user_quarantine_sessions_torn_down_total 0"));
+        assert!(s.contains("proteus_user_quarantine_persist_attempts_total 0"));
+        assert!(s.contains("proteus_user_quarantine_persist_failed_total 0"));
+        assert!(s.contains("proteus_user_quarantine_loaded_from_disk 0"));
+    }
+
+    fn tmpfile(suffix: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        p.push(format!(
+            "proteus_quarantine_test_{}_{}.jsonl",
+            std::process::id(),
+            suffix
+        ));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    #[test]
+    fn persist_writes_jsonl_file_with_header_and_entries() {
+        let path = tmpfile("write");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "per_user_bandwidth_rate");
+        q.insert(*b"bob00002", "rate_limit");
+        // insert auto-persists; check counter.
+        assert!(q.persist_attempts_total() >= 2);
+        assert_eq!(q.persist_failed_total(), 0);
+        let body = std::fs::read_to_string(&path).expect("file written");
+        assert!(
+            body.contains(r#""kind":"header""#),
+            "header missing: {body}"
+        );
+        assert!(
+            body.contains(r#""user_id":"alice001""#),
+            "alice missing: {body}"
+        );
+        assert!(
+            body.contains(r#""user_id":"bob00002""#),
+            "bob missing: {body}"
+        );
+        assert!(
+            body.contains(r#""triggered_by":"per_user_bandwidth_rate""#),
+            "trigger missing: {body}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_disk_restores_unexpired_entries() {
+        let path = tmpfile("load_round");
+        // First instance: insert two users, persist.
+        {
+            let q1 = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+            q1.insert(*b"alice001", "per_user_bandwidth_rate");
+            q1.insert(*b"bob00002", "rate_limit");
+        }
+        // Second instance: load from disk.
+        let q2 = UserQuarantineList::load_from_disk(path.clone(), secs(600), 4096);
+        assert_eq!(q2.loaded_from_disk(), 2, "expected 2 entries restored");
+        assert!(q2.check(b"alice001").is_some(), "alice must be quarantined");
+        assert!(q2.check(b"bob00002").is_some(), "bob must be quarantined");
+        // Triggered_by survives the roundtrip.
+        let snap = q2.active_snapshot(64);
+        let alice = snap.iter().find(|e| e.user_id == "alice001").unwrap();
+        assert_eq!(alice.triggered_by, "per_user_bandwidth_rate");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_disk_skips_expired_entries() {
+        // Hand-write a JSONL file with two entries: one expired
+        // (expires_unix_seconds in the past), one valid.
+        let path = tmpfile("expired");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = format!(
+            "{}\n{}\n{}\n",
+            r#"{"kind":"header","schema_version":1}"#,
+            format_args!(
+                r#"{{"user_id":"expired0","expires_unix_seconds":{},"triggered_by":"byte_budget"}}"#,
+                now - 100
+            ),
+            format_args!(
+                r#"{{"user_id":"valid001","expires_unix_seconds":{},"triggered_by":"rate_limit"}}"#,
+                now + 300
+            )
+        );
+        std::fs::write(&path, body).unwrap();
+        let q = UserQuarantineList::load_from_disk(path.clone(), secs(600), 4096);
+        assert_eq!(q.loaded_from_disk(), 1, "only the valid entry restored");
+        assert!(q.check(b"expired0").is_none());
+        assert!(q.check(b"valid001").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_from_disk_handles_missing_file_as_empty_fresh_start() {
+        let path = tmpfile("missing");
+        // file does not exist
+        let q = UserQuarantineList::load_from_disk(path.clone(), secs(600), 4096);
+        assert_eq!(q.loaded_from_disk(), 0);
+        // Persist failure counter MUST stay 0 for "file not found"
+        // (that's a fresh start, not an error).
+        assert_eq!(q.persist_failed_total(), 0);
+    }
+
+    #[test]
+    fn load_from_disk_handles_malformed_lines_gracefully() {
+        let path = tmpfile("malformed");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = format!(
+            "{}\n{}\n{}\n",
+            r#"this is not json"#,
+            r#"{"user_id":"missing fields"}"#,
+            format_args!(
+                r#"{{"user_id":"valid001","expires_unix_seconds":{},"triggered_by":"rate_limit"}}"#,
+                now + 300
+            )
+        );
+        std::fs::write(&path, body).unwrap();
+        let q = UserQuarantineList::load_from_disk(path.clone(), secs(600), 4096);
+        assert_eq!(
+            q.loaded_from_disk(),
+            1,
+            "valid line restored, others skipped"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn persist_failure_bumps_counter_without_crashing() {
+        // Point at a path inside a NONEXISTENT directory — the
+        // rename will fail. The in-memory map must stay
+        // authoritative; only the counter should reflect the
+        // failure.
+        let path = std::path::PathBuf::from("/proc/nonexistent_dir/proteus_q.jsonl");
+        let q = UserQuarantineList::new(secs(60), 4096).with_persistence(path);
+        let inserted = q.insert(*b"alice001", "byte_budget");
+        assert!(
+            inserted,
+            "in-memory insert must succeed even when disk fails"
+        );
+        assert!(
+            q.check(b"alice001").is_some(),
+            "alice must still be quarantined"
+        );
+        assert!(
+            q.persist_failed_total() >= 1,
+            "persist failure must bump counter"
+        );
+    }
+
+    #[test]
+    fn user_id_roundtrip_through_persistence_handles_hex_form() {
+        let path = tmpfile("hexform");
+        let weird = [0xff_u8, 0x00, 0xab, 0xcd, 0xef, 0x12, 0x34, 0x56];
+        {
+            let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+            q.insert(weird, "byte_budget");
+        }
+        let q2 = UserQuarantineList::load_from_disk(path.clone(), secs(600), 4096);
+        assert_eq!(q2.loaded_from_disk(), 1);
+        assert!(q2.check(&weird).is_some(), "weird user_id must roundtrip");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn decode_user_id_rejects_malformed_hex() {
+        // wrong length
+        assert!(decode_user_id("hex:abc").is_err());
+        // too long printable
+        assert!(decode_user_id("toolongtoolong").is_err());
+    }
+
+    #[test]
+    fn parse_entry_line_rejects_missing_fields() {
+        assert!(parse_entry_line(r#"{"user_id":"alice001"}"#).is_err());
+        assert!(parse_entry_line(r#"{"expires_unix_seconds":123}"#).is_err());
     }
 
     #[test]

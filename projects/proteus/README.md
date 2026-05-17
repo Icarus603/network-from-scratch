@@ -557,6 +557,32 @@ operator-facing counter for this — alert on it to catch every
 mid-burst exfil that was interrupted, not just every new
 handshake that was blocked.
 
+**Persistence across restarts**: a stolen credential that gets
+banned for 10 minutes, then the process OOMs / systemd restarts /
+operator deploys a new binary, gets a FRESH attack window of TTL
+minutes until the next abuse fire re-detects them. To close this
+gap, the quarantine list supports JSON Lines persistence:
+
+```yaml
+user_quarantine:
+  ttl_secs: 600
+  max_entries: 4096
+  on_kinds: [per_user_bandwidth_rate, rate_limit]
+  persistence_path: /var/lib/proteus/user_quarantine.jsonl
+```
+
+Every insert (fresh or refresh) writes the current map to disk
+atomically (temp file + rename — never partially-written on
+crash). On startup, the binary loads the file, filters
+already-expired entries, and seeds the in-memory map. The format
+is operator-readable + hand-editable for emergency unbans —
+delete a line, restart.
+
+Persistence counters (`proteus_user_quarantine_persist_attempts_total`,
+`_failed_total`, `_loaded_from_disk`) make silent-write-failure
+visible: a non-zero `failed_total` means bans will NOT survive a
+restart, alert on it. Mirrors the SIGHUP-reload counter pattern.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

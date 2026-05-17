@@ -545,6 +545,26 @@ pub struct UserQuarantineCfg {
     /// only — no detector opted in, nothing ever gets banned.
     #[serde(default)]
     pub on_kinds: Vec<String>,
+    /// Optional disk path for persisting quarantine state across
+    /// process restarts. When set, every insert (fresh or refresh)
+    /// writes the current map to the file atomically (temp + rename),
+    /// and the file is loaded at startup to restore prior bans.
+    ///
+    /// Without this, a stolen credential gets a fresh attack window
+    /// of `ttl_secs` every time the process restarts (systemd
+    /// restart, OOM kill, binary upgrade). For deployments that
+    /// expect long quarantine windows, persistence is mandatory.
+    ///
+    /// Format: operator-readable JSON Lines with a versioned
+    /// header. Safe to hand-edit for emergency unbans (delete the
+    /// matching line, SIGHUP to reload... actually no SIGHUP is
+    /// needed — the file is only read at startup; future edits
+    /// take effect on next restart).
+    ///
+    /// Recommended path: `/var/lib/proteus/user_quarantine.jsonl`
+    /// (same level as systemd's typical `StateDirectory=`).
+    #[serde(default)]
+    pub persistence_path: Option<std::path::PathBuf>,
 }
 
 const fn default_user_quarantine_ttl_secs() -> u64 {
@@ -1062,6 +1082,31 @@ user_quarantine:\n  \
         assert!(p
             .prometheus()
             .contains(r#"proteus_config_section_active{section="user_quarantine"} 1"#),);
+    }
+
+    #[test]
+    fn user_quarantine_persistence_path_roundtrips_through_yaml() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+user_quarantine:\n  \
+  ttl_secs: 600\n  \
+  max_entries: 4096\n  \
+  on_kinds:\n    - per_user_bandwidth_rate\n  \
+  persistence_path: /var/lib/proteus/user_quarantine.jsonl\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let q = cfg.user_quarantine.as_ref().unwrap();
+        assert_eq!(
+            q.persistence_path.as_deref(),
+            Some(std::path::Path::new(
+                "/var/lib/proteus/user_quarantine.jsonl"
+            )),
+        );
     }
 
     #[test]

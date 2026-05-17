@@ -610,12 +610,30 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         Arc<proteus_transport_alpha::user_quarantine::UserQuarantineList>,
     > = match cfg.user_quarantine.as_ref() {
         Some(qcfg) => {
-            let list = Arc::new(
-                proteus_transport_alpha::user_quarantine::UserQuarantineList::new(
+            // Load prior state from disk when persistence is configured;
+            // otherwise start with an empty list. Either way the
+            // returned instance has persistence wired so subsequent
+            // inserts auto-write.
+            let list = Arc::new(match qcfg.persistence_path.as_ref() {
+                Some(path) => {
+                    proteus_transport_alpha::user_quarantine::UserQuarantineList::load_from_disk(
+                        path.clone(),
+                        std::time::Duration::from_secs(qcfg.ttl_secs),
+                        qcfg.max_entries,
+                    )
+                }
+                None => proteus_transport_alpha::user_quarantine::UserQuarantineList::new(
                     std::time::Duration::from_secs(qcfg.ttl_secs),
                     qcfg.max_entries,
                 ),
-            );
+            });
+            if list.loaded_from_disk() > 0 {
+                info!(
+                    restored = list.loaded_from_disk(),
+                    path = ?qcfg.persistence_path,
+                    "user_quarantine: restored prior bans from disk"
+                );
+            }
             // Filter on_kinds to the known set of labels (forward-
             // compat: unknown labels are silently accepted but
             // never trigger enforcement). Build the static-str set

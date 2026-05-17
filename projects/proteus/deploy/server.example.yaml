@@ -265,6 +265,16 @@ handshake_deadline_secs: 15
 #   on_kinds:
 #     - per_user_bandwidth_rate
 #     - rate_limit
+#   # Optional: persist quarantine state to disk so bans survive
+#   # process restarts (systemd restart, OOM kill, binary upgrade).
+#   # Without this, a stolen credential gets a fresh attack window
+#   # of ttl_secs every time the process restarts. Strongly
+#   # recommended for any deployment with a non-trivial TTL.
+#   #
+#   # Format: JSON Lines, hand-editable for emergency unbans.
+#   # Recommended path: /var/lib/proteus/ (matches systemd's
+#   # typical StateDirectory= convention).
+#   persistence_path: /var/lib/proteus/user_quarantine.jsonl
 
 # Per-session byte budget (tx + rx plaintext). Sessions whose total
 # bytes crosses this threshold are torn down with close_reason
