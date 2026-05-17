@@ -662,11 +662,48 @@ fn check_key_file(
         ));
         return;
     }
+    // Iter-52: secret-key file mode check (symmetric with server-
+    // side iter-52). The client's `client_ed25519_sk` is the
+    // long-term identity used to authenticate to the server; a
+    // world-readable SK on a shared host is a real exposure. WARN
+    // (not FAIL) for the same reason as server: host-preflight is
+    // the hard gate; validate is the early-warning surface.
+    if label == "client_ed25519_sk" {
+        check_secret_file_mode(r, label, path);
+    }
     r.push_pass(format!(
         "keys.{label} OK ({} bytes, {})",
         decoded.len(),
         expected
     ));
+}
+
+/// Iter-52: Unix-only secret-file mode check. Symmetric with the
+/// server-side helper of the same name in
+/// proteus-server/src/validate.rs.
+#[cfg(unix)]
+fn check_secret_file_mode(r: &mut PreflightReport, label: &str, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let md = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mode = md.permissions().mode() & 0o777;
+    let group_or_other_set = mode & 0o077 != 0;
+    if group_or_other_set {
+        r.push_warn(format!(
+            "keys.{label} {} has mode {mode:#o} — group or world readable. SECRET key \
+             exposure on shared hosts. Fix: `chmod 0600 {}`. (validate emits a warn; \
+             the harder gate is `proteus-client host-preflight`.)",
+            path.display(),
+            path.display(),
+        ));
+    }
+}
+
+#[cfg(not(unix))]
+fn check_secret_file_mode(_r: &mut PreflightReport, _label: &str, _path: &Path) {
+    // No-op on non-Unix; the world-readable concept doesn't map.
 }
 
 fn base64_or_raw(input: &[u8]) -> Vec<u8> {

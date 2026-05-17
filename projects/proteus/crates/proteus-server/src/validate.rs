@@ -794,10 +794,63 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
                     return;
                 }
             }
+            // Iter-52: secret key files must be 0600 (or stricter).
+            // Operators copying SK files between hosts via rsync /
+            // scp without `-p` end up with default umask (0644) on
+            // the destination. Public PQ keys exposed to the
+            // operator's user is bad; exposed to OTHER users on the
+            // VPS (shared hosting / chroot escape) is catastrophic.
+            // `host-preflight` already catches this but many
+            // operators only run `validate` before deploy — same
+            // signal should fire there.
+            //
+            // Pattern: the file is a "SECRET" if the label ends with
+            // `_sk` OR the label is `tls.private_key`. Public keys
+            // (`_pk`, `cert_chain`) skip the mode check.
+            let is_secret = label.ends_with("_sk") || label == "tls.private_key";
+            if is_secret {
+                check_secret_file_mode(report, label, path);
+            }
             report.push_pass(format!("{label} exists and readable ({path:?})"));
         }
         Err(e) => report.push_fail(format!("{label} {path:?}: {e}")),
     }
+}
+
+/// Iter-52: Unix-only secret-file mode check. On non-Unix the
+/// check is a no-op (Windows doesn't have the same world-readable
+/// concept). The check WARNs (not FAILs) because:
+///   - Operators ship in containers with restricted process users
+///     where loose modes are still safe in practice
+///   - The runtime would happily start with a 0644 SK — emitting a
+///     hard FAIL would block deploys that the host-preflight WARN
+///     already flagged
+///   - `host-preflight` is the FAIL gate for this class; `validate`
+///     is the lighter early-warning surface
+#[cfg(unix)]
+fn check_secret_file_mode(report: &mut PreflightReport, label: &str, path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let md = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return, // existing check_file branch will surface the error
+    };
+    let mode = md.permissions().mode() & 0o777;
+    // 0600 (owner-only) is the canonical safe state. 0400 (owner-
+    // read-only) is also safe. Anything with bits in group/other
+    // categories is a warn.
+    let group_or_other_set = mode & 0o077 != 0;
+    if group_or_other_set {
+        report.push_warn(format!(
+            "{label} {path:?} has mode {mode:#o} — group or world readable. \
+             SECRET key exposure on shared hosts. Fix: `chmod 0600 {path:?}`. \
+             (validate emits a warn; the harder gate is `proteus-server host-preflight`.)"
+        ));
+    }
+}
+
+#[cfg(not(unix))]
+fn check_secret_file_mode(_report: &mut PreflightReport, _label: &str, _path: &Path) {
+    // No-op on non-Unix; the world-readable concept doesn't map.
 }
 
 fn base64_or_raw_bytes(input: &[u8]) -> Vec<u8> {
@@ -1042,6 +1095,94 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Check::Warn(m) if m.contains("non-loopback"))),
             "expected a non-loopback warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-52: secret key files with world-readable mode get a
+    /// WARN (not FAIL — same severity philosophy as host-preflight
+    /// gates this harder; validate is the early-warning surface).
+    #[cfg(unix)]
+    #[test]
+    fn iter52_world_readable_secret_key_warns() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        // Plant a world-readable secret key (mode 0644).
+        std::fs::set_permissions(&cfg.keys.mlkem_sk, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let report = preflight(&cfg);
+        eprintln!("world-readable-sk report:\n{report}");
+        // Cleanup so tmpdir delete works.
+        let _ = std::fs::set_permissions(
+            &cfg.keys.mlkem_sk,
+            std::fs::Permissions::from_mode(0o600),
+        );
+        // Skip on root which ignores write/read bits.
+        let is_root = std::env::var("USER").as_deref() == Ok("root")
+            || std::env::var("LOGNAME").as_deref() == Ok("root");
+        if is_root {
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => {
+                s.contains("mlkem_sk") && (s.contains("0o644") || s.contains("group or world"))
+            }
+            _ => false,
+        });
+        assert!(
+            warn,
+            "world-readable SECRET key must WARN at validate: {report}"
+        );
+        // Must NOT escalate to FAIL — validate is early-warning,
+        // host-preflight is the hard gate.
+        assert!(
+            !report.has_failures(),
+            "iter-52 mode warn must NOT escalate to FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-52: 0600 mode key passes cleanly (no warn).
+    #[cfg(unix)]
+    #[test]
+    fn iter52_owner_only_secret_key_passes_silently() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        std::fs::set_permissions(&cfg.keys.mlkem_sk, std::fs::Permissions::from_mode(0o600))
+            .unwrap();
+        let report = preflight(&cfg);
+        let any_mode_warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("mlkem_sk") && s.contains("group or world"),
+            _ => false,
+        });
+        assert!(
+            !any_mode_warn,
+            "0600 mode key must NOT trigger the iter-52 warn: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-52: public-key file (mlkem_pk) is NOT subject to the
+    /// mode check — public artifacts are intentionally readable.
+    #[cfg(unix)]
+    #[test]
+    fn iter52_public_key_world_readable_no_warn() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        std::fs::set_permissions(&cfg.keys.mlkem_pk, std::fs::Permissions::from_mode(0o644))
+            .unwrap();
+        let report = preflight(&cfg);
+        let any_pk_warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("mlkem_pk") && s.contains("group or world"),
+            _ => false,
+        });
+        assert!(
+            !any_pk_warn,
+            "PUBLIC key file mode is intentionally permissive — no warn: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
