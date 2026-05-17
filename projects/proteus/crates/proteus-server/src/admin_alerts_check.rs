@@ -386,6 +386,79 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── Iter-32: ProteusCoverForwardRejecting ────
+    //
+    // Mirrors the bundled Prometheus rule (iter-26) that
+    // alerts when the iter-20 cover-forward semaphore drops
+    // rejections. Point-in-time: any non-zero value of the
+    // rejections counter means the cap was hit at some point
+    // since process start. Operators reading the alerts-check
+    // output get the same surface signal they'd see from
+    // their Prometheus stack — useful for the "no Prometheus
+    // available, just curl /metrics + run alerts-check
+    // locally" deploy path.
+    if let Some(rejected) = g("proteus_cover_forwards_rejected_total") {
+        if rejected > 0.0 {
+            r.push(Check {
+                rule_name: "ProteusCoverForwardRejecting",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{rejected} cover-forward request(s) rejected since start — either `max_cover_forwards` cap too low OR cover endpoint slow/unhealthy (cover tasks not exiting → semaphore drained)"
+                ),
+                equivalent_promql: "rate(proteus_cover_forwards_rejected_total[5m]) > 0",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusCoverForwardRejecting",
+                severity: CheckSeverity::Pass,
+                message: "no cover-forward rejections — cap holding".to_string(),
+                equivalent_promql: "",
+            });
+        }
+    }
+
+    // ──── Iter-32: ProteusCoverForwardStorm (point-in-time approx) ────
+    //
+    // The bundled Prometheus rule is `rate(proteus_cover_forwards_total[5m]) > 100`
+    // — a sustained-rate signal. We can't compute rate from a
+    // single-scrape /metrics body without a baseline, so we
+    // approximate: a HIGH absolute count of cover_forwards
+    // since process start signals "this box has handled a lot
+    // of probes — go look at recent rate via Prometheus." The
+    // 10k threshold below is operator-tunable in the bundled
+    // alert (100/sec × 60s × 1.6 minutes typical alert
+    // latency = ~10k) and chosen here to match the alert's
+    // intent without producing false positives on a freshly-
+    // restarted box.
+    if let Some(forwards) = g("proteus_cover_forwards_total") {
+        // Threshold: 10k cumulative cover-forwards since start.
+        // For long-running processes this is operator-relevant;
+        // for processes < 1 hour old it's nearly always
+        // unreached.
+        const STORM_THRESHOLD: f64 = 10_000.0;
+        if forwards >= STORM_THRESHOLD {
+            r.push(Check {
+                rule_name: "ProteusCoverForwardStorm",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{} cumulative cover-forwards since start — this box is likely under sustained probing. Cross-reference proteus_probe_anomalies_fired_total for /24 prefix sources.",
+                    forwards as u64
+                ),
+                equivalent_promql: "rate(proteus_cover_forwards_total[5m]) > 100",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusCoverForwardStorm",
+                severity: CheckSeverity::Pass,
+                message: format!(
+                    "{} cumulative cover-forwards (under {} threshold)",
+                    forwards as u64, STORM_THRESHOLD as u64
+                ),
+                equivalent_promql: "",
+            });
+        }
+    }
+
     r
 }
 
@@ -653,5 +726,80 @@ mod tests {
         let s = format!("{r}");
         assert!(s.contains("summary:"));
         assert!(s.contains("exit"));
+    }
+
+    // ──── Iter-32: ProteusCoverForwardRejecting checks ────
+
+    /// Non-zero `cover_forwards_rejected_total` must fire the
+    /// iter-26 alert as WARN. Without this evaluation the
+    /// `proteus-server admin alerts-check` CLI would silently
+    /// pass even when the iter-20 cover-forward semaphore was
+    /// dropping rejections in production.
+    #[test]
+    fn iter32_evaluate_warns_when_cover_forwards_rejected_nonzero() {
+        let body = body_with("proteus_cover_forwards_rejected_total 42");
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusCoverForwardRejecting")
+            .expect("ProteusCoverForwardRejecting check must fire");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+        assert!(c.message.contains("42"));
+    }
+
+    /// Zero rejections → PASS (cap is holding, all good).
+    #[test]
+    fn iter32_evaluate_passes_when_cover_forwards_rejected_zero() {
+        let body = body_with("proteus_cover_forwards_rejected_total 0");
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusCoverForwardRejecting")
+            .expect("ProteusCoverForwardRejecting check must fire even at zero");
+        assert_eq!(c.severity, CheckSeverity::Pass);
+    }
+
+    /// Counter absent → check skipped (no metric → no
+    /// alert). This matches the pattern other checks use for
+    /// optional metrics.
+    #[test]
+    fn iter32_evaluate_skips_cover_forward_rejecting_when_metric_absent() {
+        let body = body_with("proteus_up 1"); // no cover_forwards_rejected
+        let r = evaluate(&body);
+        assert!(
+            r.checks
+                .iter()
+                .all(|c| c.rule_name != "ProteusCoverForwardRejecting"),
+            "iter-32: should NOT emit a check when the metric is absent"
+        );
+    }
+
+    // ──── Iter-32: ProteusCoverForwardStorm checks ────
+
+    #[test]
+    fn iter32_evaluate_warns_on_storm_threshold_exceeded() {
+        let body = body_with("proteus_cover_forwards_total 50000");
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusCoverForwardStorm")
+            .expect("ProteusCoverForwardStorm check must fire");
+        assert_eq!(c.severity, CheckSeverity::Warn);
+        assert!(c.message.contains("50000"));
+    }
+
+    #[test]
+    fn iter32_evaluate_passes_under_storm_threshold() {
+        let body = body_with("proteus_cover_forwards_total 100");
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusCoverForwardStorm")
+            .expect("ProteusCoverForwardStorm check must fire even below threshold");
+        assert_eq!(c.severity, CheckSeverity::Pass);
     }
 }
