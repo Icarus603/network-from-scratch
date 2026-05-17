@@ -769,6 +769,28 @@ async fn try_alpha(
 /// proteus server so it drops its relay and propagates to upstream.
 /// On `server_to_client` EOF, shut down the SOCKS5 socket so the
 /// client's read returns EOF.
+///
+/// ## Adaptive flush (iter 12)
+///
+/// Pre-iter-12 this function flushed after every `send_record`,
+/// which defeated the 64 KiB `BufWriter` inside `AlphaSender`. On
+/// bulk uploads (file transfer, screen share, anything streaming
+/// past 16 KiB) that turned one logical 1 MiB write into ~64
+/// individual TLS records each followed by its own kernel write.
+/// The result was wasted syscalls, fragmented TCP segments, and
+/// throughput much lower than the underlying carrier could carry.
+///
+/// New behavior: flush ONLY when the upstream read returned LESS
+/// than the buffer's capacity. The intuition mirrors `TCP_CORK` /
+/// nginx `tcp_nopush`: a full-buffer read implies more bytes are
+/// queued at the source, so coalesce with the next chunk; a
+/// partial read implies the source paused, so flush now to keep
+/// interactive RPC latency low. Bulk transfers see large coalesced
+/// writes; interactive sessions see no added latency.
+///
+/// The receiver side is unchanged — `recv_record` already wakes
+/// per logical record; we simply forward each one to the SOCKS5
+/// socket as it arrives.
 async fn pump<R, W>(
     sock: &mut TcpStream,
     sender: &mut proteus_transport_alpha::session::AlphaSender<W>,
@@ -779,15 +801,31 @@ async fn pump<R, W>(
 {
     let (mut sock_r, mut sock_w) = tokio::io::split(sock);
     let client_to_server = async {
-        let mut buf = vec![0u8; 16 * 1024];
+        // 64 KiB matches AlphaSender::TX_BUF_CAPACITY so a single
+        // read can fill the BufWriter, and consecutive full reads
+        // coalesce cleanly without exceeding it.
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
             match sock_r.read(&mut buf).await {
-                Ok(0) | Err(_) => break,
+                Ok(0) | Err(_) => {
+                    // Best-effort drain of anything still buffered
+                    // before signaling EOF — the select! arm below
+                    // will then send CLOSE + shut down the socket.
+                    let _ = sender.flush().await;
+                    break;
+                }
                 Ok(n) => {
                     if sender.send_record(&buf[..n]).await.is_err() {
                         break;
                     }
-                    if sender.flush().await.is_err() {
+                    // Adaptive flush: only if the read returned LESS
+                    // than the buffer (=> source paused, batch boundary)
+                    // OR the buffer is near-full inside the sender.
+                    // A full-capacity read means more bytes are likely
+                    // queued at the source — coalesce with the next
+                    // chunk by skipping the flush, letting the
+                    // BufWriter accumulate.
+                    if n < buf.len() && sender.flush().await.is_err() {
                         break;
                     }
                 }

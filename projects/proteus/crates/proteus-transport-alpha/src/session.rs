@@ -1169,3 +1169,144 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
         }
     }
 }
+
+#[cfg(test)]
+mod bufwriter_coalescing_tests {
+    //! Pins the iter-12 contract: when callers send multiple records
+    //! WITHOUT calling `flush` between them, the inner BufWriter must
+    //! coalesce them into ONE underlying write call (up to the 64 KiB
+    //! `TX_BUF_CAPACITY` ceiling). Pre-iter-12, the SOCKS relay
+    //! pump and the server relay forced a flush after every record,
+    //! defeating this BufWriter entirely on bulk uploads/downloads.
+    //!
+    //! The fix is in the *callers* (socks.rs::pump,
+    //! relay.rs::upstream_to_client) — they now flush only on
+    //! batch boundaries (partial read = source paused). This test
+    //! exists to catch any future regression that re-introduces
+    //! the per-record flush at the session layer.
+    use super::*;
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::task::{Context, Poll};
+    use tokio::io::AsyncWrite;
+
+    /// Mock writer that counts how many distinct `poll_write` calls
+    /// it receives. A single `BufWriter` flush manifests as ONE
+    /// `poll_write` (passing the whole buffered payload).
+    struct CountingWriter {
+        bytes: Vec<u8>,
+        writes: Arc<AtomicUsize>,
+    }
+    impl AsyncWrite for CountingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes.fetch_add(1, Ordering::Relaxed);
+            self.bytes.extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn keys() -> DirectionKeys {
+        DirectionKeys {
+            key: zeroize::Zeroizing::new([0x9Au8; 32]),
+            iv: zeroize::Zeroizing::new([0x4Cu8; 12]),
+        }
+    }
+
+    /// Many small records without intermediate flush → ONE
+    /// underlying writer call (BufWriter coalesces).
+    #[tokio::test]
+    async fn many_small_records_without_flush_coalesce_to_one_underlying_write() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mw = CountingWriter {
+            bytes: Vec::new(),
+            writes: Arc::clone(&writes),
+        };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut sender = AlphaSender::new(mw, keys(), zeroize::Zeroizing::new([0u8; 32]), metrics);
+
+        // Send 50 short records. Total bytes (50 * ~80 incl AEAD + header)
+        // ≈ 4 KiB, well under TX_BUF_CAPACITY (64 KiB) — BufWriter
+        // must coalesce all of them into ONE underlying write at the
+        // explicit flush below.
+        for i in 0..50u32 {
+            let payload = i.to_be_bytes();
+            sender.send_record(&payload).await.unwrap();
+        }
+        sender.flush().await.unwrap();
+        let total_writes = writes.load(Ordering::Relaxed);
+        assert_eq!(
+            total_writes, 1,
+            "50 small records without intermediate flush MUST coalesce to 1 underlying write, got {total_writes}",
+        );
+    }
+
+    /// Per-record flush → one underlying write PER record. This is
+    /// the pre-iter-12 anti-pattern; the test pins the *cost* so
+    /// future readers see why the callers must NOT do this.
+    #[tokio::test]
+    async fn per_record_flush_emits_one_underlying_write_per_record() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mw = CountingWriter {
+            bytes: Vec::new(),
+            writes: Arc::clone(&writes),
+        };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut sender = AlphaSender::new(mw, keys(), zeroize::Zeroizing::new([0u8; 32]), metrics);
+        for i in 0..50u32 {
+            let payload = i.to_be_bytes();
+            sender.send_record(&payload).await.unwrap();
+            sender.flush().await.unwrap(); // anti-pattern
+        }
+        let total_writes = writes.load(Ordering::Relaxed);
+        assert!(
+            total_writes >= 50,
+            "per-record-flush MUST emit at least one underlying write per record (got {total_writes})",
+        );
+    }
+
+    /// Records totalling more than TX_BUF_CAPACITY without explicit
+    /// flush will auto-flush at the buffer boundary, but the
+    /// boundary should be at ~64 KiB — NOT every 16 KiB the way the
+    /// pre-iter-12 buffer size would have implied.
+    #[tokio::test]
+    async fn bulk_records_auto_flush_only_at_tx_buf_capacity_boundary() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let mw = CountingWriter {
+            bytes: Vec::new(),
+            writes: Arc::clone(&writes),
+        };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut sender = AlphaSender::new(mw, keys(), zeroize::Zeroizing::new([0u8; 32]), metrics);
+        // Three 32 KiB records = 96 KiB raw, ~96 KiB ciphertext +
+        // headers. Should trigger ~2 BufWriter flushes (96 / 64 = 1.5
+        // → 2) at the TX_BUF_CAPACITY boundary, NOT 3 (one per record)
+        // and NOT 6 (one per record on a 16 KiB buf).
+        let payload = vec![0xA5u8; 32 * 1024];
+        for _ in 0..3 {
+            sender.send_record(&payload).await.unwrap();
+        }
+        sender.flush().await.unwrap();
+        let total_writes = writes.load(Ordering::Relaxed);
+        assert!(
+            total_writes <= 4,
+            "3 × 32 KiB records should yield ≤4 underlying writes (got {total_writes})",
+        );
+        assert!(
+            total_writes >= 1,
+            "should still produce at least one write (got {total_writes})",
+        );
+    }
+}

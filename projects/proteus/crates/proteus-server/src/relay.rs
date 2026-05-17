@@ -495,7 +495,13 @@ where
     let reason_u2c = std::sync::Arc::clone(&reason_cell);
     let bytes_u2c = std::sync::Arc::clone(&bytes_used);
     let upstream_to_client = async move {
-        let mut buf = vec![0u8; 16 * 1024];
+        // 64 KiB to match AlphaSender::TX_BUF_CAPACITY: a full read
+        // can fill the BufWriter and consecutive full reads coalesce
+        // cleanly without exceeding it. Pre-iter-12 this was 16 KiB,
+        // which split bulk responses (HTTP/2 long-poll, file
+        // downloads, video chunks) across 4× the records strictly
+        // needed.
+        let mut buf = vec![0u8; 64 * 1024];
         loop {
             let read_fut = up_r.read(&mut buf);
             let n = match idle {
@@ -537,7 +543,15 @@ where
                 set_reason(&reason_u2c, "client_send_err");
                 break;
             }
-            if sender.flush().await.is_err() {
+            // Adaptive flush (iter 12): only when the read returned
+            // LESS than the buffer (= source paused, natural batch
+            // boundary). A full-capacity read implies more bytes are
+            // queued at the source — coalesce with the next chunk by
+            // skipping the flush and letting the BufWriter
+            // accumulate. Interactive RPC sees no added latency
+            // because its reads are short; bulk transfer reclaims
+            // the syscall + record-framing overhead it was wasting.
+            if n < buf.len() && sender.flush().await.is_err() {
                 set_reason(&reason_u2c, "client_send_err");
                 break;
             }
