@@ -470,16 +470,18 @@ files. The Proteus side is reproducible; the comparison is the
 operator's to make and to publish (we won't ship cherry-picked
 numbers we generated).
 
-Real bench numbers from this dev box (M-series Apple Silicon, release):
+**Persisted baseline** (Apple Silicon M-series, release, 2026-05-19) —
+raw JSONL committed at
+[`notes/perf/2026-05-19-loopback-baseline.jsonl`](../../notes/perf/2026-05-19-loopback-baseline.jsonl),
+12 runs across 5 cells:
 
-| Payload | Window override | One-way effective | Gbps | Notes |
-|---|---|---|---|---|
-| 4 MiB | default | ~13 MiB/s | ~0.11 | Handshake dominates — too short for steady-state |
-| 16 MiB | default | ~47–52 MiB/s | ~0.40 | Reasonable baseline; 3-run variance |
-| 64 MiB | default | ~94 MiB/s | ~0.79 | Steady-state β throughput; BBR window saturated |
-| 128 MiB | default | (stall) | n/a | Hits the 64 MiB stream-receive window |
-| 128 MiB | `--stream-window-mib 256` | **~110 MiB/s** | **0.93** | Past the 64 MiB stall; 2026-05-18 |
-| 256 MiB | `--stream-window-mib 512` | **~105 MiB/s** | **0.88** | Sustained single-stream past 1 Gbps wire goodput |
+| Payload | pad_quic | Window | n | median MiB/s | Gbps | Notes |
+|---|---|---|---:|---:|---:|---|
+| 16 MiB | off | default (64M) | 3 | 53.5 | 0.45 | Too short to amortize handshake + BBR ramp |
+| 16 MiB | on | default | 1 | 76.7 | 0.64 | (single sample; not a confident curve) |
+| 64 MiB | off | default | 3 | **108.3** | **0.91** | Steady-state β throughput |
+| 64 MiB | on | default | 2 | 87.4 | 0.73 | ~20% padding cost at 64 MiB |
+| 128 MiB | off | `--stream-window-mib 256` | 3 | **112.7** | **0.95** | Past the 64 MiB stall |
 
 The `--stream-window-mib` knob is bench-only — production keeps the
 64 MiB per-stream window which is correctly sized for 1 Gbps × 500 ms RTT

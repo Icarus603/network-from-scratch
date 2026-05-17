@@ -24,9 +24,9 @@
 //!   proteus-bench beta --payload-mib $sz
 //! done | tee /tmp/bench.jsonl
 //!
-//! # Compare PerfProfile padding on/off:
-//! proteus-bench beta --pad-mtu false  # baseline
-//! proteus-bench beta --pad-mtu true   # padded
+//! # Compare PerfProfile padding on/off (flag presence = on):
+//! proteus-bench beta            # baseline (pad=false)
+//! proteus-bench beta --pad-mtu  # padded (pad=true)
 //!
 //! # Inside an OrbStack Linux VM with netem applied to lo0:
 //! #   sudo tc qdisc add dev lo root netem loss 5% delay 50ms
