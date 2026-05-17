@@ -87,6 +87,21 @@ fn known_metric_names() -> HashSet<&'static str> {
         // TLS
         "proteus_tls_cert_not_after_unix_seconds",
         "proteus_tls_cert_watcher_auto_reload_failed_total",
+        // Iter-39: SIGHUP reload-backlog dashboard panel surfaces
+        // the 4 server-side reload counter pairs (firewall,
+        // rate_limit, user_rate_limit, handshake_budget). Each
+        // pair is referenced as `<prefix>_attempts_total -
+        // <prefix>_succeeded_total`, so the dashboard-coverage
+        // test sees both halves of every pair in the panel
+        // expressions.
+        "proteus_firewall_reload_attempts_total",
+        "proteus_firewall_reload_succeeded_total",
+        "proteus_rate_limit_reload_attempts_total",
+        "proteus_rate_limit_reload_succeeded_total",
+        "proteus_user_rate_limit_reload_attempts_total",
+        "proteus_user_rate_limit_reload_succeeded_total",
+        "proteus_handshake_budget_reload_attempts_total",
+        "proteus_handshake_budget_reload_succeeded_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling

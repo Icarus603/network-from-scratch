@@ -511,6 +511,47 @@
       }
     },
     {
+      "id": 60,
+      "type": "timeseries",
+      "title": "Server SIGHUP reload backlog (4 surfaces)",
+      "description": "Per-surface (attempts - succeeded) gap for the 4 SIGHUP-reloadable server configs (firewall, rate_limit, user_rate_limit, handshake_budget). Steady-state 0 = every reload applied. A series climbing above 0 fires ProteusXxxReloadFailing (iter-38 alerts). Each gap means a parse-error swallow during SIGHUP — the running config is still pre-SIGHUP. TLS auto-reload has its own dedicated path (mtime-driven, not SIGHUP-driven) covered by ProteusTlsAutoReloadFailing.",
+      "gridPos": {"x": 0, "y": 64, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "proteus_firewall_reload_attempts_total - proteus_firewall_reload_succeeded_total",
+          "refId": "fw",
+          "legendFormat": "firewall"
+        },
+        {
+          "expr": "proteus_rate_limit_reload_attempts_total - proteus_rate_limit_reload_succeeded_total",
+          "refId": "rl",
+          "legendFormat": "rate_limit"
+        },
+        {
+          "expr": "proteus_user_rate_limit_reload_attempts_total - proteus_user_rate_limit_reload_succeeded_total",
+          "refId": "url",
+          "legendFormat": "user_rate_limit"
+        },
+        {
+          "expr": "proteus_handshake_budget_reload_attempts_total - proteus_handshake_budget_reload_succeeded_total",
+          "refId": "hb",
+          "legendFormat": "handshake_budget"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
       "id": 55,
       "type": "stat",
       "title": "Client pool reload backlog (SIGHUP failures)",
