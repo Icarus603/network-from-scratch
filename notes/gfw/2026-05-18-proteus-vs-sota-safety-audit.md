@@ -106,15 +106,17 @@ a given cover URL.
 |---|---|---|---|
 | Cover-IAT camouflage | ❌ | ❌ | ✅ heartbeat cells inserted during idle windows, wire-indistinguishable from data cells per `heartbeat_cover::heartbeat_cell_is_wire_indistinguishable_from_data_cell` |
 | Cover-endpoint pool rotation | ❌ (single dest SNI) | n/a | ✅ `cover_endpoints: [...]` with per-src-IP /24 (v4) / /48 (v6) **affinity** routing — same observer sees same URL across all probes (no rotation signal), different src IPs see different URLs. 8 unit tests + 4 integration tests; `crates/proteus-transport-alpha/src/cover_pool.rs`, commit landed 2026-05-18 |
-| Probe-anomaly detector (server-side) | ❌ | ❌ | ❌ (P1 deliverable) |
+| Probe-anomaly detector (server-side) | ❌ | ❌ | ✅ sliding-window per-/24 (v4) / /48 (v6) cover-forward counter with fire-once-per-burst Prometheus alert; defaults: 300s window / 8 events / 16 K prefix cap. `crates/proteus-transport-alpha/src/probe_anomaly.rs`, commit landed 2026-05-18 (11 tests: 8 unit + 3 e2e) |
 
-**Verdict: ⇈ strictly ahead** as of 2026-05-18. We have heartbeats
-(IAT camouflage) AND a cover-endpoint pool with per-source-IP /24
-affinity (the "no rotation visible to a single observer" property
-matters more than naive round-robin would). REALITY/Hy2/TUIC-v5
-have neither. The remaining gap on this line is server-side
-probe-anomaly tracking (count "src_ip triggered cover-forward N
-times in last M minutes" + auto-tune rate-limit); still P1.
+**Verdict: ⇈ strictly ahead** as of 2026-05-18. Triple defense:
+heartbeats (IAT camouflage), cover-endpoint pool with per-source-IP
+/24 affinity (no rotation signal to single observer), AND
+server-side probe-anomaly detector (per-/24 sliding-window counter
+with Prometheus alert + fire-once-per-burst semantics — operator
+sees the signal before the adversary has finished mapping). All
+three defenses are in `crates/proteus-transport-alpha/`; the
+analogous capability matrix entry for REALITY / Hy2 / TUIC-v5 is
+empty on every row.
 
 ### 4. Per-record traffic analysis (length signature)
 

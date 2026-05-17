@@ -197,6 +197,7 @@ where
 /// splices `stream` to `ctx.cover_endpoint` (if configured), otherwise
 /// drop the stream. Idempotent + non-blocking.
 fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream, peer: &std::net::SocketAddr) {
+    record_probe_anomaly(ctx, peer);
     if let Some(cover) = ctx.cover_endpoint_for(peer) {
         let metrics = ctx.metrics().cloned();
         tokio::spawn(async move {
@@ -210,6 +211,36 @@ fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream, peer: &std::n
         });
     }
     // Else: stream drops here, TCP RST/FIN closes silently.
+}
+
+/// Record one cover-forward event in the probe-anomaly detector (if
+/// installed). On the call that crosses the per-/24 threshold,
+/// emits a structured WARN log + bumps the
+/// `probe_anomalies_fired` Prometheus counter. Pure CPU; safe to
+/// call from any context.
+fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) {
+    let Some(detector) = ctx.probe_anomaly() else {
+        return;
+    };
+    if detector
+        .record_at(peer.ip(), std::time::Instant::now())
+        .is_some()
+    {
+        // Threshold crossed for this /24 — surface the signal.
+        tracing::warn!(
+            peer = %peer,
+            prefix = match peer.ip() {
+                std::net::IpAddr::V4(_) => "/24",
+                std::net::IpAddr::V6(_) => "/48",
+            },
+            "probe-anomaly: source-IP prefix repeatedly tripping cover-forward — \
+             likely active probing (threat-intel main line 4)"
+        );
+        if let Some(m) = ctx.metrics() {
+            m.probe_anomalies_fired
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 /// Per-server state shared across connections.
@@ -229,6 +260,16 @@ pub struct ServerCtx {
     /// that a single observer can mount; see `cover_pool.rs` design
     /// rationale for the trade-off vs. cross-observer correlation).
     cover_endpoint: Option<crate::cover_pool::CoverEndpointPool>,
+    /// Optional sliding-window probe-anomaly detector that counts
+    /// cover-forwards per source-IP /24 (v4) / /48 (v6) prefix and
+    /// fires a structured WARN log + Prometheus counter increment
+    /// when any single prefix crosses the configured threshold.
+    /// Companion defense to `cover_pool`: the pool defeats the
+    /// time-series-rotation signal; this detector defeats the
+    /// probe-volume signal. See `probe_anomaly.rs` for the rationale.
+    /// When `None`, anomaly detection is disabled — operator opts in
+    /// via `with_probe_anomaly_detector()`.
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
     /// Optional per-source-IP rate limiter.
     rate_limiter: Option<crate::rate_limit::RateLimiter>,
     /// Maximum time to spend on a single handshake before giving up
@@ -285,6 +326,7 @@ impl ServerCtx {
             keys,
             replay: Mutex::new(ReplayWindow::new()),
             cover_endpoint: None,
+            probe_anomaly: None,
             rate_limiter: None,
             handshake_deadline: std::time::Duration::from_secs(15),
             tcp_keepalive_secs: 30,
@@ -640,6 +682,30 @@ impl ServerCtx {
         self.cover_endpoint.as_ref()
     }
 
+    /// Install a probe-anomaly detector. The detector counts
+    /// cover-forwards per source-IP /24 prefix and signals "this
+    /// /24 is repeatedly tripping cover-forward" — the operator
+    /// surfaces that signal via the `proteus_probe_anomalies_fired_total`
+    /// Prometheus counter and a structured WARN log line per burst.
+    ///
+    /// See `crate::probe_anomaly::ProbeAnomalyDetector::with_defaults`
+    /// for the recommended thresholds; operators tune via
+    /// `probe_anomaly:` in `server.yaml`.
+    #[must_use]
+    pub fn with_probe_anomaly_detector(
+        mut self,
+        detector: Arc<crate::probe_anomaly::ProbeAnomalyDetector>,
+    ) -> Self {
+        self.probe_anomaly = Some(detector);
+        self
+    }
+
+    /// Diagnostic accessor for the installed detector, if any.
+    #[must_use]
+    pub fn probe_anomaly(&self) -> Option<&Arc<crate::probe_anomaly::ProbeAnomalyDetector>> {
+        self.probe_anomaly.as_ref()
+    }
+
     /// Public accessor for the ML-KEM EK bytes (for client config).
     #[must_use]
     pub fn mlkem_pk_bytes(&self) -> &[u8] {
@@ -929,6 +995,11 @@ where
             };
             let _ = timed_out;
             if let (Some(cover), Some(stream)) = (cover_target, raw_stream) {
+                // Record before forwarding so the anomaly counter
+                // increments even if the forward itself fails to
+                // dial the cover server — the probe still happened
+                // from the operator's POV.
+                record_probe_anomaly(&ctx, &peer);
                 match crate::cover::forward_to_cover(&cover, replay_buf, stream).await {
                     Ok(()) => {
                         tracing::debug!(peer = %peer, "cover forward complete");

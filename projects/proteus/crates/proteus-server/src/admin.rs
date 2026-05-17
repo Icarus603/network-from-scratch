@@ -40,6 +40,7 @@ pub struct MetricsSnapshot {
     pub firewall_denied: u64,
     pub user_rate_rejected: u64,
     pub cover_forwards: u64,
+    pub probe_anomalies_fired: u64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -123,6 +124,7 @@ impl MetricsSnapshot {
                 "proteus_firewall_denied_total" => s.firewall_denied = v,
                 "proteus_user_rate_rejected_total" => s.user_rate_rejected = v,
                 "proteus_cover_forwards_total" => s.cover_forwards = v,
+                "proteus_probe_anomalies_fired_total" => s.probe_anomalies_fired = v,
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
                 "proteus_aead_drops_total" => s.aead_drops = v,
@@ -189,6 +191,12 @@ impl MetricsSnapshot {
         push_json_u64(&mut s, "firewall_denied", self.firewall_denied, false);
         push_json_u64(&mut s, "user_rate_rejected", self.user_rate_rejected, false);
         push_json_u64(&mut s, "cover_forwards", self.cover_forwards, false);
+        push_json_u64(
+            &mut s,
+            "probe_anomalies_fired",
+            self.probe_anomalies_fired,
+            false,
+        );
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -265,6 +273,7 @@ impl fmt::Display for MetricsSnapshot {
         row!("conn_limit_rejected", self.conn_limit_rejected)?;
         row!("user_rate_rejected", self.user_rate_rejected)?;
         row!("cover_forwards", self.cover_forwards)?;
+        row!("probe_anomalies_fired", self.probe_anomalies_fired)?;
         row!("total_rejected", self.total_rejected())?;
         writeln!(f)?;
 
@@ -484,6 +493,7 @@ pub struct MetricsDelta {
     pub firewall_denied: u64,
     pub user_rate_rejected: u64,
     pub cover_forwards: u64,
+    pub probe_anomalies_fired: u64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -547,6 +557,11 @@ impl MetricsDelta {
                 &mut counter_reset,
             ),
             cover_forwards: delta(a.cover_forwards, b.cover_forwards, &mut counter_reset),
+            probe_anomalies_fired: delta(
+                a.probe_anomalies_fired,
+                b.probe_anomalies_fired,
+                &mut counter_reset,
+            ),
             tx_bytes: delta(a.tx_bytes, b.tx_bytes, &mut counter_reset),
             rx_bytes: delta(a.rx_bytes, b.rx_bytes, &mut counter_reset),
             aead_drops: delta(a.aead_drops, b.aead_drops, &mut counter_reset),
@@ -620,6 +635,12 @@ impl MetricsDelta {
         push_json_u64(&mut s, "firewall_denied", self.firewall_denied, false);
         push_json_u64(&mut s, "user_rate_rejected", self.user_rate_rejected, false);
         push_json_u64(&mut s, "cover_forwards", self.cover_forwards, false);
+        push_json_u64(
+            &mut s,
+            "probe_anomalies_fired",
+            self.probe_anomalies_fired,
+            false,
+        );
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -766,6 +787,7 @@ impl fmt::Display for MetricsDelta {
         row_rate!("conn_limit_rejected", self.conn_limit_rejected)?;
         row_rate!("user_rate_rejected", self.user_rate_rejected)?;
         row_rate!("cover_forwards", self.cover_forwards)?;
+        row_rate!("probe_anomalies_fired", self.probe_anomalies_fired)?;
         row_rate!("total_rejected", self.total_rejected())?;
         writeln!(f)?;
 

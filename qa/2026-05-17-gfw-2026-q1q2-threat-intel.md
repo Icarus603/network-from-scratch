@@ -166,7 +166,7 @@ Proteus 的 active-probing 防禦是「byte-verbatim cover-server splice」（au
 
 **TODO**：
 1. ~~**Cover-endpoint pool 輪換**~~ ✅ **DONE 2026-05-18** —— `cover_endpoints: [...]` YAML 知識點 + `CoverEndpointPool` 含 per-source-IP /24（v4）/ /48（v6）一致性 affinity。**比 round-robin 強的點**：同一 observer 從同一 src IP 看到的 cover URL 跨任意多輪探測都一致（看起來像正常 cover server，沒有 rotation 信號），而 round-robin 會讓每輪換 URL —— 那本身就是 fingerprint。8 unit tests + 4 integration tests。`crates/proteus-transport-alpha/src/cover_pool.rs`。
-2. **Probe-anomaly detector**：server side 統計「相同 src_ip 在 N 分鐘內連續觸發 cover-forward」的次數，超閾值寫 metrics + 可選封 IP。
+2. ~~**Probe-anomaly detector**~~ ✅ **DONE 2026-05-18** —— `ProbeAnomalyDetector` 同樣用 per-/24（v4）/ /48（v6）prefix 鍵，sliding window（預設 300s）+ threshold（預設 8）。Fire-once-per-burst：同一 /24 在 window 內第一次過閾值即 emit 一次 WARN log + bump `proteus_probe_anomalies_fired_total` Prometheus counter，後續同 burst 沉默直到 window 清空。Memory cap 16 KiB prefixes（~1 MiB bookkeeping）。**不直接封 IP** —— 把 enforcement 留給現有 rate-limiter，detector 只負責「讓 operator 看到 signal」。8 unit tests + 3 e2e tests，`crates/proteus-transport-alpha/src/probe_anomaly.rs`。
 3. **β profile 同樣納入 cover 機制**：目前 β 沒有 cover-forward path（README 已標）。研究在 QUIC 失敗握手後 fallback 到一個真實的 H3 cover server 是否可行。
 
 ---
@@ -269,7 +269,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | QUIC SNI 審查 (USENIX 25 #4) | ✅ migration API | — |
 | ECH（SNI 加密）| ❌ | **P0 升級到 M3** (spec §7.4) |
 | Active probing（請求層）| ✅ cover-server splice | — |
-| Active probing（時序層）| ✅ cover-endpoint pool with per-src-IP /24 affinity（2026-05-18 done）| ❌ anomaly detector 還缺 |
+| Active probing（時序層）| ✅ cover-endpoint pool with per-src-IP /24 affinity + probe-anomaly detector（per-/24 sliding-window counter + Prometheus alert，fire-once-per-burst，2026-05-18 done）| — |
 | CONNECTION_CLOSE 信號 | ✅ NO_ERROR/empty (本 commit 已 lock-in) | — |
 | 應用層 probe（cover URL 反覆探測）| ✅ `cover_endpoints:` pool 配置 + per-src-IP /24 affinity（同一觀察者多輪 probe 看到一致的 cover URL，跨不同 src IP 分流；2026-05-18 done）| — |
 | IP 範圍預封 | ✅ preflight 對 90+ 條 commercial-cloud CIDR 直接 WARN（外加 operator watchlist 覆蓋自家燒過的範圍）| — |

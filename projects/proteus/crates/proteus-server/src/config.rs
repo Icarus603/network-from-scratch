@@ -122,6 +122,30 @@ pub struct ServerConfig {
     /// stays empty.
     #[serde(default)]
     pub cover_endpoints: Vec<String>,
+    /// Probe-anomaly detector: counts cover-forwards per source-IP
+    /// /24 (v4) / /48 (v6) prefix and fires a structured WARN log
+    /// AND a `proteus_probe_anomalies_fired_total` Prometheus
+    /// counter increment whenever any prefix crosses the threshold
+    /// within the sliding window.
+    ///
+    /// Companion defense to `cover_endpoints` (2026 threat-intel
+    /// main line 4): the pool defeats the time-series-rotation
+    /// signal, this detector defeats the probe-volume signal. See
+    /// `proteus_transport_alpha::probe_anomaly` for the rationale.
+    ///
+    /// Default: disabled (operator opts in by adding the block).
+    /// Recommended for any deployment that has the cover-forward
+    /// path enabled.
+    ///
+    /// YAML example (defaults shown):
+    /// ```yaml
+    /// probe_anomaly:
+    ///   window_secs: 300       # 5 min sliding window
+    ///   threshold: 8           # 8 cover-forwards per /24 in window
+    ///   max_prefixes: 16384    # memory cap on tracked prefixes
+    /// ```
+    #[serde(default)]
+    pub probe_anomaly: Option<ProbeAnomalyCfg>,
     /// Optional Prometheus exposition listener, e.g. `"127.0.0.1:9090"`.
     /// When set, the server exposes `/metrics`, `/healthz`, `/readyz`
     /// over plain HTTP. Bind only to a private address (loopback or
@@ -395,6 +419,35 @@ pub struct RateLimitCfg {
     pub burst: f64,
     /// Steady-state refill rate (tokens per second per source IP).
     pub refill_per_sec: f64,
+}
+
+/// Configuration for `proteus_transport_alpha::probe_anomaly::ProbeAnomalyDetector`.
+/// See the field's docstring on `ServerConfig::probe_anomaly` for
+/// the operator-facing description; the type lives here so YAML can
+/// deserialize it.
+#[derive(Debug, Deserialize)]
+pub struct ProbeAnomalyCfg {
+    /// Sliding-window length in seconds. Default 300 (5 min).
+    #[serde(default = "default_probe_anomaly_window_secs")]
+    pub window_secs: u64,
+    /// Per-prefix threshold. Default 8 (cover-forwards from one /24
+    /// in `window_secs`).
+    #[serde(default = "default_probe_anomaly_threshold")]
+    pub threshold: usize,
+    /// Hard cap on tracked prefixes (memory bound). Default 16384
+    /// — about 1 MiB of bookkeeping.
+    #[serde(default = "default_probe_anomaly_max_prefixes")]
+    pub max_prefixes: usize,
+}
+
+const fn default_probe_anomaly_window_secs() -> u64 {
+    300
+}
+const fn default_probe_anomaly_threshold() -> usize {
+    8
+}
+const fn default_probe_anomaly_max_prefixes() -> usize {
+    16 * 1024
 }
 
 #[derive(Debug, Deserialize)]

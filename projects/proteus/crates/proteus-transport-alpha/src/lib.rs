@@ -40,6 +40,7 @@ pub mod metrics;
 pub mod metrics_http;
 pub mod outbound_filter;
 pub mod pow;
+pub mod probe_anomaly;
 pub mod rate_limit;
 pub mod server;
 pub mod session;

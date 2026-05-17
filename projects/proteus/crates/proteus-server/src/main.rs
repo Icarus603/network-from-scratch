@@ -348,6 +348,30 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     } else {
         warn!("no cover_endpoint or cover_endpoints configured — auth-fail connections will be dropped silently");
     }
+    if let Some(pa) = &cfg.probe_anomaly {
+        info!(
+            window_secs = pa.window_secs,
+            threshold = pa.threshold,
+            max_prefixes = pa.max_prefixes,
+            "probe-anomaly detector configured (per-/24 sliding window)"
+        );
+        let detector = std::sync::Arc::new(
+            proteus_transport_alpha::probe_anomaly::ProbeAnomalyDetector::new(
+                std::time::Duration::from_secs(pa.window_secs),
+                pa.threshold,
+                pa.max_prefixes,
+            ),
+        );
+        ctx = ctx.with_probe_anomaly_detector(detector);
+    } else {
+        // No-op: detector silent when unset; operators on long-lived
+        // deployments should turn it on so probe-volume signals
+        // surface as metrics rather than disappearing into noise.
+        info!(
+            "probe_anomaly detector unset — cover-forward bursts will not surface as \
+             alerts (consider enabling for production)"
+        );
+    }
     if let Some(rl) = &cfg.rate_limit {
         info!(
             burst = rl.burst,

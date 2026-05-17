@@ -288,6 +288,27 @@ cover_endpoint: "www.cloudflare.com:443"
 #   - www.microsoft.com:443
 #   - www.bing.com:443
 
+# Probe-anomaly detector — companion defense to cover_endpoints
+# (2026 threat-intel main line 4). Counts cover-forwards per
+# source-IP /24 (v4) / /48 (v6) prefix in a sliding window. When
+# any prefix crosses the threshold, fires a structured WARN log +
+# bumps the `proteus_probe_anomalies_fired_total` Prometheus
+# counter — that signal indicates sustained active probing from a
+# coordinated origin (the kind of pattern a Tiangou-class IP-sweep
+# would produce).
+#
+# Off by default — operators on long-lived deployments should turn
+# this on so probe-volume signals surface as alerts instead of
+# disappearing into noise. The detector does NOT block; the
+# operator's existing rate-limiter / firewall remains the
+# enforcement layer. Fire-once-per-burst semantics: one alert per
+# /24 per window, so a continuous attacker doesn't spam logs.
+#
+# probe_anomaly:
+#   window_secs: 300       # 5 min sliding window (default)
+#   threshold: 8           # 8 cover-forwards per /24 in window (default)
+#   max_prefixes: 16384    # memory cap on tracked prefixes (~1 MiB)
+
 # Server long-term keys (generated via `proteus-server keygen`).
 keys:
   mlkem_pk: /etc/proteus/keys/server_lt.mlkem768.pk

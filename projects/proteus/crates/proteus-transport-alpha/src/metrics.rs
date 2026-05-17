@@ -158,6 +158,14 @@ pub struct ServerMetrics {
     pub handshake_budget_rejected: AtomicU64,
     pub user_rate_rejected: AtomicU64,
     pub cover_forwards: AtomicU64,
+    /// Probe-anomaly detector alerts (sliding-window, fire-once-per-
+    /// burst semantics). Bumped when any source-IP /24 (v4) /
+    /// /48 (v6) prefix crosses the configured cover-forward
+    /// threshold within the window. A rising counter here indicates
+    /// sustained active probing from a coordinated origin — the
+    /// kind of signal a Tiangou-class adversary's IP-sweep mapping
+    /// would produce. See `crate::probe_anomaly::ProbeAnomalyDetector`.
+    pub probe_anomalies_fired: AtomicU64,
     pub total_tx_bytes: AtomicU64,
     pub total_rx_bytes: AtomicU64,
     pub total_aead_drops: AtomicU64,
@@ -213,6 +221,7 @@ impl Default for ServerMetrics {
             handshake_budget_rejected: AtomicU64::new(0),
             user_rate_rejected: AtomicU64::new(0),
             cover_forwards: AtomicU64::new(0),
+            probe_anomalies_fired: AtomicU64::new(0),
             total_tx_bytes: AtomicU64::new(0),
             total_rx_bytes: AtomicU64::new(0),
             total_aead_drops: AtomicU64::new(0),
@@ -280,6 +289,9 @@ impl ServerMetrics {
              # HELP proteus_cover_forwards_total Connections forwarded to the cover endpoint.\n\
              # TYPE proteus_cover_forwards_total counter\n\
              proteus_cover_forwards_total {}\n\
+             # HELP proteus_probe_anomalies_fired_total Per-/24 cover-forward anomaly alerts (sliding window, fire-once-per-burst).\n\
+             # TYPE proteus_probe_anomalies_fired_total counter\n\
+             proteus_probe_anomalies_fired_total {}\n\
              # HELP proteus_tx_bytes_total Plaintext bytes sent (server→client).\n\
              # TYPE proteus_tx_bytes_total counter\n\
              proteus_tx_bytes_total {}\n\
@@ -326,6 +338,7 @@ impl ServerMetrics {
             s(&self.handshake_budget_rejected),
             s(&self.user_rate_rejected),
             s(&self.cover_forwards),
+            s(&self.probe_anomalies_fired),
             s(&self.total_tx_bytes),
             s(&self.total_rx_bytes),
             s(&self.total_aead_drops),

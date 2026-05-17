@@ -266,6 +266,60 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
+    // 5b. Probe-anomaly detector config sanity.
+    if let Some(pa) = cfg.probe_anomaly.as_ref() {
+        if pa.window_secs == 0 {
+            r.push_fail("probe_anomaly.window_secs = 0 disables the window entirely");
+        } else if pa.window_secs > 86_400 {
+            r.push_warn(format!(
+                "probe_anomaly.window_secs = {} is > 24h; alert may take a long time to clear \
+                 (consider 300-3600)",
+                pa.window_secs
+            ));
+        } else {
+            r.push_pass(format!("probe_anomaly.window_secs = {}", pa.window_secs));
+        }
+        if pa.threshold == 0 {
+            r.push_fail("probe_anomaly.threshold = 0 means every cover-forward fires an alert");
+        } else if pa.threshold == 1 {
+            r.push_warn(
+                "probe_anomaly.threshold = 1 fires on every single cover-forward; legitimate \
+                 misconfigured clients will keep alerting (consider 3-10)",
+            );
+        } else {
+            r.push_pass(format!("probe_anomaly.threshold = {}", pa.threshold));
+        }
+        if pa.max_prefixes == 0 {
+            r.push_fail("probe_anomaly.max_prefixes = 0 disables tracking");
+        } else if pa.max_prefixes < 64 {
+            r.push_warn(format!(
+                "probe_anomaly.max_prefixes = {} is very small; an IP-sweep attack would \
+                 quickly evict legitimate prefixes (consider ≥ 1024)",
+                pa.max_prefixes
+            ));
+        } else {
+            r.push_pass(format!(
+                "probe_anomaly.max_prefixes = {} (≈ {} KiB bookkeeping)",
+                pa.max_prefixes,
+                pa.max_prefixes * 64 / 1024
+            ));
+        }
+        // Coherence: anomaly detector without any cover endpoint
+        // means there's nothing to count — the detector will sit
+        // silent forever.
+        if cfg.cover_endpoint.is_none() && cfg.cover_endpoints.is_empty() {
+            r.push_warn(
+                "probe_anomaly is configured but no cover endpoint is set — the detector \
+                 will never see events to count",
+            );
+        }
+    } else if cfg.cover_endpoint.is_some() || !cfg.cover_endpoints.is_empty() {
+        r.push_warn(
+            "cover endpoint is configured but probe_anomaly is unset — cover-forward bursts \
+             will not surface as alerts. Consider enabling the detector for production",
+        );
+    }
+
     // 6. Firewall CIDR rules parse — using the same parser the server
     //    will use at runtime.
     if let Some(fw) = cfg.firewall.as_ref() {
@@ -637,6 +691,7 @@ mod tests {
             client_allowlist: Vec::new(),
             cover_endpoint: None,
             cover_endpoints: Vec::new(),
+            probe_anomaly: None,
             metrics_listen: None,
             metrics_token_file: None,
             rate_limit: None,
