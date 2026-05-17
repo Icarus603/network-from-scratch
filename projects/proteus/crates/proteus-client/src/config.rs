@@ -43,12 +43,14 @@ pub struct ClientConfig {
     /// `Arc<EndpointHealth>` per entry — cheap; no per-CONNECT
     /// allocation.
     ///
-    /// **NOTE (2026-05-18)**: this commit ships the type +
-    /// validation + YAML wiring; the SOCKS dispatch refactor that
-    /// actually consults the pool is a follow-up commit. Operators
-    /// can set the field today without behavior change — the
-    /// foundation is in place but dispatch still uses
-    /// `server_endpoint` only.
+    /// **WIRED 2026-05-18** (follow-up to the foundation commit
+    /// of the same day): SOCKS dispatch consults the pool via
+    /// `handle_socks5_with_health_and_pool`. Operators setting
+    /// this field today get real failover: on per-entry handshake
+    /// failure the next entry is tried, and per-entry
+    /// `EndpointHealth` state survives across CONNECTs so repeated
+    /// failures back off without spending the timeout cost on
+    /// every request.
     #[serde(default)]
     pub server_endpoints: Vec<String>,
     pub socks_listen: String,

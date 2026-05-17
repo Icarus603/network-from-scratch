@@ -42,11 +42,10 @@ server_endpoint: "vps.example.com:8443"
 # `validate` subcommand warns if `server_endpoint` is missing
 # from the pool (suspicious split-brain configuration).
 #
-# NOTE (2026-05-18): the type + validation + YAML wiring is in
-# place; the SOCKS dispatch refactor that actually consults the
-# pool is the next-iteration deliverable. Setting this field
-# today is harmless (no behavior change) but doesn't yet do
-# anything until the dispatch wiring lands.
+# WIRED 2026-05-18 (follow-up to the foundation commit of the
+# same day): SOCKS dispatch consults the pool via
+# `handle_socks5_with_health_and_pool`. Setting this field now
+# gets real per-entry failover with EndpointHealth tracking.
 #
 # server_endpoints:
 #   - "vps.example.com:8443"

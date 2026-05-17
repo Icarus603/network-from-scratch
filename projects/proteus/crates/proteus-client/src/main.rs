@@ -24,6 +24,7 @@ mod keygen;
 
 use proteus_client::carrier_health::CarrierHealth;
 use proteus_client::config::ClientConfig;
+use proteus_client::endpoint_pool::EndpointPool;
 use proteus_client::socks;
 
 #[derive(Parser, Debug)]
@@ -91,6 +92,25 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // Lives across CONNECTs so back-off survives the SOCKS5
     // request boundary — see `carrier_health.rs` for the policy.
     let health = Arc::new(CarrierHealth::new());
+
+    // Multi-VPS HA endpoint pool (operator-opt-in via
+    // `server_endpoints: [...]` in client.yaml). When unset or
+    // empty, dispatch falls back to the single `server_endpoint`
+    // path (pre-pool behavior). When set, every CONNECT walks the
+    // pool with per-endpoint health tracking — automatic failover
+    // around any single-VPS outage without operator intervention.
+    let endpoint_pool: Option<Arc<EndpointPool>> = if cfg.server_endpoints.is_empty() {
+        None
+    } else {
+        let pool = EndpointPool::new(cfg.server_endpoints.clone()).map(Arc::new);
+        if let Some(p) = &pool {
+            info!(
+                entries = p.len(),
+                "multi-VPS endpoint pool wired — dispatch will failover across entries"
+            );
+        }
+        pool
+    };
 
     // ----- Concurrency cap -----
     //
@@ -167,10 +187,16 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         let _ = stream.set_nodelay(true);
                         let cfg = Arc::clone(&cfg);
                         let health = Arc::clone(&health);
+                        let endpoint_pool = endpoint_pool.clone();
                         tokio::spawn(async move {
                             let _permit = permit; // drop on task exit
-                            if let Err(e) =
-                                socks::handle_socks5_with_health(stream, &cfg, &health).await
+                            if let Err(e) = socks::handle_socks5_with_health_and_pool(
+                                stream,
+                                &cfg,
+                                &health,
+                                endpoint_pool.as_ref(),
+                            )
+                            .await
                             {
                                 warn!(peer = %peer, error = %e, "socks5 session ended");
                             }

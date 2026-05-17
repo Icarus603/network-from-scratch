@@ -120,7 +120,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 **Roadmap priorities driven by this threat intel**:
 
 - **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, ~~`deploy/README.md` anti-relay topology warning~~ ✅ **done 2026-05-18**. **4 of 5 P0 done**; only ECH (multi-week, rustls-fork) remains.
-- **P1** (M3): uTLS bit-perfect ClientHello, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), **multi-VPS HA client foundation** ✅ 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + 14 tests; dispatch refactor next iteration).
+- **P1** (M3): uTLS bit-perfect ClientHello, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
 The single most important update is conceptual: the adversary is no longer

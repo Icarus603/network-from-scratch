@@ -12,6 +12,7 @@ use tokio::net::TcpStream;
 use crate::bootstrap::{resolve_for_client, BootstrapError, Resolved, ResolvedVia};
 use crate::carrier_health::{BetaDecision, CarrierHealth};
 use crate::config::ClientConfig;
+use crate::endpoint_pool::{EndpointDecision, EndpointPool};
 
 #[derive(thiserror::Error, Debug)]
 pub enum SocksError {
@@ -82,16 +83,31 @@ pub async fn handle_socks5(sock: TcpStream, cfg: &Arc<ClientConfig>) -> Result<(
     // `handle_socks5_with_health` so the back-off / probe logic
     // actually has somewhere to accumulate state.
     let health = Arc::new(CarrierHealth::new());
-    handle_socks5_with_health(sock, cfg, &health).await
+    handle_socks5_with_health_and_pool(sock, cfg, &health, None).await
 }
 
 /// Health-aware dispatch — the entry point the production binary
 /// uses so the back-off + recovery-probe state survives across
 /// CONNECTs from the same client.
 pub async fn handle_socks5_with_health(
+    sock: TcpStream,
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+) -> Result<(), SocksError> {
+    handle_socks5_with_health_and_pool(sock, cfg, health, None).await
+}
+
+/// Full-featured dispatch: optionally consults a multi-VPS
+/// `EndpointPool` for primary-then-fallback routing. When `pool`
+/// is `None`, falls back to the single-endpoint behavior using
+/// `cfg.server_endpoint` (and optionally `cfg.server_endpoint_beta`).
+/// When `pool` is `Some(_)`, every CONNECT walks the pool in
+/// operator-specified order with per-endpoint health tracking.
+pub async fn handle_socks5_with_health_and_pool(
     mut sock: TcpStream,
     cfg: &Arc<ClientConfig>,
     health: &Arc<CarrierHealth>,
+    pool: Option<&Arc<EndpointPool>>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -170,6 +186,27 @@ pub async fn handle_socks5_with_health(
         v
     };
 
+    // Multi-VPS HA dispatch path: when `pool` is wired, walk pool
+    // entries in operator order using each entry's EndpointHealth
+    // to skip recently-failed endpoints. Within each chosen entry,
+    // the existing CarrierHealth still decides β-vs-α.
+    if let Some(p) = pool {
+        return dispatch_via_pool(cfg, health, p, target_bytes, &mut sock).await;
+    }
+
+    // Single-endpoint path (legacy / pool not configured). Behavior
+    // is identical to the pre-pool dispatcher.
+    single_endpoint_dispatch(cfg, health, &target_bytes, &mut sock).await
+}
+
+/// Pre-pool single-endpoint dispatcher. Kept as a separate function
+/// so the pool path can reuse it per-entry without code duplication.
+async fn single_endpoint_dispatch(
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+    target_bytes: &[u8],
+    sock: &mut TcpStream,
+) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
     // throttled by the GFW per threat-intel main line 5), we
@@ -189,7 +226,7 @@ pub async fn handle_socks5_with_health(
                 health.failure_streak(),
             );
         }
-        match try_beta(cfg, &target_bytes, &mut sock).await {
+        match try_beta(cfg, target_bytes, sock, None).await {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -211,22 +248,136 @@ pub async fn handle_socks5_with_health(
         );
     }
 
-    try_alpha(cfg, &target_bytes, &mut sock).await
+    try_alpha(cfg, target_bytes, sock, None).await
 }
 
-/// Attempt a β-profile (QUIC) handshake to `cfg.server_endpoint_beta`,
-/// send the CONNECT target, and pump bytes. Returns Ok(()) on a
-/// fully-completed session, Err(_) on any failure that justifies
-/// falling back to α.
+/// Multi-VPS dispatcher. Walks `pool` in operator-specified order,
+/// using each entry's `EndpointHealth` to skip recently-failed
+/// endpoints. For each chosen entry, runs the β-then-α
+/// CarrierHealth-aware logic with the entry's address as the
+/// endpoint override.
+///
+/// Returns the result of the FIRST successful CONNECT; on a
+/// per-entry failure (network refused, handshake timed out, etc.)
+/// records the failure against that entry's health AND continues
+/// to the next entry. Returns the LAST entry's error when every
+/// pool member failed; that mirrors single-endpoint behavior from
+/// the user's POV (one error per SOCKS5 CONNECT).
+async fn dispatch_via_pool(
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+    pool: &Arc<EndpointPool>,
+    target_bytes: Vec<u8>,
+    sock: &mut TcpStream,
+) -> Result<(), SocksError> {
+    let mut last_err: Option<SocksError> = None;
+    let mut any_endpoint_attempted = false;
+    let now = std::time::Instant::now();
+
+    for entry in 0..pool.len() {
+        let snap = pool.diagnostic_snapshot(now);
+        let (addr_owned, _streak, _suppressed) = snap[entry].clone();
+        let decision = pool.endpoint_health(entry).map(|h| h.decide(now));
+        let Some(decision) = decision else { continue };
+        if matches!(decision, EndpointDecision::SkipSuppressed) {
+            tracing::debug!(endpoint = %addr_owned, "pool: skipping suppressed entry");
+            continue;
+        }
+        if matches!(decision, EndpointDecision::Probe) {
+            tracing::debug!(endpoint = %addr_owned, "pool: recovery probe");
+        }
+        any_endpoint_attempted = true;
+        let endpoint_health = pool.endpoint_health(entry).unwrap();
+
+        // Per-entry attempt: same β-first → α-fallback as
+        // single_endpoint_dispatch, but with endpoint_override.
+        // Note: the β endpoint override mirrors the α one — operators
+        // who run α and β on the same host:port (the
+        // recommended deployment) get one address per pool entry
+        // covering both carriers.
+        let result = attempt_one_pool_entry(cfg, health, &addr_owned, &target_bytes, sock).await;
+        match result {
+            Ok(()) => {
+                endpoint_health.record_success();
+                return Ok(());
+            }
+            Err(e) => {
+                endpoint_health.record_failure(std::time::Instant::now());
+                tracing::warn!(
+                    endpoint = %addr_owned,
+                    error = %e,
+                    streak = endpoint_health.failure_streak(),
+                    "pool entry failed — trying next"
+                );
+                last_err = Some(e);
+            }
+        }
+    }
+
+    if !any_endpoint_attempted {
+        // All entries were suppressed (no probe slot landed); force
+        // a primary probe so we never end up in a "did nothing"
+        // state. Matches `EndpointPool::dispatch_with` fallback.
+        tracing::warn!("pool: every entry suppressed; forcing primary probe");
+        let primary = pool.diagnostic_snapshot(now)[0].0.clone();
+        attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock).await?;
+        return Ok(());
+    }
+    Err(last_err.unwrap_or(SocksError::Socks("pool dispatch produced no result")))
+}
+
+/// One pool entry's β-then-α attempt. Factored out so
+/// `dispatch_via_pool` can reuse it for both the regular and
+/// "all suppressed → force primary probe" paths.
+async fn attempt_one_pool_entry(
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+    endpoint: &str,
+    target_bytes: &[u8],
+    sock: &mut TcpStream,
+) -> Result<(), SocksError> {
+    let beta_configured = cfg.server_endpoint_beta.is_some();
+    let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
+    let try_beta_now = matches!(beta_decision, BetaDecision::TryBeta | BetaDecision::Probe);
+    if try_beta_now {
+        match try_beta(cfg, target_bytes, sock, Some(endpoint)).await {
+            Ok(()) => {
+                health.record_beta_success();
+                return Ok(());
+            }
+            Err(e) => {
+                health.record_beta_failure(std::time::Instant::now());
+                tracing::warn!(
+                    endpoint = %endpoint,
+                    error = %e,
+                    "pool entry: β dial failed; falling to α on this same entry"
+                );
+            }
+        }
+    }
+    try_alpha(cfg, target_bytes, sock, Some(endpoint)).await
+}
+
+/// Attempt a β-profile (QUIC) handshake.
+///
+/// `endpoint_override` lets the multi-VPS HA dispatcher (`dispatch_via_pool`)
+/// substitute the per-pool-entry address for the cfg's primary
+/// `server_endpoint_beta`. When `None`, falls back to the cfg
+/// value — preserving the pre-pool single-endpoint behavior for
+/// callers that haven't migrated to the pool yet.
 async fn try_beta(
     cfg: &Arc<ClientConfig>,
     target_bytes: &[u8],
     sock: &mut TcpStream,
+    endpoint_override: Option<&str>,
 ) -> Result<(), SocksError> {
-    let beta_endpoint = cfg
-        .server_endpoint_beta
-        .as_ref()
-        .ok_or(SocksError::Socks("server_endpoint_beta unset"))?;
+    let beta_endpoint: &str = match endpoint_override {
+        Some(e) => e,
+        None => cfg
+            .server_endpoint_beta
+            .as_deref()
+            .ok_or(SocksError::Socks("server_endpoint_beta unset"))?,
+    };
     let server_name = cfg
         .beta_server_name
         .as_deref()
@@ -244,8 +395,8 @@ async fn try_beta(
     let Resolved {
         addr: server_addr,
         via,
-    } = resolve_for_client(beta_endpoint.as_str(), cfg).await?;
-    log_bootstrap_route("β", beta_endpoint.as_str(), server_addr, via);
+    } = resolve_for_client(beta_endpoint, cfg).await?;
+    log_bootstrap_route("β", beta_endpoint, server_addr, via);
 
     // Build a β-flavored ClientConfig (profile_hint = Beta).
     let mut hs_cfg = cfg.build_handshake_config()?;
@@ -331,12 +482,18 @@ async fn try_beta(
 /// Attempt the α-profile (TCP / TCP+TLS) path. Same logic as the
 /// pre-dual-stack version, factored out so try_beta's fall-back
 /// path can call it.
+///
+/// `endpoint_override`: see `try_beta`'s same-named param. When
+/// `None`, dials `cfg.server_endpoint`; when `Some`, dials the
+/// supplied per-pool-entry address.
 async fn try_alpha(
     cfg: &Arc<ClientConfig>,
     target_bytes: &[u8],
     sock: &mut TcpStream,
+    endpoint_override: Option<&str>,
 ) -> Result<(), SocksError> {
     let hs_cfg = cfg.build_handshake_config()?;
+    let alpha_endpoint: &str = endpoint_override.unwrap_or(cfg.server_endpoint.as_str());
 
     // Resolve under the configured bootstrap-DNS policy (same path
     // as β — see `bootstrap.rs`). The same `Resolved` discriminator
@@ -345,8 +502,8 @@ async fn try_alpha(
     let Resolved {
         addr: server_addr,
         via,
-    } = resolve_for_client(cfg.server_endpoint.as_str(), cfg).await?;
-    log_bootstrap_route("α", cfg.server_endpoint.as_str(), server_addr, via);
+    } = resolve_for_client(alpha_endpoint, cfg).await?;
+    log_bootstrap_route("α", alpha_endpoint, server_addr, via);
 
     if let Some(tls_cfg) = cfg.tls.as_ref() {
         let connector = match tls_cfg.trusted_ca.as_ref() {

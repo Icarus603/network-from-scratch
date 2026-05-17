@@ -278,6 +278,24 @@ impl EndpointPool {
         None
     }
 
+    /// Borrow a per-entry health handle by index. Returns `None`
+    /// when `index >= len()`. Used by the SOCKS dispatcher to record
+    /// per-attempt success/failure into the right bucket without
+    /// having to walk the whole entries vec.
+    #[must_use]
+    pub fn endpoint_health(&self, index: usize) -> Option<Arc<EndpointHealth>> {
+        self.entries.get(index).map(|(_, h)| Arc::clone(h))
+    }
+
+    /// Borrow the address+health pair by index. Same indexing as
+    /// `endpoint_health` but also returns the address string.
+    #[must_use]
+    pub fn entry(&self, index: usize) -> Option<(String, Arc<EndpointHealth>)> {
+        self.entries
+            .get(index)
+            .map(|(a, h)| (a.clone(), Arc::clone(h)))
+    }
+
     /// Diagnostic accessor for ops tooling: snapshot of every
     /// entry's `(address, current_failure_streak, is_suppressed)`
     /// at `now`.

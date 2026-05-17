@@ -97,7 +97,7 @@ Tiangou 的 SSL/TLS 攔截 + ML 行為分析 ≠ 古典 DPI 簽名匹配。我�
 - ✅ 設計上就是 client → VPS 直連，無境內中轉依賴
 - ✅ `proteus-client validate` 已能預檢配置
 - ✅ **NEW 2026-05-18**：`deploy/README.md` 「Deployment topology」section 完整警告 + Mermaid 三圖（direct-dial 推薦、relay 死亡、商用 farm 高風險）+ security checklist 三項 operator-action item
-- ⚠️ multi-VPS HA：foundation 已 ship（2026-05-18 `EndpointPool` + `EndpointHealth` + YAML `server_endpoints: [...]` + validate 4 條 guidance lines + 10 unit + 4 validate-CLI tests），SOCKS dispatch refactor 是下個 iteration deliverable。Operator 設了該欄位現在無 behavior change 但 type system + validate 已 ready。
+- ✅ **NEW 2026-05-18 同日 follow-up**：multi-VPS HA dispatch 已 wire 通 — `handle_socks5_with_health_and_pool` 串接 `EndpointPool` 含 `EndpointHealth`，每 CONNECT walk pool 順序試 entries，per-entry 失敗即 record failure 並 fall-to-next；下個 CONNECT 跳過 suppressed entries。+2 真實 server e2e tests 證明 primary down → backup 接管。
 - ❌ multipath QUIC 還沒做（spec §10.4，M3+）
 
 **TODO**：
@@ -269,7 +269,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | Tiangou 商用 DPI（共享黑名單）| ✅ `proteus-server preflight check-ip-reputation` 離線分類 + operator watchlist | — |
 | Tiangou ML 行為分析 | ✅ cell-split + heartbeats | — |
 | uTLS bit-perfect ClientHello | ❌ | M3（README ❌ 已標）|
-| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）+ `deploy/README.md` topology section + security checklist + **multi-VPS HA foundation: `EndpointPool` + YAML `server_endpoints:` 配置 + validate guidance（2026-05-18 done）** | ⚠ dispatch refactor 下個 iteration |
+| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）+ deploy README topology section + security checklist + **multi-VPS HA pool + dispatch（2026-05-18 done: 配置 + 14 unit + 4 validate + 2 e2e tests; 真實 fall-to-backup verified）** | — |
 | QUIC SNI 審查 (USENIX 25 #1) | ✅ source-port walk | — |
 | QUIC SNI 審查 (USENIX 25 #2) | ✅ prefix-noise | — |
 | QUIC SNI 審查 (USENIX 25 #4) | ✅ migration API | — |
