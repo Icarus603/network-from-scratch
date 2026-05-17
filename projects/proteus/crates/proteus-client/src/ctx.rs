@@ -56,6 +56,18 @@ pub struct ClientCtx {
     pub dials_attempted: Arc<AtomicU64>,
     pub dials_succeeded: Arc<AtomicU64>,
     pub dials_failed: Arc<AtomicU64>,
+    /// Unix seconds of the LAST successful dial. 0 = no dial has
+    /// ever succeeded in this process's lifetime. The client's
+    /// `/healthz` consults this to flip to 503 when the upstream
+    /// connection has been wedged for longer than the operator-
+    /// configured staleness window — downstream apps (browser,
+    /// IDE) probing /healthz then fall back to direct connection
+    /// instead of stalling on a broken SOCKS proxy.
+    ///
+    /// `AtomicI64` (not U64) so the unix-seconds value matches the
+    /// shape of the server-side `proteus_*_unix_seconds` gauges
+    /// and the existing `proteus_client_*` prefix conventions.
+    pub last_dial_success_unix_seconds: Arc<std::sync::atomic::AtomicI64>,
     /// Cumulative bootstrap-DNS resolution counters, partitioned by
     /// the path the resolver took. Bumped exactly once per
     /// successful `bootstrap::resolve_*` call (the dispatcher calls
@@ -107,6 +119,7 @@ impl ClientCtx {
             dials_attempted: Arc::new(AtomicU64::new(0)),
             dials_succeeded: Arc::new(AtomicU64::new(0)),
             dials_failed: Arc::new(AtomicU64::new(0)),
+            last_dial_success_unix_seconds: Arc::new(std::sync::atomic::AtomicI64::new(0)),
             bootstrap_via_ip_literal: Arc::new(AtomicU64::new(0)),
             bootstrap_via_pinned_direct_ip: Arc::new(AtomicU64::new(0)),
             bootstrap_via_system_resolver: Arc::new(AtomicU64::new(0)),
@@ -211,9 +224,34 @@ impl ClientCtx {
         self.dials_attempted.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Bump `dials_succeeded`. Returns the new value.
+    /// Bump `dials_succeeded`. Returns the new value. ALSO
+    /// stamps `last_dial_success_unix_seconds` so the /healthz
+    /// staleness rule sees a fresh success timestamp.
     pub fn record_dial_success(&self) -> u64 {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        self.last_dial_success_unix_seconds
+            .store(now_unix, Ordering::Relaxed);
         self.dials_succeeded.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Read the most-recent successful dial timestamp (Unix
+    /// seconds). 0 = never succeeded. Used by /healthz to apply
+    /// the staleness rule.
+    #[must_use]
+    pub fn last_dial_success_unix(&self) -> i64 {
+        self.last_dial_success_unix_seconds.load(Ordering::Relaxed)
+    }
+
+    /// Test-only: stamp the last-success timestamp explicitly.
+    /// Production code MUST go through `record_dial_success` so
+    /// the gauge stays in lockstep with `dials_succeeded`.
+    #[cfg(test)]
+    pub fn set_last_dial_success_unix(&self, unix_seconds: i64) {
+        self.last_dial_success_unix_seconds
+            .store(unix_seconds, Ordering::Relaxed);
     }
 
     /// Bump `dials_failed`. Returns the new value.
@@ -346,6 +384,27 @@ mod tests {
         assert_eq!(ctx.record_dial_attempt(), 1);
         assert_eq!(ctx.record_dial_attempt(), 2);
         assert_eq!(ctx.dial_counters().attempted, 2);
+    }
+
+    #[test]
+    fn record_dial_success_stamps_last_success_unix_timestamp() {
+        let ctx = mk_ctx(None, 0);
+        // Before any success: timestamp is 0.
+        assert_eq!(ctx.last_dial_success_unix(), 0);
+        let before = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        ctx.record_dial_success();
+        let after = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let stamped = ctx.last_dial_success_unix();
+        assert!(
+            stamped >= before && stamped <= after,
+            "stamped {stamped} must be in [{before},{after}]"
+        );
     }
 
     #[test]

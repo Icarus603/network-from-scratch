@@ -204,6 +204,26 @@ pub struct ClientConfig {
     /// when this is set.
     #[serde(default)]
     pub admin_listen: Option<String>,
+
+    /// Staleness threshold (seconds) for the admin `/healthz`
+    /// endpoint. When > 0, /healthz returns 503 if the upstream
+    /// Proteus dial has been wedged for longer than this window
+    /// (no successful dial in the last N seconds, AND at least
+    /// one dial has been attempted).
+    ///
+    /// Downstream apps (browser, IDE, mobile app) probe
+    /// /healthz to decide "send traffic through SOCKS or fall
+    /// back to direct?". Without this knob, /healthz returns
+    /// 200 the moment SOCKS5 binds and never re-evaluates — so
+    /// downstream apps stall on a broken proxy.
+    ///
+    /// 0 (default) = staleness rule disabled; /healthz returns
+    /// 200 as soon as SOCKS5 binds (back-compat).
+    /// Recommended for production: 120 (2 min). Catches a
+    /// wedged upstream within ~2 min so downstream apps fall
+    /// back fast.
+    #[serde(default)]
+    pub healthz_staleness_secs: Option<u64>,
 }
 
 /// Bootstrap DNS resolution policy. See [`ClientConfig::bootstrap_dns`].
@@ -343,6 +363,46 @@ fn decode_b64_or_raw(input: &[u8]) -> Vec<u8> {
         return decoded;
     }
     input.to_vec()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn healthz_staleness_secs_parses_when_supplied() {
+        let yaml = "\
+socks_listen: \"127.0.0.1:1080\"\n\
+server_endpoint: \"vps.example.com:8443\"\n\
+server_dns_name: \"vps.example.com\"\n\
+keys:\n  \
+  server_mlkem_pk: /tmp/x\n  \
+  server_x25519_pk: /tmp/x\n  \
+  server_pq_fingerprint: /tmp/x\n  \
+  client_ed25519_sk: /tmp/x\n\
+user_id: \"alice001\"\n\
+healthz_staleness_secs: 120\n\
+";
+        let cfg: ClientConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.healthz_staleness_secs, Some(120));
+    }
+
+    #[test]
+    fn healthz_staleness_secs_defaults_to_none_when_omitted() {
+        let yaml = "\
+socks_listen: \"127.0.0.1:1080\"\n\
+server_endpoint: \"vps.example.com:8443\"\n\
+server_dns_name: \"vps.example.com\"\n\
+keys:\n  \
+  server_mlkem_pk: /tmp/x\n  \
+  server_x25519_pk: /tmp/x\n  \
+  server_pq_fingerprint: /tmp/x\n  \
+  client_ed25519_sk: /tmp/x\n\
+user_id: \"alice001\"\n\
+";
+        let cfg: ClientConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.healthz_staleness_secs, None);
+    }
 }
 
 #[derive(thiserror::Error, Debug)]

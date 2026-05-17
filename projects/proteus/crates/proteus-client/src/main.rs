@@ -330,8 +330,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     if let Some(admin_addr) = cfg.admin_listen.clone() {
         let alive_for_admin = Arc::clone(&alive);
         let ctx_for_admin = Arc::clone(&ctx);
+        let staleness = cfg.healthz_staleness_secs.unwrap_or(0);
+        if staleness > 0 {
+            info!(
+                staleness_secs = staleness,
+                "client /healthz staleness rule wired (503 after no dial success for N seconds)"
+            );
+        }
         tokio::spawn(async move {
-            if let Err(e) = admin::serve_with_ctx(admin_addr, alive_for_admin, ctx_for_admin).await
+            if let Err(e) =
+                admin::serve_with_ctx_v2(admin_addr, alive_for_admin, ctx_for_admin, staleness)
+                    .await
             {
                 warn!(error = %e, "client admin endpoint exited");
             }

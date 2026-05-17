@@ -96,6 +96,19 @@ pub struct ClientStatusSnapshot {
     /// prefix so a single Prometheus instance can scrape both
     /// client and server without collisions.
     pub process: ProcessView,
+    /// Unix seconds of the LAST successful dial. 0 = never
+    /// succeeded since process start. /healthz consults this
+    /// (alongside `healthz_staleness_secs`) to flip to 503 when
+    /// the upstream Proteus connection has been wedged for too
+    /// long. Always present; rendered as
+    /// `proteus_client_last_dial_success_unix_seconds`.
+    pub last_dial_success_unix: i64,
+    /// Operator-configured staleness threshold for /healthz, in
+    /// seconds. When > 0 AND `time() - last_dial_success > N`
+    /// AND `dials_attempted > 0`, /healthz returns 503
+    /// `dial_stale`. 0 = staleness rule disabled (back-compat:
+    /// /healthz still returns 200 once SOCKS5 has bound).
+    pub healthz_staleness_secs: u64,
 }
 
 /// Operator-friendly process view rendered from a
@@ -179,6 +192,21 @@ impl ClientStatusSnapshot {
     /// view and cumulative dial counters.
     #[must_use]
     pub fn from_ctx(alive: bool, ctx: &ClientCtx, now: Instant) -> Self {
+        Self::from_ctx_with_healthz_staleness(alive, ctx, now, 0)
+    }
+
+    /// Same as [`Self::from_ctx`] but ALSO populates the
+    /// operator-configured `/healthz` staleness threshold. The
+    /// renderer uses this to decide whether to flip /healthz to
+    /// 503 when no successful dial has happened in the last N
+    /// seconds. 0 = staleness rule disabled (back-compat).
+    #[must_use]
+    pub fn from_ctx_with_healthz_staleness(
+        alive: bool,
+        ctx: &ClientCtx,
+        now: Instant,
+        healthz_staleness_secs: u64,
+    ) -> Self {
         // Snapshot the pool once so the rest of from_ctx works
         // against a consistent Arc — a SIGHUP between capture and
         // any future reads would otherwise risk surfacing
@@ -219,6 +247,8 @@ impl ClientStatusSnapshot {
             rustc: ctx.process_info.rustc.to_string(),
             target: ctx.process_info.target.to_string(),
         };
+        snap.last_dial_success_unix = ctx.last_dial_success_unix();
+        snap.healthz_staleness_secs = healthz_staleness_secs;
         snap
     }
 
@@ -325,6 +355,8 @@ impl ClientStatusSnapshot {
             pool_reload: PoolReloadCounters::default(),
             bootstrap: BootstrapCounters::default(),
             process: ProcessView::default(),
+            last_dial_success_unix: 0,
+            healthz_staleness_secs: 0,
         }
     }
 
@@ -552,6 +584,37 @@ impl ClientStatusSnapshot {
         );
         let _ = writeln!(s, "# TYPE proteus_client_dials_failed_total counter");
         let _ = writeln!(s, "proteus_client_dials_failed_total {}", self.dials.failed);
+
+        // Last-successful-dial timestamp + configured /healthz
+        // staleness threshold. Operator alerts on:
+        //   time() - proteus_client_last_dial_success_unix_seconds
+        //     > proteus_client_healthz_staleness_secs
+        // (or just on `proteus_client_healthz_staleness_secs > 0
+        // AND the difference exceeds the threshold) to catch a
+        // wedged upstream BEFORE downstream apps stall.
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_last_dial_success_unix_seconds Unix seconds of the most recent successful dial. 0 = no success since startup."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_last_dial_success_unix_seconds gauge"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_last_dial_success_unix_seconds {}",
+            self.last_dial_success_unix
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_healthz_staleness_secs Operator-configured /healthz staleness threshold (seconds). 0 = staleness rule disabled."
+        );
+        let _ = writeln!(s, "# TYPE proteus_client_healthz_staleness_secs gauge");
+        let _ = writeln!(
+            s,
+            "proteus_client_healthz_staleness_secs {}",
+            self.healthz_staleness_secs
+        );
 
         // Bootstrap-DNS resolution counters — partitioned by path.
         // Always emitted from t=0 so PromQL `rate(...)` doesn't see
@@ -1038,13 +1101,28 @@ pub async fn serve(
 }
 
 /// Full-featured serve: takes a `ClientCtx` so the snapshot includes
-/// the concurrency view + cumulative dial counters. This is the
-/// entry point `main.rs` calls in production; the legacy `serve`
+/// the concurrency view + cumulative dial counters.
+///
+/// Back-compat shim — forwards to [`serve_with_ctx_v2`] with the
+/// healthz staleness threshold disabled. The legacy `serve`
 /// wrapper above is kept for tests that don't build a full ctx.
 pub async fn serve_with_ctx(
     bind_addr: String,
     alive: AliveFlag,
     ctx: Arc<ClientCtx>,
+) -> std::io::Result<()> {
+    serve_with_ctx_v2(bind_addr, alive, ctx, 0).await
+}
+
+/// v2 of [`serve_with_ctx`] — adds the operator-configured
+/// `healthz_staleness_secs`. When > 0, /healthz returns 503
+/// when the upstream Proteus dial has been wedged for longer
+/// than this window.
+pub async fn serve_with_ctx_v2(
+    bind_addr: String,
+    alive: AliveFlag,
+    ctx: Arc<ClientCtx>,
+    healthz_staleness_secs: u64,
 ) -> std::io::Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     let local = listener.local_addr()?;
@@ -1070,7 +1148,8 @@ pub async fn serve_with_ctx(
         let alive = Arc::clone(&alive);
         let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection_ctx(stream, alive, ctx).await {
+            if let Err(e) = handle_connection_ctx(stream, alive, ctx, healthz_staleness_secs).await
+            {
                 warn!(peer = %peer, error = %e, "client admin connection ended");
             }
         });
@@ -1081,11 +1160,17 @@ async fn handle_connection_ctx(
     mut stream: tokio::net::TcpStream,
     alive: AliveFlag,
     ctx: Arc<ClientCtx>,
+    healthz_staleness_secs: u64,
 ) -> std::io::Result<()> {
     let mut req = [0u8; 1024];
     let n = stream.read(&mut req).await?;
     let head = std::str::from_utf8(&req[..n]).unwrap_or("");
-    let snap = ClientStatusSnapshot::from_ctx(alive.load(Ordering::Relaxed), &ctx, Instant::now());
+    let snap = ClientStatusSnapshot::from_ctx_with_healthz_staleness(
+        alive.load(Ordering::Relaxed),
+        &ctx,
+        Instant::now(),
+        healthz_staleness_secs,
+    );
     let (status_line, content_type, body) = route(head, &snap);
     let response = format!(
         "{status_line}\
@@ -1110,15 +1195,58 @@ pub fn route(
     snap: &ClientStatusSnapshot,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/healthz") {
-        if snap.alive {
-            ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())
-        } else {
-            (
+        // Three-gate /healthz logic (mirrors the server-side
+        // patterns):
+        //
+        //   1. `alive` = SOCKS5 listener bound. Strongest signal
+        //      — anything else doesn't matter if we can't accept
+        //      connections.
+        //   2. Staleness: if `healthz_staleness_secs > 0` AND we
+        //      have ever attempted a dial AND the last successful
+        //      dial was more than N seconds ago, return 503
+        //      `dial_stale`. Downstream apps (browser, IDE)
+        //      probing /healthz then fall back to direct
+        //      connection instead of stalling on a broken SOCKS
+        //      proxy.
+        //   3. Never-succeeded: if we have attempted dials but
+        //      never had a success AND the staleness rule is
+        //      enabled, return 503 `dial_never_succeeded`.
+        //      Different reason string so operators can grep.
+        //
+        // Without the staleness rule (default 0 for back-compat),
+        // /healthz returns 200 the moment SOCKS5 binds — matches
+        // the historical behavior.
+        if !snap.alive {
+            return (
                 "HTTP/1.1 503 Service Unavailable\r\n",
                 "text/plain",
                 "starting\n".to_string(),
-            )
+            );
         }
+        let staleness = snap.healthz_staleness_secs;
+        if staleness > 0 && snap.dials.attempted > 0 {
+            let last_success = snap.last_dial_success_unix;
+            if last_success == 0 {
+                return (
+                    "HTTP/1.1 503 Service Unavailable\r\n",
+                    "text/plain",
+                    "dial_never_succeeded\n".to_string(),
+                );
+            }
+            let now_unix = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let age = now_unix.saturating_sub(last_success);
+            if age > staleness as i64 {
+                return (
+                    "HTTP/1.1 503 Service Unavailable\r\n",
+                    "text/plain",
+                    "dial_stale\n".to_string(),
+                );
+            }
+        }
+        ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())
     } else if matches_path(request_head, "/status") {
         (
             "HTTP/1.1 200 OK\r\n",
@@ -1612,6 +1740,133 @@ mod tests {
         let (status, ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &empty_snap());
         assert!(status.starts_with("HTTP/1.1 503"));
         assert_eq!(ctype, "text/plain");
+        assert_eq!(body, "starting\n");
+    }
+
+    #[test]
+    fn route_healthz_503_dial_stale_when_last_success_older_than_threshold() {
+        // alive=true, staleness=60s, last success was 1 hour ago,
+        // attempted > 0. /healthz must return 503 dial_stale.
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            healthz_staleness_secs: 60,
+            last_dial_success_unix: now_unix - 3600,
+            dials: DialCounters {
+                attempted: 10,
+                succeeded: 5,
+                failed: 5,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 503"));
+        assert_eq!(body, "dial_stale\n");
+    }
+
+    #[test]
+    fn route_healthz_503_dial_never_succeeded_when_no_success_and_staleness_set() {
+        // alive=true, staleness=60s, attempted > 0, never
+        // succeeded. /healthz must return 503 dial_never_succeeded.
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            healthz_staleness_secs: 60,
+            last_dial_success_unix: 0,
+            dials: DialCounters {
+                attempted: 5,
+                succeeded: 0,
+                failed: 5,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 503"));
+        assert_eq!(body, "dial_never_succeeded\n");
+    }
+
+    #[test]
+    fn route_healthz_200_when_last_success_is_recent() {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            healthz_staleness_secs: 60,
+            last_dial_success_unix: now_unix - 10, // 10s ago, within 60s
+            dials: DialCounters {
+                attempted: 10,
+                succeeded: 10,
+                failed: 0,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn route_healthz_200_when_staleness_disabled_even_with_old_last_success() {
+        // staleness_secs = 0 → rule disabled. last_dial_success = 0
+        // doesn't matter; /healthz returns 200 as soon as alive.
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            healthz_staleness_secs: 0,
+            last_dial_success_unix: 0,
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 0,
+                failed: 100,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn route_healthz_200_when_no_dials_attempted_yet() {
+        // staleness > 0 but no dials attempted yet — the
+        // staleness rule shouldn't fire (the client just
+        // started; nothing has tried to dial). 200 alive.
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            healthz_staleness_secs: 60,
+            last_dial_success_unix: 0,
+            dials: DialCounters {
+                attempted: 0,
+                succeeded: 0,
+                failed: 0,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn route_healthz_503_alive_false_takes_priority_over_staleness() {
+        // alive=false trumps any staleness state. Always
+        // "starting".
+        let snap = ClientStatusSnapshot {
+            alive: false,
+            healthz_staleness_secs: 60,
+            last_dial_success_unix: 1000, // ancient
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 50,
+                failed: 50,
+            },
+            ..empty_snap()
+        };
+        let (status, _ctype, body) = route("GET /healthz HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 503"));
         assert_eq!(body, "starting\n");
     }
 

@@ -883,6 +883,55 @@ within a minute; `stat()` cost is microseconds. Combined with
 the existing SIGHUP path, operators have both push (SIGHUP)
 and pull (mtime) trip-wires for cert rotation.
 
+### Client-side `/healthz` staleness rule
+
+The client (SOCKS5 inbound proxy on the user's machine) exposes
+`/healthz` for downstream apps (browser, IDE, mobile app) to
+probe before sending traffic through. Today `/healthz` returns
+200 the moment the SOCKS5 listener binds — and stays 200 even
+if every upstream Proteus dial fails for the next 10 hours.
+Downstream apps stall on a broken proxy because nothing tells
+them to fall back.
+
+```yaml
+# client.yaml
+healthz_staleness_secs: 120   # 0 = staleness rule disabled (default)
+```
+
+When set, `/healthz` consults a three-gate check:
+
+1. SOCKS5 alive (top priority — strongest signal).
+2. **Dial freshness**: if ≥1 dial attempted AND the last
+   successful dial was more than N seconds ago, return
+   **503 `dial_stale`**.
+3. **Never succeeded**: if ≥1 dial attempted AND no success
+   ever recorded, return **503 `dial_never_succeeded`**.
+
+Downstream apps probing /healthz then fall back to direct
+connection (or display a "proxy degraded" banner) instead of
+hanging on broken dials.
+
+Operator surface (always emitted on `/metrics`):
+
+```
+proteus_client_last_dial_success_unix_seconds   # gauge — 0 = never
+proteus_client_healthz_staleness_secs           # gauge — operator threshold
+```
+
+PromQL recipe for an alert (independent of the client's own
+`/healthz` flip — useful when the client's admin endpoint
+isn't scraped but the gauges go to a separate Prometheus):
+
+```promql
+proteus_client_healthz_staleness_secs > 0
+  AND time() - proteus_client_last_dial_success_unix_seconds
+    > proteus_client_healthz_staleness_secs
+```
+
+Recommended for production: 120 seconds (2 min). Catches a
+wedged upstream within ~2 min so downstream apps fall back
+fast without thrashing on transient blips.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit
