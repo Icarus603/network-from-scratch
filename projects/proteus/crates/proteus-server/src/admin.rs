@@ -41,6 +41,26 @@ pub struct MetricsSnapshot {
     pub user_rate_rejected: u64,
     pub cover_forwards: u64,
     pub probe_anomalies_fired: u64,
+    /// Number of distinct /24 (v4) / /48 (v6) prefixes currently
+    /// being tracked by the probe-anomaly detector (gauge — current
+    /// sliding-window population, not a cumulative count). Sourced
+    /// from `proteus_probe_anomaly_tracked_prefixes`.
+    pub probe_anomaly_tracked: u64,
+    /// Times the detector refused to track a NEW prefix because
+    /// `max_prefixes` was reached (IP-sweep memory-cap signal).
+    /// A rising counter here = either operator should raise the
+    /// cap (legitimate scale) OR an attacker is sieve-probing
+    /// (firewall / rate-limit should engage). Sourced from
+    /// `proteus_probe_anomaly_dropped_inserts_total`.
+    pub probe_anomaly_dropped_inserts: u64,
+    /// Recent fires from the bounded ring buffer. Each entry is
+    /// `(prefix_string, seconds_since_fire)`. Sourced by parsing
+    /// the labelled `proteus_probe_anomaly_recent_secs{prefix="…"}`
+    /// gauge lines. Pretty-printed at the bottom of `admin status`
+    /// text output + emitted as a JSON array in `admin status
+    /// --format json`. The most operationally critical signal in
+    /// this snapshot for IR work: "which /24 do I blackhole-route?"
+    pub probe_anomaly_recent: Vec<ProbeAnomalyRecentFire>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -50,6 +70,19 @@ pub struct MetricsSnapshot {
     /// Counters we recognized by name but don't have a dedicated
     /// field for yet. Operators see them under "Other".
     pub other: BTreeMap<String, u64>,
+}
+
+/// One row of the probe-anomaly recent-fires ring buffer, parsed out
+/// of the labelled Prometheus gauge `proteus_probe_anomaly_recent_secs`.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeAnomalyRecentFire {
+    /// Prefix string as emitted by the server, e.g. `"198.51.100.0/24"`
+    /// or `"2001:db8::/48"`. Already operator-readable; no further
+    /// transformation needed.
+    pub prefix: String,
+    /// Seconds elapsed between the fire and the scrape time. Smaller
+    /// = more recent; 0 = just fired.
+    pub secs_ago: u64,
 }
 
 /// Output format for `admin status` / `diff` / `watch`. The
@@ -97,13 +130,21 @@ impl MetricsSnapshot {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            // Each value line is `name value`; reject anything with
-            // labels (a `{` between name and value), per above.
+            // Each value line is `name value`; rather than rejecting
+            // every line with a `{`, we recognize ONE specific
+            // labelled series — `proteus_probe_anomaly_recent_secs
+            // {prefix="..."} <value>` — and route it to the
+            // recent-fires ring. Everything else with a `{` stays
+            // skipped (no other Proteus metric has labels).
             let (name, value) = match line.split_once(' ') {
                 Some((n, v)) => (n.trim(), v.trim()),
                 None => continue,
             };
             if name.contains('{') {
+                // Parse the recent_secs labelled lines.
+                if let Some(fire) = parse_probe_anomaly_recent(name, value) {
+                    s.probe_anomaly_recent.push(fire);
+                }
                 continue;
             }
             let v: u64 = match value.parse() {
@@ -125,6 +166,10 @@ impl MetricsSnapshot {
                 "proteus_user_rate_rejected_total" => s.user_rate_rejected = v,
                 "proteus_cover_forwards_total" => s.cover_forwards = v,
                 "proteus_probe_anomalies_fired_total" => s.probe_anomalies_fired = v,
+                "proteus_probe_anomaly_tracked_prefixes" => s.probe_anomaly_tracked = v,
+                "proteus_probe_anomaly_dropped_inserts_total" => {
+                    s.probe_anomaly_dropped_inserts = v;
+                }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
                 "proteus_aead_drops_total" => s.aead_drops = v,
@@ -197,6 +242,37 @@ impl MetricsSnapshot {
             self.probe_anomalies_fired,
             false,
         );
+        push_json_u64(
+            &mut s,
+            "probe_anomaly_tracked",
+            self.probe_anomaly_tracked,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "probe_anomaly_dropped_inserts",
+            self.probe_anomaly_dropped_inserts,
+            false,
+        );
+        // Recent-fires ring as a JSON array. Always emit (even when
+        // empty) so scripts can rely on the key's presence. Sorted
+        // freshest-first to match the text-output ordering.
+        s.push_str(r#","probe_anomaly_recent":["#);
+        let mut sorted = self.probe_anomaly_recent.clone();
+        sorted.sort_by_key(|r| r.secs_ago);
+        let mut first = true;
+        for fire in &sorted {
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push_str(r#"{"prefix":""#);
+            json_escape_str(&fire.prefix, &mut s);
+            s.push_str(r#"","secs_ago":"#);
+            s.push_str(&fire.secs_ago.to_string());
+            s.push('}');
+        }
+        s.push(']');
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -276,6 +352,44 @@ impl fmt::Display for MetricsSnapshot {
         row!("probe_anomalies_fired", self.probe_anomalies_fired)?;
         row!("total_rejected", self.total_rejected())?;
         writeln!(f)?;
+
+        // Probe-anomaly diagnostic block. Only printed when the
+        // operator has actually wired the detector (tracked > 0 OR
+        // a fire has been recorded). Keeps the default snapshot
+        // compact for the common case where the detector is inactive.
+        if self.probe_anomalies_fired > 0
+            || self.probe_anomaly_tracked > 0
+            || !self.probe_anomaly_recent.is_empty()
+        {
+            writeln!(f, " Probe-anomaly diagnostics")?;
+            row!("tracked_prefixes_gauge", self.probe_anomaly_tracked)?;
+            row!("dropped_inserts_total", self.probe_anomaly_dropped_inserts)?;
+            if self.probe_anomaly_recent.is_empty() {
+                row!("recent_fires", "(none in ring)")?;
+            } else {
+                writeln!(
+                    f,
+                    "  recent_fires ({} entries, freshest first):",
+                    self.probe_anomaly_recent.len()
+                )?;
+                // Sort by secs_ago ascending = freshest first. Operators
+                // care most about the just-fired prefixes for IR.
+                let mut sorted = self.probe_anomaly_recent.clone();
+                sorted.sort_by_key(|r| r.secs_ago);
+                for fire in sorted.iter().take(20) {
+                    writeln!(f, "    {} fired {}s ago", fire.prefix, fire.secs_ago,)?;
+                }
+                if sorted.len() > 20 {
+                    writeln!(
+                        f,
+                        "    … ({} more — query Prometheus `topk(N, \
+                         proteus_probe_anomaly_recent_secs)` for the full list)",
+                        sorted.len() - 20
+                    )?;
+                }
+            }
+            writeln!(f)?;
+        }
 
         writeln!(f, " Session teardown causes")?;
         row!("session_idle_reaped", self.session_idle_reaped)?;
@@ -370,6 +484,30 @@ pub fn read_token_file(path: &Path) -> Result<String, AdminError> {
         ));
     }
     Ok(token)
+}
+
+/// Parse one `proteus_probe_anomaly_recent_secs{prefix="..."}` line
+/// into a `ProbeAnomalyRecentFire`. Returns `None` for any other
+/// labelled line so the caller can quietly skip it.
+///
+/// Robust to whitespace variations and the small Prometheus quoting
+/// rules (we only ever emit `"…"` values without internal quotes/
+/// backslashes, so the parser doesn't need to handle escape
+/// sequences).
+fn parse_probe_anomaly_recent(name: &str, value: &str) -> Option<ProbeAnomalyRecentFire> {
+    let metric_prefix = "proteus_probe_anomaly_recent_secs{";
+    let rest = name.strip_prefix(metric_prefix)?;
+    let rest = rest.strip_suffix('}')?;
+    // rest is e.g. `prefix="198.51.100.0/24"` — a single key/value.
+    let (k, v) = rest.split_once('=')?;
+    if k.trim() != "prefix" {
+        return None;
+    }
+    let v = v.trim();
+    let v = v.strip_prefix('"')?;
+    let prefix = v.strip_suffix('"')?.to_string();
+    let secs_ago: u64 = value.parse().ok()?;
+    Some(ProbeAnomalyRecentFire { prefix, secs_ago })
 }
 
 /// Parse a `http://host:port/path` URL into `(host, port, path)`.
@@ -1152,6 +1290,149 @@ proteus_some_future_counter_total 43
         let s = MetricsSnapshot::parse(body);
         let j = s.to_json();
         assert!(j.contains("\"other\":{}"), "expected empty other: {j}");
+    }
+
+    // ---------- probe-anomaly diagnostic surface ----------
+
+    /// The Prometheus body includes the detector's three new lines —
+    /// two flat counters and one labelled gauge per recent fire.
+    /// The admin snapshot MUST recognize all three and surface them
+    /// as typed fields (not as opaque "Other" entries).
+    #[test]
+    fn snapshot_parses_probe_anomaly_extension_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_probe_anomalies_fired_total 3\n\
+proteus_probe_anomaly_tracked_prefixes 5\n\
+proteus_probe_anomaly_dropped_inserts_total 0\n\
+proteus_probe_anomaly_recent_secs{prefix=\"198.51.100.0/24\"} 12\n\
+proteus_probe_anomaly_recent_secs{prefix=\"203.0.113.0/24\"} 47\n\
+proteus_probe_anomaly_recent_secs{prefix=\"2001:db8::/48\"} 99\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.probe_anomalies_fired, 3);
+        assert_eq!(s.probe_anomaly_tracked, 5);
+        assert_eq!(s.probe_anomaly_dropped_inserts, 0);
+        assert_eq!(s.probe_anomaly_recent.len(), 3);
+        // Order from parse should match emission order; sorting
+        // happens in the renderer, not the parser.
+        let prefixes: Vec<&str> = s
+            .probe_anomaly_recent
+            .iter()
+            .map(|r| r.prefix.as_str())
+            .collect();
+        assert_eq!(
+            prefixes,
+            vec!["198.51.100.0/24", "203.0.113.0/24", "2001:db8::/48"]
+        );
+        // No detector field should leak into "other" (the parser
+        // must recognize them by name, not fall through).
+        assert!(
+            s.other.is_empty(),
+            "detector fields leaked into Other map: {:?}",
+            s.other
+        );
+    }
+
+    /// JSON output emits the recent-fires array sorted freshest-first
+    /// (smallest secs_ago first). This is the order an operator
+    /// scanning the dashboard cares about first.
+    #[test]
+    fn snapshot_json_emits_recent_fires_freshest_first() {
+        let body = "\
+proteus_up 1\n\
+proteus_probe_anomaly_recent_secs{prefix=\"10.0.0.0/24\"} 60\n\
+proteus_probe_anomaly_recent_secs{prefix=\"10.0.1.0/24\"} 5\n\
+proteus_probe_anomaly_recent_secs{prefix=\"10.0.2.0/24\"} 30\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        // Freshest = 5s, then 30s, then 60s.
+        let idx_5 = j.find(r#""prefix":"10.0.1.0/24","secs_ago":5"#).unwrap();
+        let idx_30 = j.find(r#""prefix":"10.0.2.0/24","secs_ago":30"#).unwrap();
+        let idx_60 = j.find(r#""prefix":"10.0.0.0/24","secs_ago":60"#).unwrap();
+        assert!(
+            idx_5 < idx_30 && idx_30 < idx_60,
+            "recent-fires not sorted freshest-first in JSON: {j}",
+        );
+    }
+
+    /// Empty ring buffer still produces the `probe_anomaly_recent: []`
+    /// key — scripts can rely on its presence.
+    #[test]
+    fn snapshot_json_emits_empty_recent_array_when_no_fires() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(
+            j.contains(r#""probe_anomaly_recent":[]"#),
+            "expected empty recent array key in: {j}"
+        );
+    }
+
+    /// Text output renders the probe-anomaly diagnostic block
+    /// ONLY when there's something interesting to show (fires > 0
+    /// OR tracked > 0 OR ring non-empty). Quiet by default.
+    #[test]
+    fn snapshot_text_omits_probe_anomaly_block_when_quiet() {
+        let body = "proteus_up 1\nproteus_sessions_accepted_total 7\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            !t.contains("Probe-anomaly diagnostics"),
+            "quiet snapshot should NOT render the diagnostic block:\n{t}",
+        );
+    }
+
+    /// When the detector has fires, the text block IS rendered and
+    /// includes the recent /24 list sorted freshest-first.
+    #[test]
+    fn snapshot_text_renders_probe_anomaly_block_when_fires_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_probe_anomalies_fired_total 2\n\
+proteus_probe_anomaly_tracked_prefixes 1\n\
+proteus_probe_anomaly_dropped_inserts_total 0\n\
+proteus_probe_anomaly_recent_secs{prefix=\"198.51.100.0/24\"} 8\n\
+proteus_probe_anomaly_recent_secs{prefix=\"203.0.113.0/24\"} 2\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            t.contains("Probe-anomaly diagnostics"),
+            "block missing:\n{t}"
+        );
+        assert!(t.contains("tracked_prefixes_gauge"), "tracked row missing");
+        assert!(t.contains("dropped_inserts_total"), "dropped row missing");
+        // Freshest first → 203.0.113 (2s) before 198.51.100 (8s).
+        let idx_203 = t.find("203.0.113.0/24").expect("203 line missing");
+        let idx_198 = t.find("198.51.100.0/24").expect("198 line missing");
+        assert!(
+            idx_203 < idx_198,
+            "recent-fires not sorted freshest-first in text:\n{t}",
+        );
+        assert!(t.contains("fired 2s ago"));
+        assert!(t.contains("fired 8s ago"));
+    }
+
+    /// Malformed labelled lines must not crash the parser — they
+    /// just get skipped. Defense against future format drift.
+    #[test]
+    fn snapshot_parser_skips_malformed_recent_secs_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_probe_anomaly_recent_secs{prefix=\"198.51.100.0/24\"} 12\n\
+proteus_probe_anomaly_recent_secs{ notvalid \n\
+proteus_probe_anomaly_recent_secs{wrongkey=\"x\"} 5\n\
+proteus_probe_anomaly_recent_secs{prefix=missing_quotes} 7\n\
+proteus_probe_anomaly_recent_secs{prefix=\"valid/24\"} not_a_number\n\
+proteus_probe_anomaly_recent_secs{prefix=\"203.0.113.0/24\"} 47\n";
+        let s = MetricsSnapshot::parse(body);
+        // Only the two well-formed lines survived.
+        assert_eq!(s.probe_anomaly_recent.len(), 2);
+        let prefixes: Vec<&str> = s
+            .probe_anomaly_recent
+            .iter()
+            .map(|r| r.prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["198.51.100.0/24", "203.0.113.0/24"]);
     }
 
     #[test]
