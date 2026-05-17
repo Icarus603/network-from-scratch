@@ -328,6 +328,36 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             "client_allowlist has {} users",
             cfg.client_allowlist.len()
         ));
+        // Iter-57: duplicate user_id detection. The runtime
+        // lookup is `client_allowlist.iter().find(...)` which
+        // returns the FIRST match. Duplicate user_ids with
+        // DIFFERENT pubkeys = the second-and-later entries are
+        // dead code; the client whose pubkey matches the dead
+        // entry will fail signature verification and reject.
+        // The operator usually intended the second entry as a
+        // key rotation; failing to notice means a real client
+        // is silently locked out.
+        let mut seen: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(cfg.client_allowlist.len());
+        let mut dupes: Vec<String> = Vec::new();
+        for (idx, client) in cfg.client_allowlist.iter().enumerate() {
+            if let Some(prev_idx) = seen.insert(client.user_id.as_str(), idx) {
+                dupes.push(format!(
+                    "{:?} appears at indices [{prev_idx}] and [{idx}]",
+                    client.user_id
+                ));
+            }
+        }
+        if !dupes.is_empty() {
+            r.push_fail(format!(
+                "client_allowlist has duplicate user_id(s): {}. The runtime lookup \
+                 returns the FIRST match; any client whose pubkey matches a LATER \
+                 duplicate entry will fail signature verification and be rejected. \
+                 If this is a key rotation, remove the old entry; if it's a typo, \
+                 give each client a distinct user_id.",
+                dupes.join("; ")
+            ));
+        }
     }
 
     // 5. Cover endpoint parses (single OR pool — pool wins when set).
@@ -1488,6 +1518,77 @@ mod tests {
         });
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-57: duplicate user_id in allowlist → FAIL. The
+    /// runtime returns the FIRST match; subsequent entries with
+    /// the same user_id are dead code. If the operator meant
+    /// the second entry as a key rotation, the matching client
+    /// will fail signature verification against the OLD key and
+    /// be silently rejected. Surface as a FAIL with both indices
+    /// for fast triage.
+    #[test]
+    fn iter57_duplicate_user_id_in_allowlist_fails() {
+        let dir = tmpdir();
+        let pk1 = dir.join("alice1.pk");
+        let pk2 = dir.join("alice2.pk");
+        std::fs::write(&pk1, b"old-pubkey-bytes").unwrap();
+        std::fs::write(&pk2, b"new-pubkey-bytes").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![
+            ClientCfg {
+                user_id: "alice".to_string(),
+                ed25519_pk: pk1,
+            },
+            ClientCfg {
+                user_id: "alice".to_string(), // same user_id, different pk
+                ed25519_pk: pk2,
+            },
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "duplicate allowlist user_id MUST FAIL: {report}"
+        );
+        let dup_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("duplicate user_id") && s.contains("alice") && s.contains("[0]") && s.contains("[1]")
+            }
+            _ => false,
+        });
+        assert!(
+            dup_fail,
+            "FAIL must call out duplicate + both indices: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-57: distinct user_ids → no false positive.
+    #[test]
+    fn iter57_distinct_user_ids_do_not_fail_dupe_check() {
+        let dir = tmpdir();
+        let pk1 = dir.join("alice.pk");
+        let pk2 = dir.join("bob.pk");
+        std::fs::write(&pk1, b"alice-pubkey").unwrap();
+        std::fs::write(&pk2, b"bob-pubkey").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![
+            ClientCfg {
+                user_id: "alice".to_string(),
+                ed25519_pk: pk1,
+            },
+            ClientCfg {
+                user_id: "bob".to_string(),
+                ed25519_pk: pk2,
+            },
+        ];
+        let report = preflight(&cfg);
+        let dup_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("duplicate user_id"),
+            _ => false,
+        });
+        assert!(!dup_fail, "distinct user_ids must not trigger dup-check: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
