@@ -90,8 +90,38 @@ pub struct ServerConfig {
     pub client_allowlist: Vec<ClientCfg>,
     /// Cover URL to forward to on auth failure (spec §7.5).
     /// e.g. `"www.cloudflare.com:443"`.
+    ///
+    /// **Single-endpoint mode (default).** Every auth-failed
+    /// connection splices to this one URL. Mutually exclusive with
+    /// `cover_endpoints`; if both are set, `cover_endpoints` wins.
     #[serde(default)]
     pub cover_endpoint: Option<String>,
+    /// Cover endpoint POOL — N URLs the server rotates across with
+    /// per-source-IP /24 (v4) or /48 (v6) affinity. Defeats
+    /// time-series active probing (2026 threat-intel main line 4):
+    /// a single observer probing the same Proteus IP across many
+    /// rounds receives the SAME cover URL every round (looks
+    /// consistent with a real cover server), while different src IPs
+    /// receive different cover URLs.
+    ///
+    /// Recommended: 3-5 endpoints across distinct popular HTTPS
+    /// destinations the operator does NOT control (Cloudflare,
+    /// Microsoft, Apple, etc — same picking criteria as the
+    /// single-endpoint case, just N of them).
+    ///
+    /// YAML example:
+    /// ```yaml
+    /// cover_endpoints:
+    ///   - www.cloudflare.com:443
+    ///   - www.apple.com:443
+    ///   - www.microsoft.com:443
+    /// ```
+    ///
+    /// Single-endpoint `cover_endpoint` shorthand still works for
+    /// operators who don't need the pool; in that case this field
+    /// stays empty.
+    #[serde(default)]
+    pub cover_endpoints: Vec<String>,
     /// Optional Prometheus exposition listener, e.g. `"127.0.0.1:9090"`.
     /// When set, the server exposes `/metrics`, `/healthz`, `/readyz`
     /// over plain HTTP. Bind only to a private address (loopback or

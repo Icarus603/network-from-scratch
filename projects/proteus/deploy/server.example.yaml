@@ -265,7 +265,28 @@ tls:
 # byte-verbatim to this endpoint on any handshake failure, making the
 # server indistinguishable from a generic HTTPS proxy fronting this
 # upstream. Use a real, popular HTTPS site to maximize cover.
+#
+# ## Two forms
+#
+# Single endpoint (every auth-fail routes to the same URL):
 cover_endpoint: "www.cloudflare.com:443"
+
+# **OR** an N-endpoint POOL with per-source-IP /24 (v4) / /48 (v6)
+# affinity (defeats time-series active probing — see 2026 threat-
+# intel main line 4 in qa/2026-05-17-gfw-2026-q1q2-threat-intel.md).
+# When the pool is non-empty, `cover_endpoint` above is ignored.
+#
+# Recommended: 3-5 distinct popular HTTPS destinations the operator
+# does NOT control. Each src-IP /24 consistently hashes to one entry,
+# so a single observer probing the server across hours sees the SAME
+# cover URL every round (matches real-cover-server behavior), while
+# different src IPs receive different URLs.
+#
+# cover_endpoints:
+#   - www.cloudflare.com:443
+#   - www.apple.com:443
+#   - www.microsoft.com:443
+#   - www.bing.com:443
 
 # Server long-term keys (generated via `proteus-server keygen`).
 keys:

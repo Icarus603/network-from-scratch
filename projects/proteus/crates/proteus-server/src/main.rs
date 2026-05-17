@@ -299,10 +299,46 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
     let keys = load_server_keys(&cfg)?;
     let mut ctx = ServerCtx::new(keys);
-    if let Some(cover) = &cfg.cover_endpoint {
+    // Cover-endpoint wiring with precedence:
+    //   1. `cover_endpoints` (the POOL with per-source-IP affinity) — wins
+    //      when non-empty; defeats time-series active probing.
+    //   2. `cover_endpoint` (the single-URL shorthand) — backward
+    //      compatibility for operators who haven't migrated yet.
+    //   3. Neither → silent drop on auth fail.
+    if !cfg.cover_endpoints.is_empty() {
+        let mut parsed_list = Vec::with_capacity(cfg.cover_endpoints.len());
+        let mut rejected = 0usize;
+        for raw in &cfg.cover_endpoints {
+            match proteus_transport_alpha::cover::parse_cover_endpoint(raw) {
+                Some(p) => parsed_list.push(p),
+                None => {
+                    rejected += 1;
+                    warn!(cover = %raw, "invalid cover endpoint in cover_endpoints pool — skipping");
+                }
+            }
+        }
+        if parsed_list.is_empty() {
+            warn!(
+                rejected,
+                "every cover_endpoints entry was invalid — auth-fail connections will be dropped"
+            );
+        } else {
+            info!(
+                pool_size = parsed_list.len(),
+                rejected, "cover endpoint POOL configured (per-src-IP /24 affinity)"
+            );
+            ctx = ctx.with_cover_pool(parsed_list);
+            if cfg.cover_endpoint.is_some() {
+                warn!(
+                    "cover_endpoint is also set — IGNORED because cover_endpoints pool wins; \
+                     remove cover_endpoint from the YAML to silence this warning"
+                );
+            }
+        }
+    } else if let Some(cover) = &cfg.cover_endpoint {
         match proteus_transport_alpha::cover::parse_cover_endpoint(cover) {
             Some(parsed) => {
-                info!(cover = %parsed, "cover endpoint configured");
+                info!(cover = %parsed, "cover endpoint configured (single)");
                 ctx = ctx.with_cover(parsed);
             }
             None => {
@@ -310,7 +346,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         }
     } else {
-        warn!("no cover_endpoint configured — auth-fail connections will be dropped silently");
+        warn!("no cover_endpoint or cover_endpoints configured — auth-fail connections will be dropped silently");
     }
     if let Some(rl) = &cfg.rate_limit {
         info!(

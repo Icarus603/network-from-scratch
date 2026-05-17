@@ -218,14 +218,51 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         ));
     }
 
-    // 5. Cover endpoint parses.
-    match cfg.cover_endpoint.as_ref() {
-        Some(c) => match proteus_transport_alpha::cover::parse_cover_endpoint(c) {
-            Some(parsed) => r.push_pass(format!("cover_endpoint parses ({parsed})")),
-            None => r.push_fail(format!("cover_endpoint {c:?}: bad host:port")),
-        },
-        None => {
-            r.push_warn("cover_endpoint unset — auth-fail connections will be silently dropped")
+    // 5. Cover endpoint parses (single OR pool — pool wins when set).
+    if !cfg.cover_endpoints.is_empty() {
+        let mut bad = Vec::new();
+        for (idx, raw) in cfg.cover_endpoints.iter().enumerate() {
+            if proteus_transport_alpha::cover::parse_cover_endpoint(raw).is_none() {
+                bad.push(format!("[{idx}]={raw:?}"));
+            }
+        }
+        if bad.is_empty() {
+            r.push_pass(format!(
+                "cover_endpoints pool parses ({} entries, per-src-IP /24 affinity)",
+                cfg.cover_endpoints.len()
+            ));
+        } else {
+            r.push_fail(format!(
+                "cover_endpoints pool has bad host:port entries: {}",
+                bad.join(", ")
+            ));
+        }
+        // Pool of size 1 = silently equivalent to cover_endpoint
+        // single mode, but operator probably meant to add more.
+        if cfg.cover_endpoints.len() == 1 {
+            r.push_warn(
+                "cover_endpoints has only one entry — equivalent to the cover_endpoint \
+                 single-URL shorthand. Add ≥3 distinct destinations to actually defeat \
+                 time-series active probing (threat-intel main line 4)",
+            );
+        }
+        if cfg.cover_endpoint.is_some() {
+            r.push_warn(
+                "both cover_endpoint AND cover_endpoints are set — cover_endpoint will be \
+                 IGNORED at runtime. Remove cover_endpoint from the YAML to silence the \
+                 runtime warning",
+            );
+        }
+    } else {
+        match cfg.cover_endpoint.as_ref() {
+            Some(c) => match proteus_transport_alpha::cover::parse_cover_endpoint(c) {
+                Some(parsed) => r.push_pass(format!("cover_endpoint parses ({parsed})")),
+                None => r.push_fail(format!("cover_endpoint {c:?}: bad host:port")),
+            },
+            None => r.push_warn(
+                "cover_endpoint / cover_endpoints both unset — auth-fail connections will \
+                 be silently dropped",
+            ),
         }
     }
 
@@ -599,6 +636,7 @@ mod tests {
             },
             client_allowlist: Vec::new(),
             cover_endpoint: None,
+            cover_endpoints: Vec::new(),
             metrics_listen: None,
             metrics_token_file: None,
             rate_limit: None,

@@ -196,8 +196,8 @@ where
 /// Helper used by every accept loop: spawn a cover-forward task that
 /// splices `stream` to `ctx.cover_endpoint` (if configured), otherwise
 /// drop the stream. Idempotent + non-blocking.
-fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream) {
-    if let Some(cover) = ctx.cover_endpoint().map(str::to_string) {
+fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream, peer: &std::net::SocketAddr) {
+    if let Some(cover) = ctx.cover_endpoint_for(peer) {
         let metrics = ctx.metrics().cloned();
         tokio::spawn(async move {
             let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
@@ -217,7 +217,18 @@ pub struct ServerCtx {
     keys: ServerKeys,
     replay: Mutex<ReplayWindow>,
     /// Optional cover endpoint (`host:port`) for auth-fail forwarding.
-    cover_endpoint: Option<String>,
+    /// Cover-forwarding endpoint(s) per spec §7.5 + 2026 threat-intel
+    /// main line 4. When set, every auth-failed connection is byte-
+    /// spliced to one of the configured endpoints.
+    ///
+    /// Wrapped in `CoverEndpointPool` so single-endpoint and pool
+    /// configurations share one type. Single-endpoint = pool of
+    /// size 1; pool of size N applies per-source-IP /24 (v4) or
+    /// /48 (v6) affinity — same peer always sees the same cover URL
+    /// across repeated probes (defeats time-series active probing
+    /// that a single observer can mount; see `cover_pool.rs` design
+    /// rationale for the trade-off vs. cross-observer correlation).
+    cover_endpoint: Option<crate::cover_pool::CoverEndpointPool>,
     /// Optional per-source-IP rate limiter.
     rate_limiter: Option<crate::rate_limit::RateLimiter>,
     /// Maximum time to spend on a single handshake before giving up
@@ -573,16 +584,60 @@ impl ServerCtx {
         }
     }
 
-    /// Configure cover-forwarding endpoint per spec §7.5.
+    /// Configure cover-forwarding to a SINGLE endpoint per spec §7.5.
+    /// Backward-compatible single-endpoint setter — wraps into a
+    /// `CoverEndpointPool` of size 1, so every source IP routes to
+    /// the same URL (pre-pool behavior).
     pub fn with_cover(mut self, endpoint: impl Into<String>) -> Self {
-        self.cover_endpoint = Some(endpoint.into());
+        self.cover_endpoint = Some(crate::cover_pool::CoverEndpointPool::single(
+            endpoint.into(),
+        ));
         self
     }
 
-    /// Read the cover endpoint.
+    /// Configure cover-forwarding to a POOL of N endpoints.
+    /// Per-source-IP /24 (v4) / /48 (v6) affinity — same peer always
+    /// receives the same cover URL across repeated probes, defeating
+    /// time-series active probing while preserving the consistency
+    /// property a single observer would expect from a real cover
+    /// server. See `cover_pool.rs` module docs for the trade-off.
+    ///
+    /// Returns `self` unchanged when `endpoints` is empty (caller
+    /// almost certainly wanted a non-empty pool; an empty pool
+    /// would silently disable cover-forwarding and tend to surprise
+    /// the operator).
+    pub fn with_cover_pool(mut self, endpoints: Vec<String>) -> Self {
+        if let Some(pool) = crate::cover_pool::CoverEndpointPool::new(endpoints) {
+            self.cover_endpoint = Some(pool);
+        }
+        self
+    }
+
+    /// Backward-compatible accessor. Returns the canonical (index-0)
+    /// cover endpoint string from the pool — sufficient for callers
+    /// that lost the peer address before reaching cover-forward.
+    /// New code should prefer `cover_endpoint_for(&peer)` so the
+    /// affinity policy applies.
     #[must_use]
-    pub fn cover_endpoint(&self) -> Option<&str> {
-        self.cover_endpoint.as_deref()
+    pub fn cover_endpoint(&self) -> Option<String> {
+        self.cover_endpoint.as_ref().map(|p| p.select_canonical())
+    }
+
+    /// Select a cover endpoint with per-source-IP affinity. This is
+    /// the path call sites with a `peer: &SocketAddr` in scope
+    /// should use; the affinity discipline only fires when the peer
+    /// address is supplied.
+    #[must_use]
+    pub fn cover_endpoint_for(&self, peer: &std::net::SocketAddr) -> Option<String> {
+        self.cover_endpoint.as_ref().map(|p| p.select_for(peer))
+    }
+
+    /// Diagnostic accessor — returns the configured pool, if any.
+    /// Used by metrics + admin surfaces to report pool size /
+    /// endpoint list without invoking the affinity selector.
+    #[must_use]
+    pub fn cover_pool(&self) -> Option<&crate::cover_pool::CoverEndpointPool> {
+        self.cover_endpoint.as_ref()
     }
 
     /// Public accessor for the ML-KEM EK bytes (for client config).
@@ -640,7 +695,7 @@ where
         let handle = handle.clone();
 
         if !admission_ok(&ctx, &peer) {
-            route_to_cover_or_drop(&ctx, stream);
+            route_to_cover_or_drop(&ctx, stream, &peer);
             continue;
         }
 
@@ -653,7 +708,7 @@ where
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                route_to_cover_or_drop(&ctx, stream);
+                route_to_cover_or_drop(&ctx, stream, &peer);
                 continue;
             }
         };
@@ -729,7 +784,7 @@ where
         let handle = handle.clone();
 
         if !admission_ok(&ctx, &peer) {
-            route_to_cover_or_drop(&ctx, stream);
+            route_to_cover_or_drop(&ctx, stream, &peer);
             continue;
         }
 
@@ -742,7 +797,7 @@ where
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                route_to_cover_or_drop(&ctx, stream);
+                route_to_cover_or_drop(&ctx, stream, &peer);
                 continue;
             }
         };
@@ -811,7 +866,7 @@ where
 
         // ---- Source-IP firewall + per-IP rate limit (DoS defense) ----
         if !admission_ok(&ctx, &peer) {
-            route_to_cover_or_drop(&ctx, stream);
+            route_to_cover_or_drop(&ctx, stream, &peer);
             continue;
         }
 
@@ -825,7 +880,7 @@ where
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 }
-                route_to_cover_or_drop(&ctx, stream);
+                route_to_cover_or_drop(&ctx, stream, &peer);
                 continue;
             }
         };
@@ -835,7 +890,12 @@ where
 
         tokio::spawn(async move {
             let _permit_held = permit;
-            let cover_target = ctx.cover_endpoint().map(str::to_string);
+            // Per-source-IP affinity selection — same peer always
+            // sees the same cover URL across repeated probes
+            // (defeats time-series active probing). Wins when
+            // `cover_pool` is configured; collapses to the canonical
+            // single-cover behavior when only `cover_endpoint` is set.
+            let cover_target = ctx.cover_endpoint_for(&peer);
             let deadline = ctx.handshake_deadline();
             let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;
             let (replay_buf, raw_stream, timed_out) = match result {

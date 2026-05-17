@@ -33,6 +33,7 @@ pub mod abuse_detector;
 pub mod access_log;
 pub mod client;
 pub mod cover;
+pub mod cover_pool;
 pub mod error;
 pub mod firewall;
 pub mod metrics;

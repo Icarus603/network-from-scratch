@@ -336,6 +336,7 @@ mod tests {
             },
             client_allowlist: Vec::new(),
             cover_endpoint: None,
+            cover_endpoints: Vec::new(),
             metrics_listen: None,
             metrics_token_file: None,
             rate_limit: None,

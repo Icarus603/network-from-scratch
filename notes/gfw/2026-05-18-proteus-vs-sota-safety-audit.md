@@ -105,11 +105,16 @@ a given cover URL.
 | | VLESS+Reality | Hy2/TUIC-v5 | Proteus |
 |---|---|---|---|
 | Cover-IAT camouflage | ❌ | ❌ | ✅ heartbeat cells inserted during idle windows, wire-indistinguishable from data cells per `heartbeat_cover::heartbeat_cell_is_wire_indistinguishable_from_data_cell` |
-| Cover-endpoint pool rotation | ❌ (single dest SNI) | n/a | ❌ (single cover_endpoint — P1 deliverable in threat-intel) |
+| Cover-endpoint pool rotation | ❌ (single dest SNI) | n/a | ✅ `cover_endpoints: [...]` with per-src-IP /24 (v4) / /48 (v6) **affinity** routing — same observer sees same URL across all probes (no rotation signal), different src IPs see different URLs. 8 unit tests + 4 integration tests; `crates/proteus-transport-alpha/src/cover_pool.rs`, commit landed 2026-05-18 |
 | Probe-anomaly detector (server-side) | ❌ | ❌ | ❌ (P1 deliverable) |
 
-**Verdict: ↑ slightly ahead on the IAT side** (we have heartbeats,
-they don't), tied on the pool/anomaly side (no one has it).
+**Verdict: ⇈ strictly ahead** as of 2026-05-18. We have heartbeats
+(IAT camouflage) AND a cover-endpoint pool with per-source-IP /24
+affinity (the "no rotation visible to a single observer" property
+matters more than naive round-robin would). REALITY/Hy2/TUIC-v5
+have neither. The remaining gap on this line is server-side
+probe-anomaly tracking (count "src_ip triggered cover-forward N
+times in last M minutes" + auto-tune rate-limit); still P1.
 
 ### 4. Per-record traffic analysis (length signature)
 
