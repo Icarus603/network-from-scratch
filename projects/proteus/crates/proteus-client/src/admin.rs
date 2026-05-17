@@ -51,7 +51,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::carrier_health::CarrierHealth;
-use crate::ctx::{ClientCtx, DialCounters};
+use crate::ctx::{BootstrapCounters, ClientCtx, DialCounters};
 use crate::endpoint_pool::EndpointPool;
 
 /// In-process snapshot built at scrape time. All fields are `Option`
@@ -81,6 +81,15 @@ pub struct ClientStatusSnapshot {
     /// watching these increment. Always present; zero-valued at
     /// startup.
     pub pool_reload: PoolReloadCounters,
+    /// Bootstrap-DNS resolution counters partitioned by path
+    /// (ip-literal / pinned-direct-ip / system-resolver). Always
+    /// present; zero-valued before any CONNECT has been
+    /// dispatched. Critical for verifying `bootstrap_dns: direct_ip`
+    /// is actually skipping the OS resolver — a non-zero
+    /// `via_system_resolver` in a deployment that was supposed to
+    /// be all-pinned is the silent-misconfig signal (threat-intel
+    /// main line 6: DoH identification).
+    pub bootstrap: BootstrapCounters,
 }
 
 /// Snapshot of the ReloadablePool's cumulative reload counters.
@@ -182,6 +191,7 @@ impl ClientStatusSnapshot {
             attempts: ctx.reloadable_pool.reload_attempts(),
             succeeded: ctx.reloadable_pool.reload_succeeded(),
         };
+        snap.bootstrap = ctx.bootstrap_counters();
         snap
     }
 
@@ -286,6 +296,7 @@ impl ClientStatusSnapshot {
             concurrency: None,
             dials: DialCounters::default(),
             pool_reload: PoolReloadCounters::default(),
+            bootstrap: BootstrapCounters::default(),
         }
     }
 
@@ -391,6 +402,19 @@ impl ClientStatusSnapshot {
             self.pool_reload.attempts, self.pool_reload.succeeded
         );
 
+        // bootstrap: DNS resolution counters partitioned by path.
+        // Always emitted; operators alert on
+        // `via_system_resolver > 0` when their deployment was
+        // supposed to be all-pinned-IP (= silent DoH leak).
+        s.push_str(r#","bootstrap":"#);
+        let _ = write!(
+            s,
+            r#"{{"via_ip_literal":{},"via_pinned_direct_ip":{},"via_system_resolver":{}}}"#,
+            self.bootstrap.via_ip_literal,
+            self.bootstrap.via_pinned_direct_ip,
+            self.bootstrap.via_system_resolver
+        );
+
         s.push_str("}\n");
         s
     }
@@ -485,6 +509,52 @@ impl ClientStatusSnapshot {
         );
         let _ = writeln!(s, "# TYPE proteus_client_dials_failed_total counter");
         let _ = writeln!(s, "proteus_client_dials_failed_total {}", self.dials.failed);
+
+        // Bootstrap-DNS resolution counters — partitioned by path.
+        // Always emitted from t=0 so PromQL `rate(...)` doesn't see
+        // absent-counter gaps. Operators alert on:
+        //   rate(proteus_client_bootstrap_via_system_resolver_total[5m]) > 0
+        // for a deployment intended to be all-pinned-IP — the 2026
+        // GFW DoH-identification attack vector silently bypassed.
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_bootstrap_via_ip_literal_total Bootstrap resolutions where the endpoint was already an IP literal."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_bootstrap_via_ip_literal_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_bootstrap_via_ip_literal_total {}",
+            self.bootstrap.via_ip_literal
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_bootstrap_via_pinned_direct_ip_total Bootstrap resolutions that used bootstrap_dns.direct_ip — DNS skipped."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_bootstrap_via_pinned_direct_ip_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_bootstrap_via_pinned_direct_ip_total {}",
+            self.bootstrap.via_pinned_direct_ip
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_bootstrap_via_system_resolver_total Bootstrap resolutions that transited the OS resolver (DoH-vulnerable per 2026 GFW threat intel)."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_bootstrap_via_system_resolver_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_bootstrap_via_system_resolver_total {}",
+            self.bootstrap.via_system_resolver
+        );
 
         // Pool reload counters — symmetric with the server-side
         // proteus_tls_reload_attempts_total / _succeeded_total.
@@ -761,6 +831,28 @@ impl std::fmt::Display for ClientStatusSnapshot {
             succeeded = self.dials.succeeded,
             failed = self.dials.failed,
         )?;
+        // Bootstrap-DNS resolution paths. Always render — operators
+        // need to see at a glance whether their direct_ip config is
+        // taking effect. If `via_system_resolver` is nonzero AND
+        // the operator believed they had all-pinned IPs, that's the
+        // misconfig signal worth a paragraph in the text output.
+        let total_bootstrap = self.bootstrap.via_ip_literal
+            + self.bootstrap.via_pinned_direct_ip
+            + self.bootstrap.via_system_resolver;
+        if total_bootstrap > 0 {
+            let warning = if self.bootstrap.via_system_resolver > 0 {
+                " — WARN: system-resolver path used; check bootstrap_dns config"
+            } else {
+                ""
+            };
+            writeln!(
+                f,
+                " Bootstrap DNS: {ipl} ip-literal, {pin} pinned-direct-ip, {sys} system-resolver{warning}",
+                ipl = self.bootstrap.via_ip_literal,
+                pin = self.bootstrap.via_pinned_direct_ip,
+                sys = self.bootstrap.via_system_resolver,
+            )?;
+        }
         // Quiet by default — only render the line once at least one
         // SIGHUP has happened, so steady-state output stays tight
         // for operators who don't use the reload surface.
@@ -1805,6 +1897,145 @@ mod tests {
         };
         let (status, _ctype, _body) = route("GET /metrics?debug=1 HTTP/1.1\r\n\r\n", &snap);
         assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn prometheus_always_emits_bootstrap_counters() {
+        let s = empty_snap().to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_ip_literal_total 0\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_pinned_direct_ip_total 0\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_system_resolver_total 0\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_reflects_bootstrap_counter_values() {
+        let snap = ClientStatusSnapshot {
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 42,
+                via_pinned_direct_ip: 7,
+                via_system_resolver: 1,
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_ip_literal_total 42\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_pinned_direct_ip_total 7\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_bootstrap_via_system_resolver_total 1\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn json_always_emits_bootstrap_object() {
+        let s = empty_snap().to_json();
+        assert!(
+            s.contains(
+                r#""bootstrap":{"via_ip_literal":0,"via_pinned_direct_ip":0,"via_system_resolver":0}"#
+            ),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn json_reflects_bootstrap_values() {
+        let snap = ClientStatusSnapshot {
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 10,
+                via_pinned_direct_ip: 5,
+                via_system_resolver: 3,
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_json();
+        assert!(
+            s.contains(
+                r#""bootstrap":{"via_ip_literal":10,"via_pinned_direct_ip":5,"via_system_resolver":3}"#
+            ),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn text_omits_bootstrap_line_when_no_resolutions_happened() {
+        let s = format!("{}", empty_snap());
+        assert!(
+            !s.contains("Bootstrap DNS:"),
+            "should not render bootstrap line at zero: {s}"
+        );
+    }
+
+    #[test]
+    fn text_renders_bootstrap_line_when_resolutions_happened() {
+        let snap = ClientStatusSnapshot {
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 50,
+                via_pinned_direct_ip: 0,
+                via_system_resolver: 0,
+            },
+            ..empty_snap()
+        };
+        let s = format!("{snap}");
+        assert!(
+            s.contains(" Bootstrap DNS: 50 ip-literal, 0 pinned-direct-ip, 0 system-resolver"),
+            "{s}"
+        );
+        // No WARN suffix in the all-ip-literal happy path.
+        assert!(!s.contains("WARN"), "{s}");
+    }
+
+    #[test]
+    fn text_renders_warn_when_system_resolver_used() {
+        // Misconfig signal: a deployment that should be all-pinned-IP
+        // shouldn't see ANY system-resolver path. The WARN suffix
+        // makes the misconfig pop on `proteus-client status`.
+        let snap = ClientStatusSnapshot {
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 5,
+                via_pinned_direct_ip: 10,
+                via_system_resolver: 3,
+            },
+            ..empty_snap()
+        };
+        let s = format!("{snap}");
+        assert!(
+            s.contains("WARN: system-resolver path used"),
+            "expected WARN suffix: {s}"
+        );
+    }
+
+    #[test]
+    fn from_ctx_propagates_bootstrap_counters() {
+        use crate::bootstrap::ResolvedVia;
+        let ctx = Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            None,
+            None,
+            0,
+            false,
+        ));
+        ctx.record_bootstrap_resolution(ResolvedVia::IpLiteralInEndpoint);
+        ctx.record_bootstrap_resolution(ResolvedVia::PinnedDirectIp);
+        ctx.record_bootstrap_resolution(ResolvedVia::PinnedDirectIp);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert_eq!(snap.bootstrap.via_ip_literal, 1);
+        assert_eq!(snap.bootstrap.via_pinned_direct_ip, 2);
+        assert_eq!(snap.bootstrap.via_system_resolver, 0);
     }
 
     #[test]

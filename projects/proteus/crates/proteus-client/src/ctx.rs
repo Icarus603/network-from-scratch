@@ -56,6 +56,24 @@ pub struct ClientCtx {
     pub dials_attempted: Arc<AtomicU64>,
     pub dials_succeeded: Arc<AtomicU64>,
     pub dials_failed: Arc<AtomicU64>,
+    /// Cumulative bootstrap-DNS resolution counters, partitioned by
+    /// the path the resolver took. Bumped exactly once per
+    /// successful `bootstrap::resolve_*` call (the dispatcher calls
+    /// resolve once per per-pool-entry per-carrier try, so the sum
+    /// of these three counters approximates the dispatcher's
+    /// pre-dial activity volume).
+    ///
+    /// **Operator value**: a non-zero `bootstrap_via_system_resolver_total`
+    /// in a deployment that was supposed to use `bootstrap_dns:
+    /// direct_ip` is the silent signal that something in the config
+    /// chain is wrong — either the YAML didn't apply, the operator
+    /// edited the wrong file, or one of the `server_endpoints`
+    /// entries is a hostname while others are IPs. Without these
+    /// counters the misconfiguration is invisible until the GFW
+    /// flags the bootstrap DoH (threat-intel main line 6).
+    pub bootstrap_via_ip_literal: Arc<AtomicU64>,
+    pub bootstrap_via_pinned_direct_ip: Arc<AtomicU64>,
+    pub bootstrap_via_system_resolver: Arc<AtomicU64>,
     /// Whether β is configured (carrier health tracker presence
     /// doesn't tell us — it's always created).
     pub beta_configured: bool,
@@ -80,7 +98,60 @@ impl ClientCtx {
             dials_attempted: Arc::new(AtomicU64::new(0)),
             dials_succeeded: Arc::new(AtomicU64::new(0)),
             dials_failed: Arc::new(AtomicU64::new(0)),
+            bootstrap_via_ip_literal: Arc::new(AtomicU64::new(0)),
+            bootstrap_via_pinned_direct_ip: Arc::new(AtomicU64::new(0)),
+            bootstrap_via_system_resolver: Arc::new(AtomicU64::new(0)),
             beta_configured,
+        }
+    }
+
+    /// Bump the appropriate bootstrap-resolver counter based on the
+    /// `ResolvedVia` discriminator. Called by the dispatch path's
+    /// resolve helper immediately after a successful resolution.
+    pub fn record_bootstrap_resolution(&self, via: crate::bootstrap::ResolvedVia) {
+        use crate::bootstrap::ResolvedVia;
+        match via {
+            ResolvedVia::IpLiteralInEndpoint => {
+                self.bootstrap_via_ip_literal
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ResolvedVia::PinnedDirectIp => {
+                self.bootstrap_via_pinned_direct_ip
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            ResolvedVia::SystemResolver => {
+                self.bootstrap_via_system_resolver
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+
+    /// Snapshot of the three bootstrap-resolver counters. Operators
+    /// read these to verify their `bootstrap_dns: direct_ip` config
+    /// is actually skipping the OS resolver. A non-zero
+    /// `via_system_resolver` in a deployment that was supposed to
+    /// be all-pinned-IPs is the misconfig signal — DoH transit is
+    /// the 2026 GFW's bootstrap-layer attack vector (threat-intel
+    /// main line 6).
+    #[must_use]
+    pub fn bootstrap_counters(&self) -> BootstrapCounters {
+        BootstrapCounters {
+            via_ip_literal: self.bootstrap_via_ip_literal.load(Ordering::Relaxed),
+            via_pinned_direct_ip: self.bootstrap_via_pinned_direct_ip.load(Ordering::Relaxed),
+            via_system_resolver: self.bootstrap_via_system_resolver.load(Ordering::Relaxed),
+        }
+    }
+
+    /// Cheap-to-clone counter handle for the dispatch path. Threaded
+    /// through `socks::handle_socks5_with_ctx` → `try_alpha` /
+    /// `try_beta` so they can bump the bootstrap counters without
+    /// holding a full `Arc<ClientCtx>` reference.
+    #[must_use]
+    pub fn bootstrap_counter_handles(&self) -> BootstrapCounterHandles {
+        BootstrapCounterHandles {
+            via_ip_literal: Arc::clone(&self.bootstrap_via_ip_literal),
+            via_pinned_direct_ip: Arc::clone(&self.bootstrap_via_pinned_direct_ip),
+            via_system_resolver: Arc::clone(&self.bootstrap_via_system_resolver),
         }
     }
 
@@ -138,6 +209,59 @@ pub struct DialCounters {
     pub attempted: u64,
     pub succeeded: u64,
     pub failed: u64,
+}
+
+/// Cheap-to-clone handle on the three bootstrap-DNS counter
+/// atomics. Threaded down the dispatch path to `try_alpha` /
+/// `try_beta` so they can bump the counter without needing the
+/// full `ClientCtx` as a parameter (which would couple the carrier-
+/// transport layer to the SOCKS layer's context type).
+///
+/// Construct via [`ClientCtx::bootstrap_counter_handles`].
+#[derive(Clone)]
+pub struct BootstrapCounterHandles {
+    pub via_ip_literal: Arc<AtomicU64>,
+    pub via_pinned_direct_ip: Arc<AtomicU64>,
+    pub via_system_resolver: Arc<AtomicU64>,
+}
+
+impl BootstrapCounterHandles {
+    /// Bump the counter matching the resolution path. Same semantics
+    /// as `ClientCtx::record_bootstrap_resolution` but doesn't
+    /// require the full ctx.
+    pub fn record(&self, via: crate::bootstrap::ResolvedVia) {
+        use crate::bootstrap::ResolvedVia;
+        let counter = match via {
+            ResolvedVia::IpLiteralInEndpoint => &self.via_ip_literal,
+            ResolvedVia::PinnedDirectIp => &self.via_pinned_direct_ip,
+            ResolvedVia::SystemResolver => &self.via_system_resolver,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Snapshot of the three bootstrap-DNS resolution counters,
+/// partitioned by the path the resolver took. See
+/// [`ClientCtx::record_bootstrap_resolution`] for the bump
+/// semantics and [`ClientCtx::bootstrap_counters`] for the read
+/// path.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BootstrapCounters {
+    /// Resolutions where the endpoint string was already an IP
+    /// literal — no DNS consulted at all. Anti-censorship-strongest
+    /// path; ideally where every resolution lands in a production
+    /// deploy that pins literal IPs in `server_endpoints:`.
+    pub via_ip_literal: u64,
+    /// Resolutions where `bootstrap_dns: direct_ip: X` matched a
+    /// hostname endpoint and `X:port` was used directly. Also
+    /// DNS-skipping; the operator's preferred path when they want
+    /// the hostname visible in YAML for SNI clarity.
+    pub via_pinned_direct_ip: u64,
+    /// Resolutions that went through `tokio::net::lookup_host` →
+    /// OS resolver chain. **The path the 2026 GFW DoH-identification
+    /// attack targets.** A non-zero count here in a deployment that
+    /// was supposed to be all-pinned is the misconfig signal.
+    pub via_system_resolver: u64,
 }
 
 #[cfg(test)]
@@ -203,6 +327,46 @@ mod tests {
         assert_eq!(c.attempted, 0);
         assert_eq!(c.succeeded, 2);
         assert_eq!(c.failed, 1);
+    }
+
+    #[test]
+    fn bootstrap_counters_start_at_zero() {
+        let ctx = mk_ctx(None, 0);
+        let b = ctx.bootstrap_counters();
+        assert_eq!(b.via_ip_literal, 0);
+        assert_eq!(b.via_pinned_direct_ip, 0);
+        assert_eq!(b.via_system_resolver, 0);
+    }
+
+    #[test]
+    fn record_bootstrap_resolution_bumps_correct_counter() {
+        use crate::bootstrap::ResolvedVia;
+        let ctx = mk_ctx(None, 0);
+        ctx.record_bootstrap_resolution(ResolvedVia::IpLiteralInEndpoint);
+        ctx.record_bootstrap_resolution(ResolvedVia::IpLiteralInEndpoint);
+        ctx.record_bootstrap_resolution(ResolvedVia::PinnedDirectIp);
+        ctx.record_bootstrap_resolution(ResolvedVia::SystemResolver);
+        let b = ctx.bootstrap_counters();
+        assert_eq!(b.via_ip_literal, 2);
+        assert_eq!(b.via_pinned_direct_ip, 1);
+        assert_eq!(b.via_system_resolver, 1);
+    }
+
+    #[test]
+    fn bootstrap_counter_handles_bump_same_atomics_as_ctx() {
+        use crate::bootstrap::ResolvedVia;
+        let ctx = mk_ctx(None, 0);
+        let handles = ctx.bootstrap_counter_handles();
+        // Bump via the handle (the path the dispatch uses).
+        handles.record(ResolvedVia::PinnedDirectIp);
+        handles.record(ResolvedVia::PinnedDirectIp);
+        handles.record(ResolvedVia::SystemResolver);
+        // Reading through ctx must see the same values — handles
+        // and ctx share the same Arc<AtomicU64>.
+        let b = ctx.bootstrap_counters();
+        assert_eq!(b.via_pinned_direct_ip, 2);
+        assert_eq!(b.via_system_resolver, 1);
+        assert_eq!(b.via_ip_literal, 0);
     }
 
     #[test]

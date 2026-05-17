@@ -120,8 +120,18 @@ pub async fn handle_socks5_with_ctx(
     // dispatch loop doesn't accidentally walk a partially-replaced
     // entry list.
     let pool_snapshot = ctx.pool();
-    let res =
-        handle_socks5_with_health_and_pool(sock, cfg, &ctx.carrier, pool_snapshot.as_ref()).await;
+    // Hand the dispatch path a cheap-to-clone view onto the
+    // bootstrap-DNS counter atomics so `try_alpha` / `try_beta` can
+    // bump the right counter without holding a full ctx reference.
+    let bootstrap = Some(ctx.bootstrap_counter_handles());
+    let res = handle_socks5_with_health_and_pool_and_bootstrap_counters(
+        sock,
+        cfg,
+        &ctx.carrier,
+        pool_snapshot.as_ref(),
+        bootstrap,
+    )
+    .await;
     match &res {
         Ok(()) => {
             ctx.record_dial_success();
@@ -140,10 +150,27 @@ pub async fn handle_socks5_with_ctx(
 /// When `pool` is `Some(_)`, every CONNECT walks the pool in
 /// operator-specified order with per-endpoint health tracking.
 pub async fn handle_socks5_with_health_and_pool(
+    sock: TcpStream,
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+    pool: Option<&Arc<EndpointPool>>,
+) -> Result<(), SocksError> {
+    // Back-compat shim — tests + non-ctx callers get None for the
+    // bootstrap counters so resolution paths aren't bumped against
+    // any handles (counters stay at their default zero).
+    handle_socks5_with_health_and_pool_and_bootstrap_counters(sock, cfg, health, pool, None).await
+}
+
+/// Full-fidelity dispatch entry point. `bootstrap` is the
+/// bootstrap-DNS counter handle from `ClientCtx`; pass `None` to
+/// skip counter bumps (tests / integration callers that don't have
+/// a ctx wired).
+pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     mut sock: TcpStream,
     cfg: &Arc<ClientConfig>,
     health: &Arc<CarrierHealth>,
     pool: Option<&Arc<EndpointPool>>,
+    bootstrap: Option<crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -227,12 +254,13 @@ pub async fn handle_socks5_with_health_and_pool(
     // to skip recently-failed endpoints. Within each chosen entry,
     // the existing CarrierHealth still decides β-vs-α.
     if let Some(p) = pool {
-        return dispatch_via_pool(cfg, health, p, target_bytes, &mut sock).await;
+        return dispatch_via_pool(cfg, health, p, target_bytes, &mut sock, bootstrap.as_ref())
+            .await;
     }
 
     // Single-endpoint path (legacy / pool not configured). Behavior
     // is identical to the pre-pool dispatcher.
-    single_endpoint_dispatch(cfg, health, &target_bytes, &mut sock).await
+    single_endpoint_dispatch(cfg, health, &target_bytes, &mut sock, bootstrap.as_ref()).await
 }
 
 /// Pre-pool single-endpoint dispatcher. Kept as a separate function
@@ -242,6 +270,7 @@ async fn single_endpoint_dispatch(
     health: &Arc<CarrierHealth>,
     target_bytes: &[u8],
     sock: &mut TcpStream,
+    bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
@@ -262,7 +291,7 @@ async fn single_endpoint_dispatch(
                 health.failure_streak(),
             );
         }
-        match try_beta(cfg, target_bytes, sock, None).await {
+        match try_beta(cfg, target_bytes, sock, None, bootstrap).await {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -284,7 +313,7 @@ async fn single_endpoint_dispatch(
         );
     }
 
-    try_alpha(cfg, target_bytes, sock, None).await
+    try_alpha(cfg, target_bytes, sock, None, bootstrap).await
 }
 
 /// Multi-VPS dispatcher. Walks `pool` in operator-specified order,
@@ -305,6 +334,7 @@ async fn dispatch_via_pool(
     pool: &Arc<EndpointPool>,
     target_bytes: Vec<u8>,
     sock: &mut TcpStream,
+    bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     let mut last_err: Option<SocksError> = None;
     let mut any_endpoint_attempted = false;
@@ -341,7 +371,8 @@ async fn dispatch_via_pool(
         // who run α and β on the same host:port (the
         // recommended deployment) get one address per pool entry
         // covering both carriers.
-        let result = attempt_one_pool_entry(cfg, health, &addr_owned, &target_bytes, sock).await;
+        let result =
+            attempt_one_pool_entry(cfg, health, &addr_owned, &target_bytes, sock, bootstrap).await;
         match result {
             Ok(()) => {
                 // record_success returns true IFF this transitioned
@@ -399,7 +430,8 @@ async fn dispatch_via_pool(
             .endpoint_health(0)
             .expect("pool has at least one entry");
         primary_health.record_attempt();
-        let result = attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock).await;
+        let result =
+            attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock, bootstrap).await;
         match &result {
             Ok(()) => {
                 primary_health.record_success();
@@ -423,12 +455,13 @@ async fn attempt_one_pool_entry(
     endpoint: &str,
     target_bytes: &[u8],
     sock: &mut TcpStream,
+    bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     let beta_configured = cfg.server_endpoint_beta.is_some();
     let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
     let try_beta_now = matches!(beta_decision, BetaDecision::TryBeta | BetaDecision::Probe);
     if try_beta_now {
-        match try_beta(cfg, target_bytes, sock, Some(endpoint)).await {
+        match try_beta(cfg, target_bytes, sock, Some(endpoint), bootstrap).await {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -443,7 +476,7 @@ async fn attempt_one_pool_entry(
             }
         }
     }
-    try_alpha(cfg, target_bytes, sock, Some(endpoint)).await
+    try_alpha(cfg, target_bytes, sock, Some(endpoint), bootstrap).await
 }
 
 /// Attempt a β-profile (QUIC) handshake.
@@ -458,6 +491,7 @@ async fn try_beta(
     target_bytes: &[u8],
     sock: &mut TcpStream,
     endpoint_override: Option<&str>,
+    bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     let beta_endpoint: &str = match endpoint_override {
         Some(e) => e,
@@ -485,6 +519,9 @@ async fn try_beta(
         via,
     } = resolve_for_client(beta_endpoint, cfg).await?;
     log_bootstrap_route("β", beta_endpoint, server_addr, via);
+    if let Some(b) = bootstrap {
+        b.record(via);
+    }
 
     // Build a β-flavored ClientConfig (profile_hint = Beta).
     let mut hs_cfg = cfg.build_handshake_config()?;
@@ -579,6 +616,7 @@ async fn try_alpha(
     target_bytes: &[u8],
     sock: &mut TcpStream,
     endpoint_override: Option<&str>,
+    bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
 ) -> Result<(), SocksError> {
     let hs_cfg = cfg.build_handshake_config()?;
     let alpha_endpoint: &str = endpoint_override.unwrap_or(cfg.server_endpoint.as_str());
@@ -592,6 +630,9 @@ async fn try_alpha(
         via,
     } = resolve_for_client(alpha_endpoint, cfg).await?;
     log_bootstrap_route("α", alpha_endpoint, server_addr, via);
+    if let Some(b) = bootstrap {
+        b.record(via);
+    }
 
     if let Some(tls_cfg) = cfg.tls.as_ref() {
         let connector = match tls_cfg.trusted_ca.as_ref() {

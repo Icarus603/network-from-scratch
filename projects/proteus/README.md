@@ -238,6 +238,14 @@ sum by (addr) (rate(proteus_client_endpoint_successes_total[5m]))
   < 0.8
 ```
 
+PromQL example — alert when **any** CONNECT silently went through
+the OS resolver (= 2026 GFW DoH-identification attack vector silently
+bypassing the operator's `bootstrap_dns: direct_ip` policy):
+
+```promql
+rate(proteus_client_bootstrap_via_system_resolver_total[5m]) > 0
+```
+
 ### SIGHUP-driven `server_endpoints` hot-reload
 
 Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,
