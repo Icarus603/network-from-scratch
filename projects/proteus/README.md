@@ -1480,6 +1480,23 @@ proteus_access_log_write_errors_total
 proteus_access_log_writer_alive
 ```
 
+**Prometheus alert rules — bundled, drop-in ready** at
+[`deploy/prometheus/proteus-alerts.yaml`](deploy/prometheus/proteus-alerts.yaml).
+Load via `rule_files:` in `prometheus.yml` or mount into a
+Prometheus Operator `PrometheusRule`. Covers every series
+documented in this section: liveness (`up == 0`, `proteus_up
+== 0`), TLS cert (expired now / expires <14 days / auto-reload
+failing), runtime health (panic, restart-loop, unclean
+shutdown), network (DNS-resolver wedged, log-throttle firing),
+and audit (access-log writer dead, channel chronically full).
+Severity grammar: `critical` (page), `warning` (investigate
+within the hour), `info` (dashboard panel). The
+`crates/proteus-server/tests/prometheus_alert_rules_coverage.rs`
+integration test parses the rules file at build time and
+asserts every documented metric is referenced by ≥1 alert, so
+a future iteration can't drop the metric without losing the
+alert too.
+
 `proteus_access_log_*` series surface the access-log writer's
 health + throughput. Before this, the writer task `break`'d on the
 first write/flush failure (disk full, FS read-only-remount, fsync

@@ -1,0 +1,239 @@
+# Prometheus alert rules for Proteus production deployments.
+#
+# Load with `rule_files: ['/etc/prometheus/proteus-alerts.yaml']` in
+# prometheus.yml, OR mount into a Prometheus Operator `PrometheusRule`
+# resource. Every rule documented here corresponds to a real
+# production-stability failure mode the binary surfaces via its
+# /metrics endpoint.
+#
+# Severity grammar:
+#   critical → operator must act now (paging-grade)
+#   warning  → operator should investigate within the hour
+#   info     → trending signal; dashboard panel, not a page
+#
+# Time windows are starting points; tune `for:` durations and
+# rate-window sizes to your deployment's traffic profile + alert
+# fatigue tolerance. The values below assume "personal VPN /
+# small-team deployment" semantics: aggressive on hard failures,
+# generous on transient blips.
+
+groups:
+- name: proteus-liveness
+  interval: 30s
+  rules:
+
+  # /healthz already returns 503 on these conditions; the alert
+  # fires when Prometheus itself sees `up == 0` for proteus-server
+  # — i.e. the scrape FAILED entirely (process gone / network
+  # partition). Catches both the panic-abort and the OOM-kill
+  # classes.
+  - alert: ProteusServerDown
+    expr: up{job="proteus-server"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server scrape failing"
+      description: |
+        Prometheus could not scrape proteus-server on
+        instance {{ $labels.instance }} for at least 1 minute.
+        Process likely crashed (check systemd journalctl AND
+        proteus_previous_run_unclean on next start).
+
+  # The binary's own /healthz reports degraded — TLS cert expired,
+  # self-test failed, or self-test stale. proteus_ready=0 doesn't
+  # fire this (graceful drain is expected); proteus_up=0 does.
+  - alert: ProteusServerUnhealthy
+    expr: proteus_up == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server reports itself unhealthy"
+      description: |
+        proteus_up == 0 for {{ $labels.instance }} — listener
+        not bound or the binary is mid-drain. If this fires
+        OUTSIDE a maintenance window, investigate immediately.
+
+- name: proteus-tls-cert
+  interval: 30s
+  rules:
+
+  # Cert renewal pipeline silently failed → cert is now LIVE-
+  # expired. /healthz also fires 503 here; this alert pages.
+  - alert: ProteusTlsCertExpired
+    expr: |
+      (proteus_tls_cert_not_after_unix_seconds > 0)
+      and (proteus_tls_cert_not_after_unix_seconds < time())
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server TLS cert EXPIRED"
+      description: |
+        The leaf certificate on {{ $labels.instance }} expired
+        at {{ printf "%.0f" $value }}. Every future TLS
+        handshake will fail. Run certbot renew (or your
+        rotation tooling) IMMEDIATELY.
+
+  - alert: ProteusTlsCertExpiringSoon
+    expr: |
+      (proteus_tls_cert_not_after_unix_seconds > 0)
+      and ((proteus_tls_cert_not_after_unix_seconds - time()) < 14*86400)
+      and ((proteus_tls_cert_not_after_unix_seconds - time()) > 0)
+    for: 1h
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server TLS cert expires in <14 days"
+      description: |
+        Leaf cert expires at {{ printf "%.0f" $value }} on
+        {{ $labels.instance }} — within the 14-day window.
+        If Let's Encrypt auto-renewal is wired this should
+        flip back to >14 days on the next renewal cycle. If
+        not, fix it now.
+
+  # Cert renewal hook ran (mtime changed) but Proteus's auto-
+  # reload failed — operator is now serving the OLD cert and
+  # doesn't know it.
+  - alert: ProteusTlsAutoReloadFailing
+    expr: |
+      rate(proteus_tls_cert_watcher_auto_reload_failed_total[10m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server cert auto-reload failing"
+      description: |
+        Cert file mtime changed but the reload failed on
+        {{ $labels.instance }}. Likely cause: new cert file is
+        malformed or unreadable. Old cert is still being served.
+
+- name: proteus-runtime-health
+  interval: 30s
+  rules:
+
+  # Spawned-task panic captured. Tokio absorbs them silently; the
+  # panic_hook surfaces them via this counter + a structured
+  # tracing line. ANY new panic in the steady state is worth
+  # investigating.
+  - alert: ProteusPanic
+    expr: rate(proteus_panics_total[5m]) > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus panic captured"
+      description: |
+        {{ $value }} panic(s)/sec on {{ $labels.instance }}.
+        Check `journalctl -u proteus-server -o json |
+        jq 'select(.target=="proteus_panic")'` for the
+        thread/location/message.
+
+  # Restart-loop detection. >1 restart per hour is operationally
+  # alarming for any long-lived daemon.
+  - alert: ProteusRestartLoop
+    expr: rate(proteus_restarts_total[1h]) > 1/3600
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus is restart-looping"
+      description: |
+        {{ printf "%.2f" $value }} restarts/sec on
+        {{ $labels.instance }}. Likely cause: panic-abort
+        loop, OOM kill, or systemd watchdog tripping. Check
+        proteus_previous_run_unclean and the journal.
+
+  # Previous run exited uncleanly (panic-abort, OOM kill,
+  # segfault, kill -9). One-shot signal — alert when freshly
+  # observed.
+  - alert: ProteusUncleanShutdown
+    expr: proteus_previous_run_unclean == 1
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus's previous run exited uncleanly"
+      description: |
+        proteus_previous_run_unclean=1 on {{ $labels.instance }}.
+        Either a panic-abort, OOM kill, segfault, or kill -9
+        ended the previous run. Cross-reference the previous
+        run's journal for the root cause.
+
+- name: proteus-network
+  interval: 30s
+  rules:
+
+  # Wedged recursive DNS resolver. Pegs every relay task at the
+  # 5s lookup timeout.
+  - alert: ProteusDnsResolverWedged
+    expr: |
+      rate(proteus_dns_lookups_total{outcome="timeout"}[5m]) > 0
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus DNS lookups timing out"
+      description: |
+        {{ printf "%.2f" $value }} DNS timeouts/sec on
+        {{ $labels.instance }} for the last 5 min — the
+        recursive resolver may be wedged. Every timed-out
+        lookup wastes a relay task's 5-second window.
+
+  # Hot rejection path under sustained pressure (scanner / DoS).
+  - alert: ProteusRejectionLogThrottleFiring
+    expr: |
+      rate(proteus_log_throttle_suppressed_total[5m]) > 1
+    for: 5m
+    labels:
+      severity: info
+    annotations:
+      summary: "proteus log-throttle suppressing >1 line/sec"
+      description: |
+        Site={{ $labels.site }} on {{ $labels.instance }}
+        suppressing {{ printf "%.1f" $value }} similar
+        WARN lines per second — almost certainly a scanner /
+        DoS prober hitting a rejection path. Real failure
+        signal is preserved (the throttle is per-site); this
+        is just visibility.
+
+- name: proteus-audit
+  interval: 1m
+  rules:
+
+  # Access-log writer task exited (disk full, FS RO, fsync
+  # failure). PAGES because audit-trail loss is a
+  # compliance-relevant silent failure.
+  - alert: ProteusAccessLogWriterDead
+    expr: |
+      (proteus_access_log_writer_alive == 0) and (proteus_up == 1)
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus access-log writer task has died"
+      description: |
+        proteus is running but the access-log writer task is
+        dead on {{ $labels.instance }}. Every subsequent
+        session is dropping its audit record. Most likely
+        cause: disk full, log file unwritable, or fsync
+        failure. Free disk / fix permissions, then `systemctl
+        restart proteus-server`.
+
+  # Access-log channel chronically full — the writer can't drain
+  # at producer rate.
+  - alert: ProteusAccessLogChannelChronicallyFull
+    expr: |
+      rate(proteus_access_log_records_total{outcome="dropped_channel_full"}[10m]) > 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus access-log dropping records (channel full)"
+      description: |
+        Producer rate exceeds writer drain rate on
+        {{ $labels.instance }} for 10+ minutes — bump the
+        channel capacity OR move the access log to a faster
+        disk. Transient bursts are normal; sustained
+        dropping means the audit is incomplete.
