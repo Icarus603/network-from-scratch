@@ -106,6 +106,20 @@ pub struct MetricsSnapshot {
     pub user_rate_limit_reload_succeeded: u64,
     pub handshake_budget_reload_attempts: u64,
     pub handshake_budget_reload_succeeded: u64,
+    /// **Config-presence snapshot.** Set of section names where
+    /// `proteus_config_section_active{section="..."} 1` was observed
+    /// on the wire. Operators read this to answer "did my YAML edit
+    /// even land?" without re-reading the on-disk file. Empty when
+    /// the server is older than 2026-05-19 OR when the operator
+    /// scraped a metrics endpoint that doesn't expose the
+    /// `proteus_config_section_active` series (e.g. test rigs that
+    /// don't wire `config_presence` into v4).
+    pub config_active_sections: std::collections::BTreeSet<String>,
+    /// `proteus_config_cover_endpoint_pool_size` (gauge). Zero when
+    /// the cover-endpoint pool isn't configured.
+    pub config_cover_endpoint_pool_size: u64,
+    /// `proteus_config_client_allowlist_size` (gauge).
+    pub config_client_allowlist_size: u64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -201,6 +215,10 @@ impl MetricsSnapshot {
                     s.probe_anomaly_recent.push(fire);
                 } else if let Some(entry) = parse_auto_deny_remaining(name, value) {
                     s.auto_deny_entries.push(entry);
+                } else if let Some((section, present)) = parse_config_section_active(name, value) {
+                    if present {
+                        s.config_active_sections.insert(section);
+                    }
                 }
                 continue;
             }
@@ -275,6 +293,12 @@ impl MetricsSnapshot {
                 }
                 "proteus_handshake_budget_reload_succeeded_total" => {
                     s.handshake_budget_reload_succeeded = v;
+                }
+                "proteus_config_cover_endpoint_pool_size" => {
+                    s.config_cover_endpoint_pool_size = v;
+                }
+                "proteus_config_client_allowlist_size" => {
+                    s.config_client_allowlist_size = v;
                 }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
@@ -483,6 +507,33 @@ impl MetricsSnapshot {
             &mut s,
             "handshake_budget_reload_succeeded",
             self.handshake_budget_reload_succeeded,
+            false,
+        );
+        // Config-presence snapshot — operators script
+        // `.config_active_sections | contains(["firewall"])` to
+        // assert the deployed config shape.
+        s.push_str(r#","config_active_sections":["#);
+        let mut first = true;
+        for sec in &self.config_active_sections {
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push('"');
+            json_escape_str(sec, &mut s);
+            s.push('"');
+        }
+        s.push(']');
+        push_json_u64(
+            &mut s,
+            "config_cover_endpoint_pool_size",
+            self.config_cover_endpoint_pool_size,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "config_client_allowlist_size",
+            self.config_client_allowlist_size,
             false,
         );
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
@@ -736,6 +787,34 @@ impl fmt::Display for MetricsSnapshot {
             writeln!(f)?;
         }
 
+        // Config-presence section. Quiet by default — only rendered
+        // when the metrics endpoint included the
+        // `proteus_config_section_active{...}` series (= the server
+        // is new enough AND was wired with the v4 metrics endpoint).
+        if !self.config_active_sections.is_empty()
+            || self.config_cover_endpoint_pool_size > 0
+            || self.config_client_allowlist_size > 0
+        {
+            writeln!(f, " Active config sections")?;
+            let mut secs: Vec<&str> = self
+                .config_active_sections
+                .iter()
+                .map(String::as_str)
+                .collect();
+            secs.sort_unstable();
+            if secs.is_empty() {
+                row!("sections", "(none)")?;
+            } else {
+                row!("sections", secs.join(", "))?;
+            }
+            row!(
+                "cover_endpoint_pool_size",
+                self.config_cover_endpoint_pool_size
+            )?;
+            row!("client_allowlist_size", self.config_client_allowlist_size)?;
+            writeln!(f)?;
+        }
+
         writeln!(f, " Session teardown causes")?;
         row!("session_idle_reaped", self.session_idle_reaped)?;
         row!(
@@ -860,6 +939,24 @@ fn parse_auto_deny_remaining(name: &str, value: &str) -> Option<AutoDenyEntry> {
         prefix,
         expires_in_secs: secs,
     })
+}
+
+/// Parse one `proteus_config_section_active{section="..."} 0|1` line
+/// into `(section_name, present)`. Returns `None` for non-matching
+/// metric names or malformed labels. The section name is operator-
+/// readable text the renderer prints verbatim.
+fn parse_config_section_active(name: &str, value: &str) -> Option<(String, bool)> {
+    let metric_prefix = "proteus_config_section_active{";
+    let rest = name.strip_prefix(metric_prefix)?;
+    let rest = rest.strip_suffix('}')?;
+    let (k, v) = rest.split_once('=')?;
+    if k.trim() != "section" {
+        return None;
+    }
+    let v = v.trim().strip_prefix('"')?;
+    let section = v.strip_suffix('"')?.to_string();
+    let n: u64 = value.parse().ok()?;
+    Some((section, n != 0))
 }
 
 /// Shared helper for the two `…{prefix="…"} <u64>` line shapes.
@@ -2426,6 +2523,113 @@ proteus_rate_limit_reload_succeeded_total 3\n";
         assert!(t.contains("3 (3 ok)"), "{t}");
         // user_rate_limit had zero attempts → not rendered.
         assert!(!t.contains("user_rate_limit"), "{t}");
+    }
+
+    // ----- Config-presence parse / render tests -----
+
+    /// Parser extracts every `proteus_config_section_active` row
+    /// where value=1 into the BTreeSet, ignores value=0 rows.
+    #[test]
+    fn snapshot_parses_config_section_active_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_config_section_active{section=\"tls\"} 1\n\
+proteus_config_section_active{section=\"firewall\"} 1\n\
+proteus_config_section_active{section=\"rate_limit\"} 0\n\
+proteus_config_section_active{section=\"cover_endpoints\"} 1\n\
+proteus_config_cover_endpoint_pool_size 3\n\
+proteus_config_client_allowlist_size 5\n";
+        let s = MetricsSnapshot::parse(body);
+        assert!(s.config_active_sections.contains("tls"));
+        assert!(s.config_active_sections.contains("firewall"));
+        assert!(s.config_active_sections.contains("cover_endpoints"));
+        assert!(!s.config_active_sections.contains("rate_limit"));
+        assert_eq!(s.config_cover_endpoint_pool_size, 3);
+        assert_eq!(s.config_client_allowlist_size, 5);
+    }
+
+    /// Absent series → empty set + zero gauges (back-compat: older
+    /// servers + non-v4-wired metrics endpoints).
+    #[test]
+    fn snapshot_config_presence_defaults_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert!(s.config_active_sections.is_empty());
+        assert_eq!(s.config_cover_endpoint_pool_size, 0);
+        assert_eq!(s.config_client_allowlist_size, 0);
+    }
+
+    /// Malformed labelled lines must NOT panic or leak into `other`.
+    #[test]
+    fn snapshot_parser_skips_malformed_config_section_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_config_section_active{wrong_label=\"tls\"} 1\n\
+proteus_config_section_active{section=missing-quotes} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert!(s.config_active_sections.is_empty());
+    }
+
+    /// JSON output sorts the sections (BTreeSet iteration order) so
+    /// scripted consumers get stable output.
+    #[test]
+    fn snapshot_json_emits_config_active_sections_sorted() {
+        let body = "\
+proteus_up 1\n\
+proteus_config_section_active{section=\"tls\"} 1\n\
+proteus_config_section_active{section=\"firewall\"} 1\n\
+proteus_config_section_active{section=\"cover_endpoints\"} 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        let i_cover = j.find(r#""cover_endpoints""#).unwrap();
+        let i_fw = j.find(r#""firewall""#).unwrap();
+        let i_tls = j.find(r#""tls""#).unwrap();
+        // BTreeSet sorts lexically: cover_endpoints < firewall < tls.
+        assert!(i_cover < i_fw, "{j}");
+        assert!(i_fw < i_tls, "{j}");
+    }
+
+    /// JSON output emits an empty array when no sections are
+    /// active — scripts can rely on the key's presence.
+    #[test]
+    fn snapshot_json_emits_empty_config_active_sections_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(j.contains(r#""config_active_sections":[]"#), "{j}");
+        assert!(j.contains(r#""config_cover_endpoint_pool_size":0"#), "{j}");
+        assert!(j.contains(r#""config_client_allowlist_size":0"#), "{j}");
+    }
+
+    /// Text output omits the block entirely when no config-presence
+    /// series were on the wire (older server / older metrics
+    /// endpoint).
+    #[test]
+    fn snapshot_text_omits_active_config_block_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(!t.contains(" Active config sections"), "{t}");
+    }
+
+    /// Text output renders the block when at least one section /
+    /// pool size / allowlist size is non-zero.
+    #[test]
+    fn snapshot_text_renders_active_config_block_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_config_section_active{section=\"tls\"} 1\n\
+proteus_config_section_active{section=\"firewall\"} 1\n\
+proteus_config_section_active{section=\"probe_anomaly\"} 1\n\
+proteus_config_cover_endpoint_pool_size 4\n\
+proteus_config_client_allowlist_size 2\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains(" Active config sections"), "{t}");
+        // Sections rendered alphabetically.
+        assert!(t.contains("firewall, probe_anomaly, tls"), "{t}");
+        assert!(t.contains("cover_endpoint_pool_size"), "{t}");
+        assert!(t.contains("4"), "{t}");
     }
 
     /// Text output flags the "missing" gap when attempts > succeeded

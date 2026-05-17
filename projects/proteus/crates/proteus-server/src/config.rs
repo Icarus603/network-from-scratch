@@ -531,6 +531,266 @@ impl ServerConfig {
         let cfg: Self = serde_yaml::from_str(&text).map_err(ConfigError::Yaml)?;
         Ok(cfg)
     }
+
+    /// Snapshot which optional config sections are present.
+    ///
+    /// Operators read this on `/metrics` + `admin status` to answer
+    /// "did my YAML edit even land?" without re-reading the on-disk
+    /// file. The presence bits also act as a deployment-shape
+    /// indicator visible to Grafana dashboards — e.g. an alert that
+    /// fires when `firewall` flips from 1 to 0 unexpectedly catches
+    /// the operator who SIGHUPed with the firewall block accidentally
+    /// commented out.
+    ///
+    /// Deliberately exposes ONLY presence bits, never field values —
+    /// the metric must be safe to scrape into a shared Prometheus
+    /// without leaking allowlist entries / cover URLs / rate-limit
+    /// burst values etc.
+    #[must_use]
+    pub fn presence(&self) -> ConfigPresence {
+        ConfigPresence {
+            tls: self.tls.is_some(),
+            firewall: self.firewall.is_some(),
+            rate_limit: self.rate_limit.is_some(),
+            user_rate_limit: self.user_rate_limit.is_some(),
+            handshake_budget: self.handshake_budget.is_some(),
+            probe_anomaly: self.probe_anomaly.is_some(),
+            outbound_filter: self.outbound_filter.is_some(),
+            cover_endpoint: self.cover_endpoint.is_some(),
+            cover_endpoints: !self.cover_endpoints.is_empty(),
+            max_connections: self.max_connections.is_some(),
+            metrics_listen: self.metrics_listen.is_some(),
+            cover_endpoint_count: self.cover_endpoints.len() as u64,
+            client_allowlist_count: self.client_allowlist.len() as u64,
+        }
+    }
+}
+
+/// Snapshot of which optional `ServerConfig` sections are present
+/// at load time. Returned by [`ServerConfig::presence`] and rendered
+/// to Prometheus + admin-status text.
+///
+/// All fields are public so the renderers don't need a getter
+/// boilerplate; the struct is value-only (no methods that mutate
+/// state). Safe to clone freely.
+#[derive(Debug, Clone, Default)]
+pub struct ConfigPresence {
+    pub tls: bool,
+    pub firewall: bool,
+    pub rate_limit: bool,
+    pub user_rate_limit: bool,
+    pub handshake_budget: bool,
+    pub probe_anomaly: bool,
+    pub outbound_filter: bool,
+    pub cover_endpoint: bool,
+    pub cover_endpoints: bool,
+    pub max_connections: bool,
+    pub metrics_listen: bool,
+    /// Number of entries in `cover_endpoints:`. Operators read the
+    /// SIZE of the pool as a sanity check ("I configured 5 cover
+    /// endpoints, why does this show 3?") which a bare presence bit
+    /// can't surface.
+    pub cover_endpoint_count: u64,
+    /// Number of `client_allowlist` entries. Same operator-sanity
+    /// rationale as `cover_endpoint_count`.
+    pub client_allowlist_count: u64,
+}
+
+impl ConfigPresence {
+    /// Emit a Prometheus exposition block. Format follows the
+    /// existing `proteus_*` series conventions:
+    ///   - `proteus_config_section_active{section="firewall"} 0|1`
+    ///   - `proteus_config_cover_endpoint_pool_size N`
+    ///   - `proteus_config_client_allowlist_size N`
+    ///
+    /// The `section` label discriminator lets one HELP/TYPE pair
+    /// cover all the boolean sections; PromQL `count(proteus_config_section_active{value="1"})`
+    /// gives the operator the active-section count.
+    #[must_use]
+    pub fn prometheus(&self) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::with_capacity(1024);
+        let _ = writeln!(
+            s,
+            "# HELP proteus_config_section_active 1 if the named optional config section is present at load time, 0 otherwise."
+        );
+        let _ = writeln!(s, "# TYPE proteus_config_section_active gauge");
+        for (section, present) in [
+            ("tls", self.tls),
+            ("firewall", self.firewall),
+            ("rate_limit", self.rate_limit),
+            ("user_rate_limit", self.user_rate_limit),
+            ("handshake_budget", self.handshake_budget),
+            ("probe_anomaly", self.probe_anomaly),
+            ("outbound_filter", self.outbound_filter),
+            ("cover_endpoint", self.cover_endpoint),
+            ("cover_endpoints", self.cover_endpoints),
+            ("max_connections", self.max_connections),
+            ("metrics_listen", self.metrics_listen),
+        ] {
+            let _ = writeln!(
+                s,
+                r#"proteus_config_section_active{{section="{section}"}} {}"#,
+                u8::from(present)
+            );
+        }
+        let _ = writeln!(
+            s,
+            "# HELP proteus_config_cover_endpoint_pool_size Number of entries in cover_endpoints:."
+        );
+        let _ = writeln!(s, "# TYPE proteus_config_cover_endpoint_pool_size gauge");
+        let _ = writeln!(
+            s,
+            "proteus_config_cover_endpoint_pool_size {}",
+            self.cover_endpoint_count
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_config_client_allowlist_size Number of entries in client_allowlist:."
+        );
+        let _ = writeln!(s, "# TYPE proteus_config_client_allowlist_size gauge");
+        let _ = writeln!(
+            s,
+            "proteus_config_client_allowlist_size {}",
+            self.client_allowlist_count
+        );
+        s
+    }
+}
+
+#[cfg(test)]
+mod presence_tests {
+    use super::*;
+
+    #[test]
+    fn presence_all_false_for_minimal_config() {
+        let p = ConfigPresence::default();
+        let s = p.prometheus();
+        // Every section reports 0.
+        for sec in [
+            "tls",
+            "firewall",
+            "rate_limit",
+            "user_rate_limit",
+            "handshake_budget",
+            "probe_anomaly",
+            "outbound_filter",
+            "cover_endpoint",
+            "cover_endpoints",
+            "max_connections",
+            "metrics_listen",
+        ] {
+            assert!(
+                s.contains(&format!(
+                    r#"proteus_config_section_active{{section="{sec}"}} 0"#
+                )),
+                "missing zero-row for {sec}: {s}"
+            );
+        }
+        assert!(
+            s.contains("proteus_config_cover_endpoint_pool_size 0"),
+            "{s}"
+        );
+        assert!(s.contains("proteus_config_client_allowlist_size 0"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_has_one_help_and_type_per_metric_name() {
+        let p = ConfigPresence::default();
+        let s = p.prometheus();
+        let help_section = s.matches("# HELP proteus_config_section_active ").count();
+        let type_section = s
+            .matches("# TYPE proteus_config_section_active gauge")
+            .count();
+        assert_eq!(help_section, 1);
+        assert_eq!(type_section, 1);
+        // pool_size / allowlist_size have their own HELP+TYPE.
+        assert_eq!(
+            s.matches("# HELP proteus_config_cover_endpoint_pool_size ")
+                .count(),
+            1
+        );
+        assert_eq!(
+            s.matches("# HELP proteus_config_client_allowlist_size ")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prometheus_reflects_present_sections() {
+        let p = ConfigPresence {
+            tls: true,
+            firewall: true,
+            rate_limit: false,
+            cover_endpoint_count: 3,
+            client_allowlist_count: 5,
+            ..ConfigPresence::default()
+        };
+        let s = p.prometheus();
+        assert!(s.contains(r#"proteus_config_section_active{section="tls"} 1"#));
+        assert!(s.contains(r#"proteus_config_section_active{section="firewall"} 1"#));
+        assert!(s.contains(r#"proteus_config_section_active{section="rate_limit"} 0"#));
+        assert!(s.contains("proteus_config_cover_endpoint_pool_size 3"));
+        assert!(s.contains("proteus_config_client_allowlist_size 5"));
+    }
+
+    #[test]
+    fn presence_from_yaml_minimal_reports_all_optional_sections_false() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let p = cfg.presence();
+        assert!(!p.tls);
+        assert!(!p.firewall);
+        assert!(!p.rate_limit);
+        assert!(!p.user_rate_limit);
+        assert!(!p.handshake_budget);
+        assert!(!p.probe_anomaly);
+        assert!(!p.outbound_filter);
+        assert!(!p.cover_endpoint);
+        assert!(!p.cover_endpoints);
+        assert!(!p.max_connections);
+        assert!(!p.metrics_listen);
+        assert_eq!(p.cover_endpoint_count, 0);
+        assert_eq!(p.client_allowlist_count, 0);
+    }
+
+    #[test]
+    fn presence_from_yaml_with_firewall_and_cover_pool_reports_correctly() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+firewall:\n  \
+  default_action: allow\n  \
+  rules: []\n\
+cover_endpoints:\n  \
+  - example.com:443\n  \
+  - other.com:443\n\
+client_allowlist:\n  \
+  - user_id: alice001\n    \
+    ed25519_pk: /tmp/x\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let p = cfg.presence();
+        assert!(p.firewall, "firewall block should be detected");
+        assert!(p.cover_endpoints);
+        assert_eq!(p.cover_endpoint_count, 2);
+        assert_eq!(p.client_allowlist_count, 1);
+        // Sections not in the YAML stay false.
+        assert!(!p.tls);
+        assert!(!p.rate_limit);
+    }
 }
 
 pub fn load_server_keys(cfg: &ServerConfig) -> Result<ServerKeys, ConfigError> {

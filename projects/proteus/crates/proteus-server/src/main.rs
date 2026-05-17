@@ -582,14 +582,32 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         //     (`attempts - succeeded > 0` ⇒ certbot's renewal hook
         //     ran but Proteus didn't pick the cert up).
         let tls_for_metrics = reloadable_acceptor.clone();
+        // Pre-render the config-presence Prometheus block ONCE at
+        // startup — the section-active gauges + cover-pool size +
+        // allowlist size are set-at-startup values that don't
+        // mutate without a process restart. Wrapping in Arc<String>
+        // lets every scrape clone the pointer cheaply.
+        //
+        // **Why the block is captured at startup and NOT regenerated
+        // on SIGHUP**: the existing SIGHUP path hot-swaps INSIDE
+        // sections (firewall rules, rate-limit values) but cannot
+        // toggle a section's presence — adding a brand-new section
+        // to a previously-bare config requires a restart anyway
+        // (you can't hot-install a limiter that wasn't installed at
+        // startup; that's documented in the reload counter
+        // semantics). Re-rendering on SIGHUP would change the
+        // gauge in cases where the underlying runtime didn't change,
+        // which is confusing rather than helpful.
+        let config_presence_block = Some(std::sync::Arc::new(cfg.presence().prometheus()));
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v3(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v4(
                 &metrics_addr,
                 metrics,
                 auth,
                 probe_anomaly,
                 auto_deny,
                 tls_for_metrics,
+                config_presence_block,
             )
             .await
             {

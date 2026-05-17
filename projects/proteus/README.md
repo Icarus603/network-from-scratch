@@ -267,6 +267,24 @@ or
 Each pair has the same shape + semantics as `proteus_tls_reload_*`
 — operators get consistent alerting across all 5 hot-reload paths.
 
+PromQL example — alert when the deployed config shape DRIFTS from
+the operator's intent (e.g. firewall block accidentally commented
+out at process restart):
+
+```promql
+# Expected: tls + firewall + probe_anomaly all present.
+proteus_config_section_active{section="tls"} != 1
+or
+proteus_config_section_active{section="firewall"} != 1
+or
+proteus_config_section_active{section="probe_anomaly"} != 1
+```
+
+The per-section gauges are set-at-startup (SIGHUP can mutate the
+section's content but cannot toggle its presence — adding a brand-
+new section requires a restart) so the alert fires only when the
+process restarts with a different config shape than intended.
+
 ### SIGHUP-driven `server_endpoints` hot-reload
 
 Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,

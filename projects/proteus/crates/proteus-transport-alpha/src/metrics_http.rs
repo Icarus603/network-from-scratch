@@ -164,17 +164,48 @@ pub async fn serve_with_auth_full_v3(
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
 ) -> std::io::Result<()> {
+    // Back-compat shim — forwards to v4 with no config-presence block.
+    serve_with_auth_full_v4(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        None,
+    )
+    .await
+}
+
+/// v4 of [`serve_with_auth_full`] — adds an optional
+/// `config_presence` Prometheus block to the `/metrics` exposition.
+/// Operators read the `proteus_config_section_active{section="..."}`
+/// gauges to answer "did my YAML edit even land?" without re-reading
+/// the on-disk file. The block is rendered once at startup (config
+/// is set-at-startup and SIGHUP-stable on the server) and the same
+/// string is appended verbatim to every scrape response.
+pub async fn serve_with_auth_full_v4(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
     let auto_deny_enabled = auto_deny.is_some();
     let tls_observability = tls_acceptor.is_some();
+    let config_presence_enabled = config_presence.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
         probe_anomaly = probe_anomaly_enabled,
         auto_deny = auto_deny_enabled,
         tls_observability,
+        config_presence = config_presence_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -184,6 +215,7 @@ pub async fn serve_with_auth_full_v3(
         let probe_anomaly = probe_anomaly.clone();
         let auto_deny = auto_deny.clone();
         let tls_acceptor = tls_acceptor.clone();
+        let config_presence = config_presence.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -191,6 +223,7 @@ pub async fn serve_with_auth_full_v3(
             probe_anomaly,
             auto_deny,
             tls_acceptor,
+            config_presence,
         ));
     }
 }
@@ -253,6 +286,30 @@ pub async fn serve_on_listener_full_v3(
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full_v4(
+        listener,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        None,
+    )
+    .await
+}
+
+/// v4 of [`serve_on_listener_full`] — adds the config-presence
+/// Prometheus block. See [`serve_with_auth_full_v4`] for the
+/// rationale.
+pub async fn serve_on_listener_full_v4(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
@@ -260,6 +317,7 @@ pub async fn serve_on_listener_full_v3(
         let probe_anomaly = probe_anomaly.clone();
         let auto_deny = auto_deny.clone();
         let tls_acceptor = tls_acceptor.clone();
+        let config_presence = config_presence.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -267,6 +325,7 @@ pub async fn serve_on_listener_full_v3(
             probe_anomaly,
             auto_deny,
             tls_acceptor,
+            config_presence,
         ));
     }
 }
@@ -278,6 +337,7 @@ async fn handle_connection(
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -285,13 +345,14 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v3(
+    let (status_line, content_type, body) = render_full_v4(
         head,
         &metrics,
         auth.as_ref(),
         probe_anomaly.as_deref(),
         auto_deny.as_deref(),
         tls_acceptor.as_ref(),
+        config_presence.as_deref().map(String::as_str),
     );
     let response = format!(
         "{status_line}\
@@ -392,6 +453,30 @@ pub fn render_full_v3(
     auto_deny: Option<&crate::auto_deny::AutoDenyList>,
     tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
 ) -> (&'static str, &'static str, String) {
+    render_full_v4(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        None,
+    )
+}
+
+/// v4 of [`render_full`] — adds an optional `config_presence` block
+/// emitted verbatim into the `/metrics` body AFTER the existing
+/// extensions. See [`serve_with_auth_full_v4`] for the rationale.
+#[must_use]
+pub fn render_full_v4(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
         if let Some(expected) = auth {
@@ -415,6 +500,9 @@ pub fn render_full_v3(
         }
         if let Some(ra) = tls_acceptor {
             body.push_str(&ra.prometheus_extension());
+        }
+        if let Some(cp) = config_presence {
+            body.push_str(cp);
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -851,6 +939,58 @@ mod tests {
             !body.contains("proteus_tls_reload_attempts_total"),
             "should not emit reload counters without acceptor: {body}"
         );
+    }
+
+    /// v4 propagates the config-presence block verbatim into the
+    /// `/metrics` body when supplied. Tests that the v3-shaped
+    /// metric series remain present alongside the v4 extension.
+    #[test]
+    fn render_full_v4_appends_config_presence_block() {
+        let m = ServerMetrics::default();
+        let presence = "# HELP proteus_config_section_active sample\n\
+                        # TYPE proteus_config_section_active gauge\n\
+                        proteus_config_section_active{section=\"firewall\"} 1\n";
+        let (_status, _ctype, body) = render_full_v4(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            Some(presence),
+        );
+        assert!(
+            body.contains(r#"proteus_config_section_active{section="firewall"} 1"#),
+            "missing config-presence line: {body}"
+        );
+        // v3-shaped series still there.
+        assert!(body.contains("proteus_sessions_accepted_total"));
+    }
+
+    /// v4 with `None` config_presence omits the block — back-compat
+    /// path that v3 routes hit via shim.
+    #[test]
+    fn render_full_v4_omits_config_presence_when_none() {
+        let m = ServerMetrics::default();
+        let (_s, _c, body) = render_full_v4(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!body.contains("proteus_config_section_active"), "{body}");
+    }
+
+    /// v3 shim into v4 must NOT emit config-presence series (back-compat).
+    #[test]
+    fn render_full_v3_back_compat_shim_omits_config_presence() {
+        let m = ServerMetrics::default();
+        let (_s, _c, body) =
+            render_full_v3("GET /metrics HTTP/1.1\r\n\r\n", &m, None, None, None, None);
+        assert!(!body.contains("proteus_config_section_active"), "{body}");
     }
 
     #[test]
