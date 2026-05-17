@@ -61,6 +61,20 @@ pub struct MetricsSnapshot {
     /// --format json`. The most operationally critical signal in
     /// this snapshot for IR work: "which /24 do I blackhole-route?"
     pub probe_anomaly_recent: Vec<ProbeAnomalyRecentFire>,
+    /// Active auto-deny entries — operator-opt-in via
+    /// `probe_anomaly.autodeny_minutes > 0`. Sourced from
+    /// `proteus_auto_deny_active_prefixes` (gauge),
+    /// `proteus_auto_deny_inserted_total` (counter),
+    /// `proteus_auto_deny_refused_inserts_total` (counter),
+    /// `proteus_auto_deny_remaining_secs{prefix="…"}` (per-entry).
+    pub auto_deny_active: u64,
+    pub auto_deny_inserted_total: u64,
+    pub auto_deny_refused_inserts_total: u64,
+    /// Per-prefix entries from the auto-deny list. Each entry is
+    /// `(prefix_string, expires_in_secs)`. Sorted soonest-to-expire
+    /// first in the rendered output (parser preserves emission
+    /// order; sorting happens at render time).
+    pub auto_deny_entries: Vec<AutoDenyEntry>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -83,6 +97,16 @@ pub struct ProbeAnomalyRecentFire {
     /// Seconds elapsed between the fire and the scrape time. Smaller
     /// = more recent; 0 = just fired.
     pub secs_ago: u64,
+}
+
+/// One row of the auto-deny active list, parsed out of the labelled
+/// Prometheus gauge `proteus_auto_deny_remaining_secs`.
+#[derive(Debug, Clone, Default)]
+pub struct AutoDenyEntry {
+    /// Prefix string, e.g. `"198.51.100.0/24"` or `"2001:db8::/48"`.
+    pub prefix: String,
+    /// Seconds remaining before the entry auto-expires.
+    pub expires_in_secs: u64,
 }
 
 /// Output format for `admin status` / `diff` / `watch`. The
@@ -144,6 +168,8 @@ impl MetricsSnapshot {
                 // Parse the recent_secs labelled lines.
                 if let Some(fire) = parse_probe_anomaly_recent(name, value) {
                     s.probe_anomaly_recent.push(fire);
+                } else if let Some(entry) = parse_auto_deny_remaining(name, value) {
+                    s.auto_deny_entries.push(entry);
                 }
                 continue;
             }
@@ -169,6 +195,11 @@ impl MetricsSnapshot {
                 "proteus_probe_anomaly_tracked_prefixes" => s.probe_anomaly_tracked = v,
                 "proteus_probe_anomaly_dropped_inserts_total" => {
                     s.probe_anomaly_dropped_inserts = v;
+                }
+                "proteus_auto_deny_active_prefixes" => s.auto_deny_active = v,
+                "proteus_auto_deny_inserted_total" => s.auto_deny_inserted_total = v,
+                "proteus_auto_deny_refused_inserts_total" => {
+                    s.auto_deny_refused_inserts_total = v;
                 }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
@@ -270,6 +301,39 @@ impl MetricsSnapshot {
             json_escape_str(&fire.prefix, &mut s);
             s.push_str(r#"","secs_ago":"#);
             s.push_str(&fire.secs_ago.to_string());
+            s.push('}');
+        }
+        s.push(']');
+        // Auto-deny flat counters + per-entry array.
+        push_json_u64(&mut s, "auto_deny_active", self.auto_deny_active, false);
+        push_json_u64(
+            &mut s,
+            "auto_deny_inserted_total",
+            self.auto_deny_inserted_total,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "auto_deny_refused_inserts_total",
+            self.auto_deny_refused_inserts_total,
+            false,
+        );
+        // auto_deny_entries as a JSON array sorted soonest-to-expire
+        // first. Always emit (even when empty) so scripts can rely
+        // on the key's presence.
+        s.push_str(r#","auto_deny_entries":["#);
+        let mut sorted = self.auto_deny_entries.clone();
+        sorted.sort_by_key(|d| d.expires_in_secs);
+        let mut first = true;
+        for d in &sorted {
+            if !first {
+                s.push(',');
+            }
+            first = false;
+            s.push_str(r#"{"prefix":""#);
+            json_escape_str(&d.prefix, &mut s);
+            s.push_str(r#"","expires_in_secs":"#);
+            s.push_str(&d.expires_in_secs.to_string());
             s.push('}');
         }
         s.push(']');
@@ -391,6 +455,49 @@ impl fmt::Display for MetricsSnapshot {
             writeln!(f)?;
         }
 
+        // Auto-deny diagnostic block — operator-opt-in via
+        // `probe_anomaly.autodeny_minutes > 0`. Only printed when
+        // the surface is actively in use (active > 0 OR a refused
+        // insert has happened OR any inserts have been recorded).
+        // Quiet by default for the alert-only configuration.
+        if self.auto_deny_active > 0
+            || self.auto_deny_inserted_total > 0
+            || self.auto_deny_refused_inserts_total > 0
+        {
+            writeln!(f, " Auto-deny list (operator-opt-in)")?;
+            row!("active_prefixes_gauge", self.auto_deny_active)?;
+            row!("inserted_total", self.auto_deny_inserted_total)?;
+            row!(
+                "refused_inserts_total",
+                self.auto_deny_refused_inserts_total
+            )?;
+            if self.auto_deny_entries.is_empty() {
+                row!("active_entries", "(none — all expired)")?;
+            } else {
+                writeln!(
+                    f,
+                    "  active_entries ({} prefixes, soonest-to-expire first):",
+                    self.auto_deny_entries.len()
+                )?;
+                // Sort by expires_in_secs ascending so the entries
+                // about to heal appear first (most relevant for
+                // operator triage).
+                let mut sorted = self.auto_deny_entries.clone();
+                sorted.sort_by_key(|d| d.expires_in_secs);
+                for d in sorted.iter().take(20) {
+                    writeln!(f, "    {} expires in {}s", d.prefix, d.expires_in_secs,)?;
+                }
+                if sorted.len() > 20 {
+                    writeln!(
+                        f,
+                        "    … ({} more — query Prometheus `proteus_auto_deny_remaining_secs` for the full list)",
+                        sorted.len() - 20
+                    )?;
+                }
+            }
+            writeln!(f)?;
+        }
+
         writeln!(f, " Session teardown causes")?;
         row!("session_idle_reaped", self.session_idle_reaped)?;
         row!(
@@ -496,9 +603,32 @@ pub fn read_token_file(path: &Path) -> Result<String, AdminError> {
 /// sequences).
 fn parse_probe_anomaly_recent(name: &str, value: &str) -> Option<ProbeAnomalyRecentFire> {
     let metric_prefix = "proteus_probe_anomaly_recent_secs{";
+    let (prefix, secs) = parse_labelled_prefix(name, value, metric_prefix)?;
+    Some(ProbeAnomalyRecentFire {
+        prefix,
+        secs_ago: secs,
+    })
+}
+
+/// Parse one `proteus_auto_deny_remaining_secs{prefix="..."}` line
+/// into an `AutoDenyEntry`. Same shape as `parse_probe_anomaly_recent`
+/// — different metric name + different output field. Both share the
+/// `parse_labelled_prefix` helper so a parser fix only has to land
+/// in one place.
+fn parse_auto_deny_remaining(name: &str, value: &str) -> Option<AutoDenyEntry> {
+    let metric_prefix = "proteus_auto_deny_remaining_secs{";
+    let (prefix, secs) = parse_labelled_prefix(name, value, metric_prefix)?;
+    Some(AutoDenyEntry {
+        prefix,
+        expires_in_secs: secs,
+    })
+}
+
+/// Shared helper for the two `…{prefix="…"} <u64>` line shapes.
+/// Returns `(prefix_string, value_u64)` on success.
+fn parse_labelled_prefix(name: &str, value: &str, metric_prefix: &str) -> Option<(String, u64)> {
     let rest = name.strip_prefix(metric_prefix)?;
     let rest = rest.strip_suffix('}')?;
-    // rest is e.g. `prefix="198.51.100.0/24"` — a single key/value.
     let (k, v) = rest.split_once('=')?;
     if k.trim() != "prefix" {
         return None;
@@ -506,8 +636,8 @@ fn parse_probe_anomaly_recent(name: &str, value: &str) -> Option<ProbeAnomalyRec
     let v = v.trim();
     let v = v.strip_prefix('"')?;
     let prefix = v.strip_suffix('"')?.to_string();
-    let secs_ago: u64 = value.parse().ok()?;
-    Some(ProbeAnomalyRecentFire { prefix, secs_ago })
+    let secs: u64 = value.parse().ok()?;
+    Some((prefix, secs))
 }
 
 /// Parse a `http://host:port/path` URL into `(host, port, path)`.
@@ -1431,6 +1561,139 @@ proteus_probe_anomaly_recent_secs{prefix=\"203.0.113.0/24\"} 47\n";
             .probe_anomaly_recent
             .iter()
             .map(|r| r.prefix.as_str())
+            .collect();
+        assert_eq!(prefixes, vec!["198.51.100.0/24", "203.0.113.0/24"]);
+    }
+
+    // ---------- auto-deny diagnostic surface ----------
+
+    /// All four auto-deny series parse into typed fields (no
+    /// leakage to `other`).
+    #[test]
+    fn snapshot_parses_auto_deny_extension_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_auto_deny_active_prefixes 4\n\
+proteus_auto_deny_inserted_total 12\n\
+proteus_auto_deny_refused_inserts_total 3\n\
+proteus_auto_deny_remaining_secs{prefix=\"198.51.100.0/24\"} 250\n\
+proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 60\n\
+proteus_auto_deny_remaining_secs{prefix=\"2001:db8::/48\"} 1800\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.auto_deny_active, 4);
+        assert_eq!(s.auto_deny_inserted_total, 12);
+        assert_eq!(s.auto_deny_refused_inserts_total, 3);
+        assert_eq!(s.auto_deny_entries.len(), 3);
+        let prefixes: Vec<&str> = s
+            .auto_deny_entries
+            .iter()
+            .map(|d| d.prefix.as_str())
+            .collect();
+        assert_eq!(
+            prefixes,
+            vec!["198.51.100.0/24", "203.0.113.0/24", "2001:db8::/48"]
+        );
+        assert!(s.other.is_empty(), "leaked into other: {:?}", s.other);
+    }
+
+    /// JSON output emits the auto-deny array sorted soonest-to-
+    /// expire first.
+    #[test]
+    fn snapshot_json_emits_auto_deny_entries_soonest_first() {
+        let body = "\
+proteus_up 1\n\
+proteus_auto_deny_remaining_secs{prefix=\"10.0.0.0/24\"} 600\n\
+proteus_auto_deny_remaining_secs{prefix=\"10.0.1.0/24\"} 60\n\
+proteus_auto_deny_remaining_secs{prefix=\"10.0.2.0/24\"} 300\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        let idx_60 = j
+            .find(r#""prefix":"10.0.1.0/24","expires_in_secs":60"#)
+            .unwrap();
+        let idx_300 = j
+            .find(r#""prefix":"10.0.2.0/24","expires_in_secs":300"#)
+            .unwrap();
+        let idx_600 = j
+            .find(r#""prefix":"10.0.0.0/24","expires_in_secs":600"#)
+            .unwrap();
+        assert!(
+            idx_60 < idx_300 && idx_300 < idx_600,
+            "auto_deny_entries not sorted soonest-to-expire first in JSON: {j}",
+        );
+    }
+
+    /// Empty list still emits the JSON array key.
+    #[test]
+    fn snapshot_json_emits_empty_auto_deny_entries_array_by_default() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(
+            j.contains(r#""auto_deny_entries":[]"#),
+            "expected empty auto_deny_entries array: {j}"
+        );
+        assert!(j.contains(r#""auto_deny_active":0"#));
+        assert!(j.contains(r#""auto_deny_inserted_total":0"#));
+        assert!(j.contains(r#""auto_deny_refused_inserts_total":0"#));
+    }
+
+    /// Text output omits the block when the auto-deny surface is
+    /// quiet (no fires, no refusals, no active entries).
+    #[test]
+    fn snapshot_text_omits_auto_deny_block_when_quiet() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            !t.contains("Auto-deny list"),
+            "quiet snapshot must omit auto-deny block:\n{t}"
+        );
+    }
+
+    /// Text output renders the block AND sorts entries soonest-
+    /// first when the auto-deny surface is active.
+    #[test]
+    fn snapshot_text_renders_auto_deny_block_sorted_soonest_first() {
+        let body = "\
+proteus_up 1\n\
+proteus_auto_deny_active_prefixes 2\n\
+proteus_auto_deny_inserted_total 5\n\
+proteus_auto_deny_refused_inserts_total 0\n\
+proteus_auto_deny_remaining_secs{prefix=\"198.51.100.0/24\"} 100\n\
+proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 20\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains("Auto-deny list"), "block missing:\n{t}");
+        assert!(t.contains("active_prefixes_gauge"));
+        assert!(t.contains("inserted_total"));
+        assert!(t.contains("refused_inserts_total"));
+        // Soonest-to-expire first: 203.0.113 (20s) before 198.51.100 (100s).
+        let idx_203 = t.find("203.0.113.0/24").unwrap();
+        let idx_198 = t.find("198.51.100.0/24").unwrap();
+        assert!(
+            idx_203 < idx_198,
+            "auto-deny entries not sorted in text:\n{t}"
+        );
+        assert!(t.contains("expires in 20s"));
+        assert!(t.contains("expires in 100s"));
+    }
+
+    /// Malformed `remaining_secs` lines are silently skipped.
+    #[test]
+    fn snapshot_parser_skips_malformed_auto_deny_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_auto_deny_remaining_secs{prefix=\"198.51.100.0/24\"} 60\n\
+proteus_auto_deny_remaining_secs{wrongkey=\"x\"} 5\n\
+proteus_auto_deny_remaining_secs{prefix=missing_quotes} 7\n\
+proteus_auto_deny_remaining_secs{prefix=\"valid/24\"} not_a_number\n\
+proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 30\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.auto_deny_entries.len(), 2);
+        let prefixes: Vec<&str> = s
+            .auto_deny_entries
+            .iter()
+            .map(|d| d.prefix.as_str())
             .collect();
         assert_eq!(prefixes, vec!["198.51.100.0/24", "203.0.113.0/24"]);
     }

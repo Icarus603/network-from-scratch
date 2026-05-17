@@ -528,17 +528,20 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         };
         let metrics = Arc::clone(&metrics);
-        // Pull the probe-anomaly detector out of the ServerCtx so
-        // the /metrics endpoint exposes the detector's diagnostic
-        // gauges + recent-fires labelled lines. Operators get the
-        // "WHICH /24 fired?" signal without grepping logs.
+        // Pull the probe-anomaly detector + auto-deny list out of
+        // the ServerCtx so the /metrics endpoint exposes their
+        // diagnostic gauges + per-prefix labelled lines. Operators
+        // get the "WHICH /24 fired?" + "WHO is currently denied?"
+        // signals without grepping logs.
         let probe_anomaly = ctx.probe_anomaly().cloned();
+        let auto_deny = ctx.auto_deny().cloned();
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v2(
                 &metrics_addr,
                 metrics,
                 auth,
                 probe_anomaly,
+                auto_deny,
             )
             .await
             {

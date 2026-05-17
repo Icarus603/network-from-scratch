@@ -56,12 +56,25 @@ use std::net::IpAddr;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use crate::probe_anomaly::ProbeAnomalyDetector;
+use crate::probe_anomaly::{IpFamily, ProbeAnomalyDetector};
 
 /// The prefix-key shape from `probe_anomaly.rs`. Re-aliased here so
 /// the auto-deny module can use the same /24 (v4) / /48 (v6)
 /// aggregation discipline without cross-importing the type.
 pub type PrefixKey = [u8; 6];
+
+/// One row in the auto-deny snapshot — what an operator-visible
+/// dashboard / `admin status` row needs to know about a currently-
+/// denied prefix. Sorted by `expires_in_secs` ascending (soonest-
+/// to-expire first) by `active_snapshot`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActiveDenial {
+    /// Operator-readable prefix string, e.g. `"198.51.100.0/24"`.
+    pub prefix: String,
+    /// Seconds remaining before this entry expires + heals
+    /// automatically. Smaller = closer to clearing.
+    pub expires_in_secs: u64,
+}
 
 /// How often the in-memory map gets vacuumed of expired entries. A
 /// real attack pushes ~10s of /24s into the map over a minute; the
@@ -75,7 +88,13 @@ const VACUUM_INTERVAL: Duration = Duration::from_secs(30);
 /// Hold inside an `Arc` to share across the accept-loop's per-
 /// connection tasks. Cheap to clone.
 pub struct AutoDenyList {
-    entries: Mutex<HashMap<PrefixKey, Instant>>,
+    /// Value tuple is `(deadline, family)`. The family lets us
+    /// reconstruct the human-readable prefix string at snapshot time
+    /// without storing the original IpAddr (PrefixKey alone is
+    /// ambiguous: a v4 /24's first 3 octets look identical to
+    /// SOME v6 /48's first 3 bytes — without family info we'd
+    /// render the wrong format).
+    entries: Mutex<HashMap<PrefixKey, (Instant, IpFamily)>>,
     last_vacuum: Mutex<Instant>,
     /// How long each inserted prefix stays denied. 0 = the deny
     /// surface is disabled (every `is_denied` returns false; every
@@ -145,7 +164,7 @@ impl AutoDenyList {
             .lock()
             .expect("AutoDenyList entries lock poisoned");
         match entries.get(&key) {
-            Some(&deadline) => now < deadline,
+            Some(&(deadline, _family)) => now < deadline,
             None => false,
         }
     }
@@ -158,6 +177,10 @@ impl AutoDenyList {
             return false;
         }
         let key = Self::prefix_key(peer_ip);
+        let family = match peer_ip {
+            IpAddr::V4(_) => IpFamily::V4,
+            IpAddr::V6(_) => IpFamily::V6,
+        };
         let mut entries = self
             .entries
             .lock()
@@ -174,8 +197,10 @@ impl AutoDenyList {
             return false;
         }
         // Now safely insert/refresh — by construction we either have
-        // a slot to spare OR the key is already in the map.
-        entries.insert(key, now + self.ttl);
+        // a slot to spare OR the key is already in the map. The
+        // family is captured per-insert so we can render the prefix
+        // correctly at snapshot time.
+        entries.insert(key, (now + self.ttl, family));
         self.inserted_total
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         true
@@ -229,7 +254,110 @@ impl AutoDenyList {
             Ok(e) => e,
             Err(_) => return,
         };
-        entries.retain(|_, &mut deadline| now < deadline);
+        entries.retain(|_, &mut (deadline, _family)| now < deadline);
+    }
+
+    /// Snapshot the currently-active denials, sorted soonest-to-
+    /// expire first. Reconstructs human-readable prefix strings
+    /// from the (`PrefixKey`, `IpFamily`) pair stored at insert
+    /// time.
+    ///
+    /// Operationally exposed via the Prometheus extension AND the
+    /// `admin status` block so operators can see "WHO is the binary
+    /// currently blocking and for how much longer" without
+    /// grepping logs or waiting for a fire to re-occur.
+    #[must_use]
+    pub fn active_snapshot(&self, now: Instant) -> Vec<ActiveDenial> {
+        let entries = match self.entries.lock() {
+            Ok(e) => e,
+            Err(_) => return Vec::new(),
+        };
+        let mut out: Vec<ActiveDenial> = entries
+            .iter()
+            .filter_map(|(key, (deadline, family))| {
+                // Skip already-expired entries (vacuum may not have
+                // run yet) so the snapshot is accurate even between
+                // vacuum sweeps.
+                let remaining = deadline.checked_duration_since(now)?;
+                let prefix = render_prefix(key, *family);
+                Some(ActiveDenial {
+                    prefix,
+                    expires_in_secs: remaining.as_secs(),
+                })
+            })
+            .collect();
+        // Soonest-to-expire first — operators triaging a deny see
+        // the entries that are about to heal at the top.
+        out.sort_by_key(|d| d.expires_in_secs);
+        out
+    }
+
+    /// Prometheus exposition snippet for the auto-deny surface.
+    /// Emits four series:
+    ///   - `proteus_auto_deny_active_prefixes` (gauge — current map size)
+    ///   - `proteus_auto_deny_inserted_total` (counter)
+    ///   - `proteus_auto_deny_refused_inserts_total` (counter — IP-sweep cap hits)
+    ///   - `proteus_auto_deny_remaining_secs{prefix="…"}` (one labelled
+    ///     gauge per active entry, value = seconds remaining)
+    ///
+    /// Designed to be appended to the server's metrics body when
+    /// the auto-deny surface is wired into ServerCtx.
+    #[must_use]
+    pub fn prometheus_extension(&self, now: Instant) -> String {
+        let active = self.active_snapshot(now);
+        let mut out = String::with_capacity(512);
+        out.push_str(
+            "# HELP proteus_auto_deny_active_prefixes Number of /24 (v4) / /48 (v6) prefixes currently in the auto-deny list (post-vacuum).\n",
+        );
+        out.push_str("# TYPE proteus_auto_deny_active_prefixes gauge\n");
+        out.push_str(&format!(
+            "proteus_auto_deny_active_prefixes {}\n",
+            active.len()
+        ));
+        out.push_str(
+            "# HELP proteus_auto_deny_inserted_total Total auto-deny inserts (counts entry refreshes; rising = sustained anomaly traffic).\n",
+        );
+        out.push_str("# TYPE proteus_auto_deny_inserted_total counter\n");
+        out.push_str(&format!(
+            "proteus_auto_deny_inserted_total {}\n",
+            self.inserted_total()
+        ));
+        out.push_str(
+            "# HELP proteus_auto_deny_refused_inserts_total Auto-deny inserts refused because max_entries was reached (IP-sweep memory-cap signal).\n",
+        );
+        out.push_str("# TYPE proteus_auto_deny_refused_inserts_total counter\n");
+        out.push_str(&format!(
+            "proteus_auto_deny_refused_inserts_total {}\n",
+            self.refused_inserts()
+        ));
+        out.push_str(
+            "# HELP proteus_auto_deny_remaining_secs Seconds remaining before this prefix's auto-deny entry expires. One line per currently-active entry.\n",
+        );
+        out.push_str("# TYPE proteus_auto_deny_remaining_secs gauge\n");
+        for d in &active {
+            out.push_str(&format!(
+                "proteus_auto_deny_remaining_secs{{prefix=\"{}\"}} {}\n",
+                d.prefix, d.expires_in_secs,
+            ));
+        }
+        out
+    }
+}
+
+/// Render a `(PrefixKey, IpFamily)` pair into the conventional
+/// `a.b.c.0/24` (v4) or `a:b:c::/48` (v6) human-readable form.
+/// Sibling of `RecentFire::prefix_string` in `probe_anomaly.rs`;
+/// duplicated here intentionally so callers don't have to construct
+/// a synthetic `RecentFire` just to format a prefix string.
+fn render_prefix(key: &PrefixKey, family: IpFamily) -> String {
+    match family {
+        IpFamily::V4 => format!("{}.{}.{}.0/24", key[0], key[1], key[2]),
+        IpFamily::V6 => {
+            let h0 = u16::from_be_bytes([key[0], key[1]]);
+            let h1 = u16::from_be_bytes([key[2], key[3]]);
+            let h2 = u16::from_be_bytes([key[4], key[5]]);
+            format!("{h0:x}:{h1:x}:{h2:x}::/48")
+        }
     }
 }
 
@@ -363,5 +491,136 @@ mod tests {
     #[test]
     fn default_max_entries_is_sensible() {
         assert_eq!(DEFAULT_MAX_ENTRIES, 4096);
+    }
+
+    // ---------- active_snapshot + Prometheus extension ----------
+
+    #[test]
+    fn active_snapshot_empty_when_no_inserts() {
+        let list = AutoDenyList::new(Duration::from_secs(60), 1024);
+        let snap = list.active_snapshot(Instant::now());
+        assert!(snap.is_empty());
+    }
+
+    #[test]
+    fn active_snapshot_reflects_v4_prefix_with_correct_format() {
+        let list = AutoDenyList::new(Duration::from_secs(60), 1024);
+        let now = Instant::now();
+        list.insert(ip4(198, 51, 100, 7), now);
+        let snap = list.active_snapshot(now);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].prefix, "198.51.100.0/24");
+        // expires_in_secs should be close to TTL (60s) — allow a
+        // small margin for the now->snapshot elapsed time.
+        assert!(
+            snap[0].expires_in_secs >= 58 && snap[0].expires_in_secs <= 60,
+            "expires_in_secs out of expected range: {}",
+            snap[0].expires_in_secs
+        );
+    }
+
+    #[test]
+    fn active_snapshot_reflects_v6_prefix_with_correct_format() {
+        let list = AutoDenyList::new(Duration::from_secs(60), 1024);
+        let now = Instant::now();
+        let p: IpAddr = "2001:db8:cafe::99".parse().unwrap();
+        list.insert(p, now);
+        let snap = list.active_snapshot(now);
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].prefix, "2001:db8:cafe::/48");
+    }
+
+    #[test]
+    fn active_snapshot_sorted_soonest_to_expire_first() {
+        // Three /24s inserted at staggered times so each has a
+        // different deadline. Snapshot at a single instant; the
+        // entry inserted FIRST (oldest, soonest to expire) must
+        // appear first.
+        let list = AutoDenyList::new(Duration::from_secs(60), 1024);
+        let t0 = Instant::now();
+        list.insert(ip4(10, 0, 0, 1), t0); // expires at t0+60
+        list.insert(ip4(10, 0, 1, 1), t0 + Duration::from_secs(5)); // t0+65
+        list.insert(ip4(10, 0, 2, 1), t0 + Duration::from_secs(10)); // t0+70
+        let snap = list.active_snapshot(t0 + Duration::from_secs(15));
+        assert_eq!(snap.len(), 3);
+        // 10.0.0.x expires first (45s remaining at scrape time);
+        // 10.0.2.x last (55s).
+        assert_eq!(snap[0].prefix, "10.0.0.0/24");
+        assert!(snap[0].expires_in_secs < snap[1].expires_in_secs);
+        assert!(snap[1].expires_in_secs < snap[2].expires_in_secs);
+        assert_eq!(snap[2].prefix, "10.0.2.0/24");
+    }
+
+    #[test]
+    fn active_snapshot_omits_expired_entries_pre_vacuum() {
+        // Insert with short TTL so the deadline passes before
+        // VACUUM_INTERVAL kicks in. The snapshot must STILL omit
+        // expired entries (filters at snapshot time).
+        let list = AutoDenyList::new(Duration::from_secs(2), 1024);
+        let t0 = Instant::now();
+        list.insert(ip4(192, 0, 2, 1), t0);
+        // Past the TTL, but before vacuum would run.
+        let snap = list.active_snapshot(t0 + Duration::from_secs(3));
+        assert!(
+            snap.is_empty(),
+            "snapshot must filter expired entries even pre-vacuum: {:?}",
+            snap
+        );
+    }
+
+    #[test]
+    fn prometheus_extension_includes_all_four_series() {
+        let list = AutoDenyList::new(Duration::from_secs(60), 4);
+        let t0 = Instant::now();
+        list.insert(ip4(203, 0, 113, 1), t0);
+        list.insert(ip4(198, 51, 100, 1), t0);
+        // Force one refused insert by overflowing the cap.
+        list.insert(ip4(10, 0, 0, 1), t0);
+        list.insert(ip4(10, 0, 1, 1), t0);
+        list.insert(ip4(10, 0, 2, 1), t0); // 5th distinct → refused (cap = 4)
+
+        let body = list.prometheus_extension(t0 + Duration::from_secs(10));
+
+        assert!(body.contains("# HELP proteus_auto_deny_active_prefixes"));
+        assert!(body.contains("# TYPE proteus_auto_deny_active_prefixes gauge"));
+        assert!(body.contains("proteus_auto_deny_active_prefixes 4"));
+
+        assert!(body.contains("# HELP proteus_auto_deny_inserted_total"));
+        assert!(body.contains("# TYPE proteus_auto_deny_inserted_total counter"));
+        // inserted_total includes the 4 accepted (refused doesn't count).
+        assert!(body.contains("proteus_auto_deny_inserted_total 4"));
+
+        assert!(body.contains("# HELP proteus_auto_deny_refused_inserts_total"));
+        assert!(body.contains("proteus_auto_deny_refused_inserts_total 1"));
+
+        assert!(body.contains("# TYPE proteus_auto_deny_remaining_secs gauge"));
+        // 4 labelled lines (one per active entry).
+        let labelled_lines = body
+            .lines()
+            .filter(|l| l.starts_with("proteus_auto_deny_remaining_secs{prefix="))
+            .count();
+        assert_eq!(labelled_lines, 4);
+        // 10s elapsed → 50s remaining.
+        assert!(
+            body.contains("proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 50"),
+            "labelled line not found in:\n{body}"
+        );
+    }
+
+    #[test]
+    fn prometheus_extension_disabled_list_emits_zeros() {
+        let list = AutoDenyList::new(Duration::from_secs(0), 1024);
+        let body = list.prometheus_extension(Instant::now());
+        // Disabled list — inserts no-op, snapshot empty, but the
+        // counter lines still emit zeros so a Prometheus query
+        // doesn't see a missing series.
+        assert!(body.contains("proteus_auto_deny_active_prefixes 0"));
+        assert!(body.contains("proteus_auto_deny_inserted_total 0"));
+        assert!(body.contains("proteus_auto_deny_refused_inserts_total 0"));
+        let labelled_lines = body
+            .lines()
+            .filter(|l| l.starts_with("proteus_auto_deny_remaining_secs{"))
+            .count();
+        assert_eq!(labelled_lines, 0);
     }
 }

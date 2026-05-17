@@ -122,19 +122,38 @@ pub async fn serve_with_auth(
 /// `ProbeAnomalyDetector` so the `/metrics` exposition includes
 /// the detector's diagnostic gauges + recent-fires lines. Use this
 /// from the production binary when a detector is configured.
+/// Back-compat shim — forwards to [`serve_with_auth_full_v2`] with
+/// `auto_deny = None`.
 pub async fn serve_with_auth_full(
     addr: &str,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v2(addr, metrics, auth, probe_anomaly, None).await
+}
+
+/// v2 of [`serve_with_auth_full`] — adds an optional `AutoDenyList`
+/// so the `/metrics` exposition includes the active-deny gauges +
+/// per-prefix `remaining_secs` labelled gauges. Operators see WHO
+/// is currently blocked AND for how much longer, directly in
+/// Prometheus / Grafana.
+pub async fn serve_with_auth_full_v2(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
+    let auto_deny_enabled = auto_deny.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
         probe_anomaly = probe_anomaly_enabled,
+        auto_deny = auto_deny_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -142,7 +161,14 @@ pub async fn serve_with_auth_full(
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
-        tokio::spawn(handle_connection(stream, metrics, auth, probe_anomaly));
+        let auto_deny = auto_deny.clone();
+        tokio::spawn(handle_connection(
+            stream,
+            metrics,
+            auth,
+            probe_anomaly,
+            auto_deny,
+        ));
     }
 }
 
@@ -167,20 +193,41 @@ pub async fn serve_on_listener_with_auth(
 
 /// Full-featured variant: the caller may supply a
 /// `ProbeAnomalyDetector` so the `/metrics` exposition includes the
-/// detector's gauges + recent-fires diagnostic lines. Use this when
-/// the server has a detector wired (almost always recommended).
+/// detector's gauges + recent-fires diagnostic lines. Back-compat
+/// shim — forwards to [`serve_on_listener_full_v2`] with
+/// `auto_deny = None`.
 pub async fn serve_on_listener_full(
     listener: TcpListener,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full_v2(listener, metrics, auth, probe_anomaly, None).await
+}
+
+/// v2 of [`serve_on_listener_full`] — adds an optional `AutoDenyList`
+/// for the same `/metrics` exposition extension as
+/// [`serve_with_auth_full_v2`].
+pub async fn serve_on_listener_full_v2(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
-        tokio::spawn(handle_connection(stream, metrics, auth, probe_anomaly));
+        let auto_deny = auto_deny.clone();
+        tokio::spawn(handle_connection(
+            stream,
+            metrics,
+            auth,
+            probe_anomaly,
+            auto_deny,
+        ));
     }
 }
 
@@ -189,6 +236,7 @@ async fn handle_connection(
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -196,8 +244,13 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) =
-        render_full(head, &metrics, auth.as_ref(), probe_anomaly.as_deref());
+    let (status_line, content_type, body) = render_full_v2(
+        head,
+        &metrics,
+        auth.as_ref(),
+        probe_anomaly.as_deref(),
+        auto_deny.as_deref(),
+    );
     let response = format!(
         "{status_line}\
          Content-Type: {content_type}\r\n\
@@ -252,20 +305,31 @@ pub fn render(
     render_full(request_head, metrics, auth, None)
 }
 
-/// Full-featured variant of [`render`] that optionally appends a
-/// `ProbeAnomalyDetector`'s diagnostic Prometheus lines to the
-/// `/metrics` body. Operators with the detector configured get
-/// `proteus_probe_anomaly_tracked_prefixes`,
-/// `proteus_probe_anomaly_dropped_inserts_total`, and one
-/// `proteus_probe_anomaly_recent_secs{prefix="…"}` gauge line per
-/// recent fire — the "WHICH /24 is the prober coming from?" signal
-/// the bare counter can't carry.
+/// Full-featured variant of [`render`] — back-compat shim that
+/// forwards to [`render_full_v2`] with `auto_deny = None`.
 #[must_use]
 pub fn render_full(
     request_head: &str,
     metrics: &ServerMetrics,
     auth: Option<&MetricsAuth>,
     probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+) -> (&'static str, &'static str, String) {
+    render_full_v2(request_head, metrics, auth, probe_anomaly, None)
+}
+
+/// v2 of [`render_full`] — adds an optional `AutoDenyList` reference.
+/// When supplied, the `/metrics` body includes the deny list's
+/// four diagnostic series (`active_prefixes`, `inserted_total`,
+/// `refused_inserts_total`, per-prefix `remaining_secs`). Operators
+/// see WHO is currently blocked AND for how much longer, directly
+/// in Prometheus / Grafana.
+#[must_use]
+pub fn render_full_v2(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -280,9 +344,13 @@ pub fn render_full(
                 );
             }
         }
+        let now = std::time::Instant::now();
         let mut body = metrics.prometheus();
         if let Some(det) = probe_anomaly {
-            body.push_str(&det.prometheus_extension(std::time::Instant::now()));
+            body.push_str(&det.prometheus_extension(now));
+        }
+        if let Some(ad) = auto_deny {
+            body.push_str(&ad.prometheus_extension(now));
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
