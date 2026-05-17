@@ -26,7 +26,10 @@ use tracing_subscriber::EnvFilter;
 
 mod gencert;
 mod keygen;
-mod knock_keygen;
+// knock_keygen is now exposed via the lib (iter-54: validate
+// uses the same load() helper to surface PSK parse errors at
+// preflight time instead of fatal-at-startup).
+use proteus_server::knock_keygen;
 
 use proteus_server::config;
 use proteus_server::relay;

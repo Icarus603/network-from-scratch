@@ -525,6 +525,37 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
+    // 9b. knock_psk_file — FATAL at startup if invalid.
+    //
+    // Iter-54: pre-iter-54 the operator could ship a config with
+    // `knock_psk_file: /etc/proteus/knock.psk` where the file
+    // had a typo (4-byte base64 truncation, garbage line, missing
+    // newline) and validate said green. The binary would exit at
+    // startup with "knock_psk_file load failed: ..." — but the
+    // operator had already deployed and was now firefighting.
+    //
+    // Validate now invokes the same `knock_keygen::load` parser
+    // the binary uses, surfacing the same diagnostic at preflight.
+    // We also call check_secret_file_mode on it (the PSK is a
+    // secret — leaked-readable on shared hosts compromises the
+    // probe-resistance gate).
+    if let Some(path) = cfg.knock_psk_file.as_ref() {
+        match crate::knock_keygen::load(path) {
+            Ok(_) => {
+                r.push_pass(format!("knock_psk_file loads cleanly ({path:?})"));
+                check_secret_file_mode(&mut r, "knock_psk_file", path);
+            }
+            Err(e) => {
+                r.push_fail(format!(
+                    "knock_psk_file {path:?}: {e}. Startup will be FATAL. Run \
+                     `proteus-server knock-keygen --out {path:?}` to mint a fresh \
+                     PSK, OR remove the `knock_psk_file:` line from server.yaml \
+                     to disable probe-resistance."
+                ));
+            }
+        }
+    }
+
     // 10. POW difficulty range (config field is u8 so 0..=255 by type;
     //     the server caps to 24 internally, but warn loudly so the
     //     operator doesn't think they got 32-bit difficulty).
@@ -1241,6 +1272,59 @@ mod tests {
             writable_pass,
             "PASS message must call out 'writable' so operator knows the iter-50 check ran: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-54: knock_psk_file invalid → FAIL with actionable
+    /// recovery hint. Pre-iter-54 the operator could ship a typo'd
+    /// PSK file (e.g. truncated base64) and validate said green;
+    /// startup was fatal with the same message but after deploy.
+    #[test]
+    fn iter54_knock_psk_file_invalid_fails_validate() {
+        let dir = tmpdir();
+        let psk_path = dir.join("knock.psk");
+        // Plant a garbage PSK file (decoded length != 32 → fails).
+        std::fs::write(&psk_path, b"#comment\nnot-valid-base64-and-not-32-bytes\n").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.knock_psk_file = Some(psk_path);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "invalid knock_psk_file MUST FAIL validate: {report}"
+        );
+        let knock_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("knock_psk_file") && s.contains("knock-keygen"),
+            _ => false,
+        });
+        assert!(
+            knock_fail,
+            "FAIL message must call out knock_psk_file + recovery hint: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-54: valid knock_psk_file → PASS.
+    #[test]
+    fn iter54_knock_psk_file_valid_passes_validate() {
+        use base64::Engine;
+        let dir = tmpdir();
+        let psk_path = dir.join("knock.psk");
+        let mut psk = [0u8; 32];
+        // Non-zero bytes (iter-48 all-zero check would otherwise fire if
+        // the value is ever inspected as a key, but knock_psk_file isn't
+        // — it's just a parse check).
+        for (i, b) in psk.iter_mut().enumerate() {
+            *b = (i as u8) ^ 0x5a;
+        }
+        let armored = base64::engine::general_purpose::STANDARD.encode(psk);
+        std::fs::write(&psk_path, format!("# proteus knock PSK\n{armored}\n")).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.knock_psk_file = Some(psk_path);
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(m) if m.contains("knock_psk_file") && m.contains("loads cleanly"))
+        });
+        assert!(pass, "valid knock_psk_file must PASS: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

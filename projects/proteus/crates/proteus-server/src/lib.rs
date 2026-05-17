@@ -10,6 +10,7 @@ pub mod admin_alerts_check;
 pub mod config;
 pub mod host_preflight;
 pub mod ip_reputation;
+pub mod knock_keygen;
 pub mod preflight;
 pub mod preflight_orchestrator;
 pub mod process_access_log_stats;
