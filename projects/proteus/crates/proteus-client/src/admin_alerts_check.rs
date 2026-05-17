@@ -38,6 +38,12 @@
 //!   threat-intel main line 6 (DoH leak): the operator should
 //!   pin `bootstrap_dns: { direct_ip: ... }` instead of letting
 //!   the OS resolver transit a DoH provider.
+//! - **ProteusClientPoolReloadFailing**: `attempts_total >
+//!   succeeded_total` → WARN. The operator issued at least one
+//!   SIGHUP that failed to apply the new `server_endpoints` list.
+//!   The running pool still uses the previous config; the
+//!   operator's edit didn't take effect. Symmetric with the
+//!   bundled `proteus-client-alerts.yaml` rule of the same name.
 //!
 //! Rules that genuinely need a TSDB (`rate(...[5m])` etc.) are
 //! deliberately NOT mirrored here — the operator wires the
@@ -325,6 +331,49 @@ pub fn evaluate(body: &str) -> Report {
             severity: CheckSeverity::Pass,
             message: format!("{succeeded} successes, {failed} failures (healthy ratio)"),
         });
+    }
+
+    // ──── ProteusClientPoolReloadFailing ────
+    // Mirrors deploy/prometheus/proteus-client-alerts.yaml:
+    //   (attempts_total - succeeded_total) > 0
+    // The SIGHUP path bumps `attempts` first, then `succeeded`
+    // after the atomic swap completes. A positive gap means at
+    // least one SIGHUP was observed but the reload didn't apply
+    // — the running pool still uses the pre-SIGHUP config. The
+    // operator's edit is silently ineffective; surface it.
+    //
+    // Three-state emit (matching every other rule in this module):
+    //   - gap > 0          → WARN with concrete (att, succ) numbers
+    //   - gap == 0, att>0  → PASS (reloads happened, all succeeded)
+    //   - att == 0         → suppress entirely (no SIGHUP yet — no
+    //                        signal to report; same convention as
+    //                        ProteusClientNoRecentDialSuccess when
+    //                        attempts == 0)
+    let pool_reload_att = g("proteus_client_pool_reload_attempts_total").unwrap_or(0.0);
+    let pool_reload_ok = g("proteus_client_pool_reload_succeeded_total").unwrap_or(0.0);
+    if pool_reload_att > 0.0 {
+        let gap = pool_reload_att - pool_reload_ok;
+        if gap > 0.0 {
+            r.push(Check {
+                rule_name: "ProteusClientPoolReloadFailing",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{} reload attempt(s), only {} succeeded ({} failed) — running pool still uses the pre-SIGHUP config; the operator's edit didn't take effect. Check journalctl for the parse error.",
+                    pool_reload_att as u64,
+                    pool_reload_ok as u64,
+                    gap as u64,
+                ),
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusClientPoolReloadFailing",
+                severity: CheckSeverity::Pass,
+                message: format!(
+                    "all {} pool reload attempt(s) succeeded",
+                    pool_reload_att as u64
+                ),
+            });
+        }
     }
 
     // ──── ProteusClientBootstrapViaSystemResolver ────
@@ -633,6 +682,75 @@ mod tests {
         assert_eq!(c.severity, CheckSeverity::Warn);
         assert!(c.message.contains("DoH leak"));
         assert!(c.message.contains("direct_ip"));
+    }
+
+    #[test]
+    fn evaluate_emits_warn_when_pool_reload_failing() {
+        // attempts=5, succeeded=3 → gap=2 → WARN with concrete counts.
+        let body = body_with(
+            "proteus_client_up 1\nproteus_client_pool_reload_attempts_total 5\nproteus_client_pool_reload_succeeded_total 3",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusClientPoolReloadFailing")
+            .unwrap();
+        assert_eq!(c.severity, CheckSeverity::Warn);
+        assert!(c.message.contains("5 reload attempt"), "msg={}", c.message);
+        assert!(c.message.contains("3 succeeded"), "msg={}", c.message);
+        assert!(c.message.contains("2 failed"), "msg={}", c.message);
+    }
+
+    #[test]
+    fn evaluate_emits_pass_when_pool_reload_all_succeeded() {
+        // attempts == succeeded > 0 → PASS.
+        let body = body_with(
+            "proteus_client_up 1\nproteus_client_pool_reload_attempts_total 4\nproteus_client_pool_reload_succeeded_total 4",
+        );
+        let r = evaluate(&body);
+        let c = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusClientPoolReloadFailing")
+            .unwrap();
+        assert_eq!(c.severity, CheckSeverity::Pass);
+        assert!(c.message.contains("4"), "msg={}", c.message);
+    }
+
+    #[test]
+    fn evaluate_skips_pool_reload_check_when_no_attempts() {
+        // attempts == 0 → no SIGHUP yet → no signal to emit.
+        // Same convention as ProteusClientNoRecentDialSuccess when
+        // dials_attempted_total == 0.
+        let body = body_with(
+            "proteus_client_up 1\nproteus_client_pool_reload_attempts_total 0\nproteus_client_pool_reload_succeeded_total 0",
+        );
+        let r = evaluate(&body);
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name == "ProteusClientPoolReloadFailing");
+        assert!(
+            !any,
+            "must NOT emit ProteusClientPoolReloadFailing when no reload was attempted"
+        );
+    }
+
+    /// Pool-reload failure is WARN-only — it does NOT escalate
+    /// the overall exit code to 1. The dispatcher is still
+    /// serving the previous-known-good pool; the failure is
+    /// "your edit didn't take effect", not "we're down".
+    #[test]
+    fn evaluate_pool_reload_warn_does_not_force_crit_exit() {
+        let body = body_with(
+            "proteus_client_up 1\nproteus_client_pool_reload_attempts_total 3\nproteus_client_pool_reload_succeeded_total 1",
+        );
+        let r = evaluate(&body);
+        assert_eq!(r.exit_code(), 0, "warn-only rules must not escalate to exit 1");
+        let (_, w, cr) = r.counts();
+        assert!(w >= 1);
+        assert_eq!(cr, 0);
     }
 
     #[test]
