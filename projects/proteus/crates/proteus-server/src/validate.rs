@@ -168,6 +168,54 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             match proteus_transport_alpha::tls::load_cert_chain(&tls.cert_chain) {
                 Ok(chain) => {
                     r.push_pass(format!("tls.cert_chain parses ({} certs)", chain.len()));
+                    // Iter-46: cert-expiry validate. The runtime
+                    // surfaces `proteus_tls_cert_not_after_unix_seconds`
+                    // + `ProteusTlsCertExpiring{Soon,Expired}` alerts,
+                    // but those only fire AFTER the binary starts.
+                    // Operators running `validate` on a fresh deploy
+                    // (or in CI before a config push) deserve the
+                    // same warning BEFORE the cert hits production.
+                    //
+                    // Thresholds mirror the bundled Prometheus alerts:
+                    //   - expired (notAfter < now) → FAIL
+                    //   - <14 days → WARN
+                    //   - ≥14 days → PASS with days-remaining note
+                    match proteus_transport_alpha::tls::leaf_cert_not_after(&chain) {
+                        Ok(not_after) => {
+                            let now = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i64)
+                                .unwrap_or(0);
+                            let secs_until = not_after.saturating_sub(now);
+                            if secs_until <= 0 {
+                                r.push_fail(format!(
+                                    "tls.cert_chain: leaf cert EXPIRED ({} seconds ago) — every \
+                                     TLS handshake will fail. Run `certbot renew` (or your \
+                                     rotation tooling) IMMEDIATELY",
+                                    -secs_until,
+                                ));
+                            } else {
+                                let days = secs_until / 86_400;
+                                if days < 14 {
+                                    r.push_warn(format!(
+                                        "tls.cert_chain: leaf cert expires in {days} day(s) — \
+                                         within the 14-day renewal window. If Let's Encrypt \
+                                         auto-renewal is wired this will recover on the next \
+                                         renewal cycle; if not, fix it now",
+                                    ));
+                                } else {
+                                    r.push_pass(format!(
+                                        "tls.cert_chain: leaf cert valid for {days} day(s)"
+                                    ));
+                                }
+                            }
+                        }
+                        Err(e) => r.push_warn(format!(
+                            "tls.cert_chain: could not extract leaf notAfter ({e}); the cert \
+                             parses but expiry surveillance is disabled. Runtime metric \
+                             proteus_tls_cert_not_after_unix_seconds will report sentinel"
+                        )),
+                    }
                 }
                 Err(e) => r.push_fail(format!("tls.cert_chain: {e}")),
             }

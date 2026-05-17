@@ -46,6 +46,11 @@ libc = "0.2"
 rcgen = "0.13"
 rustls = { workspace = true }
 serde_json = "1"
+# Iter-46: cert-expiry validate tests need to control notAfter
+# directly. rcgen accepts a `time::OffsetDateTime` for cert
+# validity windows but doesn't re-export the `time` crate, so we
+# pull it in as a test-only dep. Same major version rcgen 0.13 uses.
+time = "0.3"
 
 [lints.rust]
 # `deny` (not `forbid`) so that the binary_launch integration test
