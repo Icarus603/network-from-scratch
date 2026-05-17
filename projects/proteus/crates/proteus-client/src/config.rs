@@ -332,7 +332,21 @@ impl ClientConfig {
         Ok(cfg)
     }
 
+    /// Legacy per-call path. Used by `connect-test` (one-shot) and
+    /// as the back-compat fallback when ctx didn't pre-build the
+    /// cached source. Production SOCKS5 traffic should go through
+    /// [`Self::build_handshake_config_source`] once at startup and
+    /// call [`HandshakeConfigSource::alpha`] / [`::beta`] per
+    /// request — see that struct's docs for the rationale.
     pub fn build_handshake_config(&self) -> Result<client::ClientConfig, ConfigError> {
+        let source = self.build_handshake_config_source()?;
+        Ok(source.alpha())
+    }
+
+    /// Build the cached handshake-config source. Call ONCE at
+    /// startup; wrap the result in `Arc<HandshakeConfigSource>` and
+    /// stash on `ClientCtx`.
+    pub fn build_handshake_config_source(&self) -> Result<HandshakeConfigSource, ConfigError> {
         let server_mlkem_pk_bytes = decode_b64_or_raw(&std::fs::read(&self.keys.server_mlkem_pk)?);
         let server_x25519_pk_bytes =
             decode_b64_or_raw(&std::fs::read(&self.keys.server_x25519_pk)?);
@@ -365,15 +379,91 @@ impl ClientConfig {
         // RNG seed not needed here; the OS RNG handles per-handshake nonces.
         let _ = OsRng;
 
-        Ok(client::ClientConfig {
+        Ok(HandshakeConfigSource {
             server_mlkem_pk_bytes,
             server_x25519_pub,
             server_pq_fingerprint,
             client_id_sk,
             user_id,
             pow_difficulty: self.pow_difficulty.unwrap_or(0),
-            profile_hint: proteus_transport_alpha::ProfileHint::Alpha,
         })
+    }
+}
+
+/// Precomputed handshake-config source. Built ONCE via
+/// [`ClientConfig::build_handshake_config_source`] at startup:
+/// reads all 4 key files from disk, decodes base64, validates
+/// lengths, derives the Ed25519 signing key. The per-CONNECT
+/// path then calls [`Self::alpha`] / [`Self::beta`] which are
+/// pure CPU clones — zero disk, zero parsing, zero key
+/// derivation.
+///
+/// ## Why this matters
+///
+/// Pre-iter-13 every SOCKS5 CONNECT called
+/// `build_handshake_config`, which:
+///   - opened 4 files (`server_mlkem_pk`, `server_x25519_pk`,
+///     `server_pq_fingerprint`, `client_ed25519_sk`)
+///   - read them into memory
+///   - stripped whitespace + base64-decoded each
+///   - validated each length
+///   - constructed an `ed25519_dalek::SigningKey` from the raw
+///     seed bytes (which runs SHA-512 internally to derive the
+///     scalar)
+///
+/// On a browser navigating a page that opens 50 short-lived
+/// HTTP/2 connections, that was 200 disk reads + 50 ed25519
+/// derivations per page load before any byte hit the wire.
+/// With the cached source it's 0 disk + 0 derivations after
+/// the one-time startup cost.
+///
+/// The clone in [`Self::alpha`] / [`Self::beta`] copies one
+/// `Vec<u8>` (the ~1184-byte ML-KEM-768 EK), the `SigningKey` (32
+/// bytes), and three small fixed-size arrays. That's ~1.3 KiB of
+/// bytes vs the syscall + parsing + key-schedule round-trip the
+/// pre-iter-13 path paid.
+#[derive(Clone)]
+pub struct HandshakeConfigSource {
+    server_mlkem_pk_bytes: Vec<u8>,
+    server_x25519_pub: [u8; 32],
+    server_pq_fingerprint: [u8; 32],
+    client_id_sk: ed25519_dalek::SigningKey,
+    user_id: [u8; 8],
+    pow_difficulty: u8,
+}
+
+impl HandshakeConfigSource {
+    /// Materialize an α-profile `ClientConfig` from the cached
+    /// fields. Pure CPU clone — no disk, no parsing.
+    #[must_use]
+    pub fn alpha(&self) -> client::ClientConfig {
+        client::ClientConfig {
+            server_mlkem_pk_bytes: self.server_mlkem_pk_bytes.clone(),
+            server_x25519_pub: self.server_x25519_pub,
+            server_pq_fingerprint: self.server_pq_fingerprint,
+            client_id_sk: self.client_id_sk.clone(),
+            user_id: self.user_id,
+            pow_difficulty: self.pow_difficulty,
+            profile_hint: proteus_transport_alpha::ProfileHint::Alpha,
+        }
+    }
+
+    /// Materialize a β-profile `ClientConfig` from the cached
+    /// fields. Identical to `alpha()` except `profile_hint =
+    /// Beta`. The β connector consumes the config by value
+    /// (it embeds the cfg into a quinn endpoint state), so
+    /// returning an owned clone is the natural API shape.
+    #[must_use]
+    pub fn beta(&self) -> client::ClientConfig {
+        client::ClientConfig {
+            server_mlkem_pk_bytes: self.server_mlkem_pk_bytes.clone(),
+            server_x25519_pub: self.server_x25519_pub,
+            server_pq_fingerprint: self.server_pq_fingerprint,
+            client_id_sk: self.client_id_sk.clone(),
+            user_id: self.user_id,
+            pow_difficulty: self.pow_difficulty,
+            profile_hint: proteus_transport_alpha::ProfileHint::Beta,
+        }
     }
 }
 

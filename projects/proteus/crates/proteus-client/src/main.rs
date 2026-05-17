@@ -563,6 +563,25 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             None
         };
 
+    // Build the handshake-config source ONCE at startup. Reads
+    // all 4 key files from disk (server_mlkem_pk,
+    // server_x25519_pk, server_pq_fingerprint, client_ed25519_sk),
+    // derives the Ed25519 signing key, validates lengths. Per
+    // CONNECT, dispatch calls `source.alpha()` or `source.beta()`
+    // (pure CPU clone — no disk, no parsing, no key derivation)
+    // instead of paying for all that work per request.
+    //
+    // If this fails at startup we refuse to start — better an
+    // explicit operator-visible error than silently failing
+    // every SOCKS5 CONNECT.
+    let cached_hs_source: Arc<proteus_client::config::HandshakeConfigSource> = Arc::new(
+        cfg.build_handshake_config_source()
+            .map_err(|e| format!("failed to build cached handshake-config source: {e}"))?,
+    );
+    info!(
+        "cached handshake-config source built — SOCKS5 requests will skip 4 disk reads + ed25519 derivation per CONNECT"
+    );
+
     let mut ctx_builder = ClientCtx::new(
         Arc::clone(&health),
         endpoint_pool.clone(),
@@ -570,7 +589,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         max_inflight,
         beta_configured,
     )
-    .with_process_info(process_info);
+    .with_process_info(process_info)
+    .with_hs_config_source(Arc::clone(&cached_hs_source));
     if let Some(c) = cached_tls_connector.clone() {
         ctx_builder = ctx_builder.with_tls_connector(c);
     }

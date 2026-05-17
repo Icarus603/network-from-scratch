@@ -111,6 +111,18 @@ pub struct ClientCtx {
     /// latency before the network even moved. Caching saves both
     /// CPU and the GC churn from a fresh `ClientConfig` per dial.
     pub tls_connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    /// Cached handshake-config source (iter 13). Holds the parsed
+    /// server pubkeys + client Ed25519 signing key + user_id +
+    /// pow_difficulty, so that per-CONNECT dispatch can call
+    /// `source.alpha()` or `source.beta()` instead of paying for
+    /// 4 disk reads + base64 decodes + Ed25519 key derivation on
+    /// every request. None when ctx was constructed by a
+    /// test/back-compat path that didn't pre-build the source —
+    /// in that case `try_alpha`/`try_beta` fall back to
+    /// `cfg.build_handshake_config()`.
+    ///
+    /// See `crate::config::HandshakeConfigSource` for the why.
+    pub hs_config_source: Option<Arc<crate::config::HandshakeConfigSource>>,
     /// Process-lifecycle info — captured once at startup, read at
     /// scrape time by the admin endpoint for the
     /// `proteus_client_process_*` Prometheus block + the `/status`
@@ -151,6 +163,11 @@ impl ClientCtx {
             // the operator's `tls:` config. Tests use ClientCtx
             // without TLS and skip this.
             tls_connector: None,
+            // Default: no cached handshake-config source. Main
+            // binary attaches one via `with_hs_config_source` from
+            // the parsed yaml + key files. Tests that don't dial
+            // skip this.
+            hs_config_source: None,
             // Default process_info: empty strings + start_unix
             // captured at construction. Real binary overrides via
             // `with_process_info` so /metrics reports the actual
@@ -189,6 +206,21 @@ impl ClientCtx {
         conn: Arc<proteus_transport_alpha::tls::TlsConnector>,
     ) -> Self {
         self.tls_connector = Some(conn);
+        self
+    }
+
+    /// Attach a pre-built handshake-config source. Called at
+    /// startup right after parsing client.yaml + reading the
+    /// key files. Per-CONNECT dispatch will call
+    /// `ctx.hs_config_source.as_ref().unwrap().alpha()` / `.beta()`
+    /// instead of paying for 4 disk reads + Ed25519 key derivation
+    /// on every request.
+    #[must_use]
+    pub fn with_hs_config_source(
+        mut self,
+        source: Arc<crate::config::HandshakeConfigSource>,
+    ) -> Self {
+        self.hs_config_source = Some(source);
         self
     }
 
@@ -577,5 +609,110 @@ mod tests {
             Arc::ptr_eq(&arc, held),
             "with_tls_connector must store the SAME Arc, not clone the inner config"
         );
+    }
+
+    /// Default ctx (built by `mk_ctx` without
+    /// `with_hs_config_source`) MUST report `hs_config_source =
+    /// None` — that's the legacy per-request `build_handshake_config`
+    /// path's fallback signal.
+    #[test]
+    fn default_ctx_has_no_cached_hs_config_source() {
+        let ctx = mk_ctx(None, 0);
+        assert!(
+            ctx.hs_config_source.is_none(),
+            "fresh ctx must not have a cached handshake-config source — main.rs attaches it explicitly"
+        );
+    }
+
+    /// `with_hs_config_source` MUST preserve the exact same `Arc`
+    /// — not clone the inner source — so per-request handler hot
+    /// paths only pay for the `source.alpha()` / `.beta()` field
+    /// clone, not an outer Arc-allocation.
+    #[test]
+    fn with_hs_config_source_preserves_arc_identity() {
+        // Construct a minimal-but-valid HandshakeConfigSource by
+        // writing the 4 key files to a temp dir then calling
+        // `build_handshake_config_source`. This is the same code
+        // path main.rs uses.
+        use std::io::Write;
+        let tmp =
+            std::env::temp_dir().join(format!("proteus-client-ctx-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        // 32 zero bytes is a structurally-valid Ed25519 seed and a
+        // valid 32-byte X25519 pub. The PQ fingerprint is also 32
+        // bytes. The ML-KEM EK is whatever bytes the source field
+        // gets — we never invoke the AEAD here.
+        let zero32 = vec![0u8; 32];
+        let mlkem = vec![0xA5u8; 1184]; // ML-KEM-768 EK byte length
+        let p_mlkem = tmp.join("mlkem.bin");
+        let p_x25519 = tmp.join("x25519.bin");
+        let p_fp = tmp.join("fp.bin");
+        let p_sk = tmp.join("sk.bin");
+        std::fs::File::create(&p_mlkem)
+            .unwrap()
+            .write_all(&mlkem)
+            .unwrap();
+        std::fs::File::create(&p_x25519)
+            .unwrap()
+            .write_all(&zero32)
+            .unwrap();
+        std::fs::File::create(&p_fp)
+            .unwrap()
+            .write_all(&zero32)
+            .unwrap();
+        std::fs::File::create(&p_sk)
+            .unwrap()
+            .write_all(&zero32)
+            .unwrap();
+
+        let yaml = format!(
+            "\
+socks_listen: \"127.0.0.1:0\"\n\
+server_endpoint: \"vps.example.com:8443\"\n\
+user_id: \"test-user\"\n\
+keys:\n  \
+  server_mlkem_pk: {}\n  \
+  server_x25519_pk: {}\n  \
+  server_pq_fingerprint: {}\n  \
+  client_ed25519_sk: {}\n\
+tls:\n  server_name: \"vps.example.com\"\n",
+            p_mlkem.display(),
+            p_x25519.display(),
+            p_fp.display(),
+            p_sk.display(),
+        );
+        let cfg: crate::config::ClientConfig = serde_yaml::from_str(&yaml).unwrap();
+        let source = cfg.build_handshake_config_source().expect("build source");
+        let arc = Arc::new(source);
+        let ctx = mk_ctx(None, 0).with_hs_config_source(Arc::clone(&arc));
+        let held = ctx
+            .hs_config_source
+            .as_ref()
+            .expect("ctx must hold the source after with_hs_config_source");
+        assert!(
+            Arc::ptr_eq(&arc, held),
+            "with_hs_config_source must store the SAME Arc, not clone the inner source"
+        );
+
+        // Pure CPU clones from the cached source — exactly the
+        // per-CONNECT fast path. Profile_hint differs; everything
+        // else matches.
+        let alpha = arc.alpha();
+        let beta = arc.beta();
+        assert!(matches!(
+            alpha.profile_hint,
+            proteus_transport_alpha::ProfileHint::Alpha
+        ));
+        assert!(matches!(
+            beta.profile_hint,
+            proteus_transport_alpha::ProfileHint::Beta
+        ));
+        assert_eq!(alpha.user_id, beta.user_id);
+        assert_eq!(alpha.server_pq_fingerprint, beta.server_pq_fingerprint);
+        assert_eq!(alpha.server_x25519_pub, beta.server_x25519_pub);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -130,6 +130,11 @@ pub async fn handle_socks5_with_ctx(
     // TLS), `try_alpha` falls through to the legacy
     // build-connector-per-request path.
     let connector = ctx.tls_connector.clone();
+    // Cached handshake-config source (iter 13). Same caching
+    // pattern as the connector — built once at startup, cloned
+    // cheaply per CONNECT. When None, try_alpha/try_beta fall
+    // back to calling cfg.build_handshake_config() per request.
+    let hs_source = ctx.hs_config_source.clone();
     let res = handle_socks5_with_health_and_pool_and_bootstrap_counters(
         sock,
         cfg,
@@ -137,6 +142,7 @@ pub async fn handle_socks5_with_ctx(
         pool_snapshot.as_ref(),
         bootstrap,
         connector,
+        hs_source,
     )
     .await;
     match &res {
@@ -165,10 +171,13 @@ pub async fn handle_socks5_with_health_and_pool(
     // Back-compat shim — tests + non-ctx callers get None for the
     // bootstrap counters so resolution paths aren't bumped against
     // any handles (counters stay at their default zero). Same for
-    // the cached TLS connector — when None, `try_alpha` falls
-    // through to building one inline per request.
-    handle_socks5_with_health_and_pool_and_bootstrap_counters(sock, cfg, health, pool, None, None)
-        .await
+    // the cached TLS connector and handshake-config source — when
+    // None, `try_alpha` / `try_beta` fall through to building
+    // them inline per request.
+    handle_socks5_with_health_and_pool_and_bootstrap_counters(
+        sock, cfg, health, pool, None, None, None,
+    )
+    .await
 }
 
 /// Full-fidelity dispatch entry point. `bootstrap` is the
@@ -182,6 +191,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     pool: Option<&Arc<EndpointPool>>,
     bootstrap: Option<crate::ctx::BootstrapCounterHandles>,
     connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    hs_source: Option<Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -273,6 +283,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             &mut sock,
             bootstrap.as_ref(),
             connector.as_ref(),
+            hs_source.as_ref(),
         )
         .await;
     }
@@ -286,6 +297,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
         &mut sock,
         bootstrap.as_ref(),
         connector.as_ref(),
+        hs_source.as_ref(),
     )
     .await
 }
@@ -299,6 +311,7 @@ async fn single_endpoint_dispatch(
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
@@ -319,7 +332,7 @@ async fn single_endpoint_dispatch(
                 health.failure_streak(),
             );
         }
-        match try_beta(cfg, target_bytes, sock, None, bootstrap).await {
+        match try_beta(cfg, target_bytes, sock, None, bootstrap, hs_source).await {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -341,7 +354,16 @@ async fn single_endpoint_dispatch(
         );
     }
 
-    try_alpha(cfg, target_bytes, sock, None, bootstrap, connector).await
+    try_alpha(
+        cfg,
+        target_bytes,
+        sock,
+        None,
+        bootstrap,
+        connector,
+        hs_source,
+    )
+    .await
 }
 
 /// Multi-VPS dispatcher. Walks `pool` in operator-specified order,
@@ -356,6 +378,12 @@ async fn single_endpoint_dispatch(
 /// to the next entry. Returns the LAST entry's error when every
 /// pool member failed; that mirrors single-endpoint behavior from
 /// the user's POV (one error per SOCKS5 CONNECT).
+///
+/// Internal dispatch fan-out — the per-CONNECT cached state
+/// (bootstrap counters, TLS connector, handshake-config source)
+/// is naturally a bag of optional refs, not a struct, so the
+/// "too many arguments" lint is suppressed here.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch_via_pool(
     cfg: &Arc<ClientConfig>,
     health: &Arc<CarrierHealth>,
@@ -364,6 +392,7 @@ async fn dispatch_via_pool(
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
     let mut last_err: Option<SocksError> = None;
     let mut any_endpoint_attempted = false;
@@ -408,6 +437,7 @@ async fn dispatch_via_pool(
             sock,
             bootstrap,
             connector,
+            hs_source,
         )
         .await;
         match result {
@@ -475,6 +505,7 @@ async fn dispatch_via_pool(
             sock,
             bootstrap,
             connector,
+            hs_source,
         )
         .await;
         match &result {
@@ -494,6 +525,11 @@ async fn dispatch_via_pool(
 /// One pool entry's β-then-α attempt. Factored out so
 /// `dispatch_via_pool` can reuse it for both the regular and
 /// "all suppressed → force primary probe" paths.
+///
+/// Same "bag of optional cached state" pattern as
+/// `dispatch_via_pool` — clippy lint suppressed for the same
+/// reason.
+#[allow(clippy::too_many_arguments)]
 async fn attempt_one_pool_entry(
     cfg: &Arc<ClientConfig>,
     health: &Arc<CarrierHealth>,
@@ -502,12 +538,22 @@ async fn attempt_one_pool_entry(
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
     let beta_configured = cfg.server_endpoint_beta.is_some();
     let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
     let try_beta_now = matches!(beta_decision, BetaDecision::TryBeta | BetaDecision::Probe);
     if try_beta_now {
-        match try_beta(cfg, target_bytes, sock, Some(endpoint), bootstrap).await {
+        match try_beta(
+            cfg,
+            target_bytes,
+            sock,
+            Some(endpoint),
+            bootstrap,
+            hs_source,
+        )
+        .await
+        {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -529,6 +575,7 @@ async fn attempt_one_pool_entry(
         Some(endpoint),
         bootstrap,
         connector,
+        hs_source,
     )
     .await
 }
@@ -546,6 +593,7 @@ async fn try_beta(
     sock: &mut TcpStream,
     endpoint_override: Option<&str>,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
+    cached_hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
     let beta_endpoint: &str = match endpoint_override {
         Some(e) => e,
@@ -578,8 +626,18 @@ async fn try_beta(
     }
 
     // Build a β-flavored ClientConfig (profile_hint = Beta).
-    let mut hs_cfg = cfg.build_handshake_config()?;
-    hs_cfg.profile_hint = proteus_transport_alpha::ProfileHint::Beta;
+    // Prefer the cached source — `source.beta()` returns an owned
+    // ClientConfig with profile_hint already set, no disk hit.
+    // Falls back to the legacy builder + mutation when ctx didn't
+    // attach a cached source.
+    let hs_cfg = match cached_hs_source {
+        Some(source) => source.beta(),
+        None => {
+            let mut c = cfg.build_handshake_config()?;
+            c.profile_hint = proteus_transport_alpha::ProfileHint::Beta;
+            c
+        }
+    };
 
     // Optional extra-trust CA from the α TLS block (β reuses the
     // same chain in the recommended deployment).
@@ -672,8 +730,17 @@ async fn try_alpha(
     endpoint_override: Option<&str>,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     cached_connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
+    cached_hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
 ) -> Result<(), SocksError> {
-    let hs_cfg = cfg.build_handshake_config()?;
+    // Prefer the cached source (built ONCE at startup) so we
+    // don't pay for 4 disk reads + base64 decode + Ed25519
+    // derivation per CONNECT. Falls back to the legacy per-request
+    // builder when the source wasn't attached (back-compat entry
+    // points / tests).
+    let hs_cfg = match cached_hs_source {
+        Some(source) => source.alpha(),
+        None => cfg.build_handshake_config()?,
+    };
     let alpha_endpoint: &str = endpoint_override.unwrap_or(cfg.server_endpoint.as_str());
 
     // Resolve under the configured bootstrap-DNS policy (same path
