@@ -688,6 +688,133 @@ async fn iter43_server_endpoints_case_insensitive_hostname_no_warn() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-56: user_id whitespace + non-ASCII checks ----------
+
+/// Operator-trap: YAML quoted user_id with trailing whitespace.
+/// `user_id: "alice "` becomes the 6-byte string "alice "; the
+/// server allowlist (no space) never matches and every dial
+/// fails with no obvious cause.
+#[tokio::test]
+async fn iter56_user_id_with_trailing_whitespace_fails() {
+    let dir = tempdir("user-id-ws");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice \"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("trailing-ws report:\n{report}");
+    let ws_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("user_id") && s.contains("whitespace")
+        }
+        _ => false,
+    });
+    assert!(
+        ws_fail,
+        "trailing-whitespace user_id MUST FAIL with whitespace diagnostic: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter56_user_id_with_leading_whitespace_fails() {
+    let dir = tempdir("user-id-leading-ws");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \" bob\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    let ws_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("user_id") && s.contains("whitespace"),
+        _ => false,
+    });
+    assert!(ws_fail, "leading-whitespace MUST FAIL: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-56: non-ASCII user_id → WARN (not FAIL). Operators
+/// who deliberately use Unicode IDs get the paste-not-retype
+/// reminder; operators who didn't mean to see "fix this".
+#[tokio::test]
+async fn iter56_user_id_with_non_ascii_warns_not_fails() {
+    let dir = tempdir("user-id-unicode");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+    let yaml = dir.join("client.yaml");
+    // "アリ" is 6 UTF-8 bytes — fits the 8-byte budget AND is non-ASCII.
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"アリ\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("unicode-id report:\n{report}");
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("user_id") && s.contains("non-ASCII"),
+        _ => false,
+    });
+    assert!(warn, "non-ASCII user_id must WARN: {report}");
+    assert!(
+        !report.has_failures(),
+        "non-ASCII must NOT escalate to FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-48: all-zero key sentinel check ----------
 
 /// Helper: write an all-zero key file (placeholder / corrupted /

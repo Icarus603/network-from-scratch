@@ -309,6 +309,19 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                     client.user_id,
                     client.user_id.len()
                 ));
+            } else if client.user_id.trim() != client.user_id {
+                // Iter-56: same whitespace trap as the client-side
+                // validate. A YAML-quoted allowlist user_id with
+                // trailing/leading whitespace becomes a byte-string
+                // that no client's `user_id:` (without the
+                // whitespace) ever matches.
+                r.push_fail(format!(
+                    "client_allowlist[{:?}].user_id has leading or trailing whitespace — \
+                     the server matches user_ids byte-for-byte; a client whose user_id \
+                     doesn't include the same whitespace will never authenticate. Fix \
+                     the YAML: unquote OR strip whitespace explicitly.",
+                    client.user_id,
+                ));
             }
         }
         r.push_pass(format!(
@@ -1475,6 +1488,38 @@ mod tests {
         });
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-56: server-side symmetric check — allowlist user_id
+    /// with trailing whitespace will never match a clean client
+    /// `user_id:`. Bytes-don't-match silent-mismatch trap.
+    #[test]
+    fn iter56_server_allowlist_user_id_with_whitespace_fails() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        // Non-zero content so the iter-48/55 check doesn't trip.
+        std::fs::write(&pk, b"some-non-zero-content").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice ".to_string(), // trailing space
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "trailing-whitespace allowlist user_id MUST FAIL: {report}"
+        );
+        let ws_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("client_allowlist") && s.contains("whitespace")
+            }
+            _ => false,
+        });
+        assert!(
+            ws_fail,
+            "FAIL message must mention 'whitespace': {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -331,6 +331,36 @@ pub async fn run(path: &Path) -> PreflightReport {
             cfg.user_id.len(),
             cfg.user_id,
         ));
+    } else if cfg.user_id.trim() != cfg.user_id {
+        // Iter-56: YAML quoting around user_ids with trailing
+        // whitespace is operator-trap territory. `user_id: "alice "`
+        // (quoted, trailing space) gets shipped as the 6-byte
+        // string "alice "; the server allowlist's `user_id: "alice"`
+        // (no space) never matches. Same shape: lead/trail tab
+        // from a copy-paste. Surface as FAIL — silent allowlist
+        // mismatch is the failure mode this catches.
+        r.push_fail(format!(
+            "user_id has leading or trailing whitespace ({:?}) — encode_user_id will \
+             include the whitespace bytes in the wire identity; the server allowlist \
+             entry (no whitespace) will not match. Fix the YAML: unquote OR strip \
+             whitespace explicitly.",
+            cfg.user_id,
+        ));
+    } else if !cfg.user_id.is_ascii() {
+        // Iter-56: encode_user_id is byte-oriented. Non-ASCII
+        // user_ids (e.g. "アリス") may encode to >8 bytes in UTF-8
+        // even though they "look" short. The len>8 check above
+        // catches it AFTER the trap fires; flagging non-ASCII
+        // explicitly gives the operator a clearer diagnostic.
+        // WARN (not FAIL) because some operators may DELIBERATELY
+        // use non-ASCII identifiers and rely on the byte
+        // representation matching server-side.
+        r.push_warn(format!(
+            "user_id contains non-ASCII bytes ({:?}); encode_user_id uses raw UTF-8 \
+             bytes — make sure the server's allowlist entry uses the SAME byte string \
+             (paste, not retype, to avoid silent mismatch).",
+            cfg.user_id,
+        ));
     } else {
         r.push_pass(format!("user_id = {:?}", cfg.user_id));
     }
