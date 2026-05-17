@@ -511,6 +511,29 @@ impl ReloadableAcceptor {
         }
     }
 
+    /// Test/fixture-only constructor: wrap an initial acceptor AND
+    /// stamp the `leaf_not_after` gauge with a caller-supplied
+    /// timestamp, bypassing X.509 parsing. Useful for /healthz
+    /// expiry-gate tests that want to drive the gauge to a known
+    /// past/future timestamp without having to mint a cert with
+    /// matching wall-clock expiry.
+    ///
+    /// `#[doc(hidden)]` because this is **not** a production API —
+    /// production paths must use [`Self::new_with_expiry`] so the
+    /// gauge reflects the real cert. Kept `pub` (not `pub(crate)`)
+    /// so cross-crate test fixtures (e.g. proteus-server's
+    /// integration tests) can use it.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_leaf_not_after_for_testing(initial: TlsAcceptor, leaf_not_after: i64) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(initial)),
+            leaf_not_after: Arc::new(std::sync::atomic::AtomicI64::new(leaf_not_after)),
+            reload_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reload_succeeded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
     /// Current leaf cert `notAfter` as Unix seconds, or `None` if
     /// expiry tracking is not active (the `new` constructor was used
     /// instead of `new_with_expiry` / `reload_with_expiry`).

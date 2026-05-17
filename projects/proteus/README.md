@@ -1477,6 +1477,19 @@ proteus_log_throttle_allowed_total{site="..."}
 proteus_log_throttle_suppressed_total{site="..."}
 ```
 
+**`/healthz` now fails closed on expired TLS cert.** Without this
+gate, a leaf cert that ran past its `notAfter` (Let's Encrypt
+renewal failed, operator forgot to roll a self-signed) returned
+200 OK at `/healthz` while every TLS handshake actually failed —
+load balancers kept steering traffic to a guaranteed-broken
+backend until the next scrape interval. Now `/healthz` checks
+`reloadable.leaf_not_after() < now` and returns
+`503 tls_cert_expired` immediately, so LBs drain on the very
+next probe. Reason-string priority: `dead` > `tls_cert_expired`
+> `self_test_failed` > `self_test_stale` (root cause wins). The
+old "<14 day warning" stays in `/diagnose` — `/healthz` should
+only drain actually-broken instances, not about-to-renew ones.
+
 `proteus_log_throttle_*` series surface the
 [`log_throttle`](crates/proteus-transport-alpha/src/log_throttle.rs)
 counters for hot rejection paths in the accept loop

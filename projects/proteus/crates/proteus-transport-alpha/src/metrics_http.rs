@@ -1804,13 +1804,23 @@ pub fn render_full_v11(
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
-        // /healthz now consults three gates:
+        // /healthz now consults FOUR gates (in priority order, first
+        // failure wins the 503 reason string):
         //   1. `alive` — accept loop bound the listener (set once
         //      at startup, flipped to false during graceful drain).
-        //   2. `last_periodic_self_test_passed` — most recent
+        //   2. **TLS cert NOT expired** — when a TLS acceptor is
+        //      wired AND the leaf cert's notAfter has passed, every
+        //      future handshake will fail before Proteus even sees
+        //      the bytes. Returning 200 OK here would keep load
+        //      balancers steering traffic to a guaranteed-failing
+        //      backend until the next scrape interval; returning
+        //      503 immediately drains the instance. Reason string:
+        //      `tls_cert_expired`. Skipped when the operator hasn't
+        //      configured TLS (raw-TCP dev mode).
+        //   3. `last_periodic_self_test_passed` — most recent
         //      background self-test outcome (true by default; set
         //      false by the periodic task on a failed cycle).
-        //   3. Staleness — if the periodic interval is configured
+        //   4. Staleness — if the periodic interval is configured
         //      (>0) AND the last successful test is more than
         //      3× interval ago, treat as failed even if the gauge
         //      still says true. Catches a hung self-test task /
@@ -1822,6 +1832,28 @@ pub fn render_full_v11(
         // instance instead of waiting for real users to hit the
         // failure.
         let alive = metrics.alive.load(Ordering::Relaxed);
+        // Gate 2: TLS cert expiry. We only consider HARD-expired
+        // (notAfter < now); the "<14 day warning" lives in /diagnose,
+        // not /healthz — load balancers shouldn't drain instances
+        // that are about-to-renew, just instances that are
+        // currently-broken.
+        let tls_expired = if let Some(ra) = tls_acceptor {
+            if let Some(not_after) = ra.leaf_not_after() {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                not_after < now
+            } else {
+                // notAfter not parseable — treat as "we don't know,
+                // assume operator wired keys correctly" (NOT
+                // expired). The /diagnose render_diagnose_v4 path
+                // surfaces the parse failure separately.
+                false
+            }
+        } else {
+            false
+        };
         let periodic_passed = metrics
             .last_periodic_self_test_passed
             .load(Ordering::Relaxed);
@@ -1849,13 +1881,23 @@ pub fn render_full_v11(
         } else {
             false
         };
-        if alive && periodic_passed && !stale {
+        if alive && !tls_expired && periodic_passed && !stale {
             ("HTTP/1.1 200 OK\r\n", "text/plain", "alive\n".to_string())
         } else if !alive {
             (
                 "HTTP/1.1 503 Service Unavailable\r\n",
                 "text/plain",
                 "dead\n".to_string(),
+            )
+        } else if tls_expired {
+            // First-failure-wins ordering puts cert expiry BEFORE
+            // self-test result: if the cert is dead, the self-test
+            // is going to fail too, and the cert message is the
+            // actionable root cause.
+            (
+                "HTTP/1.1 503 Service Unavailable\r\n",
+                "text/plain",
+                "tls_cert_expired\n".to_string(),
             )
         } else if !periodic_passed {
             (
@@ -3317,5 +3359,201 @@ mod tests {
             body.contains("proteus_tls_reload_succeeded_total 1"),
             "wrong succeeded in body: {body}"
         );
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // /healthz TLS-expiry gate
+    // ────────────────────────────────────────────────────────────
+
+    /// Helper: build a synthetic ReloadableAcceptor with a caller-
+    /// supplied notAfter so we can drive the /healthz gate to
+    /// expired / not-expired states without minting a real cert
+    /// with matching wall-clock expiry.
+    fn synthetic_acceptor_with_not_after(not_after_unix: i64) -> crate::tls::ReloadableAcceptor {
+        // We still need a working TlsAcceptor underneath — mint
+        // one as a normal self-signed (whose own notAfter is in
+        // the future, ~1 year), then OVERRIDE the gauge via the
+        // test-only constructor.
+        let (real, _) = mint_tls_acceptor_with_chain();
+        let inner = real.current();
+        crate::tls::ReloadableAcceptor::with_leaf_not_after_for_testing(inner, not_after_unix)
+    }
+
+    #[test]
+    fn healthz_503_when_tls_cert_is_expired() {
+        // alive=true, self-test passing, but cert notAfter is 2
+        // days in the past → /healthz must 503 with
+        // `tls_cert_expired` body. Without this gate, every
+        // future TLS handshake would fail and the load balancer
+        // would keep steering traffic to a guaranteed-broken
+        // instance.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // 2 days ago.
+        let acceptor = synthetic_acceptor_with_not_after(now - 2 * 86_400);
+        let (status, _ctype, body) = render_full_v11(
+            "GET /healthz HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(body, "tls_cert_expired\n");
+    }
+
+    #[test]
+    fn healthz_200_when_tls_cert_is_valid_into_the_future() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // 30 days in the future.
+        let acceptor = synthetic_acceptor_with_not_after(now + 30 * 86_400);
+        let (status, _ctype, body) = render_full_v11(
+            "GET /healthz HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "alive\n");
+    }
+
+    #[test]
+    fn healthz_tls_expired_takes_priority_over_self_test_failed() {
+        // Both gates would 503; the TLS-expiry reason wins
+        // because cert death is the actionable root cause.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        // Self-test ALSO failed.
+        m.last_periodic_self_test_passed
+            .store(false, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let acceptor = synthetic_acceptor_with_not_after(now - 60);
+        let (status, _ctype, body) = render_full_v11(
+            "GET /healthz HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(
+            body, "tls_cert_expired\n",
+            "expired cert is the actionable root cause; must win the reason string"
+        );
+    }
+
+    #[test]
+    fn healthz_503_dead_takes_priority_over_tls_expired() {
+        // alive=false → "dead\n" regardless of cert state.
+        // alive is the strongest signal.
+        let m = ServerMetrics::default();
+        m.alive.store(false, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let acceptor = synthetic_acceptor_with_not_after(now - 60);
+        let (status, _ctype, body) = render_full_v11(
+            "GET /healthz HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(status, "HTTP/1.1 503 Service Unavailable\r\n");
+        assert_eq!(body, "dead\n");
+    }
+
+    #[test]
+    fn healthz_ignores_tls_acceptor_with_unknown_not_after() {
+        // When ReloadableAcceptor was built without expiry
+        // tracking (the legacy `new` constructor), leaf_not_after()
+        // returns None. /healthz must NOT 503 — it has no signal
+        // to act on, and treating "unknown" as "expired" would
+        // fail-closed on raw-TCP dev mode + on operators who
+        // built with the old API.
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.last_periodic_self_test_passed
+            .store(true, Ordering::Relaxed);
+        // Build with i64::MIN sentinel — leaf_not_after returns None.
+        let (real, _) = mint_tls_acceptor_with_chain();
+        let inner = real.current();
+        let acceptor =
+            crate::tls::ReloadableAcceptor::with_leaf_not_after_for_testing(inner, i64::MIN);
+        assert!(acceptor.leaf_not_after().is_none());
+        let (status, _ctype, body) = render_full_v11(
+            "GET /healthz HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert_eq!(body, "alive\n");
     }
 }
