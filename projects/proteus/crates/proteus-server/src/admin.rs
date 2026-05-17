@@ -90,6 +90,22 @@ pub struct MetricsSnapshot {
     /// SIGHUP-failure signal operators alert on. Sourced from
     /// `proteus_tls_reload_succeeded_total`.
     pub tls_reload_succeeded: Option<u64>,
+    /// **SIGHUP firewall / rate-limit / handshake-budget reload
+    /// counters.** Each pair has the same `attempts - succeeded`
+    /// alert semantics as `tls_reload`. Zero-valued when no SIGHUP
+    /// has happened OR when the YAML doesn't have the corresponding
+    /// section configured (the *_attempts counter is bumped per
+    /// SIGHUP regardless, but `_succeeded` only bumps when the
+    /// section was actually applicable). Operators alert on
+    /// `attempts - succeeded > 0` to catch silent SIGHUP failures.
+    pub firewall_reload_attempts: u64,
+    pub firewall_reload_succeeded: u64,
+    pub rate_limit_reload_attempts: u64,
+    pub rate_limit_reload_succeeded: u64,
+    pub user_rate_limit_reload_attempts: u64,
+    pub user_rate_limit_reload_succeeded: u64,
+    pub handshake_budget_reload_attempts: u64,
+    pub handshake_budget_reload_succeeded: u64,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -235,6 +251,30 @@ impl MetricsSnapshot {
                 }
                 "proteus_tls_reload_succeeded_total" => {
                     s.tls_reload_succeeded = Some(v);
+                }
+                "proteus_firewall_reload_attempts_total" => {
+                    s.firewall_reload_attempts = v;
+                }
+                "proteus_firewall_reload_succeeded_total" => {
+                    s.firewall_reload_succeeded = v;
+                }
+                "proteus_rate_limit_reload_attempts_total" => {
+                    s.rate_limit_reload_attempts = v;
+                }
+                "proteus_rate_limit_reload_succeeded_total" => {
+                    s.rate_limit_reload_succeeded = v;
+                }
+                "proteus_user_rate_limit_reload_attempts_total" => {
+                    s.user_rate_limit_reload_attempts = v;
+                }
+                "proteus_user_rate_limit_reload_succeeded_total" => {
+                    s.user_rate_limit_reload_succeeded = v;
+                }
+                "proteus_handshake_budget_reload_attempts_total" => {
+                    s.handshake_budget_reload_attempts = v;
+                }
+                "proteus_handshake_budget_reload_succeeded_total" => {
+                    s.handshake_budget_reload_succeeded = v;
                 }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
@@ -392,6 +432,59 @@ impl MetricsSnapshot {
             Some(v) => s.push_str(&v.to_string()),
             None => s.push_str("null"),
         }
+        // SIGHUP reload counters for firewall + rate limits.
+        // Always present as concrete u64 (zero-valued at startup);
+        // operators script `attempts - succeeded > 0` to alert on
+        // silent SIGHUP failures the same way they would for the
+        // existing TLS reload counters above.
+        push_json_u64(
+            &mut s,
+            "firewall_reload_attempts",
+            self.firewall_reload_attempts,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "firewall_reload_succeeded",
+            self.firewall_reload_succeeded,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "rate_limit_reload_attempts",
+            self.rate_limit_reload_attempts,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "rate_limit_reload_succeeded",
+            self.rate_limit_reload_succeeded,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "user_rate_limit_reload_attempts",
+            self.user_rate_limit_reload_attempts,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "user_rate_limit_reload_succeeded",
+            self.user_rate_limit_reload_succeeded,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "handshake_budget_reload_attempts",
+            self.handshake_budget_reload_attempts,
+            false,
+        );
+        push_json_u64(
+            &mut s,
+            "handshake_budget_reload_succeeded",
+            self.handshake_budget_reload_succeeded,
+            false,
+        );
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -589,6 +682,56 @@ impl fmt::Display for MetricsSnapshot {
                     format!("{att} ({suc} ok)")
                 };
                 row!("reload_attempts_total", label)?;
+            }
+            writeln!(f)?;
+        }
+
+        // SIGHUP reload block for firewall + 3 rate-limit sections.
+        // Quiet-by-default: only rendered after the first SIGHUP so
+        // operators who never use SIGHUP don't see noise. Each pair
+        // formats as `attempts (succeeded ok[, failed missing])`
+        // where "missing" means the operator SIGHUPed but the
+        // section either isn't in config OR the matching limiter
+        // wasn't installed at startup (= silent reload failure).
+        let any_reload = self.firewall_reload_attempts
+            + self.rate_limit_reload_attempts
+            + self.user_rate_limit_reload_attempts
+            + self.handshake_budget_reload_attempts
+            > 0;
+        if any_reload {
+            writeln!(f, " SIGHUP reloads")?;
+            for (label, att, suc) in [
+                (
+                    "firewall",
+                    self.firewall_reload_attempts,
+                    self.firewall_reload_succeeded,
+                ),
+                (
+                    "rate_limit",
+                    self.rate_limit_reload_attempts,
+                    self.rate_limit_reload_succeeded,
+                ),
+                (
+                    "user_rate_limit",
+                    self.user_rate_limit_reload_attempts,
+                    self.user_rate_limit_reload_succeeded,
+                ),
+                (
+                    "handshake_budget",
+                    self.handshake_budget_reload_attempts,
+                    self.handshake_budget_reload_succeeded,
+                ),
+            ] {
+                if att == 0 && suc == 0 {
+                    continue;
+                }
+                let missing = att.saturating_sub(suc);
+                let cell = if missing > 0 {
+                    format!("{att} ({suc} ok, {missing} missing — section not in config OR no limiter installed at startup)")
+                } else {
+                    format!("{att} ({suc} ok)")
+                };
+                row!(label, cell)?;
             }
             writeln!(f)?;
         }
@@ -2162,6 +2305,142 @@ proteus_tls_reload_succeeded_total 3\n";
         assert!(
             !t.contains(" TLS cert"),
             "should not show TLS block in:\n{t}"
+        );
+    }
+
+    // ----- New SIGHUP reload counter tests (firewall + 3 limiters) -----
+
+    /// Parser maps each of the 8 new counter series to the matching
+    /// MetricsSnapshot field.
+    #[test]
+    fn snapshot_parses_all_sighup_reload_counters() {
+        let body = "\
+proteus_up 1\n\
+proteus_firewall_reload_attempts_total 5\n\
+proteus_firewall_reload_succeeded_total 4\n\
+proteus_rate_limit_reload_attempts_total 5\n\
+proteus_rate_limit_reload_succeeded_total 3\n\
+proteus_user_rate_limit_reload_attempts_total 5\n\
+proteus_user_rate_limit_reload_succeeded_total 5\n\
+proteus_handshake_budget_reload_attempts_total 5\n\
+proteus_handshake_budget_reload_succeeded_total 0\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.firewall_reload_attempts, 5);
+        assert_eq!(s.firewall_reload_succeeded, 4);
+        assert_eq!(s.rate_limit_reload_attempts, 5);
+        assert_eq!(s.rate_limit_reload_succeeded, 3);
+        assert_eq!(s.user_rate_limit_reload_attempts, 5);
+        assert_eq!(s.user_rate_limit_reload_succeeded, 5);
+        assert_eq!(s.handshake_budget_reload_attempts, 5);
+        assert_eq!(s.handshake_budget_reload_succeeded, 0);
+    }
+
+    /// All 8 fields default to 0 when their series are absent (e.g.
+    /// scraping an older server). The parser must not insert them
+    /// into `other` — they're dedicated fields now.
+    #[test]
+    fn snapshot_sighup_reload_counters_default_zero_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.firewall_reload_attempts, 0);
+        assert_eq!(s.firewall_reload_succeeded, 0);
+        assert_eq!(s.rate_limit_reload_attempts, 0);
+        assert_eq!(s.rate_limit_reload_succeeded, 0);
+        assert_eq!(s.user_rate_limit_reload_attempts, 0);
+        assert_eq!(s.user_rate_limit_reload_succeeded, 0);
+        assert_eq!(s.handshake_budget_reload_attempts, 0);
+        assert_eq!(s.handshake_budget_reload_succeeded, 0);
+        assert!(
+            !s.other
+                .contains_key("proteus_firewall_reload_attempts_total"),
+            "reload counters must be dedicated fields, not in 'other'"
+        );
+    }
+
+    /// JSON output emits all 8 new fields as bare u64 (always
+    /// present, never null — distinguishes from the TLS counters
+    /// which are Option<u64>).
+    #[test]
+    fn snapshot_json_always_emits_sighup_reload_counters_as_u64() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        for k in [
+            "firewall_reload_attempts",
+            "firewall_reload_succeeded",
+            "rate_limit_reload_attempts",
+            "rate_limit_reload_succeeded",
+            "user_rate_limit_reload_attempts",
+            "user_rate_limit_reload_succeeded",
+            "handshake_budget_reload_attempts",
+            "handshake_budget_reload_succeeded",
+        ] {
+            assert!(
+                j.contains(&format!(r#""{k}":0"#)),
+                "JSON must contain {k}:0; got: {j}"
+            );
+        }
+    }
+
+    /// JSON reflects parsed values.
+    #[test]
+    fn snapshot_json_reflects_sighup_reload_values() {
+        let body = "\
+proteus_up 1\n\
+proteus_firewall_reload_attempts_total 12\n\
+proteus_firewall_reload_succeeded_total 12\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(j.contains(r#""firewall_reload_attempts":12"#), "{j}");
+        assert!(j.contains(r#""firewall_reload_succeeded":12"#), "{j}");
+    }
+
+    /// Text output omits the SIGHUP reload block when no SIGHUP has
+    /// happened (steady-state cleanliness — operators who never
+    /// reload don't see the section).
+    #[test]
+    fn snapshot_text_omits_sighup_reload_block_when_no_reloads() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            !t.contains(" SIGHUP reloads"),
+            "quiet snapshot must omit SIGHUP block:\n{t}"
+        );
+    }
+
+    /// Text output renders the block when any of the 4 sections has
+    /// a non-zero attempt counter.
+    #[test]
+    fn snapshot_text_renders_sighup_reload_block_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_firewall_reload_attempts_total 3\n\
+proteus_firewall_reload_succeeded_total 3\n\
+proteus_rate_limit_reload_attempts_total 3\n\
+proteus_rate_limit_reload_succeeded_total 3\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains(" SIGHUP reloads"), "{t}");
+        assert!(t.contains("firewall"), "{t}");
+        assert!(t.contains("3 (3 ok)"), "{t}");
+        // user_rate_limit had zero attempts → not rendered.
+        assert!(!t.contains("user_rate_limit"), "{t}");
+    }
+
+    /// Text output flags the "missing" gap when attempts > succeeded
+    /// — the silent SIGHUP failure signal operators alert on.
+    #[test]
+    fn snapshot_text_flags_missing_sighup_reload_outcomes() {
+        let body = "\
+proteus_up 1\n\
+proteus_rate_limit_reload_attempts_total 4\n\
+proteus_rate_limit_reload_succeeded_total 0\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            t.contains("4 (0 ok, 4 missing"),
+            "expected '4 (0 ok, 4 missing' marker for silent SIGHUP failure: {t}"
         );
     }
 }

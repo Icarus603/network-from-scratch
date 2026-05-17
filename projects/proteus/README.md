@@ -246,6 +246,27 @@ bypassing the operator's `bootstrap_dns: direct_ip` policy):
 rate(proteus_client_bootstrap_via_system_resolver_total[5m]) > 0
 ```
 
+PromQL example — alert when **any** server-side SIGHUP reload
+silently failed (firewall edit ignored due to parse error, or a
+rate-limit section in YAML but no limiter installed at startup):
+
+```promql
+(proteus_firewall_reload_attempts_total
+   - proteus_firewall_reload_succeeded_total) > 0
+or
+(proteus_rate_limit_reload_attempts_total
+   - proteus_rate_limit_reload_succeeded_total) > 0
+or
+(proteus_user_rate_limit_reload_attempts_total
+   - proteus_user_rate_limit_reload_succeeded_total) > 0
+or
+(proteus_handshake_budget_reload_attempts_total
+   - proteus_handshake_budget_reload_succeeded_total) > 0
+```
+
+Each pair has the same shape + semantics as `proteus_tls_reload_*`
+— operators get consistent alerting across all 5 hot-reload paths.
+
 ### SIGHUP-driven `server_endpoints` hot-reload
 
 Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,

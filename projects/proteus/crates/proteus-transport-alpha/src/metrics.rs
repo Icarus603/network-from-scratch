@@ -199,6 +199,32 @@ pub struct ServerMetrics {
     /// In-flight session count (incremented on accept, decremented on
     /// session completion). Exported as a Prometheus gauge.
     pub in_flight_sessions: AtomicU64,
+    /// **SIGHUP firewall reload counters.** The server's SIGHUP
+    /// handler re-reads the YAML, rebuilds the CIDR firewall, and
+    /// hot-swaps it. Operators have always seen the TLS-reload
+    /// success counter on `/metrics` but NOT the firewall reload
+    /// counter — meaning they couldn't tell whether SIGHUP actually
+    /// applied their `firewall:` block edit. A non-zero
+    /// `firewall_reload_attempts - firewall_reload_succeeded`
+    /// surfaces YAML-parse errors in the new firewall block.
+    pub firewall_reload_attempts: AtomicU64,
+    pub firewall_reload_succeeded: AtomicU64,
+    /// **SIGHUP per-IP rate-limit reload counters.** Same shape +
+    /// same operator value as firewall. `reload_attempts` bumps on
+    /// every SIGHUP that has a `rate_limit:` block in the new YAML;
+    /// `reload_succeeded` bumps only when the existing per-IP
+    /// limiter was installed at startup (operator must restart to
+    /// install a NEW limiter — config docstring covers this).
+    pub rate_limit_reload_attempts: AtomicU64,
+    pub rate_limit_reload_succeeded: AtomicU64,
+    /// **SIGHUP per-user rate-limit reload counters.** Same pattern
+    /// as per-IP rate limit.
+    pub user_rate_limit_reload_attempts: AtomicU64,
+    pub user_rate_limit_reload_succeeded: AtomicU64,
+    /// **SIGHUP global handshake-budget reload counters.** Same
+    /// pattern.
+    pub handshake_budget_reload_attempts: AtomicU64,
+    pub handshake_budget_reload_succeeded: AtomicU64,
     /// `/healthz` flag — process is alive and event loop running.
     /// Set to `true` once the listener is bound; never flipped back.
     pub alive: AtomicBool,
@@ -232,6 +258,14 @@ impl Default for ServerMetrics {
             abuse_alerts_rate_limit: AtomicU64::new(0),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
+            firewall_reload_attempts: AtomicU64::new(0),
+            firewall_reload_succeeded: AtomicU64::new(0),
+            rate_limit_reload_attempts: AtomicU64::new(0),
+            rate_limit_reload_succeeded: AtomicU64::new(0),
+            user_rate_limit_reload_attempts: AtomicU64::new(0),
+            user_rate_limit_reload_succeeded: AtomicU64::new(0),
+            handshake_budget_reload_attempts: AtomicU64::new(0),
+            handshake_budget_reload_succeeded: AtomicU64::new(0),
             // Default to "not alive, not ready". The accept loop flips
             // alive→true once it binds; the operator flips ready→true
             // once they're satisfied the process has warmed up.
@@ -327,7 +361,31 @@ impl ServerMetrics {
              proteus_up {}\n\
              # HELP proteus_ready 1 if the server is accepting new traffic, 0 otherwise.\n\
              # TYPE proteus_ready gauge\n\
-             proteus_ready {}\n",
+             proteus_ready {}\n\
+             # HELP proteus_firewall_reload_attempts_total SIGHUP-driven firewall reload attempts.\n\
+             # TYPE proteus_firewall_reload_attempts_total counter\n\
+             proteus_firewall_reload_attempts_total {}\n\
+             # HELP proteus_firewall_reload_succeeded_total Firewall reloads that successfully parsed + swapped.\n\
+             # TYPE proteus_firewall_reload_succeeded_total counter\n\
+             proteus_firewall_reload_succeeded_total {}\n\
+             # HELP proteus_rate_limit_reload_attempts_total SIGHUP-driven per-IP rate-limit reload attempts.\n\
+             # TYPE proteus_rate_limit_reload_attempts_total counter\n\
+             proteus_rate_limit_reload_attempts_total {}\n\
+             # HELP proteus_rate_limit_reload_succeeded_total Per-IP rate-limit reloads that hot-swapped (requires the limiter to have been installed at startup).\n\
+             # TYPE proteus_rate_limit_reload_succeeded_total counter\n\
+             proteus_rate_limit_reload_succeeded_total {}\n\
+             # HELP proteus_user_rate_limit_reload_attempts_total SIGHUP-driven per-user rate-limit reload attempts.\n\
+             # TYPE proteus_user_rate_limit_reload_attempts_total counter\n\
+             proteus_user_rate_limit_reload_attempts_total {}\n\
+             # HELP proteus_user_rate_limit_reload_succeeded_total Per-user rate-limit reloads that hot-swapped.\n\
+             # TYPE proteus_user_rate_limit_reload_succeeded_total counter\n\
+             proteus_user_rate_limit_reload_succeeded_total {}\n\
+             # HELP proteus_handshake_budget_reload_attempts_total SIGHUP-driven global handshake-budget reload attempts.\n\
+             # TYPE proteus_handshake_budget_reload_attempts_total counter\n\
+             proteus_handshake_budget_reload_attempts_total {}\n\
+             # HELP proteus_handshake_budget_reload_succeeded_total Global handshake-budget reloads that hot-swapped.\n\
+             # TYPE proteus_handshake_budget_reload_succeeded_total counter\n\
+             proteus_handshake_budget_reload_succeeded_total {}\n",
             s(&self.sessions_accepted),
             s(&self.handshakes_succeeded),
             s(&self.handshakes_failed),
@@ -351,6 +409,14 @@ impl ServerMetrics {
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),
             u64::from(self.ready.load(Ordering::Relaxed)),
+            s(&self.firewall_reload_attempts),
+            s(&self.firewall_reload_succeeded),
+            s(&self.rate_limit_reload_attempts),
+            s(&self.rate_limit_reload_succeeded),
+            s(&self.user_rate_limit_reload_attempts),
+            s(&self.user_rate_limit_reload_succeeded),
+            s(&self.handshake_budget_reload_attempts),
+            s(&self.handshake_budget_reload_succeeded),
         )
     }
 }
@@ -385,6 +451,50 @@ mod tests {
         assert!(text.contains("proteus_sessions_accepted_total 7"));
         assert!(text.contains("proteus_handshakes_succeeded_total 5"));
         assert!(text.contains("# TYPE proteus_handshakes_failed_total counter"));
+    }
+
+    /// SIGHUP reload counters are always emitted at zero on a fresh
+    /// ServerMetrics — operators script `rate(...)` and need the
+    /// series to exist from t=0 (no absent-counter gaps).
+    #[test]
+    fn server_prometheus_always_emits_sighup_reload_counters() {
+        let m = ServerMetrics::default();
+        let text = m.prometheus();
+        for name in [
+            "proteus_firewall_reload_attempts_total",
+            "proteus_firewall_reload_succeeded_total",
+            "proteus_rate_limit_reload_attempts_total",
+            "proteus_rate_limit_reload_succeeded_total",
+            "proteus_user_rate_limit_reload_attempts_total",
+            "proteus_user_rate_limit_reload_succeeded_total",
+            "proteus_handshake_budget_reload_attempts_total",
+            "proteus_handshake_budget_reload_succeeded_total",
+        ] {
+            assert!(
+                text.contains(&format!("{name} 0\n")),
+                "missing zero-valued counter {name} in:\n{text}"
+            );
+            assert!(
+                text.contains(&format!("# TYPE {name} counter")),
+                "missing TYPE row for {name} in:\n{text}"
+            );
+        }
+    }
+
+    /// Bumping the reload counters reflects in the Prometheus output.
+    #[test]
+    fn server_prometheus_reflects_sighup_reload_counter_bumps() {
+        let m = ServerMetrics::default();
+        m.firewall_reload_attempts.fetch_add(3, Ordering::Relaxed);
+        m.firewall_reload_succeeded.fetch_add(3, Ordering::Relaxed);
+        m.rate_limit_reload_attempts.fetch_add(3, Ordering::Relaxed);
+        m.rate_limit_reload_succeeded
+            .fetch_add(2, Ordering::Relaxed);
+        let text = m.prometheus();
+        assert!(text.contains("proteus_firewall_reload_attempts_total 3\n"));
+        assert!(text.contains("proteus_firewall_reload_succeeded_total 3\n"));
+        assert!(text.contains("proteus_rate_limit_reload_attempts_total 3\n"));
+        assert!(text.contains("proteus_rate_limit_reload_succeeded_total 2\n"));
     }
 
     #[test]

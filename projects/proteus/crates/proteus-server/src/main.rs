@@ -685,6 +685,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let config_path = config_path.to_path_buf();
         let tls_cfg_path = cfg.tls.clone();
         let ctx_for_reload = Arc::clone(&ctx);
+        // Hold a metrics ref inside the SIGHUP task so it can bump
+        // the 8 new reload counters (4 sections × {attempts,
+        // succeeded}). Existing TLS-reload counters already live on
+        // `reloadable_acceptor`; this brings the firewall + 3 rate-
+        // limit reloads to the same observability bar.
+        let metrics_for_reload = Arc::clone(&metrics);
         tokio::spawn(async move {
             let mut sighup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -758,6 +764,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 // ----- 2. Firewall + rate-limit reload (re-read full
                 //          YAML so the new rules come from the
                 //          operator's edit) -----
+                //
+                // Each reload bumps its own attempts_total counter
+                // upfront (so an operator who SIGHUPed knows the
+                // signal reached us, even if the YAML re-read failed
+                // and we never reached the per-section logic).
+                // Per-section *_reload_succeeded_total is bumped
+                // only on successful hot-swap — operators alert on
+                // `attempts - succeeded` to catch silent reload
+                // failures.
+                use std::sync::atomic::Ordering;
+                let m = &metrics_for_reload;
+                m.firewall_reload_attempts.fetch_add(1, Ordering::Relaxed);
+                m.rate_limit_reload_attempts.fetch_add(1, Ordering::Relaxed);
+                m.user_rate_limit_reload_attempts
+                    .fetch_add(1, Ordering::Relaxed);
+                m.handshake_budget_reload_attempts
+                    .fetch_add(1, Ordering::Relaxed);
                 match config::ServerConfig::load(&config_path).await {
                     Ok(fresh_cfg) => {
                         // 2a. Firewall.
@@ -766,6 +789,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 Ok(new_fw) => {
                                     let rules = new_fw.rule_count();
                                     firewall_handle.reload(new_fw);
+                                    m.firewall_reload_succeeded.fetch_add(1, Ordering::Relaxed);
                                     info!(rules, "firewall rules reloaded");
                                 }
                                 Err(e) => {
@@ -776,6 +800,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 // Config now has no firewall block — clear the rules.
                                 firewall_handle
                                     .reload(proteus_transport_alpha::firewall::Firewall::new());
+                                m.firewall_reload_succeeded.fetch_add(1, Ordering::Relaxed);
                                 info!("firewall block removed from config; rules cleared");
                             }
                         }
@@ -783,6 +808,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // 2b. Per-IP rate-limit hot-swap.
                         if let Some(rl) = fresh_cfg.rate_limit.as_ref() {
                             if ctx_for_reload.reload_rate_limit(rl.burst, rl.refill_per_sec) {
+                                m.rate_limit_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                                 info!(
                                     burst = rl.burst,
                                     refill = rl.refill_per_sec,
@@ -799,6 +826,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // 2c. Per-user rate-limit hot-swap.
                         if let Some(u) = fresh_cfg.user_rate_limit.as_ref() {
                             if ctx_for_reload.reload_user_rate_limit(u.burst, u.refill_per_sec) {
+                                m.user_rate_limit_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                                 info!(
                                     burst = u.burst,
                                     refill = u.refill_per_sec,
@@ -815,6 +844,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // 2d. Global handshake-budget hot-swap.
                         if let Some(b) = fresh_cfg.handshake_budget.as_ref() {
                             if ctx_for_reload.reload_handshake_budget(b.burst, b.refill_per_sec) {
+                                m.handshake_budget_reload_succeeded
+                                    .fetch_add(1, Ordering::Relaxed);
                                 info!(
                                     burst = b.burst,
                                     refill = b.refill_per_sec,
