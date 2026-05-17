@@ -170,6 +170,27 @@ pub struct PerfProfile {
     /// jumbo-frame path can raise this in `server.yaml` /
     /// `client.yaml` (`beta_mtu_upper_bound: 9000`).
     pub mtu_upper_bound: u16,
+    /// Per-stream receive window override in bytes. `None` keeps the
+    /// production default (64 MiB). `Some(n)` overrides — used by
+    /// `proteus-bench` to push single-stream throughput past the
+    /// 64 MiB window stall documented in the README throughput
+    /// table.
+    ///
+    /// **Why expose this as an override, not a config knob**: in
+    /// production, 64 MiB / RTT is the right sizing for the
+    /// transcontinental long-fat-pipe paths Proteus targets. Bumping
+    /// it higher is bench-only — you're trading buffer memory for
+    /// the ability to keep one stream saturated past the natural
+    /// flow-control gate. The bench harness sweeps this to find
+    /// where BBR's bandwidth estimate stops being the bottleneck;
+    /// production deploys leave the default.
+    ///
+    /// Default: `None` (= 64 MiB).
+    pub stream_receive_window_override: Option<u32>,
+    /// Per-connection receive window override in bytes. Mirrors the
+    /// per-stream override above. Bench-only; production defaults to
+    /// 256 MiB.
+    pub connection_receive_window_override: Option<u32>,
 }
 
 impl Default for PerfProfile {
@@ -192,6 +213,10 @@ impl Default for PerfProfile {
             // quinn's current default but pins it so a future quinn
             // upgrade can't silently regress paths that depend on it.
             mtu_upper_bound: 1452,
+            // BENCH-ONLY overrides — None means "keep the 64/256 MiB
+            // production defaults wired into apply_perf_tuning_with".
+            stream_receive_window_override: None,
+            connection_receive_window_override: None,
         }
     }
 }
@@ -210,12 +235,22 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         .datagram_send_buffer_size(8 * 1024 * 1024)
         // Per-stream receive window — bytes the SENDER may have in
         // flight on ONE stream before the receiver acks. 64 MiB
-        // sustains 1 Gbit/s at ~500 ms RTT.
-        .stream_receive_window(quinn::VarInt::from_u32(64 * 1024 * 1024))
+        // sustains 1 Gbit/s at ~500 ms RTT. Bench can override via
+        // `PerfProfile.stream_receive_window_override`.
+        .stream_receive_window(quinn::VarInt::from_u32(
+            profile
+                .stream_receive_window_override
+                .unwrap_or(64 * 1024 * 1024),
+        ))
         // Per-connection receive window — sum across all streams.
         // 4× the per-stream limit so a future multi-stream config
-        // (M3+) doesn't starve.
-        .receive_window(quinn::VarInt::from_u32(256 * 1024 * 1024))
+        // (M3+) doesn't starve. Bench can override via
+        // `PerfProfile.connection_receive_window_override`.
+        .receive_window(quinn::VarInt::from_u32(
+            profile
+                .connection_receive_window_override
+                .unwrap_or(256 * 1024 * 1024),
+        ))
         // Per-stream send window — bytes the LOCAL sender will keep
         // buffered before back-pressuring writes. 8 MiB is a
         // sensible Linux-default-ish value.

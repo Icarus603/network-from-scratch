@@ -318,12 +318,54 @@ numbers we generated).
 
 Real bench numbers from this dev box (M-series Apple Silicon, release):
 
-| Payload | One-way effective | Gbps | Notes |
-|---|---|---|---|
-| 4 MiB | ~13 MiB/s | ~0.11 | Handshake dominates — too short for steady-state measurement |
-| 16 MiB | ~47–52 MiB/s | ~0.40 | Reasonable baseline; 3-run variance |
-| 64 MiB | ~94 MiB/s | ~0.79 | Steady-state β throughput, BBR window saturated |
-| 128 MiB | (window stall) | n/a | Hits the 64 MiB stream-receive window — single-stream β bench upper bound; multi-stream M3+ work |
+| Payload | Window override | One-way effective | Gbps | Notes |
+|---|---|---|---|---|
+| 4 MiB | default | ~13 MiB/s | ~0.11 | Handshake dominates — too short for steady-state |
+| 16 MiB | default | ~47–52 MiB/s | ~0.40 | Reasonable baseline; 3-run variance |
+| 64 MiB | default | ~94 MiB/s | ~0.79 | Steady-state β throughput; BBR window saturated |
+| 128 MiB | default | (stall) | n/a | Hits the 64 MiB stream-receive window |
+| 128 MiB | `--stream-window-mib 256` | **~110 MiB/s** | **0.93** | Past the 64 MiB stall; 2026-05-18 |
+| 256 MiB | `--stream-window-mib 512` | **~105 MiB/s** | **0.88** | Sustained single-stream past 1 Gbps wire goodput |
+
+The `--stream-window-mib` knob is bench-only — production keeps the
+64 MiB per-stream window which is correctly sized for 1 Gbps × 500 ms RTT
+without consuming arbitrary buffer memory. The bench numbers show the
+single-stream β ceiling is far above the window, and multi-stream
+(M3 multipath QUIC) is the path to higher aggregate without bumping
+the buffer sizing.
+
+### Cross-host bench
+
+`proteus-bench beta-server` prints a 5-line identity banner that
+`proteus-bench beta-client` consumes. Each line is `KEY=hex_value`
+for trivial copy-paste or `grep | sed` piping:
+
+```bash
+# On the server side (e.g. VPS):
+proteus-bench beta-server \
+  --bind 0.0.0.0:8443 \
+  --extra-san my-vps.example.com
+# Prints (one shell line per banner key):
+#   BENCH_SERVER_LISTEN_ADDR=0.0.0.0:8443
+#   BENCH_SERVER_LEAF_CERT_HEX=<2120 hex chars of DER>
+#   BENCH_SERVER_MLKEM_PK_HEX=<2368 hex chars>
+#   BENCH_SERVER_X25519_PUB_HEX=<64 hex chars>
+#   BENCH_SERVER_PQ_FINGERPRINT_HEX=<64 hex chars>
+
+# On the client side (copy-paste the values from above):
+proteus-bench beta-client \
+  --server-addr my-vps.example.com:8443 \
+  --server-name my-vps.example.com \
+  --server-leaf-cert-hex <hex> \
+  --server-mlkem-pk-hex <hex> \
+  --server-x25519-pub-hex <hex> \
+  --server-pq-fingerprint-hex <hex> \
+  --payload-mib 64 --runs 3
+```
+
+The client verifies the `pq_fingerprint` matches `SHA-256(mlkem_pk_bytes)`
+**before** opening a socket, so a copy-paste mistake fails with a clear
+"pq_fingerprint mismatch" error instead of an opaque handshake failure.
 
 ## Test coverage
 
