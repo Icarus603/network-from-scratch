@@ -100,15 +100,44 @@ pub struct InFlightGuard {
     /// on drop. None means "do not merge" (used by tests that don't
     /// want to mutate state).
     snapshot: Option<SessionMetricsSnapshot>,
+    /// Per-user accumulator + the user_id this guard's session
+    /// belongs to. When `Some`, the drop also records into the
+    /// per-user bandwidth tracker at the same moment as the
+    /// global merge. When `None`, behaves identically to the
+    /// pre-per-user code path (back-compat for tests + the
+    /// legacy `enter` constructor).
+    per_user: Option<(Arc<crate::per_user_bandwidth::PerUserBandwidth>, [u8; 8])>,
 }
 
 impl InFlightGuard {
     /// Construct the guard. Increments `in_flight_sessions` immediately.
+    /// Back-compat entry point — no per-user accounting.
     pub fn enter(server: Arc<ServerMetrics>, snapshot: SessionMetricsSnapshot) -> Self {
         server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
         Self {
             server,
             snapshot: Some(snapshot),
+            per_user: None,
+        }
+    }
+
+    /// Like [`Self::enter`] but ALSO records this session's
+    /// `(tx_bytes, rx_bytes)` against the supplied `user_id` in
+    /// the per-user bandwidth accumulator on drop. Operators
+    /// reading `/metrics` then see
+    /// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
+    /// climb in real time.
+    pub fn enter_with_per_user(
+        server: Arc<ServerMetrics>,
+        snapshot: SessionMetricsSnapshot,
+        per_user: Arc<crate::per_user_bandwidth::PerUserBandwidth>,
+        user_id: [u8; 8],
+    ) -> Self {
+        server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
+        Self {
+            server,
+            snapshot: Some(snapshot),
+            per_user: Some((per_user, user_id)),
         }
     }
 }
@@ -117,6 +146,13 @@ impl Drop for InFlightGuard {
     fn drop(&mut self) {
         if let Some(snap) = self.snapshot.take() {
             self.server.merge_session(&snap);
+            if let Some((pu, uid)) = self.per_user.take() {
+                // Per-user record happens AT THE SAME MOMENT as
+                // the global merge, so operators never see drift
+                // between `proteus_tx_bytes_total` and the
+                // sum of `proteus_per_user_bytes_sent_total{...}`.
+                pu.record(uid, snap.tx_bytes, snap.rx_bytes);
+            }
         }
         self.server
             .in_flight_sessions
@@ -516,6 +552,35 @@ mod tests {
         server.merge_session(&session);
         assert_eq!(server.total_tx_bytes.load(Ordering::Relaxed), 20);
         assert_eq!(server.total_rx_bytes.load(Ordering::Relaxed), 40);
+    }
+
+    #[test]
+    fn in_flight_guard_with_per_user_records_at_drop() {
+        use crate::per_user_bandwidth::PerUserBandwidth;
+        let server = Arc::new(ServerMetrics::default());
+        let pu = Arc::new(PerUserBandwidth::new(4096));
+        let snap = SessionMetricsSnapshot {
+            tx_bytes: 1024,
+            rx_bytes: 2048,
+            ..SessionMetricsSnapshot::default()
+        };
+        {
+            let _g = InFlightGuard::enter_with_per_user(
+                Arc::clone(&server),
+                snap,
+                Arc::clone(&pu),
+                *b"alice001",
+            );
+        }
+        // Per-user counters bumped at drop.
+        let pu_snap = pu.snapshot();
+        assert_eq!(pu_snap.len(), 1);
+        assert_eq!(pu_snap[0].0, *b"alice001");
+        assert_eq!(pu_snap[0].1.tx, 1024);
+        assert_eq!(pu_snap[0].1.rx, 2048);
+        // Global server counters bumped at the same moment.
+        assert_eq!(server.total_tx_bytes.load(Ordering::Relaxed), 1024);
+        assert_eq!(server.total_rx_bytes.load(Ordering::Relaxed), 2048);
     }
 
     #[test]

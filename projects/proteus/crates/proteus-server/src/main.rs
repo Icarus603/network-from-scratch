@@ -490,6 +490,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         ));
     }
 
+    // Per-user bandwidth accumulator — bounded at 4096 distinct
+    // user_ids by default. Operators with > 4096 users in
+    // client_allowlist will see overflow attribution under the
+    // `__overflow__` bucket on /metrics; raising the cap is a
+    // future-config item (today it's a const because shipping the
+    // YAML knob is one more iteration and the default already
+    // covers typical personal-VPN-for-friends scale).
+    let per_user_bandwidth =
+        Arc::new(proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth::new(4096));
+    ctx = ctx.with_per_user_bandwidth(Arc::clone(&per_user_bandwidth));
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics
@@ -616,8 +627,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 option_env!("TARGET").unwrap_or(""),
             ),
         ));
+        let per_user_for_metrics = Some(Arc::clone(&per_user_bandwidth));
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v5(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v6(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -626,6 +638,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 tls_for_metrics,
                 config_presence_block,
                 process_info,
+                per_user_for_metrics,
             )
             .await
             {
@@ -1017,6 +1030,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 let metrics_beta = Arc::clone(&metrics);
                 let relay_cfg_beta = relay_cfg.clone();
                 let ctx_beta = Arc::clone(&ctx);
+                // Hold a second ctx Arc for the per-session
+                // closure so we can pull the per-user bandwidth
+                // accumulator off it on each session completion.
+                let ctx_beta_for_metrics = Arc::clone(&ctx);
                 let on_session_beta =
                     move |session: proteus_transport_alpha::session::AlphaSession<
                         quinn::RecvStream,
@@ -1024,6 +1041,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     >| {
                         let metrics = Arc::clone(&metrics_beta);
                         let relay_cfg = relay_cfg_beta.clone();
+                        let ctx_pu = Arc::clone(&ctx_beta_for_metrics);
                         async move {
                             metrics
                                 .sessions_accepted
@@ -1032,10 +1050,28 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let snap = session.metrics.snapshot();
-                            let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
-                                Arc::clone(&metrics),
-                                snap,
-                            );
+                            // Wire per-user bandwidth if both the
+                            // accumulator AND the session's user_id
+                            // are present — degrades gracefully to
+                            // the back-compat enter() when either
+                            // is missing.
+                            let _guard = match (
+                                ctx_pu.per_user_bandwidth().cloned(),
+                                session.user_id,
+                            ) {
+                                (Some(pu), Some(uid)) => {
+                                    proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
+                                        Arc::clone(&metrics),
+                                        snap,
+                                        pu,
+                                        uid,
+                                    )
+                                }
+                                _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
+                                    Arc::clone(&metrics),
+                                    snap,
+                                ),
+                            };
                             if let Err(e) = relay::handle_session(session, relay_cfg).await {
                                 warn!(error = %e, "β session terminated");
                             }
@@ -1061,9 +1097,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     > = {
         let metrics_tcp = Arc::clone(&metrics);
         let relay_cfg_tcp = relay_cfg.clone();
+        let ctx_tcp_for_metrics = Arc::clone(&ctx);
         let on_session_tcp = move |session: proteus_transport_alpha::session::AlphaSession| {
             let metrics = Arc::clone(&metrics_tcp);
             let relay_cfg = relay_cfg_tcp.clone();
+            let ctx_pu = Arc::clone(&ctx_tcp_for_metrics);
             async move {
                 metrics
                     .sessions_accepted
@@ -1073,12 +1111,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // RAII guard: increments in_flight_sessions; decrements
                 // AND merges per-session totals on drop, even if the
-                // handler future panics.
+                // handler future panics. Wires per-user accounting
+                // when both the accumulator + user_id are present.
                 let snap = session.metrics.snapshot();
-                let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
-                    Arc::clone(&metrics),
-                    snap,
-                );
+                let _guard = match (ctx_pu.per_user_bandwidth().cloned(), session.user_id) {
+                    (Some(pu), Some(uid)) => {
+                        proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
+                            Arc::clone(&metrics),
+                            snap,
+                            pu,
+                            uid,
+                        )
+                    }
+                    _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
+                        Arc::clone(&metrics),
+                        snap,
+                    ),
+                };
                 if let Err(e) = relay::handle_session(session, relay_cfg).await {
                     warn!(error = %e, "session terminated");
                 }
@@ -1088,6 +1137,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             Some(acceptor) => {
                 let metrics = Arc::clone(&metrics);
                 let relay_cfg_tls = relay_cfg.clone();
+                let ctx_tls_for_metrics = Arc::clone(&ctx);
                 let on_session_tls =
                     move |session: proteus_transport_alpha::session::AlphaSession<
                         tokio::io::ReadHalf<proteus_transport_alpha::tls::ServerStream>,
@@ -1095,6 +1145,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     >| {
                         let metrics = Arc::clone(&metrics);
                         let relay_cfg = relay_cfg_tls.clone();
+                        let ctx_pu = Arc::clone(&ctx_tls_for_metrics);
                         async move {
                             metrics
                                 .sessions_accepted
@@ -1103,10 +1154,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             let snap = session.metrics.snapshot();
-                            let _guard = proteus_transport_alpha::metrics::InFlightGuard::enter(
-                                Arc::clone(&metrics),
-                                snap,
-                            );
+                            let _guard = match (
+                                ctx_pu.per_user_bandwidth().cloned(),
+                                session.user_id,
+                            ) {
+                                (Some(pu), Some(uid)) => {
+                                    proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
+                                        Arc::clone(&metrics),
+                                        snap,
+                                        pu,
+                                        uid,
+                                    )
+                                }
+                                _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
+                                    Arc::clone(&metrics),
+                                    snap,
+                                ),
+                            };
                             if let Err(e) = relay::handle_session(session, relay_cfg).await {
                                 warn!(error = %e, "TLS session terminated");
                             }

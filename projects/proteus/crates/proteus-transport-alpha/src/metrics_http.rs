@@ -225,6 +225,40 @@ pub async fn serve_with_auth_full_v5(
     config_presence: Option<Arc<String>>,
     process_info: Option<Arc<crate::process_info::ProcessInfo>>,
 ) -> std::io::Result<()> {
+    // Back-compat shim — forwards to v6 with `per_user = None`.
+    serve_with_auth_full_v6(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        None,
+    )
+    .await
+}
+
+/// v6 of [`serve_with_auth_full`] — adds an optional
+/// `PerUserBandwidth` accumulator. When supplied, the `/metrics`
+/// exposition includes the
+/// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
+/// series + the `proteus_per_user_bandwidth_tracked_users` gauge.
+/// Operators query `topk(5, rate(proteus_per_user_bytes_sent_total[1m]))`
+/// to see who's hogging bandwidth in real time.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v6(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -232,6 +266,7 @@ pub async fn serve_with_auth_full_v5(
     let tls_observability = tls_acceptor.is_some();
     let config_presence_enabled = config_presence.is_some();
     let process_info_enabled = process_info.is_some();
+    let per_user_enabled = per_user.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -240,6 +275,7 @@ pub async fn serve_with_auth_full_v5(
         tls_observability,
         config_presence = config_presence_enabled,
         process_info = process_info_enabled,
+        per_user_bandwidth = per_user_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -251,6 +287,7 @@ pub async fn serve_with_auth_full_v5(
         let tls_acceptor = tls_acceptor.clone();
         let config_presence = config_presence.clone();
         let process_info = process_info.clone();
+        let per_user = per_user.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -260,6 +297,7 @@ pub async fn serve_with_auth_full_v5(
             tls_acceptor,
             config_presence,
             process_info,
+            per_user,
         ));
     }
 }
@@ -360,7 +398,7 @@ pub async fn serve_on_listener_full_v4(
 }
 
 /// v5 of [`serve_on_listener_full`] — adds the process-lifecycle
-/// block. See [`serve_with_auth_full_v5`] for rationale.
+/// block. Back-compat shim that forwards to v6 with `per_user = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_on_listener_full_v5(
     listener: TcpListener,
@@ -372,6 +410,34 @@ pub async fn serve_on_listener_full_v5(
     config_presence: Option<Arc<String>>,
     process_info: Option<Arc<crate::process_info::ProcessInfo>>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full_v6(
+        listener,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        None,
+    )
+    .await
+}
+
+/// v6 of [`serve_on_listener_full`] — adds the per-user
+/// bandwidth block. See [`serve_with_auth_full_v6`] for rationale.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_on_listener_full_v6(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
@@ -381,6 +447,7 @@ pub async fn serve_on_listener_full_v5(
         let tls_acceptor = tls_acceptor.clone();
         let config_presence = config_presence.clone();
         let process_info = process_info.clone();
+        let per_user = per_user.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
@@ -390,6 +457,7 @@ pub async fn serve_on_listener_full_v5(
             tls_acceptor,
             config_presence,
             process_info,
+            per_user,
         ));
     }
 }
@@ -404,6 +472,7 @@ async fn handle_connection(
     tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
     config_presence: Option<Arc<String>>,
     process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -411,7 +480,7 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v5(
+    let (status_line, content_type, body) = render_full_v6(
         head,
         &metrics,
         auth.as_ref(),
@@ -420,6 +489,7 @@ async fn handle_connection(
         tls_acceptor.as_ref(),
         config_presence.as_deref().map(String::as_str),
         process_info.as_deref(),
+        per_user.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -829,8 +899,8 @@ pub fn render_full_v4(
 
 /// v5 of [`render_full`] — adds optional process-lifecycle gauges
 /// (`proteus_process_start_unix_seconds`, `_uptime_seconds`,
-/// `proteus_build_info`). See [`serve_with_auth_full_v5`] for the
-/// rationale.
+/// `proteus_build_info`). Back-compat shim — forwards to v6 with
+/// `per_user = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v5(
@@ -842,6 +912,37 @@ pub fn render_full_v5(
     tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
     config_presence: Option<&str>,
     process_info: Option<&crate::process_info::ProcessInfo>,
+) -> (&'static str, &'static str, String) {
+    render_full_v6(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        None,
+    )
+}
+
+/// v6 of [`render_full`] — adds optional per-user bandwidth
+/// accumulator. When supplied, the `/metrics` body includes the
+/// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
+/// series. See [`serve_with_auth_full_v6`] for the operator
+/// rationale.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v6(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -882,6 +983,9 @@ pub fn render_full_v5(
             if !res.is_empty() {
                 body.push_str(&res.prometheus_with_prefix("proteus"));
             }
+        }
+        if let Some(pu) = per_user {
+            body.push_str(&pu.prometheus());
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -1368,6 +1472,89 @@ mod tests {
         );
         // v3-shaped series still there.
         assert!(body.contains("proteus_sessions_accepted_total"));
+    }
+
+    /// v6 with per_user supplied emits the per-user series in
+    /// the `/metrics` body alongside the rest of the dump.
+    #[test]
+    fn render_full_v6_emits_per_user_bytes_when_accumulator_supplied() {
+        use crate::per_user_bandwidth::PerUserBandwidth;
+        let m = ServerMetrics::default();
+        let pu = PerUserBandwidth::new(4096);
+        pu.record(*b"alice001", 1024, 2048);
+        pu.record(*b"bob00002", 512, 256);
+        let (status, _ctype, body) = render_full_v6(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&pu),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(
+            body.contains(r#"proteus_per_user_bytes_sent_total{user_id="alice001"} 1024"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"proteus_per_user_bytes_received_total{user_id="alice001"} 2048"#),
+            "{body}"
+        );
+        assert!(
+            body.contains(r#"proteus_per_user_bytes_sent_total{user_id="bob00002"} 512"#),
+            "{body}"
+        );
+        assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v6 with `None` per_user omits the per-user block entirely.
+    #[test]
+    fn render_full_v6_omits_per_user_block_when_accumulator_none() {
+        let m = ServerMetrics::default();
+        let (_status, _ctype, body) = render_full_v6(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !body.contains("proteus_per_user_bytes_sent_total"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("proteus_per_user_bandwidth_tracked_users"),
+            "{body}"
+        );
+    }
+
+    /// v5 with no per-user accumulator (the back-compat shim path)
+    /// should ALSO omit the per-user block — proves the shim is
+    /// transparent.
+    #[test]
+    fn render_full_v5_back_compat_shim_omits_per_user_block() {
+        let m = ServerMetrics::default();
+        let (_status, _ctype, body) = render_full_v5(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !body.contains("proteus_per_user_bytes_sent_total"),
+            "{body}"
+        );
     }
 
     /// v5 + process_info=Some triggers process_resources capture

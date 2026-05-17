@@ -321,6 +321,43 @@ Linux; macOS / Windows dev rigs see absent series, which PromQL's
 `absent()` correctly distinguishes from a zero value). Client
 emits the same shape under the `proteus_client_*` prefix.
 
+### Per-user bandwidth accounting (server)
+
+Server `/metrics` exposes per-user bandwidth counters tagged by
+the `user_id` matched at handshake — operators see who's using how
+much in real time:
+
+- `proteus_per_user_bytes_sent_total{user_id="alice001"}` (counter)
+- `proteus_per_user_bytes_received_total{user_id="alice001"}` (counter)
+- `proteus_per_user_bandwidth_tracked_users` (gauge — distinct
+  user_ids; cap = 4096 by default; overflow accumulates into
+  `user_id="__overflow__"`)
+
+PromQL recipes:
+
+```promql
+# Top 5 bandwidth users right now.
+topk(5, rate(proteus_per_user_bytes_sent_total[1m]))
+
+# User pushing > 100 MB/s — likely abuse / stolen credential.
+rate(proteus_per_user_bytes_sent_total[1m]) > 100 * 1024 * 1024
+
+# Asymmetric exfil: rx >> tx for one user — credential being
+# used to upload data, not browse.
+  rate(proteus_per_user_bytes_received_total[5m])
+/ rate(proteus_per_user_bytes_sent_total[5m]) > 10
+
+# Track-cap overflow — operator should raise max_users.
+proteus_per_user_bandwidth_tracked_users >= 4096
+```
+
+User-id rendering: ASCII-printable user_ids (e.g. `alice001`)
+render verbatim; non-printable or quote-containing ids fall back
+to `hex:<16hexchars>` for safety. The cap is a hard memory bound;
+beyond it, additional user_ids accumulate into `__overflow__` so
+bandwidth accounting stays complete even when individual
+attribution is lost.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

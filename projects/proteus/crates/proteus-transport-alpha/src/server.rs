@@ -356,6 +356,13 @@ pub struct ServerCtx {
     /// `user_rate_rejected` `threshold` times within `window`. Sibling
     /// to the byte-budget detector wired in the relay.
     abuse_detector_rate_limit: Option<Arc<crate::abuse_detector::AbuseDetector>>,
+    /// Optional per-user bandwidth accumulator. When set,
+    /// `InFlightGuard::drop` ALSO records this session's
+    /// `(tx_bytes, rx_bytes)` against the user_id matched at
+    /// handshake. Operators see real-time per-tenant bandwidth via
+    /// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
+    /// on `/metrics`. None = feature disabled (back-compat).
+    per_user_bandwidth: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
 }
 
 impl ServerCtx {
@@ -378,7 +385,28 @@ impl ServerCtx {
             handshake_budget: None,
             user_limiter: None,
             abuse_detector_rate_limit: None,
+            per_user_bandwidth: None,
         }
+    }
+
+    /// Install a per-user bandwidth accumulator. When set, every
+    /// session-completion path records `(tx_bytes, rx_bytes)`
+    /// against the session's user_id, exposed on `/metrics` via
+    /// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`.
+    #[must_use]
+    pub fn with_per_user_bandwidth(
+        mut self,
+        accumulator: Arc<crate::per_user_bandwidth::PerUserBandwidth>,
+    ) -> Self {
+        self.per_user_bandwidth = Some(accumulator);
+        self
+    }
+
+    /// Read the per-user bandwidth accumulator handle. Used by
+    /// the session-completion path (`InFlightGuard` construction)
+    /// AND the metrics endpoint (rendering the per-user series).
+    pub fn per_user_bandwidth(&self) -> Option<&Arc<crate::per_user_bandwidth::PerUserBandwidth>> {
+        self.per_user_bandwidth.as_ref()
     }
 
     /// Install a sliding-window abuse detector for the per-user
