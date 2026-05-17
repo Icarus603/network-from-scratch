@@ -190,10 +190,71 @@ async fn beta_client_emits_noise_before_quic_initial() {
         &payload1[..payload1.len().min(8)],
     );
 
+    // PROPERTY 4 (USENIX Security '23 fully-encrypted-traffic
+    // heuristics, Wu et al.): the prefix-noise MUST also pass the
+    // GFW's SECOND classifier — the "first 6 bytes must be printable
+    // ASCII OR overall non-printable density < 70 %" whitelist /
+    // entropy combo (`gfw.report/blog/ss_advise/en/`,
+    // `geneva.cs.umd.edu/posts/fully-encrypted-traffic/`).
+    //
+    // Without this property, a successful USENIX-25-#2 evasion gets
+    // immediately re-trapped by USENIX-23 — the GFW would tag the
+    // flow as "fully encrypted, no protocol prefix, no printable
+    // header" and proceed to the same residual-block treatment.
+    //
+    // Defense (in client.rs): bytes 0–5 are shaped into printable
+    // ASCII (0x20–0x7E); bytes 6–15 stay random. This hits the
+    // "first 6 bytes printable" whitelist (rule 3) AND keeps overall
+    // non-printable density below the 70 % wall (rule 1) even in the
+    // worst case (10/16 = 62.5 %).
+    //
+    // This test pins BOTH rules. If a future refactor goes back to
+    // a fully-random 16-byte noise, both assertions fail loudly.
+    let noise_prefix_len = 6;
+    assert!(
+        payload0.len() >= noise_prefix_len,
+        "prefix-noise payload shorter than 6 bytes ({} bytes) — \
+         shaping logic in client.rs broke; cannot satisfy USENIX 23 \
+         rule 3 whitelist (first 6 bytes printable)",
+        payload0.len(),
+    );
+    let printable_in_first_6 = payload0[..noise_prefix_len]
+        .iter()
+        .filter(|b| (0x20..=0x7E).contains(*b))
+        .count();
+    assert_eq!(
+        printable_in_first_6,
+        noise_prefix_len,
+        "USENIX Sec '23 rule 3 violation: first 6 bytes of prefix-noise \
+         must ALL be printable ASCII (0x20–0x7E); got only {printable_in_first_6}/6 \
+         printable. Bytes: {:02x?}. GFW will classify this flow as \
+         fully-encrypted-traffic suspect and proceed to its \
+         residual-block treatment, defeating the USENIX 25 #2 evasion.",
+        &payload0[..noise_prefix_len],
+    );
+    let non_printable_total = payload0
+        .iter()
+        .filter(|b| !(0x20..=0x7E).contains(*b))
+        .count();
+    let non_printable_ratio = (non_printable_total as f64) / (payload0.len() as f64);
+    assert!(
+        non_printable_ratio < 0.70,
+        "USENIX Sec '23 rule 1 violation: prefix-noise has {:.1}% \
+         non-printable bytes (>= 70% wall). The shaped-prefix tweak \
+         in client.rs ensures 10 random + 6 printable = max 62.5%; \
+         if this fires, the noise length or shaping was changed without \
+         re-checking the entropy budget. Bytes: {:02x?}",
+        non_printable_ratio * 100.0,
+        payload0,
+    );
+
     eprintln!(
         "GFW-evasion prefix-noise test: src={src0} dst={dst_port}, \
-         datagram[0]={} bytes (noise), datagram[1]={} bytes (real QUIC Initial)",
+         datagram[0]={} bytes (noise; printable[0..6]={}, non-printable ratio={:.1}%), \
+         datagram[1]={} bytes (real QUIC Initial)",
         payload0.len(),
+        printable_in_first_6,
+        non_printable_ratio * 100.0,
         payload1.len(),
     );
 }

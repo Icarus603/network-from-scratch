@@ -330,19 +330,56 @@ pub async fn connect_with_timeout_and_perf(
     // 0. This makes the byte look like a SHORT-header QUIC packet
     // — and the GFW's Initial-only inspector explicitly skips
     // short-header packets (they cannot carry SNI; SNI lives in
-    // the CRYPTO frame inside the Initial). The remaining 15
-    // bytes stay random so the noise is still indistinguishable
-    // from arbitrary UDP padding.
+    // the CRYPTO frame inside the Initial).
     //
-    // Payload: 16 bytes total. Bit-0 of byte 0 cleared (short-
-    // header form); the rest fully random.
+    // ### Why bytes 0–5 are *printable* ASCII, not random
+    //
+    // A second, *independent* GFW classifier (Wu et al., USENIX
+    // Security 2023, "How the Great Firewall of China Detects and
+    // Blocks Fully Encrypted Traffic") flags any connection whose
+    // **first 6 bytes** are not "printable ASCII" as a fully-
+    // encrypted-traffic suspect — and the proxy-block heuristic
+    // additionally fires when ≥70 % of bytes are non-printable.
+    // The rule is a whitelist exception: if the first 6 bytes are
+    // all printable (letters / digits / spaces / common punctuation,
+    // ASCII 0x20–0x7E), the connection is exempt regardless of
+    // entropy elsewhere. This is documented at GFW.report
+    // (`/blog/ss_advise/en/`) and Geneva
+    // (`geneva.cs.umd.edu/posts/fully-encrypted-traffic/`).
+    //
+    // 16 fully random bytes hit ~94 % non-printable density and
+    // trip both heuristics. We therefore split the 16-byte noise:
+    //   - bytes 0–5:  printable ASCII (random within 0x20–0x7E,
+    //                 with byte 0 ALSO satisfying the short-header
+    //                 constraint via the 0x20–0x7E range which has
+    //                 bit 0x80 already cleared — every printable
+    //                 ASCII byte is by definition < 0x80)
+    //   - bytes 6–15: fully random (10 bytes; well under the 70 %
+    //                 non-printable threshold for the 16-byte total
+    //                 — even worst-case all-10-non-printable gives
+    //                 10/16 = 62.5 %, under the 70 % wall)
+    //
+    // This single change satisfies USENIX 25 #2 (prefix-noise
+    // before QUIC Initial, byte 0 cleared) AND USENIX 23 rules
+    // 1 + 3 (printable-byte heuristic) simultaneously. See
+    // `qa/2026-05-17-gfw-2026-q1q2-threat-intel.md` main line 7.
+    //
+    // Payload: 16 bytes total. Bytes 0–5 in 0x20..=0x7E (printable
+    // ASCII); bytes 6–15 fully random.
     {
         let mut noise = [0u8; 16];
         use rand_core::RngCore;
         rand_core::OsRng.fill_bytes(&mut noise);
-        // Clear the long-header bit so the inspector can't even
-        // classify this as a candidate Initial packet.
-        noise[0] &= 0x7f;
+        // Shape bytes 0–5 to printable ASCII (0x20–0x7E). Mapping
+        // a random byte into 95 codepoints biases (256 mod 95 = 66
+        // codepoints get one extra) but the bias is well below any
+        // meaningful adversary distinguisher and is irrelevant for
+        // GFW heuristics that only care about printable vs. not.
+        // The short-header-bit constraint (byte 0 & 0x80 == 0) is
+        // automatically satisfied because 0x20..=0x7E ⊂ [0, 0x7F].
+        for byte in noise.iter_mut().take(6) {
+            *byte = 0x20 + (*byte % 95); // 0x20..=0x7E
+        }
         // Best-effort: if this send fails (e.g. ICMP unreachable on
         // a closed UDP path), we ignore and let quinn do its
         // own retransmit. The evasion is a probabilistic optimization
