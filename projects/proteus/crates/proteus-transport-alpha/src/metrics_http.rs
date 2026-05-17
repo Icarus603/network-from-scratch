@@ -1510,6 +1510,57 @@ mod tests {
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
     }
 
+    /// When the per-user accumulator has a rate detector wired,
+    /// the `/metrics` body renders the detector's threshold +
+    /// window + tracked-users gauges INSIDE the per-user block.
+    /// Operators reading `/metrics` see one contiguous "per-user
+    /// bandwidth" section instead of needing to know about a
+    /// separate detector module.
+    #[test]
+    fn render_full_v6_emits_rate_detector_gauges_when_detector_wired() {
+        use crate::per_user_bandwidth::PerUserBandwidth;
+        use crate::per_user_bandwidth_rate_detector::PerUserBandwidthRateDetector;
+        use std::sync::Arc;
+        use std::time::Duration;
+        let m = ServerMetrics::default();
+        let pu = PerUserBandwidth::new(4096);
+        let det = Arc::new(PerUserBandwidthRateDetector::new(
+            Duration::from_secs(45),
+            200 * 1024 * 1024, // 200 MB/s threshold
+            4096,
+        ));
+        pu.set_rate_detector(Some(Arc::clone(&det)));
+        pu.record(*b"alice001", 1024, 1024);
+        let (_s, _c, body) = render_full_v6(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&pu),
+        );
+        assert!(
+            body.contains("proteus_per_user_bandwidth_rate_threshold_bytes_per_sec 209715200"),
+            "rate threshold gauge missing: {body}"
+        );
+        assert!(
+            body.contains("proteus_per_user_bandwidth_rate_window_seconds 45"),
+            "rate window gauge missing: {body}"
+        );
+        assert!(
+            body.contains("proteus_per_user_bandwidth_rate_tracked_users 1"),
+            "rate tracked-users gauge missing: {body}"
+        );
+        // Counter present at 0 (always emitted, even pre-fire).
+        assert!(
+            body.contains("proteus_abuse_alerts_per_user_bandwidth_total 0"),
+            "abuse alerts counter missing: {body}"
+        );
+    }
+
     /// v6 with `None` per_user omits the per-user block entirely.
     #[test]
     fn render_full_v6_omits_per_user_block_when_accumulator_none() {

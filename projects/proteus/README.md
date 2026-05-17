@@ -358,6 +358,54 @@ beyond it, additional user_ids accumulate into `__overflow__` so
 bandwidth accounting stays complete even when individual
 attribution is lost.
 
+### Per-user **sustained-bandwidth** abuse detector (server)
+
+`/metrics` PromQL alerts work for ops teams running Prometheus +
+Alertmanager. The canonical Proteus operator — personal-VPN-for-
+friends on one VPS, `journalctl` + maybe a Telegram bot tailing
+logs — has no alerting infrastructure. The server ships an
+**in-process** sustained-bandwidth detector that fires structured
+WARN logs + bumps a counter the moment a user crosses the
+threshold:
+
+```yaml
+# server.yaml
+per_user_bandwidth_rate:
+  window_secs: 30                 # rolling-window length
+  threshold_mb_per_sec: 100       # 100 MB/s sustained = abuse
+  max_users: 4096                 # match per-user accumulator cap
+  exit_factor: 0.5                # hysteresis: re-arm at 50 MB/s
+```
+
+Wire-up: the detector hooks into the per-user bandwidth accumulator
+(`PerUserBandwidth::set_rate_detector`) so every session-completion
+runs the rate check inside `InFlightGuard::drop`. On `Fired`, the
+server emits:
+
+```text
+WARN abuse: per-user sustained bandwidth above threshold —
+     possible stolen credential or exfiltration tool.
+     Fire-once-per-burst; resets after rate drops to half threshold.
+     user_id="alice001" bytes_per_sec=125829120
+```
+
+and bumps `proteus_abuse_alerts_per_user_bandwidth_total` (counter,
+always emitted at 0 from t=0 so operators script `increase(... [5m])
+> 0` even before the first fire).
+
+**Why hysteresis matters**: without it, a user oscillating at the
+threshold boundary (~99-101 MB/s) generates an alert every burst.
+The `exit_factor` (default 0.5) requires the rate to drop to half
+threshold before re-arming, so the same user gets ONE alert per
+sustained burst.
+
+**Threshold = 0 = "wired but silent"**: leaves the slot installed
+(so a SIGHUP-driven config swap can flip the threshold to non-zero
+later without a restart) but every record returns Quiet. Gauges
+still emit so operators can confirm via
+`proteus_per_user_bandwidth_rate_threshold_bytes_per_sec` that the
+slot is alive.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

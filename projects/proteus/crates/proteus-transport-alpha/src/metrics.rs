@@ -204,7 +204,30 @@ impl Drop for InFlightGuard {
                 // the global merge, so operators never see drift
                 // between `proteus_tx_bytes_total` and the
                 // sum of `proteus_per_user_bytes_sent_total{...}`.
-                pu.record(uid, snap.tx_bytes, snap.rx_bytes);
+                // Use the rate-checking variant so a sustained-
+                // bandwidth abuse alert can fire from inside the
+                // hot-path drop without the binary having to wire
+                // a separate hook for each carrier.
+                if let crate::per_user_bandwidth_rate_detector::RateAlertOutcome::Fired {
+                    bytes_per_sec,
+                } = pu.record_with_rate_check(uid, snap.tx_bytes, snap.rx_bytes)
+                {
+                    self.server
+                        .abuse_alerts_per_user_bandwidth
+                        .fetch_add(1, Ordering::Relaxed);
+                    // Render user_id for the WARN line using the
+                    // same printable-vs-hex strategy the per-user
+                    // exposition uses, so the log entry matches
+                    // the `/metrics` label.
+                    let uid_render = crate::per_user_bandwidth::render_user_id_pub(&uid);
+                    tracing::warn!(
+                        user_id = %uid_render,
+                        bytes_per_sec,
+                        "abuse: per-user sustained bandwidth above threshold — \
+                         possible stolen credential or exfiltration tool. \
+                         Fire-once-per-burst; resets after rate drops to half threshold."
+                    );
+                }
             }
         }
         self.server
@@ -278,6 +301,16 @@ pub struct ServerMetrics {
     /// repeatedly. Operator sees this counter rise = likely a
     /// misconfigured / bot-controlled client.
     pub abuse_alerts_rate_limit: AtomicU64,
+    /// **Per-user sustained bandwidth alerts.** Bumped once per burst
+    /// (sliding-window, hysteresis-driven) when a user's
+    /// `(tx + rx)` byte rate stays above the operator-configured
+    /// `per_user_bandwidth_rate_threshold` for the window length.
+    /// Distinct from `abuse_alerts_byte_budget` (which fires on
+    /// discrete cap hits): this fires on **sustained throughput**,
+    /// catching exfil patterns that stay under the per-session cap.
+    /// Operator workflow: alert on `rate(...) > 0` in any log/metrics
+    /// pipeline — even a single uptick is operator-actionable.
+    pub abuse_alerts_per_user_bandwidth: AtomicU64,
     /// Upstream dial requests blocked by the outbound destination
     /// filter. Includes SSRF-style attempts (`169.254.169.254`,
     /// RFC 1918, loopback, IPv6 ULA / mapped-v4 bypass) and
@@ -345,6 +378,7 @@ impl Default for ServerMetrics {
             session_byte_budget_exhausted: AtomicU64::new(0),
             abuse_alerts_byte_budget: AtomicU64::new(0),
             abuse_alerts_rate_limit: AtomicU64::new(0),
+            abuse_alerts_per_user_bandwidth: AtomicU64::new(0),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             firewall_reload_attempts: AtomicU64::new(0),
@@ -439,6 +473,9 @@ impl ServerMetrics {
              # HELP proteus_abuse_alerts_rate_limit_total Per-user rate-limit abuse alert fires (sliding window).\n\
              # TYPE proteus_abuse_alerts_rate_limit_total counter\n\
              proteus_abuse_alerts_rate_limit_total {}\n\
+             # HELP proteus_abuse_alerts_per_user_bandwidth_total Per-user sustained-bandwidth abuse alert fires (sliding window + hysteresis).\n\
+             # TYPE proteus_abuse_alerts_per_user_bandwidth_total counter\n\
+             proteus_abuse_alerts_per_user_bandwidth_total {}\n\
              # HELP proteus_outbound_blocked_total Upstream dials blocked by the outbound destination filter.\n\
              # TYPE proteus_outbound_blocked_total counter\n\
              proteus_outbound_blocked_total {}\n\
@@ -494,6 +531,7 @@ impl ServerMetrics {
             s(&self.session_byte_budget_exhausted),
             s(&self.abuse_alerts_byte_budget),
             s(&self.abuse_alerts_rate_limit),
+            s(&self.abuse_alerts_per_user_bandwidth),
             s(&self.outbound_blocked),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),

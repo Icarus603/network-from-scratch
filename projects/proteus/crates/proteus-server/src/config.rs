@@ -256,6 +256,34 @@ pub struct ServerConfig {
     #[serde(default)]
     pub abuse_detector: Option<AbuseDetectorCfg>,
 
+    /// Optional **per-user sustained bandwidth-rate** abuse detector.
+    /// Unlike the event-based [`AbuseDetectorCfg`] above, this fires
+    /// on rolling-window throughput: when a `user_id`'s `(tx+rx)`
+    /// byte rate averaged over `window_secs` crosses
+    /// `threshold_mb_per_sec`, the server logs one WARN line and
+    /// bumps `abuse_alerts_per_user_bandwidth_total`. Hysteresis
+    /// (re-arm after rate drops below 50% threshold) prevents
+    /// flapping at the boundary.
+    ///
+    /// Designed for the canonical small-VPN operator (personal VPN
+    /// for friends on one VPS, no Prometheus stack). The in-process
+    /// detector gives them the alert that PromQL `rate(...) > N`
+    /// would otherwise provide — without requiring the alerting
+    /// infrastructure.
+    ///
+    /// Sensible production value (a 1 Gbps home uplink, 5-user
+    /// personal VPN):
+    ///   per_user_bandwidth_rate:
+    ///     window_secs: 30
+    ///     threshold_mb_per_sec: 100   # 100 MB/s sustained = abuse
+    ///     max_users: 4096
+    ///
+    /// Unset OR `threshold_mb_per_sec=0` = detector silent
+    /// (gauges still emitted as 0 so operators can verify the slot
+    /// is wired).
+    #[serde(default)]
+    pub per_user_bandwidth_rate: Option<PerUserBandwidthRateCfg>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -391,6 +419,48 @@ const fn default_abuse_window_secs() -> u64 {
 }
 const fn default_abuse_threshold() -> usize {
     3
+}
+
+/// Per-user sustained bandwidth-rate detector knobs (see
+/// [`ServerConfig::per_user_bandwidth_rate`] for the operator-facing
+/// docstring).
+#[derive(Debug, Deserialize)]
+pub struct PerUserBandwidthRateCfg {
+    /// Sliding-window length in seconds the detector averages over.
+    /// Operator default 30s — short enough to catch real abuse fast,
+    /// long enough to ignore a single fast-completing session.
+    #[serde(default = "default_per_user_bw_window_secs")]
+    pub window_secs: u64,
+    /// Per-user threshold in **megabytes per second**. A user whose
+    /// `(tx+rx)/window_secs` exceeds this fires ONE alert per burst.
+    /// 0 = detector wired but silent (gauges still emitted so the
+    /// operator can confirm the slot is alive).
+    #[serde(default)]
+    pub threshold_mb_per_sec: u64,
+    /// Cap on distinct user_ids the detector samples. Matches the
+    /// per-user bandwidth accumulator's typical default of 4096.
+    /// Beyond cap, new users are silently dropped from the detector
+    /// (memory bound > alerting perfection).
+    #[serde(default = "default_per_user_bw_max_users")]
+    pub max_users: usize,
+    /// Hysteresis exit factor `[0.0, 1.0]`. Once an alert fires, the
+    /// user's rolling-window rate must drop below
+    /// `threshold * exit_factor` before another alert can fire.
+    /// Default 0.5 — re-arm at half threshold; prevents flapping at
+    /// the boundary.
+    #[serde(default = "default_per_user_bw_exit_factor")]
+    pub exit_factor: f64,
+}
+
+const fn default_per_user_bw_window_secs() -> u64 {
+    30
+}
+const fn default_per_user_bw_max_users() -> usize {
+    4096
+}
+#[allow(clippy::excessive_precision)]
+fn default_per_user_bw_exit_factor() -> f64 {
+    0.5
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -560,6 +630,7 @@ impl ServerConfig {
             cover_endpoints: !self.cover_endpoints.is_empty(),
             max_connections: self.max_connections.is_some(),
             metrics_listen: self.metrics_listen.is_some(),
+            per_user_bandwidth_rate: self.per_user_bandwidth_rate.is_some(),
             cover_endpoint_count: self.cover_endpoints.len() as u64,
             client_allowlist_count: self.client_allowlist.len() as u64,
         }
@@ -586,6 +657,9 @@ pub struct ConfigPresence {
     pub cover_endpoints: bool,
     pub max_connections: bool,
     pub metrics_listen: bool,
+    /// `per_user_bandwidth_rate:` block — 1 when the detector is
+    /// configured (even with threshold=0 — the slot is wired).
+    pub per_user_bandwidth_rate: bool,
     /// Number of entries in `cover_endpoints:`. Operators read the
     /// SIZE of the pool as a sanity check ("I configured 5 cover
     /// endpoints, why does this show 3?") which a bare presence bit
@@ -627,6 +701,7 @@ impl ConfigPresence {
             ("cover_endpoints", self.cover_endpoints),
             ("max_connections", self.max_connections),
             ("metrics_listen", self.metrics_listen),
+            ("per_user_bandwidth_rate", self.per_user_bandwidth_rate),
         ] {
             let _ = writeln!(
                 s,
@@ -790,6 +865,72 @@ client_allowlist:\n  \
         // Sections not in the YAML stay false.
         assert!(!p.tls);
         assert!(!p.rate_limit);
+        // Specifically not configuring per_user_bandwidth_rate must
+        // leave the presence bit at false (back-compat: existing YAML
+        // files without the section must not start showing the bit
+        // active).
+        assert!(!p.per_user_bandwidth_rate);
+    }
+
+    #[test]
+    fn presence_reports_per_user_bandwidth_rate_when_configured() {
+        // YAML roundtrip — proves the section name + every field
+        // serde-deserializes against the operator-facing docstring.
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+per_user_bandwidth_rate:\n  \
+  window_secs: 30\n  \
+  threshold_mb_per_sec: 100\n  \
+  max_users: 4096\n  \
+  exit_factor: 0.5\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let r = cfg
+            .per_user_bandwidth_rate
+            .as_ref()
+            .expect("must deserialize");
+        assert_eq!(r.window_secs, 30);
+        assert_eq!(r.threshold_mb_per_sec, 100);
+        assert_eq!(r.max_users, 4096);
+        assert!((r.exit_factor - 0.5).abs() < 1e-12);
+        let p = cfg.presence();
+        assert!(
+            p.per_user_bandwidth_rate,
+            "presence bit must reflect the section being present"
+        );
+        // Prometheus block includes the new section row.
+        let prom = p.prometheus();
+        assert!(
+            prom.contains(r#"proteus_config_section_active{section="per_user_bandwidth_rate"} 1"#),
+            "{prom}"
+        );
+    }
+
+    #[test]
+    fn per_user_bandwidth_rate_defaults_apply_when_subfields_missing() {
+        // Minimal section: only threshold given, rest from defaults.
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+per_user_bandwidth_rate:\n  \
+  threshold_mb_per_sec: 200\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let r = cfg.per_user_bandwidth_rate.as_ref().unwrap();
+        assert_eq!(r.threshold_mb_per_sec, 200);
+        // Defaults pulled from default_per_user_bw_*.
+        assert_eq!(r.window_secs, 30);
+        assert_eq!(r.max_users, 4096);
+        assert!((r.exit_factor - 0.5).abs() < 1e-12);
     }
 }
 

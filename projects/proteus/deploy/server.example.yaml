@@ -199,6 +199,28 @@ handshake_deadline_secs: 15
 #     window_secs: 300
 #     threshold: 3
 
+# Per-user **sustained-bandwidth** abuse detector. Distinct from
+# `abuse_detector` above: this fires on rolling-window throughput,
+# not on discrete cap-hit events. Designed for the single-VPS
+# personal-VPN operator who has no Prometheus stack — the in-process
+# detector emits a WARN log + bumps
+# `proteus_abuse_alerts_per_user_bandwidth_total` the moment a user
+# crosses the threshold. Hysteresis (`exit_factor=0.5`) prevents
+# flapping; the same user gets ONE alert per sustained burst until
+# the rate drops to half threshold.
+#
+# Sensible production value for a 1 Gbps home uplink, 5-user VPN:
+#   threshold_mb_per_sec: 100  # 100 MB/s sustained = abuse
+#   window_secs: 30            # 30-second average
+#
+# Set threshold_mb_per_sec=0 to wire the detector but stay silent
+# (gauges still emit so the slot is operator-visible).
+# per_user_bandwidth_rate:
+#   window_secs: 30
+#   threshold_mb_per_sec: 100
+#   max_users: 4096
+#   exit_factor: 0.5
+
 # Per-session byte budget (tx + rx plaintext). Sessions whose total
 # bytes crosses this threshold are torn down with close_reason
 # "byte_budget_exhausted". Defends against a compromised credential

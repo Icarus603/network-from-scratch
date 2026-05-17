@@ -501,6 +501,48 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         Arc::new(proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth::new(4096));
     ctx = ctx.with_per_user_bandwidth(Arc::clone(&per_user_bandwidth));
 
+    // Per-user sustained bandwidth-rate detector. Wired into the
+    // accumulator so every session-close runs the rate check, and a
+    // burst-alert fires inside InFlightGuard::drop (one WARN line +
+    // bump of `proteus_abuse_alerts_per_user_bandwidth_total`).
+    //
+    // When the operator's YAML has no `per_user_bandwidth_rate:`
+    // block, NO detector is wired — the accumulator stays in its
+    // back-compat (counter-only, no rate alerts) mode. When the
+    // block is present with threshold=0, a detector IS wired but
+    // silent — gauges still emit so operators can verify the slot.
+    if let Some(rcfg) = cfg.per_user_bandwidth_rate.as_ref() {
+        let det = std::sync::Arc::new(
+            proteus_transport_alpha::per_user_bandwidth_rate_detector::PerUserBandwidthRateDetector::new(
+                std::time::Duration::from_secs(rcfg.window_secs),
+                rcfg.threshold_mb_per_sec.saturating_mul(1024 * 1024),
+                rcfg.max_users,
+            )
+            .with_exit_factor(rcfg.exit_factor),
+        );
+        per_user_bandwidth.set_rate_detector(Some(Arc::clone(&det)));
+        if rcfg.threshold_mb_per_sec == 0 {
+            info!(
+                window_secs = rcfg.window_secs,
+                max_users = rcfg.max_users,
+                "per-user bandwidth-rate detector WIRED but SILENT (threshold_mb_per_sec=0)"
+            );
+        } else {
+            info!(
+                window_secs = rcfg.window_secs,
+                threshold_mb_per_sec = rcfg.threshold_mb_per_sec,
+                exit_factor = rcfg.exit_factor,
+                max_users = rcfg.max_users,
+                "per-user bandwidth-rate detector configured (fire-once-per-burst with hysteresis)"
+            );
+        }
+    } else {
+        info!(
+            "per_user_bandwidth_rate unset — sustained-bandwidth abuse alerts disabled \
+             (set in server.yaml to enable in-process credential-abuse detection without Prometheus)"
+        );
+    }
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics

@@ -50,6 +50,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::per_user_bandwidth_rate_detector::{PerUserBandwidthRateDetector, RateAlertOutcome};
+
 /// Per-user cumulative byte counters. `tx` = bytes the server
 /// sent to the user; `rx` = bytes received from the user. The
 /// asymmetry is operator-visible — a stolen credential exfiltrating
@@ -79,6 +81,12 @@ pub struct PerUserBandwidth {
     inner: Mutex<HashMap<[u8; 8], Arc<UserBytes>>>,
     max_users: usize,
     overflow: Arc<UserBytes>,
+    /// Optional bandwidth-rate abuse detector. When wired, every
+    /// `record()` call also feeds the per-user delta into the
+    /// detector; if the detector fires, the caller (typically the
+    /// binary's session-close hook) emits a structured WARN log
+    /// and bumps `proteus_abuse_alerts_per_user_bandwidth_total`.
+    rate_detector: Mutex<Option<Arc<PerUserBandwidthRateDetector>>>,
 }
 
 impl PerUserBandwidth {
@@ -92,7 +100,35 @@ impl PerUserBandwidth {
             inner: Mutex::new(HashMap::with_capacity(max_users.min(64))),
             max_users,
             overflow: Arc::new(UserBytes::default()),
+            rate_detector: Mutex::new(None),
         }
+    }
+
+    /// Builder: attach a bandwidth-rate abuse detector. The detector
+    /// is consulted on every `record()` call; on `Fired`, the caller
+    /// is responsible for the WARN log + counter bump.
+    ///
+    /// SIGHUP hot-reload: the detector slot is itself behind a
+    /// `Mutex<Option<...>>` so the binary can swap detectors on
+    /// reload without rebuilding the bandwidth accumulator. The
+    /// `record_with_rate_check` path takes the lock once per session
+    /// completion (low rate — not on the data-plane hot path).
+    pub fn set_rate_detector(&self, detector: Option<Arc<PerUserBandwidthRateDetector>>) {
+        let mut g = self
+            .rate_detector
+            .lock()
+            .expect("PerUserBandwidth rate_detector lock poisoned");
+        *g = detector;
+    }
+
+    /// Read-only accessor for the current rate detector. Returns
+    /// `None` when no detector is wired.
+    #[must_use]
+    pub fn rate_detector(&self) -> Option<Arc<PerUserBandwidthRateDetector>> {
+        self.rate_detector
+            .lock()
+            .expect("PerUserBandwidth rate_detector lock poisoned")
+            .clone()
     }
 
     /// Record one session's `(tx_bytes, rx_bytes)` against
@@ -100,7 +136,23 @@ impl PerUserBandwidth {
     /// per-user totals merge AT THE SAME MOMENT as the global
     /// totals — operators never see drift between the aggregate
     /// and the per-user sum.
+    ///
+    /// Back-compat shim: discards the rate detector's alert
+    /// outcome. Callers that want to surface the alert (the binary's
+    /// session-close hook) should use [`Self::record_with_rate_check`]
+    /// instead.
     pub fn record(&self, user_id: [u8; 8], tx: u64, rx: u64) {
+        let _ = self.record_with_rate_check(user_id, tx, rx);
+    }
+
+    /// Like [`Self::record`] but returns the bandwidth-rate
+    /// detector's alert outcome (or `RateAlertOutcome::Quiet` when
+    /// no detector is wired). Callers use the outcome to drive the
+    /// WARN log + counter bump for sustained-rate abuse alerts.
+    ///
+    /// Even when no detector is wired this records into the per-user
+    /// accumulator — the rate check is purely additive.
+    pub fn record_with_rate_check(&self, user_id: [u8; 8], tx: u64, rx: u64) -> RateAlertOutcome {
         // Hot path: look up + bump under read-lock semantics
         // (mutex is fine because once an entry exists we only
         // touch the atomics; the mutex is dropped immediately).
@@ -126,6 +178,16 @@ impl PerUserBandwidth {
         if rx > 0 {
             bucket.rx.fetch_add(rx, Ordering::Relaxed);
         }
+        // Consult the rate detector if wired. The detector's
+        // window-based rate measurement is based on the sum of
+        // (tx + rx) bytes — both directions count toward "sustained
+        // bandwidth" because operators care about NIC saturation /
+        // exfiltration regardless of direction.
+        if let Some(det) = self.rate_detector() {
+            let bytes_total = tx.saturating_add(rx);
+            return det.record(user_id, bytes_total);
+        }
+        RateAlertOutcome::Quiet
     }
 
     /// Snapshot the per-user totals. Returns a `(user_id, tx, rx)`
@@ -248,8 +310,23 @@ impl PerUserBandwidth {
             "proteus_per_user_bandwidth_tracked_users {}",
             self.tracked_users()
         );
+        // Append the rate-detector's gauges if a detector is wired.
+        // This keeps "the bandwidth metrics" rendered as one
+        // contiguous block on /metrics — operators don't need to
+        // know the detector lives in a separate module.
+        if let Some(det) = self.rate_detector() {
+            s.push_str(&det.prometheus());
+        }
         s
     }
+}
+
+/// Public re-export of [`render_user_id`] for callers outside this
+/// module (the metrics module's WARN log uses it to render user_ids
+/// consistently with the `/metrics` label format).
+#[must_use]
+pub fn render_user_id_pub(uid: &[u8; 8]) -> String {
+    render_user_id(uid)
 }
 
 /// Render a user_id `[u8; 8]` as an operator-friendly string.
