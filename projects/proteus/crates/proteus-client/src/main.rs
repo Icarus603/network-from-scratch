@@ -372,6 +372,53 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         "proteus-client starting"
     );
 
+    // Optional knock PSK. Symmetric to the server's startup
+    // load (proteus-server::main loads its
+    // `cfg.knock_psk_file`). When None: legacy mode, no
+    // probe-resistance gate. When Some: validate + load NOW so
+    // file-permission / format errors surface before the SOCKS5
+    // listener binds (operator who asked for probe-resistance
+    // shouldn't silently get the legacy mode).
+    //
+    // The Arc<KnockPsk> is held in `_knock_psk` and will be
+    // consumed by the future transport-layer wiring that mints
+    // a knock token per outbound handshake. This iteration just
+    // loads it; the wire-format integration is iteration 4.
+    let _knock_psk: Option<std::sync::Arc<proteus_handshake::knock::KnockPsk>> =
+        match cfg.knock_psk_file.as_ref() {
+            Some(path) => match proteus_client::knock_psk::load(path) {
+                Ok(bytes) => {
+                    info!(
+                        path = ?path,
+                        "knock PSK loaded — Path A probe-resistance primitive ready \
+                         (transport-layer wire-format integration is a follow-up iteration)"
+                    );
+                    Some(std::sync::Arc::new(
+                        proteus_handshake::knock::KnockPsk::from_bytes(bytes),
+                    ))
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "knock_psk_file {path:?} load failed: {e}. \
+                         The server operator generated this file via \
+                         `proteus-server knock-keygen` and distributed it to you — \
+                         verify the bytes weren't corrupted in transit. To run \
+                         WITHOUT probe-resistance temporarily, remove the \
+                         `knock_psk_file:` line from client.yaml."
+                    )
+                    .into());
+                }
+            },
+            None => {
+                info!(
+                    "knock_psk_file unset — probe-resistance disabled (legacy mode). \
+                     For REALITY-grade probe resistance, ask the server operator for \
+                     a knock PSK and set `knock_psk_file:` in client.yaml."
+                );
+                None
+            }
+        };
+
     let listener = TcpListener::bind(&cfg.socks_listen).await?;
     info!(addr = %listener.local_addr()?, "SOCKS5 inbound bound");
 

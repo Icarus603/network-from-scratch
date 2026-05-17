@@ -165,6 +165,31 @@ tls:
   server_name: vps.example.com
   # trusted_ca: ./keys/tls/self-signed-ca.pem
 
+# Optional server-knock PSK file (32 bytes, base64-encoded).
+# Path A: REALITY-grade probe resistance.
+#
+# Workflow:
+#   1. Server operator runs `proteus-server knock-keygen` and
+#      gets `/etc/proteus/keys/server.knock_psk`.
+#   2. Operator distributes the EXACT same file to you out-of-band
+#      (scp from bastion, `age -r <recipient>` envelope, or the
+#      raw 32 bytes hex-encoded over Signal — your call).
+#   3. You drop the file at the path below and uncomment this line.
+#   4. Restart the client; logs show "knock PSK loaded".
+#
+# When set, the client mints an HMAC-bound knock token on every
+# outbound handshake. The server's pre-auth-passthrough gate
+# distinguishes "real client" (sees Proteus) from "GFW prober"
+# (sees the cover endpoint only — REALITY-grade indistinguishability).
+#
+# Unset (default): legacy mode, no probe-resistance gate. The
+# protocol still works for passive-DPI scenarios.
+#
+# MUST match the server's `knock_psk_file:` byte-for-byte.
+# Mismatch → handshakes silently route to cover; `proteus-client
+# connect-test` will surface the failure.
+# knock_psk_file: ./keys/server.knock_psk
+
 # Server-advertised anti-DoS difficulty (must match server's setting).
 # When the server raises this, update the client config too; mismatched
 # values lead to handshake reject (silent route to cover).

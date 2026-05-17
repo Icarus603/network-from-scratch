@@ -19,6 +19,7 @@ proteus-transport-alpha = { path = "../proteus-transport-alpha" }
 proteus-transport-beta = { path = "../proteus-transport-beta" }
 proteus-panic-hook = { path = "../proteus-panic-hook" }
 proteus-sd-notify = { path = "../proteus-sd-notify" }
+proteus-handshake = { path = "../proteus-handshake" }
 
 ed25519-dalek.workspace = true
 rand_core = { workspace = true, features = ["getrandom"] }

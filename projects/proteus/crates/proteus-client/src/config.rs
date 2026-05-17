@@ -155,6 +155,38 @@ pub struct ClientConfig {
     /// to flush their last records cleanly. Default: 15 s.
     #[serde(default)]
     pub drain_secs: Option<u64>,
+    /// Optional path to the server-knock PSK file (32 bytes,
+    /// base64-encoded; same byte-for-byte content the operator
+    /// distributed from `proteus-server knock-keygen`).
+    ///
+    /// **Path A: REALITY-grade probe resistance.** When set,
+    /// the client mints an HMAC-bound knock token (via
+    /// [`proteus_handshake::knock::compute_knock`]) on every
+    /// outbound handshake. The future transport-layer wiring
+    /// embeds the token in the TLS ClientHello so the server's
+    /// pre-auth-passthrough gate can distinguish "real Proteus
+    /// client" from "GFW active prober" BEFORE TLS even
+    /// terminates locally — probers without the PSK get
+    /// transparently forwarded to the cover endpoint and see
+    /// only the real HTTPS reverse-proxy response.
+    ///
+    /// Must match the server's `knock_psk_file:` exactly. A
+    /// mismatch (e.g. operator rotated server-side without
+    /// rolling the client) produces a clean
+    /// "passthrough-to-cover-only" experience at the server —
+    /// the client's connection succeeds at the TLS layer but
+    /// stays in cover mode and the Proteus handshake never
+    /// activates. Operators detect this via the existing
+    /// `proteus-client connect-test` (will report a handshake
+    /// failure).
+    ///
+    /// Unset (default): no knock is emitted. The protocol still
+    /// works end-to-end (the legacy auth-fail-then-cover path
+    /// covers passive DPI); only the probe-resistance gate is
+    /// off. Operators wanting REALITY-grade probe resistance
+    /// MUST set this on BOTH client AND server.
+    #[serde(default)]
+    pub knock_psk_file: Option<PathBuf>,
     /// **Bootstrap DNS policy** — how to resolve the hostname half of
     /// `server_endpoint` / `server_endpoint_beta`. Defaults to
     /// `system`, which goes through the OS resolver (which in 2026

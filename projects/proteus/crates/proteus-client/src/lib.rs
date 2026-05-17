@@ -15,6 +15,7 @@ pub mod connect_test;
 pub mod ctx;
 pub mod endpoint_pool;
 pub mod host_preflight;
+pub mod knock_psk;
 pub mod process_panic_counter;
 pub mod socks;
 pub mod validate;

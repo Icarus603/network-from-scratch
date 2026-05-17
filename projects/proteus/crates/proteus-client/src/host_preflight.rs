@@ -316,7 +316,11 @@ fn check_key_file_modes(cfg_path: &Path, r: &mut HostReport) {
     // config that fails serde_yaml deserialization should still
     // surface key-mode issues if the line is parseable.
     let mut sk_paths: Vec<PathBuf> = Vec::new();
-    let interesting_keys = ["client_ed25519_sk"];
+    // Both files are SECRET (long-term identity + knock PSK).
+    // World-readable mode on either is a credential-exposure
+    // vulnerability — knock PSK leak means probers can pass the
+    // gate, client_ed25519_sk leak means full impersonation.
+    let interesting_keys = ["client_ed25519_sk", "knock_psk_file"];
     for line in text.lines() {
         let trimmed = line.trim_start();
         for key in &interesting_keys {
