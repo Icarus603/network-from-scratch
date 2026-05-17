@@ -102,6 +102,14 @@ struct SoakArgs {
     /// exit 1 (CI-friendly).
     #[arg(long, default_value = "0.99")]
     min_success_rate: f64,
+    /// Distinct user_ids the soak rotates across (round-robin
+    /// assignment). 1 = single-tenant (default). N = N tenants
+    /// share the server, each gets `clients/N` of the load.
+    /// Used to validate per-user bandwidth accounting under real
+    /// concurrent handshakes — operators set this in scale
+    /// validation runs to mirror their actual tenant count.
+    #[arg(long, default_value = "1")]
+    users: usize,
 }
 
 #[derive(clap::Args, Debug)]
@@ -293,6 +301,7 @@ async fn run_soak_cmd(args: SoakArgs) -> Result<(), Box<dyn std::error::Error>> 
         per_session_kib: args.per_session_kib,
         report_interval: Duration::from_secs(args.report_interval_secs),
         max_concurrent_dials: args.max_concurrent_dials,
+        users: args.users,
     };
     info!(
         clients = cfg.clients,

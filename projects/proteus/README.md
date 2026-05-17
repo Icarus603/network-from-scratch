@@ -600,6 +600,26 @@ that passes this (zero spawn leaks, ≥99% success) is safe to deploy
 for typical small-to-mid VPN workloads. The bench exits non-zero on
 failure → drop-in CI gate.
 
+**Multi-tenant variant — `--users N`**: the soak harness rotates
+clients round-robin across `N` distinct `user_id`s so the in-process
+server's per-user bandwidth accumulator is exercised under real
+concurrent handshakes. `proteus-bench soak --clients 100
+--duration-secs 60 --users 10` distributes 100 clients across 10
+tenants (10 clients each); the e2e tests in `crates/proteus-bench/src/soak.rs`
+assert that every tenant gets a non-zero
+`proteus_per_user_bytes_{sent,received}_total{user_id="…"}` row
+on the resulting `/metrics` scrape.
+
+> **2026-05-19 production-stability fix**: this multi-tenant e2e
+> path caught a real bug in `InFlightGuard` where the per-session
+> metrics snapshot was being taken at *enter* time (all zeros),
+> not at *drop* time — meaning `proteus_tx_bytes_total`,
+> `proteus_rx_bytes_total`, and every per-user counter were stuck at
+> zero in production. The guard now holds the live
+> `Arc<SessionMetrics>` and snapshots at drop, so the merge sees
+> final cumulative totals. Operators upgrading from earlier nightlies
+> who saw "zero bytes reported despite traffic" should redeploy.
+
 ---
 
 **Netem loss-sweep baseline** (same machine + date) — raw JSONL at

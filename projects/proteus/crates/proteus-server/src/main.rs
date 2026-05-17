@@ -1049,7 +1049,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let snap = session.metrics.snapshot();
+                            // Hold the LIVE session metrics so the
+                            // drop snapshot reflects final byte totals
+                            // (snapshotting at enter would always
+                            // merge zero — caught by the multi-user
+                            // soak in 2026-05-18).
+                            let session_metrics = Arc::clone(&session.metrics);
                             // Wire per-user bandwidth if both the
                             // accumulator AND the session's user_id
                             // are present — degrades gracefully to
@@ -1062,14 +1067,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 (Some(pu), Some(uid)) => {
                                     proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
                                         Arc::clone(&metrics),
-                                        snap,
+                                        session_metrics,
                                         pu,
                                         uid,
                                     )
                                 }
                                 _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
                                     Arc::clone(&metrics),
-                                    snap,
+                                    session_metrics,
                                 ),
                             };
                             if let Err(e) = relay::handle_session(session, relay_cfg).await {
@@ -1113,19 +1118,22 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 // AND merges per-session totals on drop, even if the
                 // handler future panics. Wires per-user accounting
                 // when both the accumulator + user_id are present.
-                let snap = session.metrics.snapshot();
+                // Holds the LIVE Arc<SessionMetrics> so the drop-time
+                // snapshot captures actual byte totals (not the
+                // all-zero enter state).
+                let session_metrics = Arc::clone(&session.metrics);
                 let _guard = match (ctx_pu.per_user_bandwidth().cloned(), session.user_id) {
                     (Some(pu), Some(uid)) => {
                         proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
                             Arc::clone(&metrics),
-                            snap,
+                            session_metrics,
                             pu,
                             uid,
                         )
                     }
                     _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
                         Arc::clone(&metrics),
-                        snap,
+                        session_metrics,
                     ),
                 };
                 if let Err(e) = relay::handle_session(session, relay_cfg).await {
@@ -1153,7 +1161,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            let snap = session.metrics.snapshot();
+                            // Live Arc<SessionMetrics> — snapshotted at
+                            // guard drop so the merge reflects the
+                            // session's final byte totals.
+                            let session_metrics = Arc::clone(&session.metrics);
                             let _guard = match (
                                 ctx_pu.per_user_bandwidth().cloned(),
                                 session.user_id,
@@ -1161,14 +1172,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                 (Some(pu), Some(uid)) => {
                                     proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
                                         Arc::clone(&metrics),
-                                        snap,
+                                        session_metrics,
                                         pu,
                                         uid,
                                     )
                                 }
                                 _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
                                     Arc::clone(&metrics),
-                                    snap,
+                                    session_metrics,
                                 ),
                             };
                             if let Err(e) = relay::handle_session(session, relay_cfg).await {

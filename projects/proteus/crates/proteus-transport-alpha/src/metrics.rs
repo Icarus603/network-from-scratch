@@ -85,9 +85,20 @@ impl SessionMetrics {
 }
 
 /// RAII guard: increment `in_flight_sessions` on construct, decrement
-/// on drop. Holds a reference to a session's [`SessionMetricsSnapshot`]
-/// so the per-session totals are merged into the server-level counters
-/// on drop, **even if the handler panics**.
+/// on drop. Holds an `Arc<SessionMetrics>` for the live session so the
+/// per-session totals are snapshotted AT DROP TIME and merged into the
+/// server-level counters — **even if the handler panics**.
+///
+/// **Why snapshot at drop time, not enter time**: per-session counters
+/// (`tx_bytes`, `rx_bytes`, …) start at zero and accumulate as the
+/// relay pumps bytes. An enter-time snapshot is always all-zeros, so
+/// merging it at drop never bumps `proteus_tx_bytes_total` — and the
+/// per-user accumulator records (0, 0) on every session. The previous
+/// implementation had exactly this bug; the multi-user soak test
+/// caught it because `proteus_per_user_bytes_sent_total` stayed at 0
+/// despite ~100 successful sessions. Storing the live Arc and
+/// snapshotting at drop makes the merge see the final cumulative
+/// totals.
 ///
 /// Previously the binary did this with explicit `fetch_add` /
 /// `fetch_sub` pairs around `relay::handle_session(...).await`. That
@@ -96,10 +107,11 @@ impl SessionMetrics {
 /// part of panic unwinding, so the counter stays honest.
 pub struct InFlightGuard {
     server: Arc<ServerMetrics>,
-    /// Snapshot taken at construction time. Merged into server totals
-    /// on drop. None means "do not merge" (used by tests that don't
-    /// want to mutate state).
-    snapshot: Option<SessionMetricsSnapshot>,
+    /// Live session metrics handle. Snapshotted at drop time so the
+    /// merge reflects the session's FINAL byte totals, not the (all-
+    /// zero) enter-time state. `None` means "do not merge" (used by
+    /// tests that only want to validate the in_flight gauge).
+    session: Option<Arc<SessionMetrics>>,
     /// Per-user accumulator + the user_id this guard's session
     /// belongs to. When `Some`, the drop also records into the
     /// per-user bandwidth tracker at the same moment as the
@@ -111,12 +123,14 @@ pub struct InFlightGuard {
 
 impl InFlightGuard {
     /// Construct the guard. Increments `in_flight_sessions` immediately.
-    /// Back-compat entry point — no per-user accounting.
-    pub fn enter(server: Arc<ServerMetrics>, snapshot: SessionMetricsSnapshot) -> Self {
+    /// Holds the session's live metrics so the merge at drop time sees
+    /// the final byte totals. Back-compat entry point — no per-user
+    /// accounting.
+    pub fn enter(server: Arc<ServerMetrics>, session: Arc<SessionMetrics>) -> Self {
         server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
         Self {
             server,
-            snapshot: Some(snapshot),
+            session: Some(session),
             per_user: None,
         }
     }
@@ -129,22 +143,61 @@ impl InFlightGuard {
     /// climb in real time.
     pub fn enter_with_per_user(
         server: Arc<ServerMetrics>,
-        snapshot: SessionMetricsSnapshot,
+        session: Arc<SessionMetrics>,
         per_user: Arc<crate::per_user_bandwidth::PerUserBandwidth>,
         user_id: [u8; 8],
     ) -> Self {
         server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
         Self {
             server,
-            snapshot: Some(snapshot),
+            session: Some(session),
             per_user: Some((per_user, user_id)),
+        }
+    }
+
+    /// Test-only constructor that takes a synthetic snapshot directly.
+    /// Used by unit tests in this file to validate the merge + per-user
+    /// record paths without spinning up a real session. NOT for use
+    /// by the binary — production must use [`Self::enter`] /
+    /// [`Self::enter_with_per_user`] so the merge sees the LIVE
+    /// `Arc<SessionMetrics>` at drop time.
+    #[cfg(test)]
+    fn enter_with_snapshot(
+        server: Arc<ServerMetrics>,
+        snapshot: SessionMetricsSnapshot,
+        per_user: Option<(Arc<crate::per_user_bandwidth::PerUserBandwidth>, [u8; 8])>,
+    ) -> Self {
+        // Materialize the synthetic snapshot into a fake SessionMetrics
+        // so the drop path is identical to production.
+        let session = Arc::new(SessionMetrics::default());
+        session.tx_bytes.store(snapshot.tx_bytes, Ordering::Relaxed);
+        session.rx_bytes.store(snapshot.rx_bytes, Ordering::Relaxed);
+        session
+            .tx_records
+            .store(snapshot.tx_records, Ordering::Relaxed);
+        session
+            .rx_records
+            .store(snapshot.rx_records, Ordering::Relaxed);
+        session
+            .aead_drops
+            .store(snapshot.aead_drops, Ordering::Relaxed);
+        session.ratchets.store(snapshot.ratchets, Ordering::Relaxed);
+        server.in_flight_sessions.fetch_add(1, Ordering::Relaxed);
+        Self {
+            server,
+            session: Some(session),
+            per_user,
         }
     }
 }
 
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
-        if let Some(snap) = self.snapshot.take() {
+        if let Some(session) = self.session.take() {
+            // Snapshot AT DROP TIME so the merge sees the final
+            // cumulative totals (tx_bytes / rx_bytes / etc.), not the
+            // all-zero state captured at enter.
+            let snap = session.snapshot();
             self.server.merge_session(&snap);
             if let Some((pu, uid)) = self.per_user.take() {
                 // Per-user record happens AT THE SAME MOMENT as
@@ -565,11 +618,10 @@ mod tests {
             ..SessionMetricsSnapshot::default()
         };
         {
-            let _g = InFlightGuard::enter_with_per_user(
+            let _g = InFlightGuard::enter_with_snapshot(
                 Arc::clone(&server),
                 snap,
-                Arc::clone(&pu),
-                *b"alice001",
+                Some((Arc::clone(&pu), *b"alice001")),
             );
         }
         // Per-user counters bumped at drop.
@@ -584,6 +636,69 @@ mod tests {
     }
 
     #[test]
+    fn in_flight_guard_snapshots_at_drop_not_enter() {
+        // Regression: the guard must capture bytes AT DROP TIME, not
+        // at enter. Simulates a real session: the relay mutates
+        // session_metrics while the guard is alive; the drop merge
+        // must reflect those late-arriving bytes, not the all-zero
+        // enter-time state.
+        let server = Arc::new(ServerMetrics::default());
+        let session = Arc::new(SessionMetrics::default());
+        {
+            let _g = InFlightGuard::enter(Arc::clone(&server), Arc::clone(&session));
+            // Bytes accumulate AFTER the guard was constructed —
+            // exactly how relay::handle_session_inner pumps the data
+            // pipe. An enter-time snapshot would miss every byte
+            // here.
+            session.record_tx(500);
+            session.record_rx(700);
+            session.record_tx(100);
+        }
+        assert_eq!(
+            server.total_tx_bytes.load(Ordering::Relaxed),
+            600,
+            "guard must snapshot at drop — late TX should be merged"
+        );
+        assert_eq!(
+            server.total_rx_bytes.load(Ordering::Relaxed),
+            700,
+            "guard must snapshot at drop — late RX should be merged"
+        );
+    }
+
+    #[test]
+    fn in_flight_guard_per_user_records_drop_time_totals() {
+        // Same regression as above, but for the per-user accumulator.
+        // This is the production code path the multi-user soak
+        // exercises.
+        use crate::per_user_bandwidth::PerUserBandwidth;
+        let server = Arc::new(ServerMetrics::default());
+        let pu = Arc::new(PerUserBandwidth::new(4096));
+        let session = Arc::new(SessionMetrics::default());
+        {
+            let _g = InFlightGuard::enter_with_per_user(
+                Arc::clone(&server),
+                Arc::clone(&session),
+                Arc::clone(&pu),
+                *b"bob00002",
+            );
+            session.record_tx(4096);
+            session.record_rx(8192);
+        }
+        let pu_snap = pu.snapshot();
+        assert_eq!(pu_snap.len(), 1);
+        assert_eq!(pu_snap[0].0, *b"bob00002");
+        assert_eq!(
+            pu_snap[0].1.tx, 4096,
+            "per-user tx must reflect drop-time total"
+        );
+        assert_eq!(
+            pu_snap[0].1.rx, 8192,
+            "per-user rx must reflect drop-time total"
+        );
+    }
+
+    #[test]
     fn in_flight_guard_normal_drop_decrements_and_merges() {
         let server = Arc::new(ServerMetrics::default());
         let snap = SessionMetricsSnapshot {
@@ -592,7 +707,7 @@ mod tests {
             ..SessionMetricsSnapshot::default()
         };
         {
-            let _guard = InFlightGuard::enter(Arc::clone(&server), snap);
+            let _guard = InFlightGuard::enter_with_snapshot(Arc::clone(&server), snap, None);
             assert_eq!(server.in_flight_sessions.load(Ordering::Relaxed), 1);
         }
         assert_eq!(server.in_flight_sessions.load(Ordering::Relaxed), 0);
@@ -607,8 +722,10 @@ mod tests {
         let server = Arc::new(ServerMetrics::default());
         let server_clone = Arc::clone(&server);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard =
-                InFlightGuard::enter(Arc::clone(&server_clone), SessionMetricsSnapshot::default());
+            let _guard = InFlightGuard::enter(
+                Arc::clone(&server_clone),
+                Arc::new(SessionMetrics::default()),
+            );
             assert_eq!(server_clone.in_flight_sessions.load(Ordering::Relaxed), 1);
             panic!("simulated handler panic");
         }));
@@ -629,7 +746,7 @@ mod tests {
         for _ in 0..64 {
             let s = Arc::clone(&server);
             handles.push(std::thread::spawn(move || {
-                let _g = InFlightGuard::enter(s, SessionMetricsSnapshot::default());
+                let _g = InFlightGuard::enter(s, Arc::new(SessionMetrics::default()));
                 std::thread::yield_now();
             }));
         }

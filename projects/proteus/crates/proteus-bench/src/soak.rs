@@ -163,6 +163,13 @@ pub struct SoakConfig {
     /// `max_inflight_sessions`. None = unbounded (fastest, but
     /// loses one production behavior).
     pub max_concurrent_dials: Option<usize>,
+    /// Number of distinct user_ids the soak rotates across.
+    /// 1 = single-tenant (default; back-compat). 10 = 10 tenants
+    /// share the server, each gets `clients/users` of the load.
+    /// Used to validate per-user bandwidth accounting under real
+    /// concurrent handshakes — operators set this in production
+    /// scale validation runs to mirror their actual tenant count.
+    pub users: usize,
 }
 
 /// Shared counters touched by every spawned soak task.
@@ -237,13 +244,44 @@ pub async fn run_soak(
     perf: PerfProfile,
     print_progress: impl Fn(&SoakProgress) + Send + Sync + 'static,
 ) -> Result<SoakSummary, BenchError> {
+    run_soak_with_per_user_observation(cfg, perf, print_progress, None).await
+}
+
+/// Like [`run_soak`] but takes an optional `Arc<PerUserBandwidth>`
+/// the caller can inspect AFTER the soak completes — used by the
+/// multi-user end-to-end test to verify per-user accounting fires
+/// against the real handshake-supplied `user_id` (not just unit-
+/// tested in isolation).
+///
+/// When `per_user` is `Some`, the in-process server wires the
+/// accumulator via `ServerCtx::with_per_user_bandwidth` AND
+/// `InFlightGuard::enter_with_per_user` inside the handler, so
+/// every session-completion records bytes against the user_id the
+/// client supplied at handshake. When `None`, behaves identically
+/// to the back-compat `run_soak` path.
+pub async fn run_soak_with_per_user_observation(
+    cfg: SoakConfig,
+    perf: PerfProfile,
+    print_progress: impl Fn(&SoakProgress) + Send + Sync + 'static,
+    per_user: Option<Arc<proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth>>,
+) -> Result<SoakSummary, BenchError> {
     // ----- Server setup (single in-process server) -----
     let cert = mint_self_signed(None)?;
     let server_keys = ServerKeys::generate();
     let mlkem_pk_bytes = server_keys.mlkem_pk_bytes.clone();
     let pq_fingerprint = server_keys.pq_fingerprint;
     let server_x25519_pub = server_keys.x25519_pub;
-    let ctx = Arc::new(ServerCtx::new(server_keys));
+    let mut ctx_raw = ServerCtx::new(server_keys);
+    if let Some(pu) = per_user.as_ref() {
+        ctx_raw = ctx_raw.with_per_user_bandwidth(Arc::clone(pu));
+    }
+    let ctx = Arc::new(ctx_raw);
+    let ctx_for_handler = Arc::clone(&ctx);
+    // We need a server-side ServerMetrics for the InFlightGuard
+    // path. Bench harness uses its own SoakState for client-side
+    // accounting; this is the SERVER-side counter the production
+    // code path bumps. Local-only — never scraped.
+    let server_metrics = Arc::new(proteus_transport_alpha::metrics::ServerMetrics::default());
 
     let bind: std::net::SocketAddr = "127.0.0.1:0"
         .parse()
@@ -254,22 +292,47 @@ pub async fn run_soak(
         .local_addr()
         .map_err(|e| BenchError::Bind(e.to_string()))?;
 
-    let server_task = tokio::spawn(async move {
-        let _ = beta_server::serve(endpoint, ctx, |mut session| async move {
-            while let Ok(Some(rec)) = session.receiver.recv_record().await {
-                if rec.is_empty() {
-                    continue;
-                }
-                if session.sender.send_record(&rec).await.is_err() {
-                    break;
-                }
-                if session.sender.flush().await.is_err() {
-                    break;
+    let server_task =
+        tokio::spawn(async move {
+            let _ = beta_server::serve(endpoint, Arc::clone(&ctx_for_handler), move |mut session| {
+            // Per-handler clones so the spawned future owns its
+            // refs and the closure stays Fn (not FnOnce).
+            let metrics = Arc::clone(&server_metrics);
+            let ctx_h = Arc::clone(&ctx_for_handler);
+            async move {
+                // RAII guard records per-user bytes on drop when
+                // both the accumulator AND the session's user_id
+                // are present — same wire-up pattern as the
+                // production server's main.rs. The guard holds the
+                // LIVE Arc<SessionMetrics> so the drop snapshot
+                // reflects the session's final byte totals.
+                let session_metrics = Arc::clone(&session.metrics);
+                let _guard = match (ctx_h.per_user_bandwidth().cloned(), session.user_id) {
+                    (Some(pu), Some(uid)) => {
+                        proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
+                            metrics, session_metrics, pu, uid,
+                        )
+                    }
+                    _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
+                        metrics,
+                        session_metrics,
+                    ),
+                };
+                while let Ok(Some(rec)) = session.receiver.recv_record().await {
+                    if rec.is_empty() {
+                        continue;
+                    }
+                    if session.sender.send_record(&rec).await.is_err() {
+                        break;
+                    }
+                    if session.sender.flush().await.is_err() {
+                        break;
+                    }
                 }
             }
         })
         .await;
-    });
+        });
 
     // ----- Client task pool -----
     let state = Arc::new(SoakState::new());
@@ -281,12 +344,22 @@ pub async fn run_soak(
         .max_concurrent_dials
         .map(|n| Arc::new(Semaphore::new(n)));
 
+    // Sanity-clamp `users` so soak runs with users=0 don't divide
+    // by zero. The CLI clamps at parse-time too, but defense-in-
+    // depth here for embedders constructing SoakConfig directly.
+    let user_count = cfg.users.max(1);
     let mut client_handles = Vec::with_capacity(cfg.clients);
-    for _client_ix in 0..cfg.clients {
+    for client_ix in 0..cfg.clients {
         let state = Arc::clone(&state);
         let mlkem_pk = mlkem_pk.clone();
         let leaf = leaf.clone();
         let cap = concurrency_cap.clone();
+        // Assign user_id round-robin so clients distribute evenly
+        // across the configured tenant count. Format `userNNNN` is
+        // 8 bytes (exactly fits user_id slot), zero-padded for the
+        // ascii-printable check on the server side.
+        let user_index = client_ix % user_count;
+        let user_id = soak_user_id(user_index);
         let h = tokio::spawn(async move {
             let payload_bytes = (cfg.per_session_kib as usize) * 1024;
             let mut payload = vec![0u8; payload_bytes];
@@ -314,6 +387,7 @@ pub async fn run_soak(
                     pq_fingerprint,
                     &payload,
                     perf,
+                    user_id,
                 )
                 .await;
                 state.exit_session();
@@ -423,6 +497,7 @@ pub async fn run_soak(
 
 /// One Proteus session: open, blast payload, drain echo, return
 /// total bytes round-tripped. Used by the per-client loop.
+#[allow(clippy::too_many_arguments)]
 async fn do_one_session(
     addr: std::net::SocketAddr,
     pinned_leaf: &rustls::pki_types::CertificateDer<'static>,
@@ -431,6 +506,7 @@ async fn do_one_session(
     pq_fingerprint: [u8; 32],
     payload: &[u8],
     perf: PerfProfile,
+    user_id: [u8; 8],
 ) -> Result<u64, BenchError> {
     let mut rng = OsRng;
     let client_id_sk = proteus_crypto::sig::generate(&mut rng);
@@ -439,7 +515,7 @@ async fn do_one_session(
         server_x25519_pub,
         server_pq_fingerprint: pq_fingerprint,
         client_id_sk,
-        user_id: *b"soakclnt",
+        user_id,
         pow_difficulty: 0,
         profile_hint: ProfileHint::Beta,
     };
@@ -487,6 +563,27 @@ async fn do_one_session(
     Ok(got)
 }
 
+/// Format a soak user-index as a deterministic 8-byte user_id.
+/// `0` → `b"user0000"`, `1` → `b"user0001"`, …, `9999` →
+/// `b"user9999"`. Indexes ≥ 10_000 wrap (only meaningful up to
+/// 9999 distinct users, which exceeds the default
+/// PerUserBandwidth cap of 4096 anyway).
+///
+/// ASCII-printable + 8 bytes exactly → renders verbatim under
+/// the per-user Prometheus emitter's `render_user_id` (no `hex:`
+/// fallback), so operators reading test output see `user0042`
+/// not `hex:7573657230303432`.
+#[must_use]
+pub fn soak_user_id(index: usize) -> [u8; 8] {
+    let n = (index % 10_000) as u16; // bounded to 4 digits
+    let mut out = *b"user0000";
+    // Write decimal digits into out[4..8].
+    let s = format!("{n:04}");
+    let bytes = s.as_bytes();
+    out[4..8].copy_from_slice(&bytes[..4]);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,7 +595,33 @@ mod tests {
             per_session_kib: 4,
             report_interval: Duration::from_millis(500),
             max_concurrent_dials: None,
+            users: 1,
         }
+    }
+
+    #[test]
+    fn soak_user_id_zero_renders_as_user0000() {
+        assert_eq!(&soak_user_id(0), b"user0000");
+    }
+
+    #[test]
+    fn soak_user_id_42_renders_as_user0042() {
+        assert_eq!(&soak_user_id(42), b"user0042");
+    }
+
+    #[test]
+    fn soak_user_id_4096_renders_as_user4096_within_bounds() {
+        // Cap is 4096 default — make sure the user_id formatter
+        // produces a printable 8-byte id for the max value the
+        // PerUserBandwidth accumulator tracks distinctly.
+        assert_eq!(&soak_user_id(4096), b"user4096");
+    }
+
+    #[test]
+    fn soak_user_id_wraps_at_10000() {
+        // 10_000 → "user0000"; 10_042 → "user0042".
+        assert_eq!(&soak_user_id(10_000), b"user0000");
+        assert_eq!(&soak_user_id(10_042), b"user0042");
     }
 
     #[test]
@@ -633,6 +756,124 @@ mod tests {
         );
     }
 
+    /// Multi-user soak end-to-end: 4 clients × 2 users × 2 seconds.
+    /// Verifies the per-user bandwidth accumulator wired into the
+    /// server-side handler records bytes against the CORRECT
+    /// user_id (= the one the client supplied at handshake), with
+    /// every active user getting a non-zero accounting entry.
+    ///
+    /// This is the test that proves the production wire-up actually
+    /// works under real handshakes — not just the isolated unit
+    /// tests of `PerUserBandwidth::record()`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn multi_user_soak_records_per_user_bandwidth_correctly() {
+        let per_user =
+            Arc::new(proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth::new(4096));
+        let summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 4,
+                duration: Duration::from_secs(2),
+                per_session_kib: 4,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 2,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("multi-user soak should succeed");
+
+        // Headline assertions: no leaks, near-perfect success.
+        assert_eq!(summary.spawn_leak_count, 0);
+        assert_eq!(
+            summary.dials_attempted,
+            summary.dials_succeeded + summary.dials_failed
+        );
+        assert!(summary.dials_succeeded > 0);
+
+        // Per-user accumulator must have BOTH user_ids tracked.
+        let snapshot = per_user.snapshot();
+        assert!(
+            snapshot.len() >= 2,
+            "expected ≥2 distinct user_ids tracked (got {}): {snapshot:?}",
+            snapshot.len()
+        );
+
+        // Each user_id must have non-zero tx + rx. user0000 and
+        // user0001 are the round-robin assignments for 4 clients ÷
+        // 2 users.
+        for expected_uid in [b"user0000", b"user0001"] {
+            let entry = snapshot.iter().find(|(uid, _)| uid == expected_uid);
+            assert!(
+                entry.is_some(),
+                "expected user_id {:?} in per-user snapshot: {snapshot:?}",
+                std::str::from_utf8(expected_uid).unwrap()
+            );
+            let (_, bytes) = entry.unwrap();
+            assert!(
+                bytes.tx > 0,
+                "user {:?} must have non-zero tx",
+                std::str::from_utf8(expected_uid).unwrap()
+            );
+            assert!(
+                bytes.rx > 0,
+                "user {:?} must have non-zero rx",
+                std::str::from_utf8(expected_uid).unwrap()
+            );
+        }
+
+        // Sum of per-user tx ≈ aggregate bench-side bytes_out
+        // (small skew is fine — bench-side measures payload, the
+        // accumulator records the AlphaSession's `tx_bytes`
+        // which includes framing overhead the bench doesn't see).
+        let per_user_sum_tx: u64 = snapshot.iter().map(|(_, b)| b.tx).sum();
+        assert!(
+            per_user_sum_tx > 0,
+            "per-user sum tx must be > 0: {snapshot:?}"
+        );
+
+        // No overflow row — cap=4096, only used 2.
+        assert!(
+            !snapshot.iter().any(|(uid, _)| uid == b"OVERFLOW"),
+            "should NOT have overflow row at cap=4096: {snapshot:?}"
+        );
+    }
+
+    /// Single-user soak (default users=1) — proves the back-compat
+    /// path works AND every client lands on the same `user0000`
+    /// bucket.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn single_user_soak_accumulates_all_traffic_to_one_user() {
+        let per_user =
+            Arc::new(proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth::new(4096));
+        let _summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 3,
+                duration: Duration::from_secs(2),
+                per_session_kib: 4,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("single-user soak should succeed");
+        let snapshot = per_user.snapshot();
+        // Exactly one entry: user0000.
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "single-user soak must have exactly 1 tracked user: {snapshot:?}"
+        );
+        assert_eq!(snapshot[0].0, *b"user0000");
+        assert!(snapshot[0].1.tx > 0);
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn soak_progress_reporter_emits_periodic_lines() {
         // 1-second soak, 200ms report interval → expect ~4 progress
@@ -648,6 +889,7 @@ mod tests {
                 per_session_kib: 1,
                 report_interval: Duration::from_millis(200),
                 max_concurrent_dials: None,
+                users: 1,
             },
             PerfProfile::default(),
             move |p| {
