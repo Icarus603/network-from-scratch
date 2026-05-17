@@ -760,32 +760,29 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // in a follow-up iteration. Loading at startup catches
     // file-permission / format errors NOW rather than at the
     // first connection.
-    let _knock_psk: Option<proteus_handshake::knock::KnockPsk> = match cfg.knock_psk_file.as_ref() {
-        Some(path) => {
-            match knock_keygen::load(path) {
-                Ok(bytes) => {
-                    info!(
-                        path = ?path,
-                        "knock PSK loaded — Path A probe-resistance primitive ready \
-                         (transport-layer passthrough wiring is a follow-up iteration)"
-                    );
-                    Some(proteus_handshake::knock::KnockPsk::from_bytes(bytes))
-                }
-                Err(e) => {
-                    // Fatal — operator explicitly asked for
-                    // probe-resistance, refusing to start with
-                    // an invalid file is safer than silently
-                    // running without the gate.
-                    return Err(format!(
-                        "knock_psk_file {path:?} load failed: {e}. \
-                         Mint a fresh one with `proteus-server knock-keygen \
-                         --out {path:?}` or remove the `knock_psk_file:` line \
-                         from server.yaml to disable probe-resistance."
-                    )
-                    .into());
-                }
+    let knock_psk: Option<proteus_handshake::knock::KnockPsk> = match cfg.knock_psk_file.as_ref() {
+        Some(path) => match knock_keygen::load(path) {
+            Ok(bytes) => {
+                info!(
+                    path = ?path,
+                    "knock PSK loaded — Path A probe-resistance gate will run at accept time"
+                );
+                Some(proteus_handshake::knock::KnockPsk::from_bytes(bytes))
             }
-        }
+            Err(e) => {
+                // Fatal — operator explicitly asked for
+                // probe-resistance, refusing to start with
+                // an invalid file is safer than silently
+                // running without the gate.
+                return Err(format!(
+                    "knock_psk_file {path:?} load failed: {e}. \
+                     Mint a fresh one with `proteus-server knock-keygen \
+                     --out {path:?}` or remove the `knock_psk_file:` line \
+                     from server.yaml to disable probe-resistance."
+                )
+                .into());
+            }
+        },
         None => {
             info!(
                 "knock_psk_file unset — probe-resistance gate is OFF \
@@ -845,6 +842,53 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     } else {
         warn!("no cover_endpoint or cover_endpoints configured — auth-fail connections will be dropped silently");
     }
+
+    // Path-A dispatch config. Composes the loaded knock PSK
+    // (if any) with the operator's single-cover endpoint
+    // (cover_endpoint), so the gate's RouteToCover path has a
+    // splice target. Operators wanting probe resistance MUST
+    // set BOTH `knock_psk_file:` and a single `cover_endpoint:`
+    // — the pool path (cover_endpoints) is per-source-IP
+    // affinity for the legacy auth-fail flow and isn't wired
+    // into Path A's pre-auth splice yet.
+    //
+    // FAIL-CLOSED: if knock_psk is set but no cover_endpoint
+    // is configured, refuse to start. A Path-A deploy without
+    // cover would leave probers seeing a TCP RST or hung
+    // connection — exactly the fingerprint Path A is meant
+    // to eliminate. Operator either configures a cover or
+    // unsets knock_psk_file.
+    let dispatch_cfg: std::sync::Arc<proteus_transport_alpha::knock_dispatch::DispatchConfig> =
+        std::sync::Arc::new({
+            let mut c = proteus_transport_alpha::knock_dispatch::DispatchConfig::default();
+            if let Some(psk) = knock_psk.as_ref() {
+                // Path A wants its own splice target string —
+                // re-resolve the cover endpoint from cfg rather
+                // than reaching into ctx (which already consumed
+                // it via with_cover()).
+                let cover_for_path_a = cfg
+                    .cover_endpoint
+                    .as_deref()
+                    .and_then(proteus_transport_alpha::cover::parse_cover_endpoint);
+                if cover_for_path_a.is_none() {
+                    return Err("knock_psk_file is set but cover_endpoint is unconfigured. \
+                     Path A's gate routes probers to the cover endpoint; without \
+                     a configured cover the probe-resistance behavior degrades to \
+                     'TCP RST or hang' which IS itself a fingerprint. Set \
+                     cover_endpoint: in server.yaml (e.g. www.cloudflare.com:443) \
+                     or unset knock_psk_file: to disable Path A."
+                        .into());
+                }
+                c.psk = Some(psk.clone());
+                c.cover_endpoint = cover_for_path_a;
+                info!(
+                    cover = ?c.cover_endpoint,
+                    "Path A dispatch config built — probe-resistance gate is ARMED"
+                );
+            }
+            c
+        });
+
     if let Some(pa) = &cfg.probe_anomaly {
         info!(
             window_secs = pa.window_secs,
@@ -2583,44 +2627,50 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         };
         match reloadable_acceptor.clone() {
             Some(acceptor) => {
-                let metrics = Arc::clone(&metrics);
-                let relay_cfg_tls = relay_cfg.clone();
-                let ctx_tls_for_metrics = Arc::clone(&ctx);
-                let on_session_tls =
-                    move |session: proteus_transport_alpha::session::AlphaSession<
-                        tokio::io::ReadHalf<proteus_transport_alpha::tls::ServerStream>,
-                        tokio::io::WriteHalf<proteus_transport_alpha::tls::ServerStream>,
-                    >| {
-                        let metrics = Arc::clone(&metrics);
-                        let relay_cfg = relay_cfg_tls.clone();
-                        let ctx_pu = Arc::clone(&ctx_tls_for_metrics);
-                        async move {
-                            metrics
-                                .sessions_accepted
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            metrics
-                                .handshakes_succeeded
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            observe_handshake_latency(&metrics, session.handshake_duration);
-                            let _conn_guard = match check_per_user_conn_cap(
-                                ctx_pu.per_user_conn_limiter().as_ref(),
-                                session.user_id,
-                            ) {
-                                ConnCapDecision::Allow(g) => g,
-                                ConnCapDecision::Reject { user_id, cap } => {
-                                    warn!(
-                                        user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
-                                        cap,
-                                        "TLS session rejected: user_id at per-user concurrent-session cap"
-                                    );
-                                    return;
-                                }
-                            };
-                            // Live Arc<SessionMetrics> — snapshotted at
-                            // guard drop so the merge reflects the
-                            // session's final byte totals.
-                            let session_metrics = Arc::clone(&session.metrics);
-                            let _guard = match (
+                if dispatch_cfg.psk.is_some() {
+                    // Path A enabled — use the gated accept loop.
+                    // Closure body is identical to the legacy path
+                    // below, only the TLS stream type differs
+                    // (TlsStream<PrependedStream> instead of
+                    // TlsStream<TcpStream>). We build only this
+                    // closure in this arm so the closure-captured
+                    // Arcs (metrics, ctx) aren't moved into a
+                    // never-used legacy closure first.
+                    let metrics_gate = Arc::clone(&metrics);
+                    let relay_cfg_gate = relay_cfg.clone();
+                    let ctx_gate_for_metrics = Arc::clone(&ctx);
+                    let on_session_tls_gated =
+                        move |session: proteus_transport_alpha::session::AlphaSession<
+                            tokio::io::ReadHalf<proteus_transport_alpha::tls::GatedServerStream>,
+                            tokio::io::WriteHalf<proteus_transport_alpha::tls::GatedServerStream>,
+                        >| {
+                            let metrics = Arc::clone(&metrics_gate);
+                            let relay_cfg = relay_cfg_gate.clone();
+                            let ctx_pu = Arc::clone(&ctx_gate_for_metrics);
+                            async move {
+                                metrics
+                                    .sessions_accepted
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics
+                                    .handshakes_succeeded
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                observe_handshake_latency(&metrics, session.handshake_duration);
+                                let _conn_guard = match check_per_user_conn_cap(
+                                    ctx_pu.per_user_conn_limiter().as_ref(),
+                                    session.user_id,
+                                ) {
+                                    ConnCapDecision::Allow(g) => g,
+                                    ConnCapDecision::Reject { user_id, cap } => {
+                                        warn!(
+                                            user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
+                                            cap,
+                                            "Path-A TLS session rejected: user_id at per-user concurrent-session cap"
+                                        );
+                                        return;
+                                    }
+                                };
+                                let session_metrics = Arc::clone(&session.metrics);
+                                let _guard = match (
                                 ctx_pu.per_user_bandwidth().cloned(),
                                 session.user_id,
                             ) {
@@ -2637,17 +2687,85 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                                     session_metrics,
                                 ),
                             };
-                            if let Err(e) = relay::handle_session(session, relay_cfg).await {
-                                warn!(error = %e, "TLS session terminated");
+                                if let Err(e) = relay::handle_session(session, relay_cfg).await {
+                                    warn!(error = %e, "Path-A TLS session terminated");
+                                }
                             }
-                        }
-                    };
-                Box::pin(server::serve_tls_reloadable(
-                    listener,
-                    ctx,
-                    acceptor,
-                    on_session_tls,
-                ))
+                        };
+                    Box::pin(server::serve_tls_reloadable_with_gate(
+                        listener,
+                        ctx,
+                        acceptor,
+                        Arc::clone(&dispatch_cfg),
+                        on_session_tls_gated,
+                    ))
+                } else {
+                    let metrics = Arc::clone(&metrics);
+                    let relay_cfg_tls = relay_cfg.clone();
+                    let ctx_tls_for_metrics = Arc::clone(&ctx);
+                    let on_session_tls =
+                        move |session: proteus_transport_alpha::session::AlphaSession<
+                            tokio::io::ReadHalf<proteus_transport_alpha::tls::ServerStream>,
+                            tokio::io::WriteHalf<proteus_transport_alpha::tls::ServerStream>,
+                        >| {
+                            let metrics = Arc::clone(&metrics);
+                            let relay_cfg = relay_cfg_tls.clone();
+                            let ctx_pu = Arc::clone(&ctx_tls_for_metrics);
+                            async move {
+                                metrics
+                                    .sessions_accepted
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                metrics
+                                    .handshakes_succeeded
+                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                observe_handshake_latency(&metrics, session.handshake_duration);
+                                let _conn_guard = match check_per_user_conn_cap(
+                                    ctx_pu.per_user_conn_limiter().as_ref(),
+                                    session.user_id,
+                                ) {
+                                    ConnCapDecision::Allow(g) => g,
+                                    ConnCapDecision::Reject { user_id, cap } => {
+                                        warn!(
+                                            user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
+                                            cap,
+                                            "TLS session rejected: user_id at per-user concurrent-session cap"
+                                        );
+                                        return;
+                                    }
+                                };
+                                // Live Arc<SessionMetrics> — snapshotted at
+                                // guard drop so the merge reflects the
+                                // session's final byte totals.
+                                let session_metrics = Arc::clone(&session.metrics);
+                                let _guard = match (
+                                    ctx_pu.per_user_bandwidth().cloned(),
+                                    session.user_id,
+                                ) {
+                                    (Some(pu), Some(uid)) => {
+                                        proteus_transport_alpha::metrics::InFlightGuard::enter_with_per_user(
+                                            Arc::clone(&metrics),
+                                            session_metrics,
+                                            pu,
+                                            uid,
+                                        )
+                                    }
+                                    _ => proteus_transport_alpha::metrics::InFlightGuard::enter(
+                                        Arc::clone(&metrics),
+                                        session_metrics,
+                                    ),
+                                };
+                                if let Err(e) = relay::handle_session(session, relay_cfg).await {
+                                    warn!(error = %e, "TLS session terminated");
+                                }
+                            }
+                        };
+                    Box::pin(server::serve_tls_reloadable(
+                        listener,
+                        ctx,
+                        acceptor,
+                        on_session_tls,
+                    ))
+                }
             }
             None => Box::pin(server::serve(listener, ctx, on_session_tcp)),
         }

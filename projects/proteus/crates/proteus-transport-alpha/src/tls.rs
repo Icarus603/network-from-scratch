@@ -166,6 +166,12 @@ pub type ServerStream = ServerTlsStream<TcpStream>;
 /// Client-side TLS-wrapped TCP stream.
 pub type ClientStream = ClientTlsStream<TcpStream>;
 
+/// Server-side TLS-wrapped Path-A `PrependedStream`. The
+/// gated accept loop yields this concrete type instead of
+/// the legacy `ServerStream` so the binary doesn't need a
+/// direct `tokio-rustls` dependency just to spell the type.
+pub type GatedServerStream = ServerTlsStream<crate::knock_dispatch::PrependedStream>;
+
 /// Server handshake: drive the TLS 1.3 handshake on `stream`, returning
 /// the encrypted stream ready for the inner Proteus framing.
 pub async fn server_handshake(
