@@ -20,6 +20,12 @@ use crate::ALPN;
 
 /// Build the rustls client config quinn uses. ALPN pinned to
 /// `proteus-β-v1`; TLS 1.3 only.
+///
+/// Per-call (`extra_roots: Vec<CertificateDer>`) path. Kept for
+/// back-compat with tests and one-shot tools. Production SOCKS5
+/// traffic should go through [`build_client_crypto_cache`] once
+/// at startup and call [`BetaClientCrypto::quic_client_config`]
+/// per CONNECT — see that helper's docs for the rationale.
 pub fn make_client_crypto(
     extra_roots: Vec<CertificateDer<'static>>,
 ) -> Result<Arc<rustls::ClientConfig>, BetaError> {
@@ -36,6 +42,84 @@ pub fn make_client_crypto(
             .with_no_client_auth();
     client_cfg.alpn_protocols = vec![ALPN.to_vec()];
     Ok(Arc::new(client_cfg))
+}
+
+/// Pre-built β client crypto, cached at startup so the per-
+/// CONNECT path doesn't pay for:
+///
+///   * webpki-roots `extend` clone (~140 system root certs)
+///   * `rustls::ClientConfig::builder()` chain (cipher suite
+///     enumeration, sig-alg lineup, TLS 1.3 only enforcement)
+///   * ALPN Vec allocation
+///   * `QuicClientConfig::try_from(crypto)` conversion
+///
+/// Iter-22: parallels the iter-11 (α `TlsConnector`) and
+/// iter-13 (α `HandshakeConfigSource`) caching pattern, but
+/// for the β QUIC carrier.
+///
+/// ## Why this matters
+///
+/// Pre-iter-22 every SOCKS5 CONNECT that selected β (when
+/// the carrier-health tracker said "try β first" — the
+/// default on healthy networks) called `make_client_crypto`
+/// plus the `QuicClientConfig::try_from` conversion. On a
+/// browser opening a page with 50 short-lived HTTP/2
+/// connections through β, that's 50× the avoidable rustls
+/// setup work per page load.
+///
+/// The cache only holds the rustls + quinn-crypto layers.
+/// `quinn::ClientConfig` itself (which carries the per-
+/// connect `TransportConfig` with `max_idle_timeout` and the
+/// `PerfProfile`-derived knobs) is built fresh per CONNECT
+/// because those values depend on the operator's per-CONNECT
+/// timeout setting.
+#[derive(Clone)]
+pub struct BetaClientCrypto {
+    crypto: Arc<rustls::ClientConfig>,
+    quic_crypto: Arc<quinn::crypto::rustls::QuicClientConfig>,
+}
+
+impl BetaClientCrypto {
+    /// Borrow the wrapped quinn `QuicClientConfig`. The caller
+    /// passes this to `quinn::ClientConfig::new(...)` per
+    /// CONNECT — the `Arc` clone is essentially free, vs the
+    /// expensive `try_from` that the per-call path used to do.
+    #[must_use]
+    pub fn quic_client_config(&self) -> Arc<quinn::crypto::rustls::QuicClientConfig> {
+        Arc::clone(&self.quic_crypto)
+    }
+
+    /// Borrow the underlying rustls config — useful for tests
+    /// or callers that need to introspect the cipher / alpn /
+    /// root-store wiring without going through quinn.
+    #[must_use]
+    pub fn rustls_client_config(&self) -> Arc<rustls::ClientConfig> {
+        Arc::clone(&self.crypto)
+    }
+}
+
+/// Build a cached β client-crypto bundle once at startup.
+/// `extra_roots` should be the operator's pinned-CA chain
+/// (typically loaded from `tls.trusted_ca` PEM once at
+/// process start) plus an empty fallback when not configured.
+///
+/// Wrap the result in `Arc<BetaClientCrypto>` and stash on
+/// `ClientCtx` (mirroring the iter-11 `tls_connector` and
+/// iter-13 `hs_config_source` caches). Per-CONNECT callers
+/// borrow via `ctx.beta_crypto.as_ref().map(|c|
+/// c.quic_client_config())`.
+pub fn build_client_crypto_cache(
+    extra_roots: Vec<CertificateDer<'static>>,
+) -> Result<BetaClientCrypto, BetaError> {
+    let crypto = make_client_crypto(extra_roots)?;
+    let quic_crypto = Arc::new(
+        quinn::crypto::rustls::QuicClientConfig::try_from(crypto.as_ref().clone())
+            .map_err(|_| BetaError::CryptoInstall)?,
+    );
+    Ok(BetaClientCrypto {
+        crypto,
+        quic_crypto,
+    })
 }
 
 fn install_default_crypto_provider() {
@@ -208,11 +292,42 @@ pub async fn connect_with_timeout_and_perf(
             vec![ProfileHint::Beta.to_byte()],
         ));
     }
-    let crypto = make_client_crypto(extra_roots)?;
-    let crypto = Arc::new(
-        quinn::crypto::rustls::QuicClientConfig::try_from(crypto.as_ref().clone())
-            .map_err(|_| BetaError::CryptoInstall)?,
-    );
+    // Per-call fallback path. Production SOCKS5 traffic now uses
+    // `connect_with_timeout_perf_cached_crypto` so the rustls
+    // + quinn-crypto setup runs ONCE at startup, not per CONNECT.
+    let crypto = build_client_crypto_cache(extra_roots)?;
+    connect_with_timeout_perf_cached_crypto(
+        server_name,
+        server_addr,
+        &crypto,
+        cfg,
+        connect_timeout,
+        perf,
+    )
+    .await
+}
+
+/// Like [`connect_with_timeout_and_perf`] but takes a pre-
+/// built [`BetaClientCrypto`] cache (built once at startup via
+/// [`build_client_crypto_cache`]) so the per-CONNECT path
+/// doesn't pay for the webpki-roots extend + rustls config
+/// build + `QuicClientConfig::try_from` conversion on every
+/// SOCKS5 CONNECT. Iter-22 production hot path.
+pub async fn connect_with_timeout_perf_cached_crypto(
+    server_name: &str,
+    server_addr: SocketAddr,
+    crypto: &BetaClientCrypto,
+    cfg: ClientConfig,
+    connect_timeout: std::time::Duration,
+    perf: crate::PerfProfile,
+) -> Result<BetaClientSession, BetaError> {
+    if !matches!(cfg.profile_hint, ProfileHint::Beta) {
+        return Err(BetaError::AlpnMismatch(
+            vec![cfg.profile_hint.to_byte()],
+            vec![ProfileHint::Beta.to_byte()],
+        ));
+    }
+    let crypto = crypto.quic_client_config();
     let mut client_cfg = quinn::ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
     // The idle timeout doubles as quinn's effective handshake

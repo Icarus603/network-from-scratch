@@ -582,6 +582,57 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         "cached handshake-config source built — SOCKS5 requests will skip 4 disk reads + ed25519 derivation per CONNECT"
     );
 
+    // Iter-22: cache the β client crypto (rustls + quinn) ONCE
+    // at startup so per-CONNECT β dials skip the webpki-roots
+    // extend + rustls config build + QuicClientConfig::try_from
+    // + PEM parse of trusted_ca on every request. Mirrors the
+    // iter-11 α TlsConnector cache.
+    //
+    // When β isn't configured we skip the cache entirely; when
+    // the trusted_ca file fails to load we log + proceed without
+    // the cache (per-CONNECT path falls back to the legacy
+    // make_client_crypto flow which has the same failure mode
+    // it always did).
+    let cached_beta_crypto: Option<Arc<proteus_transport_beta::client::BetaClientCrypto>> =
+        if beta_configured {
+            // Load extra_roots ONCE at startup. Same trusted_ca
+            // file the α path consumes via `tls.trusted_ca`.
+            let extra_roots = match cfg.tls.as_ref().and_then(|t| t.trusted_ca.as_ref()) {
+                Some(ca) => match proteus_transport_alpha::tls::load_cert_chain(ca) {
+                    Ok(chain) => chain,
+                    Err(e) => {
+                        warn!(
+                            error = %e,
+                            path = ?ca,
+                            "failed to load tls.trusted_ca for β crypto cache — per-CONNECT \
+                             β dials will fall back to the legacy uncached path (slower)"
+                        );
+                        Vec::new()
+                    }
+                },
+                None => Vec::new(),
+            };
+            match proteus_transport_beta::client::build_client_crypto_cache(extra_roots) {
+                Ok(c) => {
+                    info!(
+                        "cached β client crypto built — SOCKS5 β-CONNECTs will skip rustls + \
+                         QuicClientConfig setup per request"
+                    );
+                    Some(Arc::new(c))
+                }
+                Err(e) => {
+                    warn!(
+                        error = %e,
+                        "failed to build β client crypto cache — per-CONNECT β dials \
+                         will fall back to legacy uncached path"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
     let mut ctx_builder = ClientCtx::new(
         Arc::clone(&health),
         endpoint_pool.clone(),
@@ -593,6 +644,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     .with_hs_config_source(Arc::clone(&cached_hs_source));
     if let Some(c) = cached_tls_connector.clone() {
         ctx_builder = ctx_builder.with_tls_connector(c);
+    }
+    if let Some(c) = cached_beta_crypto.clone() {
+        ctx_builder = ctx_builder.with_beta_crypto(c);
     }
     let ctx = Arc::new(ctx_builder);
 

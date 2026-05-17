@@ -135,6 +135,12 @@ pub async fn handle_socks5_with_ctx(
     // cheaply per CONNECT. When None, try_alpha/try_beta fall
     // back to calling cfg.build_handshake_config() per request.
     let hs_source = ctx.hs_config_source.clone();
+    // Iter-22: cached β client crypto. Same shape as the
+    // connector + hs_source caches — built once at startup,
+    // cloned cheaply per CONNECT. When None (β not configured
+    // or build failed at startup), try_beta falls back to the
+    // legacy uncached path.
+    let beta_crypto = ctx.beta_crypto.clone();
     let res = handle_socks5_with_health_and_pool_and_bootstrap_counters(
         sock,
         cfg,
@@ -143,6 +149,7 @@ pub async fn handle_socks5_with_ctx(
         bootstrap,
         connector,
         hs_source,
+        beta_crypto,
     )
     .await;
     match &res {
@@ -175,7 +182,7 @@ pub async fn handle_socks5_with_health_and_pool(
     // None, `try_alpha` / `try_beta` fall through to building
     // them inline per request.
     handle_socks5_with_health_and_pool_and_bootstrap_counters(
-        sock, cfg, health, pool, None, None, None,
+        sock, cfg, health, pool, None, None, None, None,
     )
     .await
 }
@@ -184,6 +191,7 @@ pub async fn handle_socks5_with_health_and_pool(
 /// bootstrap-DNS counter handle from `ClientCtx`; pass `None` to
 /// skip counter bumps (tests / integration callers that don't have
 /// a ctx wired).
+#[allow(clippy::too_many_arguments)]
 pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     mut sock: TcpStream,
     cfg: &Arc<ClientConfig>,
@@ -192,6 +200,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     bootstrap: Option<crate::ctx::BootstrapCounterHandles>,
     connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<Arc<crate::config::HandshakeConfigSource>>,
+    beta_crypto: Option<Arc<proteus_transport_beta::client::BetaClientCrypto>>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -311,6 +320,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             bootstrap.as_ref(),
             connector.as_ref(),
             hs_source.as_ref(),
+            beta_crypto.as_ref(),
         )
         .await;
     }
@@ -325,12 +335,14 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
         bootstrap.as_ref(),
         connector.as_ref(),
         hs_source.as_ref(),
+        beta_crypto.as_ref(),
     )
     .await
 }
 
 /// Pre-pool single-endpoint dispatcher. Kept as a separate function
 /// so the pool path can reuse it per-entry without code duplication.
+#[allow(clippy::too_many_arguments)]
 async fn single_endpoint_dispatch(
     cfg: &Arc<ClientConfig>,
     health: &Arc<CarrierHealth>,
@@ -339,6 +351,7 @@ async fn single_endpoint_dispatch(
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
+    beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
 ) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
@@ -359,7 +372,17 @@ async fn single_endpoint_dispatch(
                 health.failure_streak(),
             );
         }
-        match try_beta(cfg, target_bytes, sock, None, bootstrap, hs_source).await {
+        match try_beta(
+            cfg,
+            target_bytes,
+            sock,
+            None,
+            bootstrap,
+            hs_source,
+            beta_crypto,
+        )
+        .await
+        {
             Ok(()) => {
                 health.record_beta_success();
                 return Ok(());
@@ -420,6 +443,7 @@ async fn dispatch_via_pool(
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
+    beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
 ) -> Result<(), SocksError> {
     let mut last_err: Option<SocksError> = None;
     let mut any_endpoint_attempted = false;
@@ -465,6 +489,7 @@ async fn dispatch_via_pool(
             bootstrap,
             connector,
             hs_source,
+            beta_crypto,
         )
         .await;
         match result {
@@ -533,6 +558,7 @@ async fn dispatch_via_pool(
             bootstrap,
             connector,
             hs_source,
+            beta_crypto,
         )
         .await;
         match &result {
@@ -566,6 +592,7 @@ async fn attempt_one_pool_entry(
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
+    beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
 ) -> Result<(), SocksError> {
     let beta_configured = cfg.server_endpoint_beta.is_some();
     let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
@@ -578,6 +605,7 @@ async fn attempt_one_pool_entry(
             Some(endpoint),
             bootstrap,
             hs_source,
+            beta_crypto,
         )
         .await
         {
@@ -614,6 +642,7 @@ async fn attempt_one_pool_entry(
 /// `server_endpoint_beta`. When `None`, falls back to the cfg
 /// value — preserving the pre-pool single-endpoint behavior for
 /// callers that haven't migrated to the pool yet.
+#[allow(clippy::too_many_arguments)]
 async fn try_beta(
     cfg: &Arc<ClientConfig>,
     target_bytes: &[u8],
@@ -621,6 +650,7 @@ async fn try_beta(
     endpoint_override: Option<&str>,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     cached_hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
+    cached_beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
 ) -> Result<(), SocksError> {
     let beta_endpoint: &str = match endpoint_override {
         Some(e) => e,
@@ -704,19 +734,43 @@ async fn try_beta(
     if let Some(v) = cfg.beta_mtu_upper_bound {
         perf.mtu_upper_bound = v;
     }
-    let connect_fut = proteus_transport_beta::client::connect_with_timeout_and_perf(
-        server_name,
-        server_addr,
-        extra_roots,
-        hs_cfg,
-        timeout,
-        perf,
-    );
-    let beta_client =
+    // Iter-22: prefer the cached β crypto path when ctx
+    // attached one (production hot path — skips rustls config
+    // build + QuicClientConfig::try_from + the per-CONNECT
+    // PEM-parse of trusted_ca). Fall back to the legacy
+    // per-call builder when ctx didn't attach a cache
+    // (back-compat entry points / tests / β-crypto-cache-build
+    // failed at startup).
+    let beta_client = if let Some(crypto) = cached_beta_crypto {
+        // `extra_roots` was already folded into the cache at
+        // startup; the cached path doesn't need them.
+        drop(extra_roots);
+        let connect_fut = proteus_transport_beta::client::connect_with_timeout_perf_cached_crypto(
+            server_name,
+            server_addr,
+            crypto,
+            hs_cfg,
+            timeout,
+            perf,
+        );
         tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
             .await
             .map_err(|_| SocksError::Socks("β handshake timed out"))?
-            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?
+    } else {
+        let connect_fut = proteus_transport_beta::client::connect_with_timeout_and_perf(
+            server_name,
+            server_addr,
+            extra_roots,
+            hs_cfg,
+            timeout,
+            perf,
+        );
+        tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
+            .await
+            .map_err(|_| SocksError::Socks("β handshake timed out"))?
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?
+    };
 
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,

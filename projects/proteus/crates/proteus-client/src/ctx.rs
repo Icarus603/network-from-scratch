@@ -123,6 +123,18 @@ pub struct ClientCtx {
     ///
     /// See `crate::config::HandshakeConfigSource` for the why.
     pub hs_config_source: Option<Arc<crate::config::HandshakeConfigSource>>,
+    /// Cached β client crypto bundle (iter-22). Built ONCE at
+    /// startup from the operator's `tls.trusted_ca` (loaded from
+    /// disk + parsed once) + webpki-roots. The per-CONNECT β
+    /// dial reuses this instead of paying for the rustls config
+    /// build + `QuicClientConfig::try_from` conversion + (if
+    /// configured) PEM-parse of `tls.trusted_ca` on every
+    /// request. Mirrors the iter-11 α `tls_connector` cache.
+    ///
+    /// `None` when β isn't configured or the operator's
+    /// `trusted_ca` failed to load at startup; per-CONNECT β
+    /// dials fall back to the legacy `make_client_crypto` path.
+    pub beta_crypto: Option<Arc<proteus_transport_beta::client::BetaClientCrypto>>,
     /// Process-lifecycle info — captured once at startup, read at
     /// scrape time by the admin endpoint for the
     /// `proteus_client_process_*` Prometheus block + the `/status`
@@ -168,6 +180,9 @@ impl ClientCtx {
             // the parsed yaml + key files. Tests that don't dial
             // skip this.
             hs_config_source: None,
+            // Default: no cached β crypto. Main attaches via
+            // `with_beta_crypto` when β is configured.
+            beta_crypto: None,
             // Default process_info: empty strings + start_unix
             // captured at construction. Real binary overrides via
             // `with_process_info` so /metrics reports the actual
@@ -221,6 +236,21 @@ impl ClientCtx {
         source: Arc<crate::config::HandshakeConfigSource>,
     ) -> Self {
         self.hs_config_source = Some(source);
+        self
+    }
+
+    /// Attach a pre-built β client crypto cache (iter-22).
+    /// Called at startup right after building the cache via
+    /// `proteus_transport_beta::client::build_client_crypto_cache(extra_roots)`.
+    /// Per-CONNECT β dials reuse this instead of rebuilding the
+    /// rustls config + quinn crypto + (when set)
+    /// PEM-parsing `tls.trusted_ca` on every request.
+    #[must_use]
+    pub fn with_beta_crypto(
+        mut self,
+        crypto: Arc<proteus_transport_beta::client::BetaClientCrypto>,
+    ) -> Self {
+        self.beta_crypto = Some(crypto);
         self
     }
 
@@ -714,5 +744,34 @@ tls:\n  server_name: \"vps.example.com\"\n",
         assert_eq!(alpha.server_x25519_pub, beta.server_x25519_pub);
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Iter-22: default ctx has no cached β crypto.
+    #[test]
+    fn default_ctx_has_no_cached_beta_crypto() {
+        let ctx = mk_ctx(None, 0);
+        assert!(
+            ctx.beta_crypto.is_none(),
+            "fresh ctx must not have cached β crypto — main.rs attaches it explicitly when β is configured"
+        );
+    }
+
+    /// Iter-22: `with_beta_crypto` MUST preserve the exact same
+    /// `Arc` — not clone the inner crypto state — so per-CONNECT
+    /// handler hot paths can `Arc::clone` for free.
+    #[test]
+    fn with_beta_crypto_preserves_arc_identity() {
+        let crypto = proteus_transport_beta::client::build_client_crypto_cache(Vec::new())
+            .expect("build_client_crypto_cache");
+        let arc = Arc::new(crypto);
+        let ctx = mk_ctx(None, 0).with_beta_crypto(Arc::clone(&arc));
+        let held = ctx
+            .beta_crypto
+            .as_ref()
+            .expect("ctx must hold the crypto after with_beta_crypto");
+        assert!(
+            Arc::ptr_eq(&arc, held),
+            "with_beta_crypto must store the SAME Arc, not clone the inner crypto"
+        );
     }
 }
