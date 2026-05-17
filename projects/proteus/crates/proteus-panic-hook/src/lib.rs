@@ -216,6 +216,22 @@ pub fn install_with_counter(counter: Arc<PanicCounter>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Iter-51: serialize tests that touch the global panic hook.
+    /// `std::panic::set_hook` / `take_hook` is a process-wide
+    /// single mutable slot. Two parallel tests both calling
+    /// `install_with_counter` race: test A's hook fires test B's
+    /// increment (and vice-versa), making `c.get() == 1`
+    /// non-deterministic. The flake manifested as intermittent
+    /// `assert_eq!(c.get(), 1) — left: 0, right: 1` failures in
+    /// the workspace `cargo test --workspace` run.
+    ///
+    /// We serialize via a static Mutex — no `serial_test`
+    /// dependency, no atomic-only juggling. The Mutex MUST be
+    /// the FIRST line in each affected test so the guard outlives
+    /// any panic-hook-set+drop sequence.
+    static HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn counter_starts_at_zero_and_increments_monotonically() {
@@ -228,6 +244,8 @@ mod tests {
 
     #[test]
     fn install_returns_counter_that_increments_when_hook_fires() {
+        // Iter-51: serialize against other hook-touching tests.
+        let _guard = HOOK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         // We can't easily test the full hook in unit tests
         // without polluting the global hook state of other
         // tests in the same process; assert the counter logic
@@ -258,6 +276,10 @@ mod tests {
     /// other tests in the same binary.
     #[test]
     fn hook_increments_on_caught_panic() {
+        // Iter-51: serialize against other hook-touching tests
+        // so install_with_counter + catch_unwind can't observe
+        // OTHER tests' panics on this process-global hook.
+        let _guard = HOOK_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let c = Arc::new(PanicCounter::new());
         install_with_counter(Arc::clone(&c));
         // Use catch_unwind so the panic doesn't abort the test
