@@ -42,6 +42,7 @@ pub mod firewall;
 pub mod histogram;
 pub mod knock_dispatch;
 pub mod knock_gate;
+pub mod knock_rewriter;
 pub mod log_throttle;
 pub mod metrics;
 pub mod metrics_http;
