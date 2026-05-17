@@ -75,6 +75,21 @@ pub struct MetricsSnapshot {
     /// first in the rendered output (parser preserves emission
     /// order; sorting happens at render time).
     pub auto_deny_entries: Vec<AutoDenyEntry>,
+    /// Leaf TLS cert `notAfter` as Unix seconds. `None` means TLS
+    /// observability is not wired (legacy startup path OR no `tls:`
+    /// block in config). Sourced from
+    /// `proteus_tls_cert_not_after_unix_seconds` Prometheus gauge.
+    /// Negative values are invalid and parsed as `None`.
+    pub tls_cert_not_after_unix: Option<i64>,
+    /// SIGHUP-style TLS reload attempt counter. Sourced from
+    /// `proteus_tls_reload_attempts_total`. `None` if TLS
+    /// observability is not wired.
+    pub tls_reload_attempts: Option<u64>,
+    /// Subset of `tls_reload_attempts` whose new chain parsed cleanly
+    /// AND swapped in. The gap `attempts - succeeded` is the silent-
+    /// SIGHUP-failure signal operators alert on. Sourced from
+    /// `proteus_tls_reload_succeeded_total`.
+    pub tls_reload_succeeded: Option<u64>,
     pub tx_bytes: u64,
     pub rx_bytes: u64,
     pub aead_drops: u64,
@@ -173,6 +188,20 @@ impl MetricsSnapshot {
                 }
                 continue;
             }
+            // TLS observability gauges/counters are parsed separately
+            // because the cert-expiry gauge is naturally i64 (Unix
+            // timestamp; positive in practice but the type is signed).
+            // We branch on the name BEFORE the u64 parse so we don't
+            // silently drop the gauge if some future test uses a
+            // negative sentinel.
+            if name == "proteus_tls_cert_not_after_unix_seconds" {
+                if let Ok(ts) = value.parse::<i64>() {
+                    if ts >= 0 {
+                        s.tls_cert_not_after_unix = Some(ts);
+                    }
+                }
+                continue;
+            }
             let v: u64 = match value.parse() {
                 Ok(v) => v,
                 Err(_) => continue,
@@ -200,6 +229,12 @@ impl MetricsSnapshot {
                 "proteus_auto_deny_inserted_total" => s.auto_deny_inserted_total = v,
                 "proteus_auto_deny_refused_inserts_total" => {
                     s.auto_deny_refused_inserts_total = v;
+                }
+                "proteus_tls_reload_attempts_total" => {
+                    s.tls_reload_attempts = Some(v);
+                }
+                "proteus_tls_reload_succeeded_total" => {
+                    s.tls_reload_succeeded = Some(v);
                 }
                 "proteus_tx_bytes_total" => s.tx_bytes = v,
                 "proteus_rx_bytes_total" => s.rx_bytes = v,
@@ -337,6 +372,26 @@ impl MetricsSnapshot {
             s.push('}');
         }
         s.push(']');
+        // TLS observability — leaf cert expiry + reload-counters.
+        // Emit `null` when the field is absent (TLS not configured OR
+        // startup path bypassed the v3 acceptor wiring) so scripts
+        // can distinguish "not configured" from "zero/expired" with
+        // `(.tls_cert_not_after_unix // 0) > 0` style guards.
+        s.push_str(r#","tls_cert_not_after_unix":"#);
+        match self.tls_cert_not_after_unix {
+            Some(ts) => s.push_str(&ts.to_string()),
+            None => s.push_str("null"),
+        }
+        s.push_str(r#","tls_reload_attempts":"#);
+        match self.tls_reload_attempts {
+            Some(v) => s.push_str(&v.to_string()),
+            None => s.push_str("null"),
+        }
+        s.push_str(r#","tls_reload_succeeded":"#);
+        match self.tls_reload_succeeded {
+            Some(v) => s.push_str(&v.to_string()),
+            None => s.push_str("null"),
+        }
         push_json_u64(&mut s, "total_rejected", self.total_rejected(), false);
         push_json_u64(&mut s, "tx_bytes", self.tx_bytes, false);
         push_json_u64(&mut s, "rx_bytes", self.rx_bytes, false);
@@ -494,6 +549,46 @@ impl fmt::Display for MetricsSnapshot {
                         sorted.len() - 20
                     )?;
                 }
+            }
+            writeln!(f)?;
+        }
+
+        // TLS observability block — leaf cert expiry + reload-counter
+        // delta. Quiet when TLS isn't configured (all three Option
+        // fields are None) so unrelated deployments (LAN test rigs)
+        // don't get a confusing empty section.
+        if self.tls_cert_not_after_unix.is_some()
+            || self.tls_reload_attempts.is_some()
+            || self.tls_reload_succeeded.is_some()
+        {
+            writeln!(f, " TLS cert")?;
+            if let Some(ts) = self.tls_cert_not_after_unix {
+                // Wall-clock comparison: positive ⇒ days until expiry;
+                // negative ⇒ already expired (urgent). We compute it
+                // at render time so the snapshot stays a pure data
+                // structure (no embedded SystemTime).
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                let days = (ts - now) / 86_400;
+                let label = if days < 0 {
+                    format!("{ts} (EXPIRED {} days ago)", -days)
+                } else if days < 14 {
+                    format!("{ts} (expires in {days}d — RENEW NOW)")
+                } else {
+                    format!("{ts} (expires in {days}d)")
+                };
+                row!("not_after_unix_seconds", label)?;
+            }
+            if let (Some(att), Some(suc)) = (self.tls_reload_attempts, self.tls_reload_succeeded) {
+                let failed = att.saturating_sub(suc);
+                let label = if failed > 0 {
+                    format!("{att} ({suc} ok, {failed} failed — check journalctl for parse errors)")
+                } else {
+                    format!("{att} ({suc} ok)")
+                };
+                row!("reload_attempts_total", label)?;
             }
             writeln!(f)?;
         }
@@ -1896,5 +1991,177 @@ proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 30\n";
         let t = read_token_file(&p).unwrap();
         assert_eq!(t, "abcdef0123");
         let _ = std::fs::remove_file(&p);
+    }
+
+    /// Parser surfaces the three TLS observability lines into typed
+    /// fields. None of them are required — the parser must still
+    /// return a coherent snapshot when only some are present.
+    #[test]
+    fn snapshot_parses_tls_cert_and_reload_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds 1893456000\n\
+proteus_tls_reload_attempts_total 4\n\
+proteus_tls_reload_succeeded_total 3\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.tls_cert_not_after_unix, Some(1_893_456_000));
+        assert_eq!(s.tls_reload_attempts, Some(4));
+        assert_eq!(s.tls_reload_succeeded, Some(3));
+    }
+
+    /// All three fields default to `None` when the body has no TLS
+    /// lines — the typical LAN test-rig case. Distinguishes "not
+    /// configured" from "expired".
+    #[test]
+    fn snapshot_tls_fields_default_to_none_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        assert_eq!(s.tls_cert_not_after_unix, None);
+        assert_eq!(s.tls_reload_attempts, None);
+        assert_eq!(s.tls_reload_succeeded, None);
+    }
+
+    /// Malformed TLS gauge values (negative, garbage) must NOT panic;
+    /// the field stays `None` so downstream alerting doesn't fire on
+    /// a parse glitch.
+    #[test]
+    fn snapshot_parser_skips_malformed_tls_lines() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds -1\n\
+proteus_tls_cert_not_after_unix_seconds garbage\n\
+proteus_tls_reload_attempts_total notanumber\n";
+        let s = MetricsSnapshot::parse(body);
+        // Negative explicitly rejected (we treat negative as
+        // sentinel for "not present").
+        assert_eq!(s.tls_cert_not_after_unix, None);
+        // Garbage value: parse fails → field unchanged (None).
+        assert_eq!(s.tls_reload_attempts, None);
+        // The valid `proteus_up 1` still parsed.
+        assert_eq!(s.up, 1);
+    }
+
+    /// JSON output emits all three TLS fields, using `null` when the
+    /// field is absent so scripts can use `(.tls_cert_not_after_unix
+    /// // 0)` style guards.
+    #[test]
+    fn snapshot_json_emits_tls_fields_with_null_when_absent() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(
+            j.contains(r#""tls_cert_not_after_unix":null"#),
+            "expected null cert-expiry in: {j}"
+        );
+        assert!(j.contains(r#""tls_reload_attempts":null"#));
+        assert!(j.contains(r#""tls_reload_succeeded":null"#));
+    }
+
+    /// JSON output emits the actual numeric values when the fields
+    /// are populated. The cert timestamp is emitted as a bare i64,
+    /// no JSON-string wrap.
+    #[test]
+    fn snapshot_json_emits_tls_fields_with_values_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds 1893456000\n\
+proteus_tls_reload_attempts_total 7\n\
+proteus_tls_reload_succeeded_total 6\n";
+        let s = MetricsSnapshot::parse(body);
+        let j = s.to_json();
+        assert!(j.contains(r#""tls_cert_not_after_unix":1893456000"#), "{j}");
+        assert!(j.contains(r#""tls_reload_attempts":7"#), "{j}");
+        assert!(j.contains(r#""tls_reload_succeeded":6"#), "{j}");
+    }
+
+    /// Text output renders a "TLS cert" block when at least one
+    /// field is populated.
+    #[test]
+    fn snapshot_text_renders_tls_block_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds 9999999999\n\
+proteus_tls_reload_attempts_total 1\n\
+proteus_tls_reload_succeeded_total 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            t.contains(" TLS cert"),
+            "missing 'TLS cert' header in:\n{t}"
+        );
+        assert!(
+            t.contains("not_after_unix_seconds"),
+            "missing not_after_unix_seconds row in:\n{t}"
+        );
+        assert!(
+            t.contains("reload_attempts_total"),
+            "missing reload_attempts_total row in:\n{t}"
+        );
+        // 9999999999 is year 2286 — well past 14d so it should NOT
+        // be flagged "RENEW NOW".
+        assert!(
+            !t.contains("RENEW NOW"),
+            "should not flag RENEW NOW on a far-future cert:\n{t}"
+        );
+    }
+
+    /// "RENEW NOW" warning appears when the cert is within 14 days
+    /// of expiry. We pick `now + 5 days` to land in the danger zone.
+    #[test]
+    fn snapshot_text_renders_renew_warning_when_cert_near_expiry() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let near = now + 5 * 86_400;
+        let body = format!(
+            "proteus_up 1\nproteus_tls_cert_not_after_unix_seconds {near}\n\
+             proteus_tls_reload_attempts_total 1\n\
+             proteus_tls_reload_succeeded_total 1\n"
+        );
+        let s = MetricsSnapshot::parse(&body);
+        let t = format!("{s}");
+        assert!(t.contains("RENEW NOW"), "expected RENEW NOW in:\n{t}");
+    }
+
+    /// "EXPIRED" warning appears when the cert's notAfter is already
+    /// in the past.
+    #[test]
+    fn snapshot_text_renders_expired_warning_when_cert_in_past() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds 1\n\
+proteus_tls_reload_attempts_total 1\n\
+proteus_tls_reload_succeeded_total 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains("EXPIRED"), "expected EXPIRED in:\n{t}");
+    }
+
+    /// Failed-reload count surfaces in the text "reload_attempts"
+    /// row when `attempts > succeeded`.
+    #[test]
+    fn snapshot_text_flags_failed_reloads_when_present() {
+        let body = "\
+proteus_up 1\n\
+proteus_tls_cert_not_after_unix_seconds 9999999999\n\
+proteus_tls_reload_attempts_total 5\n\
+proteus_tls_reload_succeeded_total 3\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(t.contains("2 failed"), "expected '2 failed' in:\n{t}");
+    }
+
+    /// TLS block is omitted entirely when none of the three fields
+    /// are populated — keeps LAN test-rig output uncluttered.
+    #[test]
+    fn snapshot_text_omits_tls_block_when_not_configured() {
+        let body = "proteus_up 1\n";
+        let s = MetricsSnapshot::parse(body);
+        let t = format!("{s}");
+        assert!(
+            !t.contains(" TLS cert"),
+            "should not show TLS block in:\n{t}"
+        );
     }
 }

@@ -137,7 +137,8 @@ pub async fn serve_with_auth_full(
 /// so the `/metrics` exposition includes the active-deny gauges +
 /// per-prefix `remaining_secs` labelled gauges. Operators see WHO
 /// is currently blocked AND for how much longer, directly in
-/// Prometheus / Grafana.
+/// Prometheus / Grafana. Back-compat shim — forwards to
+/// [`serve_with_auth_full_v3`] with `tls_acceptor = None`.
 pub async fn serve_with_auth_full_v2(
     addr: &str,
     metrics: Arc<ServerMetrics>,
@@ -145,15 +146,35 @@ pub async fn serve_with_auth_full_v2(
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v3(addr, metrics, auth, probe_anomaly, auto_deny, None).await
+}
+
+/// v3 of [`serve_with_auth_full`] — adds an optional
+/// `ReloadableAcceptor` so the `/metrics` exposition includes the
+/// TLS cert-expiry gauge (`proteus_tls_cert_not_after_unix_seconds`)
+/// and the SIGHUP reload counters (`proteus_tls_reload_attempts_total`
+/// / `_succeeded_total`). Operators can PromQL-alert on cert expiry
+/// approaching (Let's Encrypt 90-day issuance, 60-day renewal) AND
+/// detect silent reload failures (when `attempts - succeeded` grows).
+pub async fn serve_with_auth_full_v3(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
     let auto_deny_enabled = auto_deny.is_some();
+    let tls_observability = tls_acceptor.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
         probe_anomaly = probe_anomaly_enabled,
         auto_deny = auto_deny_enabled,
+        tls_observability,
         "metrics endpoint bound",
     );
     loop {
@@ -162,12 +183,14 @@ pub async fn serve_with_auth_full_v2(
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
         let auto_deny = auto_deny.clone();
+        let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
             auth,
             probe_anomaly,
             auto_deny,
+            tls_acceptor,
         ));
     }
 }
@@ -207,7 +230,8 @@ pub async fn serve_on_listener_full(
 
 /// v2 of [`serve_on_listener_full`] — adds an optional `AutoDenyList`
 /// for the same `/metrics` exposition extension as
-/// [`serve_with_auth_full_v2`].
+/// [`serve_with_auth_full_v2`]. Back-compat shim — forwards to
+/// [`serve_on_listener_full_v3`] with `tls_acceptor = None`.
 pub async fn serve_on_listener_full_v2(
     listener: TcpListener,
     metrics: Arc<ServerMetrics>,
@@ -215,18 +239,34 @@ pub async fn serve_on_listener_full_v2(
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
 ) -> std::io::Result<()> {
+    serve_on_listener_full_v3(listener, metrics, auth, probe_anomaly, auto_deny, None).await
+}
+
+/// v3 of [`serve_on_listener_full`] — adds an optional
+/// `ReloadableAcceptor` for the same TLS cert-expiry + reload-counter
+/// extension as [`serve_with_auth_full_v3`].
+pub async fn serve_on_listener_full_v3(
+    listener: TcpListener,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+) -> std::io::Result<()> {
     loop {
         let (stream, _peer) = listener.accept().await?;
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
         let auto_deny = auto_deny.clone();
+        let tls_acceptor = tls_acceptor.clone();
         tokio::spawn(handle_connection(
             stream,
             metrics,
             auth,
             probe_anomaly,
             auto_deny,
+            tls_acceptor,
         ));
     }
 }
@@ -237,6 +277,7 @@ async fn handle_connection(
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
     auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
 ) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
@@ -244,12 +285,13 @@ async fn handle_connection(
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v2(
+    let (status_line, content_type, body) = render_full_v3(
         head,
         &metrics,
         auth.as_ref(),
         probe_anomaly.as_deref(),
         auto_deny.as_deref(),
+        tls_acceptor.as_ref(),
     );
     let response = format!(
         "{status_line}\
@@ -322,7 +364,8 @@ pub fn render_full(
 /// four diagnostic series (`active_prefixes`, `inserted_total`,
 /// `refused_inserts_total`, per-prefix `remaining_secs`). Operators
 /// see WHO is currently blocked AND for how much longer, directly
-/// in Prometheus / Grafana.
+/// in Prometheus / Grafana. Back-compat shim — forwards to
+/// [`render_full_v3`] with `tls_acceptor = None`.
 #[must_use]
 pub fn render_full_v2(
     request_head: &str,
@@ -330,6 +373,24 @@ pub fn render_full_v2(
     auth: Option<&MetricsAuth>,
     probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
     auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+) -> (&'static str, &'static str, String) {
+    render_full_v3(request_head, metrics, auth, probe_anomaly, auto_deny, None)
+}
+
+/// v3 of [`render_full`] — adds an optional `ReloadableAcceptor` for
+/// TLS cert-expiry + SIGHUP reload-counter observability. When
+/// supplied, the `/metrics` body includes
+/// `proteus_tls_cert_not_after_unix_seconds` (gauge) and
+/// `proteus_tls_reload_attempts_total` / `_succeeded_total`
+/// (counters).
+#[must_use]
+pub fn render_full_v3(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -351,6 +412,9 @@ pub fn render_full_v2(
         }
         if let Some(ad) = auto_deny {
             body.push_str(&ad.prometheus_extension(now));
+        }
+        if let Some(ra) = tls_acceptor {
+            body.push_str(&ra.prometheus_extension());
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -727,5 +791,102 @@ mod tests {
         assert!(!r.starts_with("HTTP/1.1 401"));
 
         server_task.abort();
+    }
+
+    /// Helper: mint a self-signed cert + acceptor + chain for the
+    /// TLS-observability test cases.
+    #[cfg(test)]
+    fn mint_tls_acceptor_with_chain() -> (
+        crate::tls::ReloadableAcceptor,
+        Vec<rustls::pki_types::CertificateDer<'static>>,
+    ) {
+        use rcgen::generate_simple_self_signed;
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        let ck = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert = CertificateDer::from(ck.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
+        let chain = vec![cert];
+        let acceptor = crate::tls::build_acceptor(chain.clone(), key).unwrap();
+        let reloadable = crate::tls::ReloadableAcceptor::new_with_expiry(acceptor, &chain);
+        (reloadable, chain)
+    }
+
+    #[test]
+    fn render_full_v3_includes_tls_cert_expiry_when_acceptor_supplied() {
+        let m = ServerMetrics::default();
+        let (acceptor, _) = mint_tls_acceptor_with_chain();
+        let (status, _ctype, body) = render_full_v3(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(
+            body.contains("proteus_tls_cert_not_after_unix_seconds"),
+            "missing cert-expiry gauge in body: {body}"
+        );
+        assert!(
+            body.contains("proteus_tls_reload_attempts_total 0"),
+            "missing/wrong reload-attempts counter in body: {body}"
+        );
+        assert!(
+            body.contains("proteus_tls_reload_succeeded_total 0"),
+            "missing/wrong reload-succeeded counter in body: {body}"
+        );
+    }
+
+    #[test]
+    fn render_full_v3_omits_tls_block_when_acceptor_is_none() {
+        let m = ServerMetrics::default();
+        let (_status, _ctype, body) =
+            render_full_v3("GET /metrics HTTP/1.1\r\n\r\n", &m, None, None, None, None);
+        assert!(
+            !body.contains("proteus_tls_cert_not_after_unix_seconds"),
+            "should not emit cert gauge without acceptor: {body}"
+        );
+        assert!(
+            !body.contains("proteus_tls_reload_attempts_total"),
+            "should not emit reload counters without acceptor: {body}"
+        );
+    }
+
+    #[test]
+    fn render_full_v3_reflects_reload_counter_bumps() {
+        let m = ServerMetrics::default();
+        let (acceptor, _) = mint_tls_acceptor_with_chain();
+        // Simulate one successful reload + one failed reload.
+        let (_, chain2) = mint_tls_acceptor_with_chain();
+        // Build a fresh acceptor from chain2's first cert via the
+        // existing mint helper — we just want a new acceptor handle.
+        let (_, _) = mint_tls_acceptor_with_chain();
+        let (acceptor_to_swap_in, _) = mint_tls_acceptor_with_chain();
+        // Successful reload using the matching chain.
+        acceptor
+            .reload_with_expiry(acceptor_to_swap_in.current(), &chain2)
+            .unwrap();
+        // Failed reload via garbage chain.
+        let bad = vec![rustls::pki_types::CertificateDer::from(vec![0xFFu8; 32])];
+        let (acceptor_to_swap_in2, _) = mint_tls_acceptor_with_chain();
+        let _ = acceptor.reload_with_expiry(acceptor_to_swap_in2.current(), &bad);
+
+        let (_status, _ctype, body) = render_full_v3(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            Some(&acceptor),
+        );
+        assert!(
+            body.contains("proteus_tls_reload_attempts_total 2"),
+            "wrong attempts in body: {body}"
+        );
+        assert!(
+            body.contains("proteus_tls_reload_succeeded_total 1"),
+            "wrong succeeded in body: {body}"
+        );
     }
 }

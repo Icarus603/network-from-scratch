@@ -199,10 +199,14 @@ power-down ([RelyVPN 2026 crackdown analysis](https://relyvpn.com/blog/china-vpn
 |---|---|---|---|
 | Direct-dial architecture (no domestic relay) | ✅ supported but not enforced | ✅ same | ✅ same |
 | In-doc operator warning + topology checklist | ❌ Xray's docs don't address this | ❌ Hy2 docs don't | ✅ [`deploy/README.md`](../../projects/proteus/deploy/README.md#deployment-topology--direct-dial-vs-relay-2026-gfw-reality-check) "Deployment topology" section + 3 Mermaid diagrams + security-checklist items, commit 87207a8 |
+| Multi-VPS HA client | ❌ static config only | ❌ same | ✅ `EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + `proteus-client validate` guidance — primary-down → backup-up automatic failover, no manual switch on burn |
+| TLS cert silent-rotation-failure observability | ❌ external monitoring only | ❌ same | ✅ `proteus_tls_cert_not_after_unix_seconds` Prometheus gauge AND `admin status` "TLS cert" block with RENEW NOW / EXPIRED warnings + `proteus_tls_reload_attempts_total` / `_succeeded_total` counters. **A silent expired-cert OR silent certbot-deploy-hook-no-SIGHUP failure is one of the documented commercial-node death modes** — Let's Encrypt's 90-day cert dies → server rejects all new TLS → operator notices days later. Now PromQL pages 14 days out + first SIGHUP failure shows in-terminal. Landed 2026-05-18 (24 tests; `crates/proteus-transport-alpha/src/tls.rs`) |
 
-**Verdict: ⇈ strictly ahead on operator guidance, tied on
-underlying protection.** This is doc work, not protocol work, but
-it's load-bearing for the user scenario (personal clean-VPS deploy).
+**Verdict: ⇈ strictly ahead on operator guidance AND ahead on
+operational observability**; tied on underlying protocol-layer
+protection. This is doc + observability work, not protocol-crypto
+work, but it's load-bearing for the user scenario (personal
+clean-VPS deploy where the operator IS the SRE).
 
 ### 9. Tiangou-class commercial DPI + cross-deployment shared blocklist
 

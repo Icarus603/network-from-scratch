@@ -492,6 +492,43 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
     let ctx = Arc::new(ctx);
 
+    // Build the TLS 1.3 outer wrapper FIRST (before the metrics
+    // listener spawns) so the metrics endpoint can include the
+    // cert-expiry gauge + SIGHUP reload counters on its very first
+    // scrape. Moved up from below-the-metrics-block on 2026-05-18 when
+    // `proteus_tls_cert_not_after_unix_seconds` landed — operators
+    // want the cert ticking down to be visible from t=0, not from the
+    // first SIGHUP.
+    let reloadable_acceptor = match cfg.tls.as_ref() {
+        Some(tls_cfg) => {
+            info!(cert = ?tls_cfg.cert_chain, "loading TLS cert chain");
+            let chain = proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let key = proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let acceptor = proteus_transport_alpha::tls::build_acceptor(chain.clone(), key)
+                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let reloadable =
+                proteus_transport_alpha::tls::ReloadableAcceptor::new_with_expiry(acceptor, &chain);
+            if let Some(ts) = reloadable.leaf_not_after() {
+                info!(
+                    not_after_unix = ts,
+                    "TLS 1.3 outer wrapper enabled (SIGHUP triggers reload, cert expiry tracked)"
+                );
+            } else {
+                info!("TLS 1.3 outer wrapper enabled (SIGHUP triggers reload)");
+            }
+            Some(reloadable)
+        }
+        None => {
+            warn!(
+                "no `tls:` block in config — server will run plain TCP. \
+                 This is INSECURE in production; passive DPI will identify the protocol."
+            );
+            None
+        }
+    };
+
     if let Some(metrics_addr) = cfg.metrics_listen.clone() {
         // Load the bearer-token gate (if configured). Failing to read
         // the token file is fatal — silently downgrading to "no auth"
@@ -535,13 +572,24 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // signals without grepping logs.
         let probe_anomaly = ctx.probe_anomaly().cloned();
         let auto_deny = ctx.auto_deny().cloned();
+        // Hand the `ReloadableAcceptor` to the metrics endpoint so the
+        // `/metrics` scrape exposes:
+        //   - `proteus_tls_cert_not_after_unix_seconds` — leaf cert
+        //     notAfter; PromQL `(_ - time()) < 14*86400` for cert-
+        //     expiry pages BEFORE Let's Encrypt silently dies.
+        //   - `proteus_tls_reload_attempts_total` and
+        //     `_succeeded_total` — silent-SIGHUP-failure detector
+        //     (`attempts - succeeded > 0` ⇒ certbot's renewal hook
+        //     ran but Proteus didn't pick the cert up).
+        let tls_for_metrics = reloadable_acceptor.clone();
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v2(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v3(
                 &metrics_addr,
                 metrics,
                 auth,
                 probe_anomaly,
                 auto_deny,
+                tls_for_metrics,
             )
             .await
             {
@@ -549,32 +597,6 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         });
     }
-
-    // Optionally build the TLS 1.3 outer wrapper, wrapped in a
-    // ReloadableAcceptor so SIGHUP can swap in a freshly-renewed
-    // Let's Encrypt cert without disturbing in-flight sessions.
-    let reloadable_acceptor = match cfg.tls.as_ref() {
-        Some(tls_cfg) => {
-            info!(cert = ?tls_cfg.cert_chain, "loading TLS cert chain");
-            let chain = proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let key = proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            let acceptor = proteus_transport_alpha::tls::build_acceptor(chain, key)
-                .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-            info!("TLS 1.3 outer wrapper enabled (SIGHUP triggers reload)");
-            Some(proteus_transport_alpha::tls::ReloadableAcceptor::new(
-                acceptor,
-            ))
-        }
-        None => {
-            warn!(
-                "no `tls:` block in config — server will run plain TCP. \
-                 This is INSECURE in production; passive DPI will identify the protocol."
-            );
-            None
-        }
-    };
 
     // One canonical startup-config banner so operators can verify
     // their YAML edit took effect via a single `journalctl` grep.
@@ -684,10 +706,40 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key),
                     ) {
                         (Ok(chain), Ok(key)) => {
-                            match proteus_transport_alpha::tls::build_acceptor(chain, key) {
+                            match proteus_transport_alpha::tls::build_acceptor(chain.clone(), key) {
                                 Ok(new_acceptor) => {
-                                    reloadable.reload(new_acceptor);
-                                    info!(cert = ?tls_cfg.cert_chain, "TLS cert reloaded");
+                                    // Use `reload_with_expiry` so the
+                                    // `proteus_tls_cert_not_after_unix_seconds`
+                                    // gauge refreshes to the freshly-
+                                    // renewed cert's notAfter AND the
+                                    // success counter bumps. The legacy
+                                    // `reload` path would leave both
+                                    // stale, hiding silent rotation
+                                    // failures from the operator.
+                                    match reloadable.reload_with_expiry(new_acceptor, &chain) {
+                                        Ok(()) => {
+                                            info!(
+                                                cert = ?tls_cfg.cert_chain,
+                                                not_after_unix = reloadable.leaf_not_after(),
+                                                "TLS cert reloaded"
+                                            );
+                                        }
+                                        Err(e) => {
+                                            // Acceptor IS swapped in
+                                            // (reload_with_expiry's
+                                            // documented behavior); the
+                                            // notAfter gauge held its
+                                            // previous value because
+                                            // leaf parsing failed.
+                                            // Surface so the operator
+                                            // can re-issue.
+                                            error!(
+                                                error = %e,
+                                                "TLS reload: leaf cert DER parse failed — \
+                                                 acceptor swapped, expiry gauge held stale"
+                                            );
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     error!(error = %e, "TLS reload: build_acceptor failed; keeping old cert");

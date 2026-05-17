@@ -98,6 +98,7 @@ Tiangou 的 SSL/TLS 攔截 + ML 行為分析 ≠ 古典 DPI 簽名匹配。我�
 - ✅ `proteus-client validate` 已能預檢配置
 - ✅ **NEW 2026-05-18**：`deploy/README.md` 「Deployment topology」section 完整警告 + Mermaid 三圖（direct-dial 推薦、relay 死亡、商用 farm 高風險）+ security checklist 三項 operator-action item
 - ✅ **NEW 2026-05-18 同日 follow-up**：multi-VPS HA dispatch 已 wire 通 — `handle_socks5_with_health_and_pool` 串接 `EndpointPool` 含 `EndpointHealth`，每 CONNECT walk pool 順序試 entries，per-entry 失敗即 record failure 並 fall-to-next；下個 CONNECT 跳過 suppressed entries。+2 真實 server e2e tests 證明 primary down → backup 接管。
+- ✅ **NEW 2026-05-18 follow-up（本次 iteration）**：TLS cert-expiry + reload 全鏈路 observability — `proteus_tls_cert_not_after_unix_seconds` (gauge) + `proteus_tls_reload_attempts_total` + `_succeeded_total` (counters) Prometheus 系列 + `admin status` 新增「TLS cert」block（含「RENEW NOW」/「EXPIRED」前置警告 + 失敗 reload 次數）。**修補本主線最隱形的 production failure mode**：商用節點集體死亡的另一條暗線是「certbot 跑了但 server 沒 reload / cert 過期了沒人發現」—— Let's Encrypt 90 天 cert 一旦失效 server 就靜默拒所有新 TLS handshake，operator 在 PromQL 上看 success rate 突降卻沒線索。現在 14 天前 PromQL alert 觸發 + SIGHUP 後 `reload_succeeded != reload_attempts` 立即看到。**24 new tests** (15 in `tls.rs` + 3 in `metrics_http.rs` + 10 in `admin.rs`)，所有舊呼叫端透過 `serve_with_auth_full_v2` → `_v3` shim 零改動。`ReloadableAcceptor::new_with_expiry` 在 startup 即解析 leaf cert notAfter 並暴露 gauge；`reload_with_expiry` 在 SIGHUP 時刷新 gauge + bump success counter。Parser 用 `x509-parser 0.18`（rustls/quinn 生態 canonical X.509 crate，audited Rust）。
 - ❌ multipath QUIC 還沒做（spec §10.4，M3+）
 
 **TODO**：

@@ -42,6 +42,13 @@ webpki-roots = { workspace = true }
 # pin the exact version rustls 0.23 uses to keep both views consistent.
 rustls-webpki = { version = "0.103", default-features = false, features = ["std", "ring"] }
 
+# x509-parser — used by `tls::leaf_cert_not_after` to extract the
+# notAfter of the loaded leaf cert. Drives the cert-expiry observability
+# surface (`proteus_tls_cert_not_after_unix_seconds` Prometheus gauge +
+# admin-status "Cert" block). Parsing DER notAfter by hand would be a
+# fragile pet project; x509-parser is the canonical Rust X.509 lib.
+x509-parser = { workspace = true }
+
 [dev-dependencies]
 rcgen = "0.13"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
