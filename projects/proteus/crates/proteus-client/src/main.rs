@@ -119,6 +119,40 @@ enum Cmd {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// One-shot Proteus α-profile handshake smoke test.
+    ///
+    /// Loads the supplied `client.yaml`, resolves `server_endpoint`
+    /// under the configured `bootstrap_dns` policy, dials the
+    /// server, runs the FULL Proteus handshake (ed25519 identity +
+    /// ml-kem768 KEM + ChaCha20 ratchet + TLS channel binding when
+    /// `tls:` is set), drops the session, and prints a per-stage
+    /// timing breakdown.
+    ///
+    /// Designed for "did my new client.yaml actually work?"
+    /// post-provisioning checks WITHOUT having to spin up the
+    /// SOCKS5 daemon + curl through it. The server sees one
+    /// session open + immediate close — operators running many
+    /// smoke runs should adjust their server's abuse detectors
+    /// to tolerate the burst.
+    ///
+    /// Exit code 0 on handshake success, 1 on failure, 2 on
+    /// pre-handshake setup error (config load / TLS connector
+    /// build).
+    ConnectTest {
+        /// Path to client YAML config.
+        #[arg(long, default_value = "/etc/proteus/client.yaml")]
+        config: PathBuf,
+        /// Per-stage hard timeout. Wraps DNS, TCP connect, AND
+        /// the Proteus handshake — a wedged server at any stage
+        /// can't pin the test runner.
+        #[arg(long, default_value_t = 10)]
+        connect_timeout_secs: u64,
+        /// Output format: `text` (default, human-readable with
+        /// per-stage millis) or `json` (one-line append-only
+        /// document for CI / scripted gates).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -160,6 +194,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 skip_dns_resolution,
             };
             let code = proteus_client::host_preflight::cli_run(input, &format).await?;
+            std::process::exit(code);
+        }
+        Cmd::ConnectTest {
+            config,
+            connect_timeout_secs,
+            format,
+        } => {
+            let code =
+                proteus_client::connect_test::cli_run(&config, connect_timeout_secs, &format)
+                    .await?;
             std::process::exit(code);
         }
     }
