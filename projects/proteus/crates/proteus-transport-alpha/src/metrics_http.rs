@@ -385,11 +385,8 @@ pub async fn serve_with_auth_full_v9(
 }
 
 /// v10 of [`serve_with_auth_full`] — adds an optional
-/// `PerUserQuotaTracker`. When supplied, the `/metrics` body
-/// includes the 11-series `proteus_user_quota_*` block AND the
-/// `/diagnose` body adds the USER QUOTA table. Operators alert
-/// on `rate(proteus_user_quota_admission_rejected_total[5m]) > 0`
-/// to spot users who hit their period cap.
+/// `PerUserQuotaTracker`. Back-compat shim — forwards to v11
+/// with `tls_cert_watcher = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v10(
     addr: &str,
@@ -406,6 +403,50 @@ pub async fn serve_with_auth_full_v10(
     user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
     user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v11(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        user_quota,
+        None,
+    )
+    .await
+}
+
+/// v11 of [`serve_with_auth_full`] — adds an optional
+/// `CertFileWatcher`. When supplied, the `/metrics` body
+/// includes the four `proteus_tls_cert_watcher_*` counters.
+/// Operators alert on
+/// `rate(proteus_tls_cert_watcher_auto_reload_failed_total[5m]) > 0`
+/// to spot a non-Let's-Encrypt deploy that produced a broken
+/// cert (the binary keeps serving the OLD cert; the counter
+/// surfaces the silent failure).
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v11(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+    tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -418,6 +459,7 @@ pub async fn serve_with_auth_full_v10(
     let abuse_fires_enabled = abuse_fires.is_some();
     let user_quarantine_enabled = user_quarantine.is_some();
     let user_quota_enabled = user_quota.is_some();
+    let tls_cert_watcher_enabled = tls_cert_watcher.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -431,6 +473,7 @@ pub async fn serve_with_auth_full_v10(
         abuse_fires = abuse_fires_enabled,
         user_quarantine = user_quarantine_enabled,
         user_quota = user_quota_enabled,
+        tls_cert_watcher = tls_cert_watcher_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -447,7 +490,8 @@ pub async fn serve_with_auth_full_v10(
         let abuse_fires = abuse_fires.clone();
         let user_quarantine = user_quarantine.clone();
         let user_quota = user_quota.clone();
-        tokio::spawn(handle_connection_v10(
+        let tls_cert_watcher = tls_cert_watcher.clone();
+        tokio::spawn(handle_connection_v11(
             stream,
             metrics,
             auth,
@@ -461,6 +505,7 @@ pub async fn serve_with_auth_full_v10(
             abuse_fires,
             user_quarantine,
             user_quota,
+            tls_cert_watcher,
         ));
     }
 }
@@ -748,7 +793,7 @@ async fn handle_connection_v9(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_v10(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -762,13 +807,49 @@ async fn handle_connection_v10(
     user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
     user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
 ) {
+    handle_connection_v11(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        user_quota,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v11(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+    tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v10(
+    let (status_line, content_type, body) = render_full_v11(
         head,
         &metrics,
         auth.as_ref(),
@@ -782,6 +863,7 @@ async fn handle_connection_v10(
         abuse_fires.as_deref(),
         user_quarantine.as_deref(),
         user_quota.as_deref(),
+        tls_cert_watcher.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -1479,10 +1561,8 @@ pub fn render_full_v9(
     )
 }
 
-/// v10 of [`render_full`] — adds optional per-user data quota
-/// tracker. When supplied, `/metrics` includes the 11-series
-/// `proteus_user_quota_*` block and `/diagnose` adds the USER
-/// QUOTA table.
+/// v10 of [`render_full`] — back-compat shim to v11 with
+/// `tls_cert_watcher = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v10(
@@ -1499,6 +1579,45 @@ pub fn render_full_v10(
     abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
     user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
     user_quota: Option<&crate::user_quota::PerUserQuotaTracker>,
+) -> (&'static str, &'static str, String) {
+    render_full_v11(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        user_quota,
+        None,
+    )
+}
+
+/// v11 of [`render_full`] — adds optional `CertFileWatcher`.
+/// When supplied, `/metrics` includes the four
+/// `proteus_tls_cert_watcher_*` counters.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v11(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+    per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+    user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
+    user_quota: Option<&crate::user_quota::PerUserQuotaTracker>,
+    tls_cert_watcher: Option<&crate::tls_watcher::CertFileWatcher>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -1554,6 +1673,9 @@ pub fn render_full_v10(
         }
         if let Some(qt) = user_quota {
             body.push_str(&qt.prometheus());
+        }
+        if let Some(w) = tls_cert_watcher {
+            body.push_str(&w.prometheus());
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -1638,7 +1760,7 @@ pub fn render_full_v10(
                 );
             }
         }
-        let body = render_diagnose_v4(
+        let mut body = render_diagnose_v4(
             metrics,
             probe_anomaly,
             auto_deny,
@@ -1649,6 +1771,13 @@ pub fn render_full_v10(
             user_quarantine,
             user_quota,
         );
+        // Append TLS cert watcher counters when wired —
+        // operators reading /diagnose see the auto-reload
+        // health alongside the SIGHUP-reload counters
+        // (`proteus_tls_reload_*`).
+        if let Some(w) = tls_cert_watcher {
+            body.push_str(&w.prometheus());
+        }
         ("HTTP/1.1 200 OK\r\n", "text/plain; charset=utf-8", body)
     } else if matches_path(request_head, "/readyz") {
         if metrics.ready.load(Ordering::Relaxed) {
@@ -2224,6 +2353,97 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v11 with tls_cert_watcher supplied emits the four
+    /// `proteus_tls_cert_watcher_*` counters on /metrics AND
+    /// appends them to /diagnose. Proves the wire-up reaches the
+    /// HTTP layer.
+    #[test]
+    fn render_full_v11_emits_tls_cert_watcher_counters_when_supplied() {
+        use crate::tls_watcher::CertFileWatcher;
+        let m = ServerMetrics::default();
+        // We don't actually need the files to exist for the
+        // /metrics rendering — the counter values are stored
+        // on the watcher independently of the filesystem.
+        let watcher = CertFileWatcher::new(
+            std::path::PathBuf::from("/tmp/nonexistent_cert.pem"),
+            std::path::PathBuf::from("/tmp/nonexistent_key.pem"),
+        );
+        watcher.record_attempt();
+        watcher.record_success();
+        let (_status, _ctype, body) = render_full_v11(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&watcher),
+        );
+        assert!(
+            body.contains("proteus_tls_cert_watcher_auto_reload_attempts_total 1"),
+            "missing attempts counter: {body}"
+        );
+        assert!(
+            body.contains("proteus_tls_cert_watcher_auto_reload_succeeded_total 1"),
+            "missing succeeded counter: {body}"
+        );
+        assert!(
+            body.contains("proteus_tls_cert_watcher_auto_reload_failed_total 0"),
+            "missing failed counter: {body}"
+        );
+
+        let (_, _, diag_body) = render_full_v11(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&watcher),
+        );
+        assert!(
+            diag_body.contains("proteus_tls_cert_watcher_auto_reload_attempts_total"),
+            "watcher counters missing from diagnose: {diag_body}"
+        );
+    }
+
+    /// v11 with no tls_cert_watcher omits the counters.
+    #[test]
+    fn render_full_v11_omits_tls_cert_watcher_when_none() {
+        let m = ServerMetrics::default();
+        let (_, _, body) = render_full_v11(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!body.contains("proteus_tls_cert_watcher_"));
     }
 
     /// v10 with user_quota supplied emits the 11-series quota

@@ -361,6 +361,7 @@ mod tests {
             user_quotas: None,
             startup_self_test_timeout_secs: None,
             periodic_self_test_interval_secs: None,
+            tls_cert_watcher_interval_secs: None,
             outbound_filter: None,
         }
     }

@@ -831,7 +831,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // `proteus_tls_cert_not_after_unix_seconds` landed — operators
     // want the cert ticking down to be visible from t=0, not from the
     // first SIGHUP.
-    let reloadable_acceptor = match cfg.tls.as_ref() {
+    let (reloadable_acceptor, tls_cert_watcher) = match cfg.tls.as_ref() {
         Some(tls_cfg) => {
             info!(cert = ?tls_cfg.cert_chain, "loading TLS cert chain");
             let chain = proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
@@ -850,14 +850,26 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             } else {
                 info!("TLS 1.3 outer wrapper enabled (SIGHUP triggers reload)");
             }
-            Some(reloadable)
+            // Build the file-mtime watcher EVEN when the operator
+            // hasn't set `tls_cert_watcher_interval_secs` — the
+            // initial mtime stamp is cheap, and a future SIGHUP
+            // that flips on the periodic task starts from a sane
+            // baseline. Without the watcher built here, an
+            // operator who later enables the feature would see
+            // every cert file's mtime as "changed" on the first
+            // poll cycle (false positive).
+            let watcher = Arc::new(proteus_transport_alpha::tls_watcher::CertFileWatcher::new(
+                tls_cfg.cert_chain.clone(),
+                tls_cfg.private_key.clone(),
+            ));
+            (Some(reloadable), Some(watcher))
         }
         None => {
             warn!(
                 "no `tls:` block in config — server will run plain TCP. \
                  This is INSECURE in production; passive DPI will identify the protocol."
             );
-            None
+            (None, None)
         }
     };
 
@@ -953,8 +965,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let abuse_fires_for_metrics = Some(Arc::clone(&abuse_fires_buffer));
         let user_quarantine_for_metrics = user_quarantine_list.as_ref().map(Arc::clone);
         let user_quotas_for_metrics = user_quotas_list.as_ref().map(Arc::clone);
+        let tls_cert_watcher_for_metrics = tls_cert_watcher.as_ref().map(Arc::clone);
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v10(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v11(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -968,6 +981,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 abuse_fires_for_metrics,
                 user_quarantine_for_metrics,
                 user_quotas_for_metrics,
+                tls_cert_watcher_for_metrics,
             )
             .await
             {
@@ -1139,6 +1153,103 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
              based on accept-loop liveness alone. For production, set a value \
              (e.g. 60) so /healthz reflects live crypto health."
         );
+    }
+
+    // TLS cert file mtime watcher (optional). Polls the cert/key
+    // file mtimes every N seconds; if either changed, fires an
+    // auto-reload through the same reload_with_expiry path that
+    // SIGHUP uses. Closes the "non-Let's-Encrypt operator
+    // forgets to signal after rotation" gap.
+    let watcher_interval_secs = cfg.tls_cert_watcher_interval_secs.unwrap_or(0);
+    #[allow(clippy::collapsible_match, clippy::collapsible_if)]
+    match (
+        watcher_interval_secs,
+        tls_cert_watcher.as_ref(),
+        reloadable_acceptor.as_ref(),
+        cfg.tls.as_ref(),
+    ) {
+        (0, _, _, _) => {
+            if cfg.tls.is_some() {
+                info!(
+                    "tls_cert_watcher_interval_secs unset/0 — operators using \
+                     non-Let's-Encrypt cert rotations should set this (e.g. 60) \
+                     so Proteus picks up renewed certs without a SIGHUP"
+                );
+            }
+        }
+        (interval, Some(watcher), Some(reloadable), Some(tls_cfg)) => {
+            let watcher = Arc::clone(watcher);
+            let reloadable = reloadable.clone();
+            let cert_path = tls_cfg.cert_chain.clone();
+            let key_path = tls_cfg.private_key.clone();
+            info!(
+                interval_secs = interval,
+                cert = ?cert_path,
+                "TLS cert file-mtime watcher wired (auto-reload on disk-rotate)"
+            );
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(interval));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    tick.tick().await;
+                    if watcher.check_and_record().is_none() {
+                        continue;
+                    }
+                    watcher.record_attempt();
+                    info!(
+                        cert = ?cert_path,
+                        key = ?key_path,
+                        "tls_cert_watcher: mtime change detected — reloading"
+                    );
+                    let load_result = (|| {
+                        let chain = proteus_transport_alpha::tls::load_cert_chain(&cert_path)
+                            .map_err(|e| format!("load_cert_chain: {e}"))?;
+                        let key = proteus_transport_alpha::tls::load_private_key(&key_path)
+                            .map_err(|e| format!("load_private_key: {e}"))?;
+                        let acceptor =
+                            proteus_transport_alpha::tls::build_acceptor(chain.clone(), key)
+                                .map_err(|e| format!("build_acceptor: {e}"))?;
+                        Ok::<_, String>((chain, acceptor))
+                    })();
+                    match load_result {
+                        Ok((chain, acceptor)) => {
+                            match reloadable.reload_with_expiry(acceptor, &chain) {
+                                Ok(()) => {
+                                    watcher.record_success();
+                                    info!(
+                                        not_after_unix = reloadable.leaf_not_after(),
+                                        "tls_cert_watcher: auto-reload succeeded"
+                                    );
+                                }
+                                Err(e) => {
+                                    // Acceptor IS swapped in;
+                                    // only the leaf parse failed.
+                                    // Count as failure for the
+                                    // operator's "alert on broken
+                                    // deploy" workflow.
+                                    watcher.record_failure();
+                                    error!(
+                                        error = %e,
+                                        "tls_cert_watcher: leaf cert DER parse failed; expiry gauge held stale"
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            watcher.record_failure();
+                            error!(
+                                error = %e,
+                                "tls_cert_watcher: auto-reload FAILED; old cert continues serving traffic"
+                            );
+                        }
+                    }
+                }
+            });
+        }
+        _ => {
+            // No `tls:` block configured — watcher would have
+            // nothing to watch. Already warned above.
+        }
     }
 
     // Graceful-shutdown signal handlers.

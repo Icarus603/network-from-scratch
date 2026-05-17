@@ -832,6 +832,57 @@ keep the data-plane lock-free: per-bucket `AtomicU64` counters
 adds — well below contention thresholds for any production
 handshake rate.
 
+### TLS cert auto-reload for non-certbot deploys
+
+The existing TLS reload path (SIGHUP-driven) works perfectly for
+Let's-Encrypt + certbot's deploy-hook. For everyone else
+(corporate CA, internal PKI, manual rotations, scripted
+deploys), if the operator's deploy script forgets to SIGHUP,
+the binary keeps serving the OLD cert until expiry — silently.
+The `proteus_tls_reload_*` counters tell operators "no SIGHUP
+fired since the renewal" but only AFTER the cert expired.
+
+Proteus ships a file-mtime watcher that closes this gap:
+
+```yaml
+tls_cert_watcher_interval_secs: 60   # 0 = disabled (default)
+```
+
+How it works:
+
+1. At startup, the watcher stamps the cert + key file mtimes.
+2. Every N seconds, `stat()` both paths.
+3. If either mtime advanced, fire `reload_with_expiry` through
+   the same path SIGHUP uses. The acceptor swaps in the fresh
+   chain; the `proteus_tls_cert_not_after_unix_seconds` gauge
+   updates.
+
+Counters:
+
+```
+proteus_tls_cert_watcher_mtime_changes_observed_total
+proteus_tls_cert_watcher_auto_reload_attempts_total
+proteus_tls_cert_watcher_auto_reload_succeeded_total
+proteus_tls_cert_watcher_auto_reload_failed_total    # alert on rate > 0
+```
+
+A non-zero `auto_reload_failed_total` rate is the operator's
+strongest signal that a deploy produced a malformed PEM (the
+binary keeps serving the OLD cert; the counter surfaces what
+would otherwise be silent failure).
+
+**Why mtime not inotify/kqueue**: portability (Linux uses
+inotify, macOS uses kqueue; the periodic `stat()` works on
+both) + atomicity (most operator cert-deploy scripts already
+do temp-file-then-rename, and `stat()` after the rename sees
+the new mtime cleanly).
+
+**Recommended for operators using non-certbot rotations**:
+`tls_cert_watcher_interval_secs: 60`. Picks up a fresh cert
+within a minute; `stat()` cost is microseconds. Combined with
+the existing SIGHUP path, operators have both push (SIGHUP)
+and pull (mtime) trip-wires for cert rotation.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

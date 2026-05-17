@@ -394,6 +394,32 @@ pub struct ServerConfig {
     #[serde(default)]
     pub periodic_self_test_interval_secs: Option<u64>,
 
+    /// TLS cert file mtime-watch interval in seconds.
+    ///
+    /// When set (and a `tls:` block is configured), Proteus polls
+    /// the cert/key file mtimes every N seconds. If either
+    /// changed, the binary auto-reloads the cert chain WITHOUT
+    /// requiring a SIGHUP. Closes the "non-Let's-Encrypt operator
+    /// forgets to signal after rotation" gap — the operator's
+    /// deploy script just needs to atomic-rename the new cert
+    /// onto the configured path; Proteus picks it up on the next
+    /// poll cycle.
+    ///
+    /// Counters: `proteus_tls_cert_watcher_*` (mtime changes,
+    /// auto-reload attempts/succeeded/failed). Alert on
+    /// `auto_reload_failed > 0` to spot a deploy that produced a
+    /// malformed PEM (the binary keeps serving the OLD cert
+    /// until the operator fixes it).
+    ///
+    /// 0 (default) = watcher DISABLED. Operators using
+    /// Let's-Encrypt + certbot deploy-hook already have SIGHUP
+    /// reload wired and don't need this. Recommended for
+    /// everyone else: 60 seconds — fast enough to pick up a
+    /// fresh cert within a minute, slow enough that `stat()`
+    /// cost is negligible.
+    #[serde(default)]
+    pub tls_cert_watcher_interval_secs: Option<u64>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -1250,6 +1276,35 @@ periodic_self_test_interval_secs: 60\n\
 ";
         let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(cfg.periodic_self_test_interval_secs, Some(60));
+    }
+
+    #[test]
+    fn tls_cert_watcher_interval_parses_when_supplied() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+tls_cert_watcher_interval_secs: 60\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.tls_cert_watcher_interval_secs, Some(60));
+    }
+
+    #[test]
+    fn tls_cert_watcher_interval_defaults_to_none() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.tls_cert_watcher_interval_secs, None);
     }
 
     #[test]
