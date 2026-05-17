@@ -76,6 +76,15 @@ enum Cmd {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Hit the running client's `/diagnose` endpoint and print the
+    /// one-shot self-check report (FINDINGS + STATUS + METRICS).
+    /// Operator-friendly alternative to `curl :9091/diagnose` —
+    /// same body, no jq required. Suitable for screen-share /
+    /// bug-report paste.
+    Diagnose {
+        #[arg(long, default_value = "http://127.0.0.1:9091")]
+        url: String,
+    },
 }
 
 #[tokio::main]
@@ -95,7 +104,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(code);
         }
         Cmd::Status { url, format } => status_cmd(&url, &format).await?,
+        Cmd::Diagnose { url } => diagnose_cmd(&url).await?,
     }
+    Ok(())
+}
+
+/// `proteus-client diagnose` — hit `/diagnose` and stream the body.
+/// Same hand-rolled HTTP/1.1 client as `status_cmd`; no extra deps.
+async fn diagnose_cmd(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let (host, port, base_path) = parse_http_url(url)?;
+    let request_path = if base_path == "/" {
+        "/diagnose".to_string()
+    } else {
+        format!("{base_path}/diagnose")
+    };
+    let req = format!(
+        "GET {request_path} HTTP/1.1\r\n\
+         Host: {host}:{port}\r\n\
+         User-Agent: proteus-client-diagnose/1\r\n\
+         Accept: */*\r\n\
+         Connection: close\r\n\r\n"
+    );
+    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+    tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await?;
+    let mut buf = Vec::with_capacity(16 * 1024);
+    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
+    let s = std::str::from_utf8(&buf).map_err(|e| format!("non-UTF8 response: {e}"))?;
+    let (status_line, body) = split_http_response(s)?;
+    if !status_line.starts_with("HTTP/1.1 200") {
+        return Err(format!("admin endpoint returned: {status_line}").into());
+    }
+    print!("{body}");
     Ok(())
 }
 

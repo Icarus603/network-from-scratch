@@ -1133,6 +1133,12 @@ pub fn route(
             "text/plain; version=0.0.4",
             snap.to_prometheus(),
         )
+    } else if matches_path(request_head, "/diagnose") {
+        (
+            "HTTP/1.1 200 OK\r\n",
+            "text/plain; charset=utf-8",
+            render_diagnose(snap),
+        )
     } else {
         (
             "HTTP/1.1 404 Not Found\r\n",
@@ -1140,6 +1146,211 @@ pub fn route(
             "not found\n".to_string(),
         )
     }
+}
+
+/// Severity classification for a [`ClientDiagnoseFinding`]. Mirrors
+/// the server-side `proteus_transport_alpha::metrics_http::DiagnoseSeverity`
+/// shape so a future merged dashboard can render both ends with one
+/// renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClientDiagnoseSeverity {
+    Info,
+    Warn,
+    Critical,
+}
+
+impl ClientDiagnoseSeverity {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Critical => "CRIT",
+        }
+    }
+}
+
+/// One client self-check result. The full set is rendered at the
+/// top of `/diagnose` before the status + metrics dumps.
+#[derive(Debug, Clone)]
+pub struct ClientDiagnoseFinding {
+    pub severity: ClientDiagnoseSeverity,
+    pub rule: &'static str,
+    pub message: String,
+}
+
+/// Run the client-side rule engine against a snapshot. Pure
+/// function — testable in isolation without spinning up the HTTP
+/// listener.
+///
+/// Rules currently shipped (severity ordering is reported, not
+/// enforced — operators read the `[CRIT]` lines first):
+///
+/// - `process_alive` — INFO when alive=true, CRIT otherwise
+/// - `bootstrap_doh_leak` — CRIT when via_system_resolver > 0
+///   (operator set `bootstrap_dns: direct_ip` but a CONNECT
+///   still transited DoH; 2026 GFW main line 6 attack vector)
+/// - `carrier_suppressed` — WARN when β is currently suppressed
+///   (the operator's β path is in back-off; may indicate UDP
+///   throttling)
+/// - `pool_entry_suppressed` — WARN per pool entry currently in
+///   back-off
+/// - `pool_reload_silent_failure` — CRIT when pool reload
+///   attempts > succeeded
+/// - `dial_success_rate_low` — WARN when lifetime success rate
+///   < 90 % AND attempted > 10 (rule fires only after enough
+///   data to be meaningful)
+#[must_use]
+pub fn run_client_diagnose_rules(snap: &ClientStatusSnapshot) -> Vec<ClientDiagnoseFinding> {
+    let mut out = Vec::new();
+
+    // Alive — every diagnose includes this as a baseline signal.
+    out.push(ClientDiagnoseFinding {
+        severity: if snap.alive {
+            ClientDiagnoseSeverity::Info
+        } else {
+            ClientDiagnoseSeverity::Critical
+        },
+        rule: "process_alive",
+        message: if snap.alive {
+            "SOCKS5 listener bound, accepting".to_string()
+        } else {
+            "SOCKS5 listener NOT bound — process is still starting OR has crashed".to_string()
+        },
+    });
+
+    // Bootstrap DoH leak — the GFW main line 6 attack vector. Any
+    // non-zero `via_system_resolver` in a deployment that intended
+    // `bootstrap_dns: direct_ip` is the silent misconfig signal.
+    if snap.bootstrap.via_system_resolver > 0 {
+        out.push(ClientDiagnoseFinding {
+            severity: ClientDiagnoseSeverity::Critical,
+            rule: "bootstrap_doh_leak",
+            message: format!(
+                "{} CONNECTs transited the OS resolver (potentially DoH-vulnerable per 2026 GFW threat intel); operator may have intended bootstrap_dns: direct_ip",
+                snap.bootstrap.via_system_resolver
+            ),
+        });
+    }
+
+    // Carrier (β) suppression — operator-actionable signal that
+    // UDP egress is degraded.
+    if let Some(c) = &snap.carrier {
+        if c.suppressed {
+            let secs = c.suppression_secs_remaining.unwrap_or(0);
+            out.push(ClientDiagnoseFinding {
+                severity: ClientDiagnoseSeverity::Warn,
+                rule: "carrier_suppressed",
+                message: format!(
+                    "β carrier in back-off ({secs}s remaining, streak={}); UDP path may be throttled or blocked, dispatcher is using α-only",
+                    c.failure_streak
+                ),
+            });
+        }
+    }
+
+    // Per-pool-entry suppression — operator sees WHICH endpoint is
+    // demoted, not just "something is suppressed".
+    if let Some(p) = &snap.pool {
+        for (ix, entry) in p.entries.iter().enumerate() {
+            if entry.suppressed {
+                let secs = entry.suppression_secs_remaining.unwrap_or(0);
+                out.push(ClientDiagnoseFinding {
+                    severity: ClientDiagnoseSeverity::Warn,
+                    rule: "pool_entry_suppressed",
+                    message: format!(
+                        "endpoint pool[{ix}] {addr} in back-off ({secs}s remaining, streak={streak}); dispatcher skipping until window expires",
+                        addr = entry.addr,
+                        streak = entry.failure_streak
+                    ),
+                });
+            }
+        }
+    }
+
+    // Pool reload silent failure — symmetric to server-side TLS
+    // reload silent failure detection.
+    if snap.pool_reload.attempts > 0 {
+        let missing = snap
+            .pool_reload
+            .attempts
+            .saturating_sub(snap.pool_reload.succeeded);
+        if missing > 0 {
+            out.push(ClientDiagnoseFinding {
+                severity: ClientDiagnoseSeverity::Critical,
+                rule: "pool_reload_silent_failure",
+                message: format!(
+                    "{} pool-reload SIGHUPs attempted, {} succeeded, {missing} failed — operator's client.yaml edit may not have applied",
+                    snap.pool_reload.attempts, snap.pool_reload.succeeded
+                ),
+            });
+        }
+    }
+
+    // Dial success rate — only fires after enough data points
+    // (≥ 10 attempts) to avoid spurious alerts at startup.
+    if snap.dials.attempted >= 10 {
+        let succ = snap.dials.succeeded as f64;
+        let att = snap.dials.attempted as f64;
+        let rate = succ / att;
+        if rate < 0.90 {
+            out.push(ClientDiagnoseFinding {
+                severity: ClientDiagnoseSeverity::Warn,
+                rule: "dial_success_rate_low",
+                message: format!(
+                    "lifetime dial success rate {:.1}% ({}/{}); investigate endpoint health or upstream connectivity",
+                    rate * 100.0,
+                    snap.dials.succeeded,
+                    snap.dials.attempted
+                ),
+            });
+        }
+    }
+
+    out
+}
+
+/// Render the `/diagnose` body. Symmetric to server-side
+/// `render_diagnose`:
+///
+///   1. FINDINGS section — operator-actionable rule output
+///   2. STATUS section — the same text the `/status` endpoint
+///      serves (operator-friendly summary of in-process state)
+///   3. METRICS section — the full Prometheus dump for sharing
+///
+/// Operator workflow:
+///   curl -s http://127.0.0.1:9091/diagnose > diagnose.txt
+///   # share the file when filing a bug
+#[must_use]
+pub fn render_diagnose(snap: &ClientStatusSnapshot) -> String {
+    let findings = run_client_diagnose_rules(snap);
+    let mut s = String::with_capacity(4096);
+    s.push_str("Proteus client diagnose — operator self-check + state dump\n");
+    s.push_str("==========================================================\n\n");
+    s.push_str("FINDINGS\n");
+    s.push_str("--------\n");
+    if findings.is_empty() {
+        s.push_str("  (no rules tripped)\n");
+    } else {
+        for f in &findings {
+            s.push_str("  [");
+            s.push_str(f.severity.label());
+            s.push_str("] ");
+            s.push_str(f.rule);
+            s.push_str(": ");
+            s.push_str(&f.message);
+            s.push('\n');
+        }
+    }
+    s.push('\n');
+    s.push_str("STATUS\n");
+    s.push_str("------\n");
+    use std::fmt::Write as _;
+    let _ = write!(s, "{snap}");
+    s.push('\n');
+    s.push_str("METRICS (text/plain; version=0.0.4)\n");
+    s.push_str("-----------------------------------\n");
+    s.push_str(&snap.to_prometheus());
+    s
 }
 
 /// Match a request line against an exact path. Mirrors the
@@ -1440,6 +1651,300 @@ mod tests {
     fn route_404_on_post() {
         let (status, _ctype, _body) = route("POST /status HTTP/1.1\r\n\r\n", &empty_snap());
         assert!(status.starts_with("HTTP/1.1 404"));
+    }
+
+    // ----- /diagnose tests -----
+
+    #[test]
+    fn diagnose_rule_engine_emits_alive_finding_baseline() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        assert!(
+            findings
+                .iter()
+                .any(|f| f.rule == "process_alive" && f.severity == ClientDiagnoseSeverity::Info),
+            "{findings:#?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_rule_engine_alive_false_emits_critical() {
+        let findings = run_client_diagnose_rules(&empty_snap());
+        let alive = findings.iter().find(|f| f.rule == "process_alive").unwrap();
+        assert_eq!(alive.severity, ClientDiagnoseSeverity::Critical);
+        assert!(
+            alive.message.contains("NOT bound"),
+            "msg: {}",
+            alive.message
+        );
+    }
+
+    #[test]
+    fn diagnose_rule_engine_bootstrap_doh_leak_fires_critical_when_resolver_used() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 10,
+                via_pinned_direct_ip: 5,
+                via_system_resolver: 2,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        let leak = findings
+            .iter()
+            .find(|f| f.rule == "bootstrap_doh_leak")
+            .expect("expected DoH-leak finding");
+        assert_eq!(leak.severity, ClientDiagnoseSeverity::Critical);
+        assert!(leak.message.contains("2"), "{}", leak.message);
+    }
+
+    #[test]
+    fn diagnose_rule_engine_no_bootstrap_finding_when_resolver_unused() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 100,
+                via_pinned_direct_ip: 50,
+                via_system_resolver: 0,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        assert!(
+            !findings.iter().any(|f| f.rule == "bootstrap_doh_leak"),
+            "must NOT fire when via_system_resolver=0: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_rule_engine_carrier_suppressed_emits_warn() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            carrier: Some(CarrierHealthView {
+                failure_streak: 5,
+                suppressed: true,
+                suppression_secs_remaining: Some(45),
+            }),
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        let car = findings
+            .iter()
+            .find(|f| f.rule == "carrier_suppressed")
+            .expect("expected carrier finding");
+        assert_eq!(car.severity, ClientDiagnoseSeverity::Warn);
+        assert!(car.message.contains("45s remaining"), "{}", car.message);
+        assert!(car.message.contains("streak=5"), "{}", car.message);
+    }
+
+    #[test]
+    fn diagnose_rule_engine_pool_entry_suppressed_fires_per_entry() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![
+                    EndpointEntryView {
+                        addr: "good:1".into(),
+                        failure_streak: 0,
+                        suppressed: false,
+                        suppression_secs_remaining: None,
+                        ..EndpointEntryView::default()
+                    },
+                    EndpointEntryView {
+                        addr: "bad:2".into(),
+                        failure_streak: 7,
+                        suppressed: true,
+                        suppression_secs_remaining: Some(120),
+                        ..EndpointEntryView::default()
+                    },
+                ],
+            }),
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        let entries: Vec<_> = findings
+            .iter()
+            .filter(|f| f.rule == "pool_entry_suppressed")
+            .collect();
+        assert_eq!(
+            entries.len(),
+            1,
+            "expected exactly one entry finding: {findings:#?}"
+        );
+        assert!(entries[0].message.contains("bad:2"));
+        assert!(entries[0].message.contains("120s"));
+        assert!(entries[0].message.contains("streak=7"));
+    }
+
+    #[test]
+    fn diagnose_rule_engine_pool_reload_silent_failure_critical() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool_reload: PoolReloadCounters {
+                attempts: 5,
+                succeeded: 3,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        let f = findings
+            .iter()
+            .find(|f| f.rule == "pool_reload_silent_failure")
+            .expect("expected reload finding");
+        assert_eq!(f.severity, ClientDiagnoseSeverity::Critical);
+        assert!(f.message.contains("2 failed"), "{}", f.message);
+    }
+
+    #[test]
+    fn diagnose_rule_engine_no_reload_finding_when_all_succeeded() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool_reload: PoolReloadCounters {
+                attempts: 5,
+                succeeded: 5,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "pool_reload_silent_failure"),
+            "must not fire when all succeeded: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_dial_success_rate_low_fires_below_90pct_with_enough_data() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 80,
+                failed: 20,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        let f = findings
+            .iter()
+            .find(|f| f.rule == "dial_success_rate_low")
+            .expect("expected dial-rate finding");
+        assert_eq!(f.severity, ClientDiagnoseSeverity::Warn);
+        assert!(f.message.contains("80.0%"), "{}", f.message);
+    }
+
+    #[test]
+    fn diagnose_dial_success_rate_low_does_not_fire_with_few_attempts() {
+        // < 10 attempts → no finding (avoid startup-spurious alerts)
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            dials: DialCounters {
+                attempted: 5,
+                succeeded: 1,
+                failed: 4,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        assert!(
+            !findings.iter().any(|f| f.rule == "dial_success_rate_low"),
+            "must not fire below 10 attempts: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_dial_success_rate_low_does_not_fire_above_90pct() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 95,
+                failed: 5,
+            },
+            ..empty_snap()
+        };
+        let findings = run_client_diagnose_rules(&snap);
+        assert!(
+            !findings.iter().any(|f| f.rule == "dial_success_rate_low"),
+            "must not fire above 90%: {findings:#?}"
+        );
+    }
+
+    #[test]
+    fn route_diagnose_200_with_text_content_type() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let (status, ctype, body) = route("GET /diagnose HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(ctype.starts_with("text/plain"));
+        assert!(body.contains("FINDINGS"), "{body}");
+        assert!(body.contains("STATUS"), "{body}");
+        assert!(body.contains("METRICS"), "{body}");
+        // The Prometheus dump goes into METRICS.
+        assert!(body.contains("proteus_client_up 1"), "{body}");
+    }
+
+    #[test]
+    fn route_diagnose_substring_path_404() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let (status, _c, _b) = route("GET /diagnoseleak HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 404"));
+    }
+
+    #[test]
+    fn route_diagnose_with_query_string_matches() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let (status, _c, _b) = route("GET /diagnose?source=cli HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn render_diagnose_shows_all_findings_in_findings_section() {
+        // Snapshot with multiple rule trips — body should list ALL
+        // of them under FINDINGS, not just the first.
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            bootstrap: BootstrapCounters {
+                via_ip_literal: 0,
+                via_pinned_direct_ip: 0,
+                via_system_resolver: 3,
+            },
+            pool_reload: PoolReloadCounters {
+                attempts: 2,
+                succeeded: 1,
+            },
+            ..empty_snap()
+        };
+        let body = render_diagnose(&snap);
+        assert!(body.contains("[CRIT] bootstrap_doh_leak"), "{body}");
+        assert!(body.contains("[CRIT] pool_reload_silent_failure"), "{body}");
+        assert!(body.contains("[INFO] process_alive"), "{body}");
+    }
+
+    #[test]
+    fn render_diagnose_no_rules_tripped_says_so() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let body = render_diagnose(&snap);
+        // Only the baseline alive INFO should appear; no other
+        // findings, so we should NOT see "(no rules tripped)" —
+        // alive itself counts.
+        assert!(body.contains("[INFO] process_alive"), "{body}");
     }
 
     #[test]

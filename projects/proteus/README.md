@@ -349,6 +349,32 @@ Auth is bearer-token enforced (same gate as `/metrics`) because
 the body includes cert TTLs and operator-sensitive counter
 state.
 
+### Client-side `GET /diagnose` mirror
+
+The client exposes a symmetric `/diagnose` endpoint at
+`http://127.0.0.1:9091/diagnose` (when `admin_listen` is set in
+`client.yaml`). Same FINDINGS + STATUS + METRICS body shape.
+Client-side rules:
+
+- `process_alive` — INFO / CRIT
+- `bootstrap_doh_leak` — **CRIT** when any CONNECT silently
+  transited the OS resolver (operator intended `bootstrap_dns:
+  direct_ip` but a hostname endpoint hit DoH)
+- `carrier_suppressed` — WARN when β is in back-off
+- `pool_entry_suppressed` — WARN per pool entry currently in
+  back-off (operator sees WHICH endpoint is demoted)
+- `pool_reload_silent_failure` — CRIT when SIGHUP attempts >
+  succeeded on the pool path
+- `dial_success_rate_low` — WARN when lifetime success rate
+  < 90 % AND ≥ 10 attempts (rule fires only after enough data)
+
+CLI wrapper:
+
+```bash
+proteus-client diagnose                          # default URL
+proteus-client diagnose --url http://127.0.0.1:9091
+```
+
 The client emits a symmetric `proteus_client_process_*` +
 `proteus_client_build_info{…}` triple — same shape, same alert
 queries:
