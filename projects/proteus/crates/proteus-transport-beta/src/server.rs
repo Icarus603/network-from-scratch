@@ -155,11 +155,48 @@ where
     Fut: std::future::Future<Output = ()> + Send,
 {
     info!(local = ?endpoint.local_addr().ok(), "β-profile listener bound");
-    while let Some(connecting) = endpoint.accept().await {
+    while let Some(incoming) = endpoint.accept().await {
+        // ---- Pre-QUIC-handshake auto-deny short-circuit ----
+        //
+        // The accept() future resolves to a `quinn::Incoming` BEFORE
+        // the QUIC handshake completes. `Incoming::remote_address()`
+        // is available immediately (the UDP datagram source). When
+        // the operator has opted into the auto-deny loop AND this
+        // /24 is currently on the list, drop the incoming via
+        // `Incoming::ignore()` — quinn sends NO response packet at
+        // all, so the prober's wire view looks like the server
+        // never existed (no QUIC Initial reply, no CONNECTION_CLOSE,
+        // no nothing). Saves the full TLS+QUIC handshake CPU cost
+        // on every probe attempt from a known-bad prefix.
+        //
+        // We DO NOT call full `admission_ok` here — that gate
+        // includes the per-IP rate limiter, which we want to fire
+        // against the post-QUIC-handshake stage so its metrics
+        // accurately reflect "QUIC handshake completed but admission
+        // rejected" vs "QUIC packet dropped pre-handshake". Same
+        // discipline as the firewall: only the auto-deny path is
+        // cheap enough to be worth running pre-handshake.
+        let remote_pre = incoming.remote_address();
+        if let Some(auto_deny) = ctx.auto_deny() {
+            if auto_deny.is_denied(remote_pre.ip(), std::time::Instant::now()) {
+                tracing::debug!(
+                    peer = %remote_pre,
+                    carrier = "β",
+                    "auto-deny hit pre-QUIC-handshake; ignoring incoming (no wire response)"
+                );
+                if let Some(m) = ctx.metrics() {
+                    m.firewall_denied
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                incoming.ignore();
+                continue;
+            }
+        }
+
         let ctx = Arc::clone(&ctx);
         let handler = handler.clone();
         tokio::spawn(async move {
-            match connecting.await {
+            match incoming.await {
                 Ok(conn) => {
                     let remote = conn.remote_address();
                     debug!(remote = %remote, "β QUIC connection accepted");
