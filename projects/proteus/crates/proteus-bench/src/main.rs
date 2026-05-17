@@ -51,6 +51,13 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Cmd {
+    /// Multi-client soak: spawn N concurrent clients, hammer one
+    /// in-process server for T seconds, report per-interval JSON
+    /// progress + an end-of-soak summary. Answers "does this
+    /// binary survive N simultaneous CONNECTs for an hour without
+    /// leaking sessions / memory / FDs?" — the production-stability
+    /// question single-stream throughput cannot answer.
+    Soak(SoakArgs),
     /// Same-host β QUIC bench. Mints fresh keys + cert, runs an
     /// in-process server, dials it, blasts a payload, prints JSON.
     Beta(BetaArgs),
@@ -62,6 +69,39 @@ enum Cmd {
     /// Identity fields are copy-pasted verbatim from the server's
     /// banner.
     BetaClient(BetaClientArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct SoakArgs {
+    /// Number of concurrent clients to spawn. Each runs an
+    /// independent open-blast-close loop until the deadline.
+    /// Production-scale targets: 50 (small VPN), 200 (medium),
+    /// 1000+ (operator stress test).
+    #[arg(long, default_value = "10")]
+    clients: usize,
+    /// Total soak duration in seconds. 60 for quick smoke,
+    /// 3600 for "can this survive an hour", 86400 for an
+    /// overnight memory-leak hunt.
+    #[arg(long, default_value = "60")]
+    duration_secs: u64,
+    /// Per-session round-trip payload in KiB. Small (4-16) =
+    /// connection-rate-bound (tests handshake + accept loop);
+    /// large (1024+) = bandwidth-bound (tests pump + flow-control).
+    #[arg(long, default_value = "16")]
+    per_session_kib: u64,
+    /// Progress reporter interval in seconds.
+    #[arg(long, default_value = "5")]
+    report_interval_secs: u64,
+    /// Optional dial-concurrency cap. None = unbounded.
+    /// Mirrors a production `max_inflight_sessions` setting if
+    /// you want to soak the cap behavior too.
+    #[arg(long)]
+    max_concurrent_dials: Option<usize>,
+    /// Minimum dial success rate the summary must meet for the
+    /// process to exit 0. Below threshold OR any spawn leak →
+    /// exit 1 (CI-friendly).
+    #[arg(long, default_value = "0.99")]
+    min_success_rate: f64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -222,9 +262,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.cmd {
+        Cmd::Soak(args) => run_soak_cmd(args).await?,
         Cmd::Beta(args) => run_beta(args).await?,
         Cmd::BetaServer(args) => run_beta_server(args).await?,
         Cmd::BetaClient(args) => run_beta_client(args).await?,
+    }
+    Ok(())
+}
+
+async fn run_soak_cmd(args: SoakArgs) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
+    let cfg = proteus_bench::soak::SoakConfig {
+        clients: args.clients,
+        duration: Duration::from_secs(args.duration_secs),
+        per_session_kib: args.per_session_kib,
+        report_interval: Duration::from_secs(args.report_interval_secs),
+        max_concurrent_dials: args.max_concurrent_dials,
+    };
+    info!(
+        clients = cfg.clients,
+        duration_secs = args.duration_secs,
+        per_session_kib = args.per_session_kib,
+        "soak run starting"
+    );
+    // Progress lines AND the final summary both go to stdout —
+    // pipe `proteus-bench soak ... | tee soak.jsonl` and you get
+    // the full record. Use `jq 'select(.kind=="summary")'` to
+    // extract just the verdict.
+    let summary = proteus_bench::soak::run_soak(cfg, PerfProfile::default(), |p| {
+        print!("{}", p.to_json());
+    })
+    .await?;
+    print!("{}", summary.to_json());
+    info!(
+        success_rate = summary.success_rate,
+        dials_succeeded = summary.dials_succeeded,
+        dials_failed = summary.dials_failed,
+        peak_concurrent = summary.peak_concurrent,
+        spawn_leak_count = summary.spawn_leak_count,
+        "soak run completed"
+    );
+    if !summary.passed(args.min_success_rate) {
+        return Err(format!(
+            "soak FAILED: success_rate {:.4} < min {:.4} OR spawn_leak={} OR zero dials succeeded",
+            summary.success_rate, args.min_success_rate, summary.spawn_leak_count
+        )
+        .into());
     }
     Ok(())
 }

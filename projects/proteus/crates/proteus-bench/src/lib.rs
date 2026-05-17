@@ -53,3 +53,4 @@
 
 pub mod beta;
 pub mod report;
+pub mod soak;

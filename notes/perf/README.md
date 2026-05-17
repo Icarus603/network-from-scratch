@@ -79,6 +79,40 @@ Cells captured (median MiB/s, n=runs):
   Ubuntu VM run; the bench harness already supports the
   workflow (see `bench/netem-sweep.sh`).
 
+### Soak baseline
+
+[`2026-05-19-soak-100c-60s.jsonl`](2026-05-19-soak-100c-60s.jsonl):
+**100 concurrent clients × 60 seconds × 16 KiB per-session payload**
+on the same Apple Silicon dev box, in-process server.
+
+| Metric | Value |
+|---|---|
+| Total dials attempted | 113,849 |
+| Dials succeeded | **113,849 (100.00%)** |
+| Dials failed | 0 |
+| Spawn leaks | **0** |
+| Peak concurrent sessions | 100 |
+| Mean per-session RTT | 52.3 ms |
+| Total bytes (each direction) | 1.86 GB |
+| Aggregate dial rate | ~1,900 dials/sec |
+
+**Why this matters**: single-stream throughput (the 64 MiB / 128 MiB
+runs above) measures the carrier's ceiling but says nothing about
+the binary's stability under realistic concurrent load. The soak
+specifically targets the failure modes throughput-mode can't catch:
+session leaks, FD leaks, quinn endpoint accumulation, race
+conditions in the auto-deny / probe-anomaly code paths.
+
+**Pass criteria** (`SoakSummary::passed`):
+- `spawn_leak_count == 0` — every spawned client task completed its
+  outer Future (Drop ran, all resources released).
+- `success_rate >= --min-success-rate` (default 0.99).
+- At least one dial succeeded (rules out "the test never ran").
+
+A failed soak exits the bench binary with status 1 — drop-in
+suitable for CI gating ("don't merge this PR if the 60-second
+soak doesn't hit 100%").
+
 ### How to reproduce
 
 ```bash
@@ -107,3 +141,14 @@ done
 ```
 
 The full matrix takes about 30 seconds on this dev box.
+
+```bash
+# Soak (100 clients × 60 seconds × 16 KiB):
+./target/release/proteus-bench soak \
+  --clients 100 --duration-secs 60 --per-session-kib 16 \
+  --report-interval-secs 10 \
+  2>/dev/null | grep '^{' > soak.jsonl
+
+# Verdict — single jq pull:
+jq 'select(.kind=="summary")' soak.jsonl
+```

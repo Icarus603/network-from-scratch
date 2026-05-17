@@ -1,0 +1,6 @@
+{"kind":"progress","elapsed_secs":10.001,"dials_attempted":25382,"dials_succeeded":25282,"dials_failed":0,"bytes_in":414220288,"bytes_out":414220288,"peak_concurrent":100,"mean_session_ms_window":38.939}
+{"kind":"progress","elapsed_secs":20.001,"dials_attempted":44730,"dials_succeeded":44630,"dials_failed":0,"bytes_in":731217920,"bytes_out":731217920,"peak_concurrent":100,"mean_session_ms_window":50.783}
+{"kind":"progress","elapsed_secs":30.001,"dials_attempted":62333,"dials_succeeded":62233,"dials_failed":0,"bytes_in":1019625472,"bytes_out":1019625472,"peak_concurrent":100,"mean_session_ms_window":56.123}
+{"kind":"progress","elapsed_secs":40.001,"dials_attempted":79639,"dials_succeeded":79539,"dials_failed":0,"bytes_in":1303166976,"bytes_out":1303166976,"peak_concurrent":100,"mean_session_ms_window":57.022}
+{"kind":"progress","elapsed_secs":50.001,"dials_attempted":96761,"dials_succeeded":96661,"dials_failed":0,"bytes_in":1583693824,"bytes_out":1583693824,"peak_concurrent":100,"mean_session_ms_window":58.389}
+{"kind":"summary","duration_secs":61.649,"clients":100,"per_session_kib":16,"dials_attempted":113849,"dials_succeeded":113849,"dials_failed":0,"bytes_in":1865302016,"bytes_out":1865302016,"peak_concurrent":100,"mean_session_ms":52.280,"success_rate":1.0000,"spawn_leak_count":0}

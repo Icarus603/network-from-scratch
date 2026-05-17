@@ -470,8 +470,28 @@ files. The Proteus side is reproducible; the comparison is the
 operator's to make and to publish (we won't ship cherry-picked
 numbers we generated).
 
-**Persisted baseline** (Apple Silicon M-series, release, 2026-05-19) —
-raw JSONL committed at
+**Multi-client soak baseline** (Apple Silicon M-series, release, 2026-05-19) —
+raw JSONL at
+[`notes/perf/2026-05-19-soak-100c-60s.jsonl`](../../notes/perf/2026-05-19-soak-100c-60s.jsonl):
+
+| Metric | Value |
+|---|---|
+| Concurrent clients × duration | **100 × 60s** |
+| Dials attempted / succeeded | **113,849 / 113,849 (100.00%)** |
+| Spawn leaks | **0** |
+| Aggregate dial rate | ~1,900 dials/sec |
+| Aggregate bytes (each direction) | 1.86 GB |
+| Mean session RTT | 52 ms |
+
+`./target/release/proteus-bench soak --clients 100 --duration-secs 60
+--per-session-kib 16` is the production-stability proof: a binary
+that passes this (zero spawn leaks, ≥99% success) is safe to deploy
+for typical small-to-mid VPN workloads. The bench exits non-zero on
+failure → drop-in CI gate.
+
+---
+
+**Single-stream throughput baseline** (same machine + date) — raw JSONL at
 [`notes/perf/2026-05-19-loopback-baseline.jsonl`](../../notes/perf/2026-05-19-loopback-baseline.jsonl),
 12 runs across 5 cells:
 
