@@ -143,7 +143,58 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         };
         if let (Some(c), Some(k)) = (cert_path, key_path) {
             match proteus_transport_alpha::tls::load_cert_chain(&c) {
-                Ok(_) => r.push_pass(format!("β cert chain loads ({c:?})")),
+                Ok(chain) => {
+                    r.push_pass(format!("β cert chain loads ({c:?})"));
+                    // Iter-49: β cert-expiry check (symmetric with
+                    // iter-46 α cert check). The β QUIC handshake
+                    // uses the same TLS 1.3 cert verification path
+                    // as α; same expiry trap class applies. When β
+                    // shares the α tls block (the common case),
+                    // this is REDUNDANT with the α check below —
+                    // but the inner-cfg.tls path may not be set
+                    // (operator explicitly split α/β cert paths
+                    // via beta_cert_chain / beta_private_key) and
+                    // we still want expiry coverage.
+                    let same_as_alpha = cfg
+                        .tls
+                        .as_ref()
+                        .map(|t| t.cert_chain == c)
+                        .unwrap_or(false);
+                    if !same_as_alpha {
+                        match proteus_transport_alpha::tls::leaf_cert_not_after(&chain) {
+                            Ok(not_after) => {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs() as i64)
+                                    .unwrap_or(0);
+                                let secs_until = not_after.saturating_sub(now);
+                                if secs_until <= 0 {
+                                    r.push_fail(format!(
+                                        "β cert: leaf EXPIRED ({} seconds ago) — every \
+                                         QUIC handshake will fail. Run `certbot renew` for \
+                                         the β cert path immediately",
+                                        -secs_until,
+                                    ));
+                                } else {
+                                    let days = secs_until / 86_400;
+                                    if days < 14 {
+                                        r.push_warn(format!(
+                                            "β cert: leaf expires in {days} day(s) — \
+                                             within the 14-day renewal window",
+                                        ));
+                                    } else {
+                                        r.push_pass(format!(
+                                            "β cert: leaf valid for {days} day(s)"
+                                        ));
+                                    }
+                                }
+                            }
+                            Err(e) => r.push_warn(format!(
+                                "β cert: could not extract leaf notAfter ({e})"
+                            )),
+                        }
+                    }
+                }
                 Err(e) => r.push_fail(format!("β cert chain {c:?}: {e}")),
             }
             match proteus_transport_alpha::tls::load_private_key(&k) {

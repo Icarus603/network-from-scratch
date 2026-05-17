@@ -164,6 +164,103 @@ async fn iter46_cert_in_renewal_window_warns() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Iter-49: β cert path (independent of α) is checked for expiry
+/// when set. Symmetric with iter-46 α check. Operators who run
+/// dual-stack with a SEPARATE β cert (e.g., HTTPS for α, QUIC
+/// for β with different CAs) get expiry surveillance on both.
+#[tokio::test]
+async fn iter49_beta_cert_expired_fails_validate() {
+    let dir = tmpdir("beta-expired");
+    // Fresh α cert (so the α check passes) and an EXPIRED β cert.
+    let alpha_not_after = time::OffsetDateTime::now_utc() + time::Duration::days(180);
+    let beta_not_after = time::OffsetDateTime::now_utc() - time::Duration::days(2);
+    let (alpha_cert, alpha_key) = mint_cert_with_not_after(&dir, alpha_not_after);
+    // Mint β separately in a sub-dir so paths are distinct.
+    let beta_dir = dir.join("beta");
+    std::fs::create_dir_all(&beta_dir).unwrap();
+    let (beta_cert, beta_key) = mint_cert_with_not_after(&beta_dir, beta_not_after);
+    // Touch the key placeholders.
+    let mlkem_pk = touch(&dir, "mlkem.pk");
+    let mlkem_sk = touch(&dir, "mlkem.sk");
+    let x25519_pk = touch(&dir, "x25519.pk");
+    let x25519_sk = touch(&dir, "x25519.sk");
+
+    let yaml = dir.join("server.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            r#"listen_alpha: "0.0.0.0:8443"
+listen_beta: "0.0.0.0:8443"
+beta_cert_chain: {}
+beta_private_key: {}
+keys:
+  mlkem_pk: {}
+  mlkem_sk: {}
+  x25519_pk: {}
+  x25519_sk: {}
+tls:
+  cert_chain: {}
+  private_key: {}
+"#,
+            beta_cert.display(),
+            beta_key.display(),
+            mlkem_pk.display(),
+            mlkem_sk.display(),
+            x25519_pk.display(),
+            x25519_sk.display(),
+            alpha_cert.display(),
+            alpha_key.display(),
+        ),
+    )
+    .unwrap();
+    let cfg = ServerConfig::load(&yaml).await.expect("config loads");
+    let report = validate::preflight(&cfg);
+    eprintln!("beta-expired report:\n{report}");
+
+    let beta_fail = report.checks.iter().any(|c| match c {
+        Check::Fail(s) => s.contains("β cert") && s.contains("EXPIRED"),
+        _ => false,
+    });
+    assert!(
+        beta_fail,
+        "expired β cert MUST FAIL validate independently of α: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-49: when β shares the α tls path (no separate
+/// beta_cert_chain), the β check is suppressed to avoid
+/// duplicate FAIL/WARN noise. The α check already covers the
+/// shared file.
+#[tokio::test]
+async fn iter49_beta_using_shared_alpha_tls_does_not_emit_duplicate() {
+    let dir = tmpdir("beta-shared");
+    let not_after = time::OffsetDateTime::now_utc() + time::Duration::days(180);
+    let (cert, key) = mint_cert_with_not_after(&dir, not_after);
+    let yaml = write_yaml(&dir, &cert, &key);
+    // Add listen_beta to the same YAML so the β-section validation
+    // runs, but DON'T set beta_cert_chain — so the β path resolves
+    // to the shared tls block.
+    let body = std::fs::read_to_string(&yaml).unwrap();
+    let extended = format!("{body}listen_beta: \"0.0.0.0:8443\"\n");
+    std::fs::write(&yaml, extended).unwrap();
+    let cfg = ServerConfig::load(&yaml).await.expect("config loads");
+    let report = validate::preflight(&cfg);
+    eprintln!("beta-shared report:\n{report}");
+
+    // The α "leaf valid for N day(s)" PASS appears exactly once.
+    let leaf_passes = report
+        .checks
+        .iter()
+        .filter(|c| matches!(c, Check::Pass(s) if s.contains("leaf cert valid for") || s.contains("leaf valid for")))
+        .count();
+    assert!(
+        leaf_passes <= 1,
+        "shared-cert dual-stack must NOT double-count cert expiry: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn iter46_cert_with_plenty_of_lifetime_passes() {
     let dir = tmpdir("healthy");
