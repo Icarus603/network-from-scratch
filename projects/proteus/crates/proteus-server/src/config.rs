@@ -200,6 +200,28 @@ pub struct ServerConfig {
     #[serde(default)]
     pub tcp_keepalive_secs: Option<u64>,
 
+    /// Optional disk path for the persistent restart-tracker state
+    /// file. When set, every startup bumps a counter on disk and
+    /// detects whether the previous run exited cleanly (SIGTERM +
+    /// drain) or uncleanly (panic-abort, OOM kill, segfault,
+    /// kill -9). The counter + classification are exposed via
+    /// `proteus_restarts_total`, `proteus_first_start_unix_seconds`,
+    /// `proteus_last_clean_shutdown_unix_seconds`, and
+    /// `proteus_previous_run_unclean` on /metrics.
+    ///
+    /// Closes the silent crash-loop class: when systemd restarts
+    /// the binary every 30 s because of an OOM bug, the operator's
+    /// dashboards look identical to a healthy long-running deploy
+    /// without this tracker. Alert on `rate(proteus_restarts_total[1h]) > 1`.
+    ///
+    /// Recommended path: `/var/lib/proteus/restart_state.json`.
+    /// File is ~200 bytes, atomic temp+rename writes; safe to
+    /// `cat`/`jq` at any time. Same level as `StateDirectory=` in
+    /// the bundled systemd unit. Without this, restart tracking
+    /// is off (no series emitted).
+    #[serde(default)]
+    pub restart_state_file: Option<PathBuf>,
+
     /// Outer TLS 1.3 config (spec §4.2). When present the server wraps
     /// every accepted connection in TLS 1.3 BEFORE running the Proteus
     /// handshake — passive DPI sees a standard TLS record stream.

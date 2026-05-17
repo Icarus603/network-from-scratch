@@ -345,6 +345,7 @@ mod tests {
             user_rate_limit: None,
             handshake_deadline_secs: None,
             tcp_keepalive_secs: None,
+            restart_state_file: None,
             tls: None,
             pow_difficulty: None,
             drain_secs: None,

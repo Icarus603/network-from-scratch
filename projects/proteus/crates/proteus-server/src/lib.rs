@@ -13,6 +13,7 @@ pub mod preflight;
 pub mod preflight_orchestrator;
 pub mod process_panic_counter;
 pub mod relay;
+pub mod restart_tracker;
 pub mod startup;
 pub mod startup_self_test;
 pub mod tls_fingerprint_observer;

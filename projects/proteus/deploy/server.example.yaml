@@ -405,6 +405,23 @@ session_idle_secs: 600
 # TCP keepalive interval (idle-session reaper). Default 30s.
 tcp_keepalive_secs: 30
 
+# Optional persistent restart-history tracker (~200-byte JSON file
+# rewritten atomically on every start + every clean shutdown). When
+# set, the binary exposes:
+#   - proteus_restarts_total              (cumulative starts)
+#   - proteus_first_start_unix_seconds    (first-ever start)
+#   - proteus_last_clean_shutdown_unix_seconds
+#   - proteus_previous_run_unclean        (1 = panic-abort / OOM kill /
+#                                          segfault / kill -9 detected)
+#
+# Closes the silent crash-loop class: without this, a binary that
+# systemd restarts every 30s due to an OOM bug looks identical on
+# Prometheus dashboards to a healthy long-running deploy (fresh
+# process, low uptime, zero panics on the new instance). Alert on
+# `rate(proteus_restarts_total[1h]) > 1`. Same location as systemd
+# `StateDirectory=`.
+# restart_state_file: /var/lib/proteus/restart_state.json
+
 # SIGTERM/SIGINT drain window. After the signal the server stops
 # accepting new connections and waits this long for in-flight sessions
 # to flush before exiting. Match `TimeoutStopSec` in the systemd unit

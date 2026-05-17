@@ -1468,6 +1468,10 @@ proteus_rx_bytes_total
 proteus_aead_drops_total
 proteus_ratchets_total
 proteus_panics_total
+proteus_restarts_total
+proteus_first_start_unix_seconds
+proteus_last_clean_shutdown_unix_seconds
+proteus_previous_run_unclean
 ```
 
 `proteus_panics_total` is incremented by the shared
@@ -1485,6 +1489,20 @@ alert on `rate(proteus_panics_total[5m]) > 0`. Set
 semantics over keep-running-with-one-session-down (default keeps
 running so a single hot-path panic doesn't tear down every other
 in-flight user).
+
+`proteus_restarts_total` + the three adjacent series are emitted
+by [`proteus_server::restart_tracker`](crates/proteus-server/src/restart_tracker.rs)
+when the operator sets `restart_state_file: /var/lib/proteus/restart_state.json`
+in `server.yaml`. The tracker persists a ~200-byte JSON file that
+the binary atomically rewrites on every start + every clean
+shutdown. Closes the silent crash-loop class: when systemd
+relaunches the binary every 30 s because of an OOM bug, the
+dashboards otherwise look identical to a healthy long-running
+deploy (fresh process, `proteus_panics_total = 0`,
+`proteus_process_uptime_seconds < 60`). With the tracker wired,
+`rate(proteus_restarts_total[1h]) > 1` fires immediately, and
+`proteus_previous_run_unclean == 1` distinguishes a panic-abort /
+OOM kill / segfault / `kill -9` exit from a clean SIGTERM drain.
 
 Tracing logs (`RUST_LOG=proteus_transport_alpha=debug`) carry a
 `peer=<SocketAddr>` field on every per-connection event for ops triage.

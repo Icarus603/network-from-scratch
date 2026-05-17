@@ -764,6 +764,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // Server-aggregated metrics — wire into ctx so the hot-path
     // increments the right counters.
     let metrics = Arc::new(proteus_transport_alpha::metrics::ServerMetrics::default());
+
+    // Restart-history tracker. Only enabled when the operator sets
+    // `restart_state_file:` in the YAML — without it we'd silently
+    // create a state file under whatever cwd the binary launched
+    // from, which is hostile to operators who launch from a
+    // read-only systemd unit. Opt-in by intent: when the file path
+    // is present, the tracker persists + exposes the counter +
+    // classifies the previous run. When absent, restart tracking
+    // is off and the metrics block isn't emitted.
+    let restart_tracker = cfg
+        .restart_state_file
+        .as_ref()
+        .map(|p| proteus_server::restart_tracker::RestartTracker::init(p.clone()));
     // Propagate the self-test outcome to the operator-visible
     // gauge BEFORE the metrics endpoint binds — operators
     // alert on `proteus_startup_self_test_passed == 0` to spot
@@ -1257,17 +1270,27 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let user_quarantine_for_metrics = user_quarantine_list.as_ref().map(Arc::clone);
         let user_quotas_for_metrics = user_quotas_list.as_ref().map(Arc::clone);
         let tls_cert_watcher_for_metrics = tls_cert_watcher.as_ref().map(Arc::clone);
-        // Live-evaluated Prometheus blocks. The panic counter is the
-        // canonical case: it's process-global, updates whenever a
-        // panic fires, and absolutely MUST be readable on /metrics
-        // (alerts wire `rate(proteus_panics_total[5m]) > 0`). We
-        // pass it as a closure rebuilt per scrape so the gauge
-        // reflects the panic count AT scrape time, not at startup.
-        let live_blocks: Vec<
+        // Live-evaluated Prometheus blocks. Canonical cases today:
+        //
+        //   * panic counter — process-global, mutates on every
+        //     spawned-task panic, MUST be readable per scrape.
+        //     Alerts wire `rate(proteus_panics_total[5m]) > 0`.
+        //   * restart tracker — `last_clean_shutdown_unix` mutates
+        //     when SIGTERM hits the drain handler mid-process, so
+        //     a closure-rendered block keeps that gauge fresh.
+        //     Skipped when `restart_state_file:` isn't configured.
+        //
+        // Closures are cheap (atomic load + format!()) and run in
+        // the scrape handler's task — no allocation when zero
+        // panics, single allocation when ≥ 1.
+        let mut live_blocks: Vec<
             std::sync::Arc<proteus_transport_alpha::metrics_http::LiveMetricsBlock>,
         > = vec![std::sync::Arc::new(|| {
             proteus_server::process_panic_counter::prometheus()
         })];
+        if let Some(rt) = restart_tracker.as_ref().cloned() {
+            live_blocks.push(std::sync::Arc::new(move || rt.prometheus()));
+        }
         tokio::spawn(async move {
             if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v12(
                 &metrics_addr,
@@ -2257,6 +2280,16 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             // Final liveness flip — we are about to exit; any further
             // /healthz probe should see 503.
             metrics.alive.store(false, std::sync::atomic::Ordering::Relaxed);
+
+            // Record this exit as CLEAN in the persistent restart
+            // tracker. The next start sees `previous_run_unclean = 0`
+            // and dashboards distinguish this restart from a panic/
+            // OOM/segfault loop. Skipped when the operator hasn't
+            // configured `restart_state_file:` (tracker is None).
+            if let Some(rt) = restart_tracker.as_ref() {
+                rt.mark_clean_shutdown();
+            }
+
             info!("proteus-server exiting");
         }
     }
