@@ -358,6 +358,7 @@ mod tests {
             per_user_bandwidth_rate: None,
             per_user_conn_limit: None,
             user_quarantine: None,
+            user_quotas: None,
             outbound_filter: None,
         }
     }

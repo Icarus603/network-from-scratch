@@ -622,6 +622,71 @@ Plus three operator-visible counters surface live ops:
   `failed > 0` to spot operator hand-edits that produced an
   unreadable file.
 
+### Per-user **period-based data quotas**
+
+Every defense above caps a **rate** or a **single session**. None
+caps **cumulative bytes over time**. A patient attacker with a
+stolen credential who stays under per-session caps AND under
+sustained-rate thresholds can quietly drain TBs over weeks —
+1 MB/s every second for 30 days = 2.6 TB, and no alarm fires.
+
+Every commercial VPN has period-based quotas (Mullvad free tier
+5 GB total; Cloudflare WARP 1 GB/month; enterprise admins set
+per-user monthly caps). Proteus matches that shape:
+
+```yaml
+user_quotas:
+  period_secs: 2592000                  # 30 days
+  default_period_bytes: 107374182400    # 100 GB monthly default
+  max_entries: 4096
+  persistence_path: /var/lib/proteus/user_quotas.jsonl
+  overrides:
+    - user_id: alice001
+      period_bytes: 53687091200         # 50 GB for alice
+    - user_id: vip00001
+      period_bytes: 0                   # unlimited (VIP override)
+```
+
+How it works:
+- `PerUserBandwidth::record_with_rate_check` (called from
+  `InFlightGuard::drop`) charges `(tx + rx)` against the user's
+  quota bucket alongside the rate-detector check.
+- `user_admission_ok` (post-handshake admission gate) rejects
+  any user_id with `is_over_quota(uid) == true`, BEFORE the
+  rate limiter sees it. Counter:
+  `proteus_user_quota_admission_rejected_total`.
+- Period rolls over automatically: at `period_started_at +
+  period_secs`, the bucket resets to 0 and the start advances.
+- Disk persistence (atomic write, JSONL, same shape as
+  `user_quarantine`) so quotas survive process restarts —
+  otherwise an attacker could bypass by bouncing the binary.
+- SIGHUP reconciles in-memory state against the file. Operators
+  hand-edit to grant a user a fresh allotment (lower
+  `used_bytes`) or change a `cap_override` without a restart.
+- Programmatic `reset_user(uid)` API + `set_user_cap(uid, bytes)`
+  for operator override paths.
+
+Operator-visible Prometheus series (11 list-emitted +
+`proteus_user_quota_admission_rejected_total` always-emitted):
+
+```
+proteus_user_quota_period_seconds                  # gauge — configured period
+proteus_user_quota_default_cap_bytes               # gauge — default cap
+proteus_user_quota_tracked_users                   # gauge — distinct users
+proteus_user_quota_over_quota_transitions_total    # counter — under→over events
+proteus_user_quota_admission_blocks_total          # counter — admission rejects
+proteus_user_quota_period_rollovers_total          # counter — period resets
+proteus_user_quota_persist_attempts_total          # counter — disk writes
+proteus_user_quota_persist_failed_total            # counter — write failures
+proteus_user_quota_loaded_from_disk                # gauge — startup restores
+proteus_user_quota_reload_attempts_total           # counter — SIGHUP reloads
+proteus_user_quota_reload_failed_total             # counter — SIGHUP reload errors
+proteus_user_quota_admission_rejected_total        # counter — admission gate hits
+```
+
+`/diagnose` adds a USER QUOTA table sorted heaviest-first so
+operators see who's about to hit their cap at the top.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

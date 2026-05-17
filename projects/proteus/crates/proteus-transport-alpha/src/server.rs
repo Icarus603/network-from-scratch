@@ -201,6 +201,25 @@ where
             return false;
         }
     }
+    // Period-based data quota check. Same priority slot as the
+    // quarantine: hard-denial that shouldn't burn rate-limit
+    // tokens. Operators reading dashboards see "alice is over her
+    // 100 GB monthly cap; reject until next period rollover (or
+    // operator reset)".
+    if let Some(quota) = ctx.user_quota() {
+        if quota.is_over_quota(&uid) {
+            tracing::warn!(
+                user_id = ?uid,
+                peer = ?session.peer_addr,
+                "user_id over period quota; closing session"
+            );
+            if let Some(m) = ctx.metrics() {
+                m.user_quota_admission_rejected
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return false;
+        }
+    }
     if ctx.check_user_rate(&uid) {
         return true;
     }
@@ -417,6 +436,14 @@ pub struct ServerCtx {
     /// bumped. Mirrors the commercial-VPN "N devices per account"
     /// model that VLESS / Hy2 / TUIC5 lack at the protocol level.
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    /// Optional per-user period-based data quota tracker. When set,
+    /// the post-handshake admission gate ALSO rejects sessions
+    /// whose user_id is over quota for the current period. Closes
+    /// the gap left by the rate / event detectors: a patient
+    /// attacker who stays under any single-session or rate
+    /// threshold can drain TBs over weeks; the quota tracker puts
+    /// a hard ceiling on cumulative bytes.
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
     /// Optional ring buffer of recent abuse-alert fires (across all
     /// three detectors: byte_budget, rate_limit,
     /// per_user_bandwidth_rate). Filled at each fire site so
@@ -467,10 +494,26 @@ impl ServerCtx {
             abuse_detector_rate_limit: None,
             per_user_bandwidth: None,
             per_user_conn_limiter: None,
+            user_quota: None,
             abuse_fires: None,
             user_quarantine: None,
             quarantine_on_kinds: std::collections::HashSet::new(),
         }
+    }
+
+    /// Install the per-user period-based data quota tracker.
+    /// When wired, the post-handshake admission gate rejects any
+    /// session whose user_id is over quota for the current period.
+    #[must_use]
+    pub fn with_user_quota(mut self, tracker: Arc<crate::user_quota::PerUserQuotaTracker>) -> Self {
+        self.user_quota = Some(tracker);
+        self
+    }
+
+    /// Read the user-quota tracker handle.
+    #[must_use]
+    pub fn user_quota(&self) -> Option<Arc<crate::user_quota::PerUserQuotaTracker>> {
+        self.user_quota.clone()
     }
 
     /// Install the auto-quarantine list. Operators who want abuse

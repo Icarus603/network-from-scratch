@@ -699,6 +699,76 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
     };
 
+    // Per-user period-based data quota tracker. Closes the gap
+    // left by the rate / event detectors: a patient attacker who
+    // stays under any single-session cap AND any sustained-rate
+    // threshold can drain TBs over weeks. Every commercial VPN
+    // has period caps; Proteus's tracker matches that shape.
+    let user_quotas_list: Option<Arc<proteus_transport_alpha::user_quota::PerUserQuotaTracker>> =
+        match cfg.user_quotas.as_ref() {
+            Some(qcfg) => {
+                let tracker = Arc::new(match qcfg.persistence_path.as_ref() {
+                    Some(path) => {
+                        proteus_transport_alpha::user_quota::PerUserQuotaTracker::load_from_disk(
+                            path.clone(),
+                            std::time::Duration::from_secs(qcfg.period_secs),
+                            qcfg.default_period_bytes,
+                            qcfg.max_entries,
+                        )
+                    }
+                    None => proteus_transport_alpha::user_quota::PerUserQuotaTracker::new(
+                        std::time::Duration::from_secs(qcfg.period_secs),
+                        qcfg.default_period_bytes,
+                        qcfg.max_entries,
+                    ),
+                });
+                // Apply YAML-supplied overrides (operator's
+                // per-user cap_overrides). The set_user_cap call
+                // also persists, so the override survives the
+                // next restart even if the file didn't have it
+                // previously.
+                for ov in &qcfg.overrides {
+                    let bytes = ov.user_id.as_bytes();
+                    if bytes.len() > 8 {
+                        warn!(
+                            user_id = %ov.user_id,
+                            "user_quotas override: user_id > 8 bytes, ignored"
+                        );
+                        continue;
+                    }
+                    let mut uid = [0u8; 8];
+                    uid[..bytes.len()].copy_from_slice(bytes);
+                    tracker.set_user_cap(uid, ov.period_bytes);
+                    info!(
+                        user_id = %ov.user_id,
+                        period_bytes = ov.period_bytes,
+                        "user_quotas: override applied"
+                    );
+                }
+                info!(
+                    period_secs = qcfg.period_secs,
+                    default_period_bytes = qcfg.default_period_bytes,
+                    overrides = qcfg.overrides.len(),
+                    restored = tracker.loaded_from_disk(),
+                    "user_quotas configured — per-user period byte caps active"
+                );
+                Some(tracker)
+            }
+            None => {
+                info!(
+                    "user_quotas unset — no per-user period byte caps. A patient \
+                 attacker staying under per-session + rate thresholds can drain \
+                 TBs over weeks. Recommended for production: enable with a \
+                 sensible default_period_bytes (e.g. 100 GiB monthly)."
+                );
+                None
+            }
+        };
+    if let Some(tracker) = user_quotas_list.as_ref() {
+        ctx = ctx.with_user_quota(Arc::clone(tracker));
+        per_user_bandwidth.set_quota(Some(Arc::clone(tracker)));
+    }
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics
@@ -829,8 +899,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let per_user_conn_limiter_for_metrics = per_user_conn_limiter.as_ref().map(Arc::clone);
         let abuse_fires_for_metrics = Some(Arc::clone(&abuse_fires_buffer));
         let user_quarantine_for_metrics = user_quarantine_list.as_ref().map(Arc::clone);
+        let user_quotas_for_metrics = user_quotas_list.as_ref().map(Arc::clone);
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v9(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v10(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -843,6 +914,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 per_user_conn_limiter_for_metrics,
                 abuse_fires_for_metrics,
                 user_quarantine_for_metrics,
+                user_quotas_for_metrics,
             )
             .await
             {
@@ -950,6 +1022,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // add an emergency manual ban, extend a TTL) and SIGHUP
         // picks it up without a restart.
         let user_quarantine_for_reload = user_quarantine_list.as_ref().map(Arc::clone);
+        let user_quotas_for_reload = user_quotas_list.as_ref().map(Arc::clone);
         tokio::spawn(async move {
             let mut sighup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -1154,6 +1227,24 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         }
                         Err(e) => {
                             warn!(error = %e, "user_quarantine reload failed; keeping in-memory state");
+                        }
+                    }
+                }
+
+                // ----- 4. User-quota reconcile from disk -----
+                //
+                // Operators can hand-edit
+                // /var/lib/proteus/user_quotas.jsonl to grant a
+                // fresh allotment, change a cap_override, etc.
+                // SIGHUP picks the edits up.
+                if let Some(qt) = user_quotas_for_reload.as_ref() {
+                    match qt.reload_from_disk() {
+                        Ok(updates) if updates > 0 => {
+                            info!(updates, "user_quotas reconciled from disk");
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            warn!(error = %e, "user_quotas reload failed; keeping in-memory state");
                         }
                     }
                 }

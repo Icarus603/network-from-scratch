@@ -104,6 +104,13 @@ pub struct PerUserBandwidth {
     /// rebuilding the accumulator.
     quarantine: Mutex<Option<Arc<crate::user_quarantine::UserQuarantineList>>>,
     quarantine_on_fire: std::sync::atomic::AtomicBool,
+    /// Optional per-user data quota tracker. When wired, every
+    /// `record()` call ALSO charges the user's quota bucket with
+    /// `(tx + rx)` bytes — so over-quota becomes a hard admission
+    /// gate (handled in `user_admission_ok`) while still letting
+    /// the bandwidth-rate detector + abuse-fires ring observe
+    /// normal usage.
+    quota: Mutex<Option<Arc<crate::user_quota::PerUserQuotaTracker>>>,
 }
 
 impl PerUserBandwidth {
@@ -121,7 +128,29 @@ impl PerUserBandwidth {
             abuse_fires: Mutex::new(None),
             quarantine: Mutex::new(None),
             quarantine_on_fire: std::sync::atomic::AtomicBool::new(false),
+            quota: Mutex::new(None),
         }
+    }
+
+    /// Attach the per-user data quota tracker. When wired, every
+    /// `record()` call charges `(tx + rx)` against the user's
+    /// quota bucket; the actual admission-gate check lives in
+    /// `user_admission_ok`.
+    pub fn set_quota(&self, tracker: Option<Arc<crate::user_quota::PerUserQuotaTracker>>) {
+        let mut g = self
+            .quota
+            .lock()
+            .expect("PerUserBandwidth quota lock poisoned");
+        *g = tracker;
+    }
+
+    /// Read the quota tracker handle.
+    #[must_use]
+    pub fn quota(&self) -> Option<Arc<crate::user_quota::PerUserQuotaTracker>> {
+        self.quota
+            .lock()
+            .expect("PerUserBandwidth quota lock poisoned")
+            .clone()
     }
 
     /// Attach an auto-quarantine list + opt-in flag. When `opt_in
@@ -248,6 +277,18 @@ impl PerUserBandwidth {
         }
         if rx > 0 {
             bucket.rx.fetch_add(rx, Ordering::Relaxed);
+        }
+        // Charge the per-user quota tracker (when wired) with the
+        // full (tx + rx) byte count. The quota tracker's
+        // is_over_quota() check happens at the post-handshake
+        // admission gate; this just keeps the running tally
+        // current. Quota tracking is purely additive — it never
+        // changes the outcome of the rate-check below.
+        if let Some(quota) = self.quota() {
+            let bytes_total = tx.saturating_add(rx);
+            if bytes_total > 0 {
+                let _ = quota.record(user_id, bytes_total);
+            }
         }
         // Consult the rate detector if wired. The detector's
         // window-based rate measurement is based on the sum of

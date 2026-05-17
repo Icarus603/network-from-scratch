@@ -330,6 +330,35 @@ pub struct ServerConfig {
     #[serde(default)]
     pub user_quarantine: Option<UserQuarantineCfg>,
 
+    /// Optional per-user period-based data quota tracker. Closes
+    /// the gap left by the rate / event detectors: a patient
+    /// attacker who stays under any single-session cap AND any
+    /// sustained-rate threshold can drain TBs over weeks; a hard
+    /// monthly cap stops that. Every commercial VPN has this
+    /// (Mullvad free tier 5 GB, Cloudflare WARP 1 GB/month,
+    /// corporate VPN admins set per-user monthly).
+    ///
+    /// Example:
+    ///
+    /// ```yaml
+    /// user_quotas:
+    ///   period_secs: 2592000              # 30 days
+    ///   default_period_bytes: 107374182400 # 100 GB default
+    ///   max_entries: 4096
+    ///   persistence_path: /var/lib/proteus/user_quotas.jsonl
+    ///   overrides:
+    ///     - user_id: alice001
+    ///       period_bytes: 53687091200     # 50 GB for alice
+    ///     - user_id: vip00001
+    ///       period_bytes: 0               # unlimited for vip
+    /// ```
+    ///
+    /// Unset = no per-user data caps (the current behavior, full
+    /// back-compat). `default_period_bytes=0` = no default cap;
+    /// only per-user overrides apply.
+    #[serde(default)]
+    pub user_quotas: Option<UserQuotasCfg>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -574,6 +603,55 @@ const fn default_user_quarantine_max_entries() -> usize {
     4096
 }
 
+/// Per-user period-based data quota config (see
+/// [`ServerConfig::user_quotas`] for the operator-facing
+/// docstring).
+#[derive(Debug, Deserialize)]
+pub struct UserQuotasCfg {
+    /// Period length over which the quota resets. Default
+    /// 2_592_000 (30 days). Set to a shorter window for daily
+    /// quotas, or longer for quarterly.
+    #[serde(default = "default_user_quota_period_secs")]
+    pub period_secs: u64,
+    /// Default per-period byte cap for any user without an
+    /// explicit override. 0 = no default cap (only overrides
+    /// apply). Recommended: 100 GiB (107_374_182_400) for
+    /// personal-VPN-for-friends.
+    #[serde(default)]
+    pub default_period_bytes: u64,
+    /// Hard cap on the number of distinct user_ids tracked.
+    /// Matches the per-user bandwidth/conn-limit defaults.
+    #[serde(default = "default_user_quota_max_entries")]
+    pub max_entries: usize,
+    /// Optional disk persistence path. Same JSONL pattern as
+    /// `user_quarantine.persistence_path`. Without this, a
+    /// process restart resets every user's bucket → attacker can
+    /// exploit by bouncing the binary.
+    #[serde(default)]
+    pub persistence_path: Option<std::path::PathBuf>,
+    /// Per-user cap overrides. Each entry's `period_bytes`
+    /// overrides the default for that user_id.
+    /// `period_bytes=0` explicitly grants UNLIMITED for that
+    /// user (operator's VIP override).
+    #[serde(default)]
+    pub overrides: Vec<UserQuotaOverride>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserQuotaOverride {
+    /// 8-byte user_id, ASCII or zero-padded.
+    pub user_id: String,
+    /// Per-period byte cap for this user. 0 = unlimited.
+    pub period_bytes: u64,
+}
+
+const fn default_user_quota_period_secs() -> u64 {
+    2_592_000 // 30 days
+}
+const fn default_user_quota_max_entries() -> usize {
+    4096
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FirewallCfg {
     /// CIDR rules — only sources matching one of these are admitted.
@@ -744,6 +822,7 @@ impl ServerConfig {
             per_user_bandwidth_rate: self.per_user_bandwidth_rate.is_some(),
             per_user_conn_limit: self.per_user_conn_limit.is_some(),
             user_quarantine: self.user_quarantine.is_some(),
+            user_quotas: self.user_quotas.is_some(),
             cover_endpoint_count: self.cover_endpoints.len() as u64,
             client_allowlist_count: self.client_allowlist.len() as u64,
         }
@@ -779,6 +858,9 @@ pub struct ConfigPresence {
     /// `user_quarantine:` block — 1 when the auto-quarantine list
     /// is configured (even with ttl_secs=0 — the slot is wired).
     pub user_quarantine: bool,
+    /// `user_quotas:` block — 1 when the per-user period quota
+    /// tracker is configured.
+    pub user_quotas: bool,
     /// Number of entries in `cover_endpoints:`. Operators read the
     /// SIZE of the pool as a sanity check ("I configured 5 cover
     /// endpoints, why does this show 3?") which a bare presence bit
@@ -823,6 +905,7 @@ impl ConfigPresence {
             ("per_user_bandwidth_rate", self.per_user_bandwidth_rate),
             ("per_user_conn_limit", self.per_user_conn_limit),
             ("user_quarantine", self.user_quarantine),
+            ("user_quotas", self.user_quotas),
         ] {
             let _ = writeln!(
                 s,
@@ -1054,6 +1137,59 @@ per_user_conn_limit:\n  \
             prom.contains(r#"proteus_config_section_active{section="per_user_conn_limit"} 1"#),
             "{prom}"
         );
+    }
+
+    #[test]
+    fn presence_reports_user_quotas_when_configured() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+user_quotas:\n  \
+  period_secs: 2592000\n  \
+  default_period_bytes: 107374182400\n  \
+  max_entries: 4096\n  \
+  persistence_path: /var/lib/proteus/user_quotas.jsonl\n  \
+  overrides:\n    - user_id: alice001\n      period_bytes: 53687091200\n    - user_id: vip00001\n      period_bytes: 0\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let q = cfg.user_quotas.as_ref().expect("must deserialize");
+        assert_eq!(q.period_secs, 2592000);
+        assert_eq!(q.default_period_bytes, 107374182400);
+        assert_eq!(q.max_entries, 4096);
+        assert_eq!(q.overrides.len(), 2);
+        assert_eq!(q.overrides[0].user_id, "alice001");
+        assert_eq!(q.overrides[0].period_bytes, 53687091200);
+        assert_eq!(q.overrides[1].user_id, "vip00001");
+        assert_eq!(q.overrides[1].period_bytes, 0);
+        let p = cfg.presence();
+        assert!(p.user_quotas);
+        assert!(p
+            .prometheus()
+            .contains(r#"proteus_config_section_active{section="user_quotas"} 1"#));
+    }
+
+    #[test]
+    fn user_quotas_defaults_apply_when_subfields_missing() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+user_quotas:\n  \
+  default_period_bytes: 107374182400\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let q = cfg.user_quotas.as_ref().unwrap();
+        assert_eq!(q.period_secs, 2_592_000); // default
+        assert_eq!(q.max_entries, 4096); // default
+        assert!(q.overrides.is_empty());
+        assert!(q.persistence_path.is_none());
     }
 
     #[test]

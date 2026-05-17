@@ -276,6 +276,36 @@ handshake_deadline_secs: 15
 #   # typical StateDirectory= convention).
 #   persistence_path: /var/lib/proteus/user_quarantine.jsonl
 
+# Per-user **period-based data quotas**. Closes the gap left by
+# rate-based and event-based detectors: a patient attacker who
+# stays under per-session AND sustained-rate thresholds can
+# quietly drain TBs over weeks. Every commercial VPN has period
+# quotas (Mullvad 5GB free; Cloudflare WARP 1GB/month).
+#
+# `period_secs`: rolling-window length. 2592000 = 30 days.
+# `default_period_bytes`: default per-user cap. 0 = no default
+#                         (only overrides apply).
+# `overrides`: per-user cap_override. `period_bytes=0` means
+#              explicitly unlimited for that user (operator VIP).
+# `persistence_path`: disk file. WITHOUT this, a process restart
+#                     resets every user's bucket → attacker can
+#                     bypass by bouncing the binary.
+#
+# Recommended for a 5-user personal VPN:
+#   period_secs: 2592000               # 30 days
+#   default_period_bytes: 107374182400 # 100 GB monthly
+#
+# user_quotas:
+#   period_secs: 2592000
+#   default_period_bytes: 107374182400
+#   max_entries: 4096
+#   persistence_path: /var/lib/proteus/user_quotas.jsonl
+#   overrides:
+#     - user_id: alice001
+#       period_bytes: 53687091200     # 50 GB
+#     - user_id: vip00001
+#       period_bytes: 0               # unlimited
+
 # Per-session byte budget (tx + rx plaintext). Sessions whose total
 # bytes crosses this threshold are torn down with close_reason
 # "byte_budget_exhausted". Defends against a compromised credential

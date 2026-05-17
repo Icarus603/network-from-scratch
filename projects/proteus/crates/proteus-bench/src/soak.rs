@@ -877,6 +877,54 @@ mod tests {
         );
     }
 
+    /// Per-user quota e2e: wire the quota tracker to the
+    /// per-user bandwidth accumulator, drive a small single-user
+    /// soak, and assert the tracker accumulated bytes against
+    /// alice's bucket. Proves the production path
+    /// `PerUserBandwidth::record_with_rate_check → quota.record`
+    /// works end-to-end through real β handshakes.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn user_quota_accumulates_bytes_via_real_handshake() {
+        use proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth;
+        use proteus_transport_alpha::user_quota::PerUserQuotaTracker;
+        let per_user = Arc::new(PerUserBandwidth::new(4096));
+        // 1 GB cap → trivially under for the 2s × 16KiB soak.
+        let quota = Arc::new(PerUserQuotaTracker::new(
+            Duration::from_secs(3600),
+            1024 * 1024 * 1024,
+            4096,
+        ));
+        per_user.set_quota(Some(Arc::clone(&quota)));
+
+        let _summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 2,
+                duration: Duration::from_secs(2),
+                per_session_kib: 16,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("quota soak should succeed");
+
+        let snap = quota.active_snapshot(64);
+        let alice = snap
+            .iter()
+            .find(|e| e.user_id == "user0000")
+            .expect("user0000 must be tracked");
+        assert!(
+            alice.used_bytes > 0,
+            "quota tracker must have charged user0000 (wire-up broken?)"
+        );
+        // Below cap.
+        assert!(!alice.over_quota);
+    }
+
     /// Auto-quarantine e2e: wire a low-threshold bandwidth-rate
     /// detector + a quarantine list that opts the
     /// `per_user_bandwidth_rate` kind in. Run a single-user soak

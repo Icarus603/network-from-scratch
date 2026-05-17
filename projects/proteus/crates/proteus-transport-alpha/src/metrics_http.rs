@@ -349,11 +349,8 @@ pub async fn serve_with_auth_full_v8(
 }
 
 /// v9 of [`serve_with_auth_full`] — adds an optional
-/// `UserQuarantineList`. When supplied, the `/metrics` body
-/// includes the six `proteus_user_quarantine_*` series AND the
-/// `/diagnose` body adds the USER QUARANTINE table. Operators
-/// use this to verify auto-quarantine is firing (counter > 0)
-/// and to see WHICH user_ids are currently banned.
+/// `UserQuarantineList`. Back-compat shim — forwards to v10 with
+/// `user_quota = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v9(
     addr: &str,
@@ -369,6 +366,46 @@ pub async fn serve_with_auth_full_v9(
     abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
     user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v10(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        None,
+    )
+    .await
+}
+
+/// v10 of [`serve_with_auth_full`] — adds an optional
+/// `PerUserQuotaTracker`. When supplied, the `/metrics` body
+/// includes the 11-series `proteus_user_quota_*` block AND the
+/// `/diagnose` body adds the USER QUOTA table. Operators alert
+/// on `rate(proteus_user_quota_admission_rejected_total[5m]) > 0`
+/// to spot users who hit their period cap.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v10(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -380,6 +417,7 @@ pub async fn serve_with_auth_full_v9(
     let per_user_conn_limit_enabled = per_user_conn_limiter.is_some();
     let abuse_fires_enabled = abuse_fires.is_some();
     let user_quarantine_enabled = user_quarantine.is_some();
+    let user_quota_enabled = user_quota.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -392,6 +430,7 @@ pub async fn serve_with_auth_full_v9(
         per_user_conn_limit = per_user_conn_limit_enabled,
         abuse_fires = abuse_fires_enabled,
         user_quarantine = user_quarantine_enabled,
+        user_quota = user_quota_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -407,7 +446,8 @@ pub async fn serve_with_auth_full_v9(
         let per_user_conn_limiter = per_user_conn_limiter.clone();
         let abuse_fires = abuse_fires.clone();
         let user_quarantine = user_quarantine.clone();
-        tokio::spawn(handle_connection_v9(
+        let user_quota = user_quota.clone();
+        tokio::spawn(handle_connection_v10(
             stream,
             metrics,
             auth,
@@ -420,6 +460,7 @@ pub async fn serve_with_auth_full_v9(
             per_user_conn_limiter,
             abuse_fires,
             user_quarantine,
+            user_quota,
         ));
     }
 }
@@ -674,7 +715,7 @@ async fn handle_connection_v8(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_v9(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -687,13 +728,47 @@ async fn handle_connection_v9(
     abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
     user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
 ) {
+    handle_connection_v10(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v10(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v9(
+    let (status_line, content_type, body) = render_full_v10(
         head,
         &metrics,
         auth.as_ref(),
@@ -706,6 +781,7 @@ async fn handle_connection_v9(
         per_user_conn_limiter.as_deref(),
         abuse_fires.as_deref(),
         user_quarantine.as_deref(),
+        user_quota.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -828,11 +904,8 @@ pub fn render_diagnose_v2(
     )
 }
 
-/// v3 of [`render_diagnose`] — adds the USER QUARANTINE table
-/// when a `UserQuarantineList` is supplied. Table renders right
-/// after the recent-abuse-fires table; together they form the
-/// operator's "abuse-state-right-now" view at the top of the
-/// diagnose body.
+/// v3 of [`render_diagnose`] — adds the USER QUARANTINE table.
+/// Back-compat shim — forwards to v4 with `user_quota = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_diagnose_v3(
@@ -844,6 +917,36 @@ pub fn render_diagnose_v3(
     process_info: Option<&crate::process_info::ProcessInfo>,
     abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
     user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
+) -> String {
+    render_diagnose_v4(
+        metrics,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        abuse_fires,
+        user_quarantine,
+        None,
+    )
+}
+
+/// v4 of [`render_diagnose`] — adds the USER QUOTA table when a
+/// `PerUserQuotaTracker` is supplied. Renders after the
+/// quarantine table; together they show the operator the full
+/// per-user enforcement state in the diagnose body.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_diagnose_v4(
+    metrics: &ServerMetrics,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+    user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
+    user_quota: Option<&crate::user_quota::PerUserQuotaTracker>,
 ) -> String {
     let findings = run_diagnose_rules(metrics, tls_acceptor, process_info);
     let mut s = String::with_capacity(4096);
@@ -893,6 +996,18 @@ pub fn render_diagnose_v3(
         s.push_str(&uq.diagnose_table(now_epoch));
         s.push('\n');
     }
+    // User quota table — heaviest bandwidth-burners + their
+    // per-period caps. Operators see "alice has consumed 99 GB
+    // of her 100 GB monthly cap" + "bob is over 50 GB cap →
+    // his admission is being rejected".
+    if let Some(qt) = user_quota {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.push_str(&qt.diagnose_table(now_epoch));
+        s.push('\n');
+    }
 
     s.push_str("METRICS (text/plain; version=0.0.4)\n");
     s.push_str("-----------------------------------\n");
@@ -922,6 +1037,9 @@ pub fn render_diagnose_v3(
     }
     if let Some(uq) = user_quarantine {
         s.push_str(&uq.prometheus());
+    }
+    if let Some(qt) = user_quota {
+        s.push_str(&qt.prometheus());
     }
     s
 }
@@ -1326,10 +1444,8 @@ pub fn render_full_v8(
     )
 }
 
-/// v9 of [`render_full`] — adds optional user_quarantine list.
-/// When supplied, `/metrics` includes the six
-/// `proteus_user_quarantine_*` series and `/diagnose` adds the
-/// USER QUARANTINE table.
+/// v9 of [`render_full`] — back-compat shim to v10 with
+/// `user_quota = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v9(
@@ -1345,6 +1461,44 @@ pub fn render_full_v9(
     per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
     abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
     user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
+) -> (&'static str, &'static str, String) {
+    render_full_v10(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        None,
+    )
+}
+
+/// v10 of [`render_full`] — adds optional per-user data quota
+/// tracker. When supplied, `/metrics` includes the 11-series
+/// `proteus_user_quota_*` block and `/diagnose` adds the USER
+/// QUOTA table.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v10(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+    per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+    user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
+    user_quota: Option<&crate::user_quota::PerUserQuotaTracker>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -1398,6 +1552,9 @@ pub fn render_full_v9(
         if let Some(uq) = user_quarantine {
             body.push_str(&uq.prometheus());
         }
+        if let Some(qt) = user_quota {
+            body.push_str(&qt.prometheus());
+        }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
         if metrics.alive.load(Ordering::Relaxed) {
@@ -1424,7 +1581,7 @@ pub fn render_full_v9(
                 );
             }
         }
-        let body = render_diagnose_v3(
+        let body = render_diagnose_v4(
             metrics,
             probe_anomaly,
             auto_deny,
@@ -1433,6 +1590,7 @@ pub fn render_full_v9(
             process_info,
             abuse_fires,
             user_quarantine,
+            user_quota,
         );
         ("HTTP/1.1 200 OK\r\n", "text/plain; charset=utf-8", body)
     } else if matches_path(request_head, "/readyz") {
@@ -1921,6 +2079,85 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v10 with user_quota supplied emits the 11-series quota
+    /// block on /metrics AND adds the USER QUOTA table to
+    /// /diagnose. End-to-end proof the wire-up reaches the HTTP
+    /// layer.
+    #[test]
+    fn render_full_v10_emits_user_quota_block_when_supplied() {
+        use crate::user_quota::PerUserQuotaTracker;
+        use std::time::Duration;
+        let m = ServerMetrics::default();
+        let qt = PerUserQuotaTracker::new(Duration::from_secs(3600), 1024, 4096);
+        qt.record(*b"alice001", 500);
+        qt.record(*b"bob00002", 1100); // over quota
+        let (_status, _ctype, body) = render_full_v10(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&qt),
+        );
+        assert!(body.contains("proteus_user_quota_period_seconds 3600"));
+        assert!(body.contains("proteus_user_quota_default_cap_bytes 1024"));
+        assert!(body.contains("proteus_user_quota_tracked_users 2"));
+        assert!(body.contains("proteus_user_quota_over_quota_transitions_total 1"));
+
+        let (_, _, diag_body) = render_full_v10(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&qt),
+        );
+        assert!(diag_body.contains("USER QUOTA"), "{diag_body}");
+        assert!(diag_body.contains("alice001"));
+        assert!(diag_body.contains("bob00002"));
+    }
+
+    /// v10 with no user_quota omits the list-emitted block but
+    /// the server-level `proteus_user_quota_admission_rejected_total`
+    /// counter is still always emitted.
+    #[test]
+    fn render_full_v10_omits_user_quota_block_when_none() {
+        let m = ServerMetrics::default();
+        let (_, _, body) = render_full_v10(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!body.contains("proteus_user_quota_period_seconds"));
+        assert!(!body.contains("proteus_user_quota_tracked_users"));
+        // Server-level counter still present.
+        assert!(body.contains("proteus_user_quota_admission_rejected_total 0"));
     }
 
     /// v9 with user_quarantine supplied emits the six
