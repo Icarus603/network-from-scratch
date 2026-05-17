@@ -355,6 +355,7 @@ mod tests {
             pad_quantum: None,
             firewall: None,
             max_connections: None,
+            max_cover_forwards: None,
             max_session_bytes: None,
             abuse_detector: None,
             per_user_bandwidth_rate: None,

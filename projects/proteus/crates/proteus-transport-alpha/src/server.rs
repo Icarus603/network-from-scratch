@@ -405,8 +405,48 @@ where
 fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream, peer: &std::net::SocketAddr) {
     record_probe_anomaly(ctx, peer);
     if let Some(cover) = ctx.cover_endpoint_for(peer) {
+        // Iter-20: acquire a cover-forward semaphore slot BEFORE
+        // the spawn so a probe storm can't fan out unbounded
+        // tokio::spawn(forward_to_cover) tasks that each hold 2
+        // FDs for up to FORWARD_IDLE_TIMEOUT (120s).
+        //
+        // try_acquire_cover_forward returns:
+        //   Some(Some(permit)) → cap configured, slot acquired
+        //   Some(None)         → no cap (legacy unbounded mode)
+        //   None               → cap configured, exhausted → drop
+        let permit_opt = match ctx.try_acquire_cover_forward() {
+            Some(p) => p,
+            None => {
+                // Cover cap exhausted — drop the inbound stream
+                // (TCP RST/FIN) and bump the rejection counter.
+                // Operators alert on
+                // `rate(proteus_cover_forwards_rejected_total[5m]) > 0`.
+                if let Some(m) = ctx.metrics() {
+                    m.cover_forwards_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                // Throttled WARN so a sustained probe storm doesn't
+                // flood the log; the rejection counter is the
+                // primary operator signal.
+                if matches!(
+                    cover_forward_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(
+                        peer = %peer,
+                        "cover-forward semaphore exhausted — dropping inbound (operator should \
+                         either raise `max_cover_forwards` or investigate the cover endpoint's \
+                         response latency)"
+                    );
+                }
+                return;
+            }
+        };
         let metrics = ctx.metrics().cloned();
         tokio::spawn(async move {
+            // _permit held for the duration of the cover task;
+            // dropped on exit releases the semaphore slot.
+            let _permit = permit_opt;
             let r = crate::cover::forward_to_cover(&cover, Vec::new(), stream).await;
             if r.is_ok() {
                 if let Some(m) = metrics {
@@ -417,6 +457,16 @@ fn route_to_cover_or_drop(ctx: &Arc<ServerCtx>, stream: TcpStream, peer: &std::n
         });
     }
     // Else: stream drops here, TCP RST/FIN closes silently.
+}
+
+/// Per-process throttle for the cover-forward-rejection WARN log.
+/// Same shape as `accept_error_throttle` (iter-18) — a sustained
+/// probe storm fires the rejection path hundreds of times per
+/// second; we want one log line every ~5 seconds, not a flood
+/// that becomes its own resource pressure source.
+fn cover_forward_throttle() -> &'static Throttle {
+    static T: OnceLock<Throttle> = OnceLock::new();
+    T.get_or_init(|| Throttle::new(3, 0.2))
 }
 
 /// Record one cover-forward event in the probe-anomaly detector (if
@@ -522,6 +572,32 @@ pub struct ServerCtx {
     /// flood that survives the rate limiter can still OOM the
     /// server by parking unbounded per-connection ML-KEM allocations.
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
+    /// Optional bounded-concurrency semaphore for the cover-forward
+    /// path (iter-20). When set, AT MOST this many cover-forward
+    /// tasks run simultaneously across the entire process; further
+    /// rejected connections are dropped (TCP RST/FIN) instead of
+    /// being spliced to cover.
+    ///
+    /// Why this exists: pre-iter-20, `route_to_cover_or_drop`
+    /// (the firewall-rejected / conn-cap-rejected / admission-
+    /// failed path) called `tokio::spawn(forward_to_cover(...))`
+    /// with NO concurrency cap. Each spawned task holds 2 FDs
+    /// (peer + cover upstream) for up to FORWARD_IDLE_TIMEOUT
+    /// (120s). Under a probe storm — 1000 probes/sec is realistic
+    /// for an exposed VPS once a censorship-scanner notices it —
+    /// 120 000 concurrent cover tasks ≈ 240 000 FDs, which hits
+    /// EMFILE almost immediately even with `ulimit -n 1048576`.
+    /// Iter-18 made the accept loop SURVIVE EMFILE; iter-20
+    /// prevents reaching EMFILE via the cover path in the first
+    /// place.
+    ///
+    /// `None` (default): no cap — preserves the legacy behavior
+    /// for operators who already deploy behind a separate L4
+    /// rate-limiter / scrubber. Anyone running an exposed VPS
+    /// SHOULD set this; sensible value is `max_connections * 4`
+    /// (most cover-forwards exit in <2s, so a 4× headroom over
+    /// the in-flight session count covers normal bursts).
+    cover_forward_limit: Option<Arc<tokio::sync::Semaphore>>,
     /// Source-IP firewall (CIDR allow/deny). Evaluated before the
     /// rate limiter. Wrapped in [`crate::firewall::ReloadableFirewall`]
     /// so SIGHUP can swap in updated rules without disturbing
@@ -610,6 +686,7 @@ impl ServerCtx {
             pow_difficulty: 0,
             metrics: None,
             conn_limit: None,
+            cover_forward_limit: None,
             firewall: crate::firewall::ReloadableFirewall::default(),
             handshake_budget: None,
             user_limiter: None,
@@ -884,6 +961,48 @@ impl ServerCtx {
     pub fn with_max_connections(mut self, n: usize) -> Self {
         self.conn_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
         self
+    }
+
+    /// Set the maximum number of concurrent cover-forward tasks
+    /// (iter-20). Caps the FD pressure from a probe storm — see
+    /// the `cover_forward_limit` field doc for the threat model.
+    ///
+    /// Sensible production default: `max_connections * 4`. Most
+    /// cover-forwards exit within ~2 s when the cover endpoint
+    /// is healthy (real HTTPS reverse proxies serve a 200 / 404
+    /// quickly), so a 4× headroom over the in-flight session
+    /// count comfortably absorbs normal bursts while still
+    /// preventing the unbounded-spawn class of FD exhaustion.
+    ///
+    /// `n = 0` is equivalent to "no cover-forward path at all" —
+    /// every routed-to-cover connection is dropped (TCP RST). Use
+    /// this only when the operator has decided cover forwarding
+    /// is not desired (e.g. high-IP-reputation single-user deploys
+    /// where any unauthenticated connection is suspicious enough
+    /// to drop outright).
+    #[must_use]
+    pub fn with_max_cover_forwards(mut self, n: usize) -> Self {
+        self.cover_forward_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
+        self
+    }
+
+    /// Try to acquire a cover-forward slot. Returns the owned
+    /// permit on success — the caller MUST hold it for the
+    /// duration of `forward_to_cover`. Returns `None` when the
+    /// cap is exhausted (caller should drop the inbound stream).
+    /// Returns `Some(None)` when no cap is configured (legacy
+    /// unbounded behavior). Note the double-Option encodes the
+    /// three-valued outcome `(unbounded | allowed | rejected)`
+    /// without an extra enum to plumb through.
+    #[allow(clippy::option_option)] // see doc above
+    pub fn try_acquire_cover_forward(&self) -> Option<Option<tokio::sync::OwnedSemaphorePermit>> {
+        match &self.cover_forward_limit {
+            Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+                Ok(permit) => Some(Some(permit)),
+                Err(_) => None, // rejected
+            },
+            None => Some(None), // unbounded
+        }
     }
 
     /// Try to acquire a connection slot. Three-valued:
@@ -2710,3 +2829,83 @@ fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 // itself. Server-side accept loops still use the local
 // `use crate::socket_opts::is_transient_accept_error;`
 // re-export so call sites are unchanged.
+
+#[cfg(test)]
+mod cover_forward_limit_tests {
+    //! Iter-20: prove the cover-forward semaphore actually
+    //! gates the cover-forward path. Without these tests, a
+    //! future refactor that silently broke the semaphore would
+    //! reintroduce the unbounded-spawn FD-exhaustion class fixed
+    //! in iter-20.
+
+    use super::*;
+
+    fn ctx_no_cap() -> ServerCtx {
+        ServerCtx::new(ServerKeys::generate())
+    }
+
+    fn ctx_with_cap(n: usize) -> ServerCtx {
+        ServerCtx::new(ServerKeys::generate()).with_max_cover_forwards(n)
+    }
+
+    /// No cap configured → returns Some(None) on every call
+    /// (the unbounded sentinel). Preserves legacy behavior for
+    /// operators who haven't opted in.
+    #[test]
+    fn no_cap_returns_unbounded_sentinel() {
+        let ctx = ctx_no_cap();
+        for _ in 0..100 {
+            let r = ctx.try_acquire_cover_forward();
+            assert!(matches!(r, Some(None)), "expected unbounded sentinel");
+        }
+    }
+
+    /// Cap configured at N → up to N concurrent permits succeed;
+    /// the (N+1)th returns None (rejected). Once any permit is
+    /// dropped, the next try succeeds again.
+    #[test]
+    fn cap_rejects_beyond_n_concurrent_then_recovers_on_drop() {
+        let ctx = ctx_with_cap(3);
+        // Acquire 3 — all succeed.
+        let p1 = ctx.try_acquire_cover_forward().unwrap();
+        let p2 = ctx.try_acquire_cover_forward().unwrap();
+        let p3 = ctx.try_acquire_cover_forward().unwrap();
+        assert!(p1.is_some());
+        assert!(p2.is_some());
+        assert!(p3.is_some());
+        // 4th — rejected (cap reached, semaphore drained).
+        let r4 = ctx.try_acquire_cover_forward();
+        assert!(r4.is_none(), "4th acquire on cap=3 should reject");
+        // Release one permit; next acquire succeeds.
+        drop(p2);
+        let p_recovered = ctx.try_acquire_cover_forward();
+        assert!(
+            matches!(p_recovered, Some(Some(_))),
+            "release-then-reacquire should succeed: {p_recovered:?}"
+        );
+    }
+
+    /// Cap of 0 → every cover-forward request is rejected
+    /// (the "drop everything routed-to-cover" operator stance).
+    #[test]
+    fn cap_zero_rejects_all() {
+        let ctx = ctx_with_cap(0);
+        for _ in 0..10 {
+            let r = ctx.try_acquire_cover_forward();
+            assert!(r.is_none(), "cap=0 must reject every request");
+        }
+    }
+
+    /// Cap of 1 → exactly one concurrent permit. Smallest non-
+    /// degenerate value; useful for testing the
+    /// rejection-then-recovery edge.
+    #[test]
+    fn cap_one_serializes_concurrent_requests() {
+        let ctx = ctx_with_cap(1);
+        let p = ctx.try_acquire_cover_forward().unwrap();
+        assert!(p.is_some());
+        assert!(ctx.try_acquire_cover_forward().is_none());
+        drop(p);
+        assert!(matches!(ctx.try_acquire_cover_forward(), Some(Some(_))));
+    }
+}

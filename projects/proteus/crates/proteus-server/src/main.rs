@@ -1015,6 +1015,36 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
              accept-flood OOM. Set max_connections in server.yaml."
         );
     }
+    // Iter-20: cover-forward concurrency cap. Default to None if
+    // operator didn't set it, but auto-derive `max_connections * 4`
+    // when max_connections IS set — that's the production-recommended
+    // rule of thumb (most cover-forwards exit in <2s when the cover
+    // endpoint is healthy, so 4× headroom over the in-flight session
+    // count absorbs normal bursts without letting an unbounded
+    // probe storm exhaust FDs).
+    let resolved_cover_cap = match (cfg.max_cover_forwards, cfg.max_connections) {
+        (Some(explicit), _) => Some(explicit),
+        (None, Some(n)) => Some(n.saturating_mul(4)),
+        (None, None) => None,
+    };
+    if let Some(n) = resolved_cover_cap {
+        info!(
+            max = n,
+            derived_from = if cfg.max_cover_forwards.is_some() {
+                "explicit max_cover_forwards"
+            } else {
+                "max_connections * 4 (default rule of thumb)"
+            },
+            "max_cover_forwards cap configured — cover-forward path bounded"
+        );
+        ctx = ctx.with_max_cover_forwards(n);
+    } else {
+        warn!(
+            "no max_cover_forwards or max_connections configured — cover-forward path \
+             is unbounded; under a probe storm this can exhaust FDs even with iter-18 \
+             EMFILE-survival in place. Set max_cover_forwards in server.yaml."
+        );
+    }
     // Build a ReloadableFirewall up front (even when no rules are
     // configured) so SIGHUP can later install rules without a
     // restart. We hold a handle for the SIGHUP task below.

@@ -270,6 +270,20 @@ pub struct ServerMetrics {
     pub handshake_budget_rejected: AtomicU64,
     pub user_rate_rejected: AtomicU64,
     pub cover_forwards: AtomicU64,
+    /// Cover-forward requests REJECTED because the
+    /// `cover_forward_limit` semaphore was saturated (iter-20).
+    /// A rising counter here means the server is at its concurrent-
+    /// cover-task ceiling and is dropping further would-be-spliced
+    /// connections instead of accepting them. Operators should
+    /// alert on `rate(proteus_cover_forwards_rejected_total[5m]) > 0`
+    /// because sustained rejections mean either (a) the cap is set
+    /// too low for the probe-load profile, or (b) the cover endpoint
+    /// is slow/unhealthy (cover tasks not exiting → semaphore stays
+    /// drained). Pre-iter-20 this counter didn't exist because there
+    /// was no cap — the symptom instead manifested as EMFILE on
+    /// `accept()` (now bounded by iter-18 backoff, but the upstream
+    /// fix is iter-20's cap).
+    pub cover_forwards_rejected: AtomicU64,
     /// Probe-anomaly detector alerts (sliding-window, fire-once-per-
     /// burst semantics). Bumped when any source-IP /24 (v4) /
     /// /48 (v6) prefix crosses the configured cover-forward
@@ -460,6 +474,7 @@ impl Default for ServerMetrics {
             handshake_budget_rejected: AtomicU64::new(0),
             user_rate_rejected: AtomicU64::new(0),
             cover_forwards: AtomicU64::new(0),
+            cover_forwards_rejected: AtomicU64::new(0),
             probe_anomalies_fired: AtomicU64::new(0),
             total_tx_bytes: AtomicU64::new(0),
             total_rx_bytes: AtomicU64::new(0),
@@ -562,6 +577,9 @@ impl ServerMetrics {
              # HELP proteus_cover_forwards_total Connections forwarded to the cover endpoint.\n\
              # TYPE proteus_cover_forwards_total counter\n\
              proteus_cover_forwards_total {}\n\
+             # HELP proteus_cover_forwards_rejected_total Cover-forward requests rejected because cover_forward_limit semaphore was saturated (iter-20).\n\
+             # TYPE proteus_cover_forwards_rejected_total counter\n\
+             proteus_cover_forwards_rejected_total {}\n\
              # HELP proteus_probe_anomalies_fired_total Per-/24 cover-forward anomaly alerts (sliding window, fire-once-per-burst).\n\
              # TYPE proteus_probe_anomalies_fired_total counter\n\
              proteus_probe_anomalies_fired_total {}\n\
@@ -665,6 +683,7 @@ impl ServerMetrics {
             s(&self.handshake_budget_rejected),
             s(&self.user_rate_rejected),
             s(&self.cover_forwards),
+            s(&self.cover_forwards_rejected),
             s(&self.probe_anomalies_fired),
             s(&self.total_tx_bytes),
             s(&self.total_rx_bytes),

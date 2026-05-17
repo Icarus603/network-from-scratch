@@ -562,6 +562,29 @@ pub struct ServerConfig {
     /// `nofile` ulimit (one connection ≈ one FD).
     #[serde(default)]
     pub max_connections: Option<usize>,
+    /// Hard cap on the number of *concurrent cover-forward tasks*
+    /// (iter-20). Bounds the FD pressure from a probe storm — see
+    /// `proteus_transport_alpha::server::ServerCtx::cover_forward_limit`
+    /// for the threat model.
+    ///
+    /// Production-recommended value: `max_connections * 4`. Most
+    /// cover-forwards exit in <2s when the cover endpoint is
+    /// healthy (real HTTPS reverse proxies serve a 200/404
+    /// quickly), so a 4× headroom over the in-flight session
+    /// count comfortably absorbs normal bursts.
+    ///
+    /// `Some(0)` disables the cover-forward path entirely
+    /// (everything routed-to-cover is dropped). Use this only on
+    /// high-IP-reputation single-user deploys where any
+    /// unauthenticated connection is suspicious.
+    ///
+    /// `None` (default): no cap — preserves the legacy unbounded
+    /// behavior for back-compat. Operators of exposed VPSes
+    /// SHOULD set this; deploy/server.example.yaml has a
+    /// commented example with the `max_connections * 4` rule of
+    /// thumb.
+    #[serde(default)]
+    pub max_cover_forwards: Option<usize>,
 }
 
 #[derive(Debug, Deserialize, Default)]
