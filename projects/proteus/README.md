@@ -1467,7 +1467,24 @@ proteus_tx_bytes_total
 proteus_rx_bytes_total
 proteus_aead_drops_total
 proteus_ratchets_total
+proteus_panics_total
 ```
+
+`proteus_panics_total` is incremented by the shared
+[`proteus-panic-hook`](crates/proteus-panic-hook/) installed in
+both `proteus-server::main` and `proteus-client::main` BEFORE any
+task is spawned. Closes the silent-panic class: tokio absorbs
+spawned-task panics by default — the task dies, the runtime keeps
+going, the operator sees nothing in `journalctl`. The hook
+captures every panic, increments the counter, emits a structured
+`tracing::error!(target = "proteus_panic", panic_count, thread,
+location, message)` line, then chains to the default handler so
+`RUST_BACKTRACE=1` still produces a full backtrace. Operators
+alert on `rate(proteus_panics_total[5m]) > 0`. Set
+`RUST_PANIC_ABORT=1` to prefer systemd `Restart=on-failure`
+semantics over keep-running-with-one-session-down (default keeps
+running so a single hot-path panic doesn't tear down every other
+in-flight user).
 
 Tracing logs (`RUST_LOG=proteus_transport_alpha=debug`) carry a
 `peer=<SocketAddr>` field on every per-connection event for ops triage.

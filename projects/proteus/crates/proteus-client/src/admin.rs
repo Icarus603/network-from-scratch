@@ -1256,11 +1256,13 @@ pub fn route(
     } else if matches_path(request_head, "/status.json") {
         ("HTTP/1.1 200 OK\r\n", "application/json", snap.to_json())
     } else if matches_path(request_head, "/metrics") {
-        (
-            "HTTP/1.1 200 OK\r\n",
-            "text/plain; version=0.0.4",
-            snap.to_prometheus(),
-        )
+        // Append the process-wide panic counter so the client's
+        // /metrics is symmetric with the server's. Closure-style
+        // gating (cheap atomic load + format!) — no allocation
+        // when zero panics, single allocation when ≥ 1.
+        let mut body = snap.to_prometheus();
+        body.push_str(&crate::process_panic_counter::prometheus());
+        ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/diagnose") {
         (
             "HTTP/1.1 200 OK\r\n",

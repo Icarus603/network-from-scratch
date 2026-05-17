@@ -129,6 +129,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // Install the shared panic hook BEFORE any tasks spawn — tokio
+    // absorbs spawned-task panics silently otherwise. The returned
+    // counter is published via `process_panic_counter::set` so any
+    // admin endpoint (today proteus-client doesn't surface metrics
+    // directly the way the server does, but the wiring is in place
+    // for the same `proteus_panics_total` series symmetric with the
+    // server side). Honours RUST_PANIC_ABORT=1 for operators who
+    // prefer systemd-restart-on-panic over keep-running semantics.
+    let panic_counter = proteus_panic_hook::install();
+    proteus_client::process_panic_counter::set(panic_counter);
+
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen { out } => keygen::run(&out)?,

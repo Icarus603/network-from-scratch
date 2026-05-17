@@ -295,6 +295,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
 
+    // Install the shared panic hook BEFORE any tasks spawn — tokio
+    // absorbs spawned-task panics silently otherwise. The returned
+    // counter is published via `process_panic_counter::set` so the
+    // metrics endpoint can read it without threading the Arc through
+    // every constructor. Honours RUST_PANIC_ABORT=1 when operators
+    // prefer systemd-restart-on-panic semantics over keep-running-
+    // with-one-session-down (default).
+    let panic_counter = proteus_panic_hook::install();
+    proteus_server::process_panic_counter::set(panic_counter);
+
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen { out } => keygen::run(&out)?,
@@ -1247,8 +1257,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let user_quarantine_for_metrics = user_quarantine_list.as_ref().map(Arc::clone);
         let user_quotas_for_metrics = user_quotas_list.as_ref().map(Arc::clone);
         let tls_cert_watcher_for_metrics = tls_cert_watcher.as_ref().map(Arc::clone);
+        // Live-evaluated Prometheus blocks. The panic counter is the
+        // canonical case: it's process-global, updates whenever a
+        // panic fires, and absolutely MUST be readable on /metrics
+        // (alerts wire `rate(proteus_panics_total[5m]) > 0`). We
+        // pass it as a closure rebuilt per scrape so the gauge
+        // reflects the panic count AT scrape time, not at startup.
+        let live_blocks: Vec<
+            std::sync::Arc<proteus_transport_alpha::metrics_http::LiveMetricsBlock>,
+        > = vec![std::sync::Arc::new(|| {
+            proteus_server::process_panic_counter::prometheus()
+        })];
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v11(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v12(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -1263,6 +1284,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 user_quarantine_for_metrics,
                 user_quotas_for_metrics,
                 tls_cert_watcher_for_metrics,
+                live_blocks,
             )
             .await
             {

@@ -1045,6 +1045,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "proteus-crypto",
+ "proteus-panic-hook",
  "proteus-spec",
  "proteus-transport-alpha",
  "proteus-transport-beta",
@@ -1108,6 +1109,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "proteus-panic-hook"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "proteus-server"
 version = "0.1.0"
 dependencies = [
@@ -1119,6 +1127,7 @@ dependencies = [
  "proteus-crypto",
  "proteus-fingerprint",
  "proteus-handshake",
+ "proteus-panic-hook",
  "proteus-spec",
  "proteus-transport-alpha",
  "proteus-transport-beta",

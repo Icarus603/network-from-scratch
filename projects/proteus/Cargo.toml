@@ -9,6 +9,7 @@ members = [
     "crates/proteus-transport-alpha",
     "crates/proteus-transport-beta",
     "crates/proteus-fingerprint",
+    "crates/proteus-panic-hook",
     "crates/proteus-server",
     "crates/proteus-client",
     "crates/proteus-bench",

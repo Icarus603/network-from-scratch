@@ -19,6 +19,7 @@ proteus-handshake = { path = "../proteus-handshake" }
 proteus-transport-alpha = { path = "../proteus-transport-alpha" }
 proteus-transport-beta = { path = "../proteus-transport-beta" }
 proteus-fingerprint = { path = "../proteus-fingerprint" }
+proteus-panic-hook = { path = "../proteus-panic-hook" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 
 ml-kem.workspace = true

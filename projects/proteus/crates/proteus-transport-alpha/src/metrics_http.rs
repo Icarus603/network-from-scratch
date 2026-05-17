@@ -422,6 +422,13 @@ pub async fn serve_with_auth_full_v10(
     .await
 }
 
+/// Type alias for a closure that renders a Prometheus exposition
+/// block on demand. Lets callers inject a *live-evaluated* block
+/// (e.g. a panic counter that mutates over the process lifetime)
+/// without re-plumbing every constructor. Stored as `Arc<dyn ...>`
+/// so multiple scrape handlers can share a single closure cheaply.
+pub type LiveMetricsBlock = dyn Fn() -> String + Send + Sync + 'static;
+
 /// v11 of [`serve_with_auth_full`] — adds an optional
 /// `CertFileWatcher`. When supplied, the `/metrics` body
 /// includes the four `proteus_tls_cert_watcher_*` counters.
@@ -430,6 +437,9 @@ pub async fn serve_with_auth_full_v10(
 /// to spot a non-Let's-Encrypt deploy that produced a broken
 /// cert (the binary keeps serving the OLD cert; the counter
 /// surfaces the silent failure).
+///
+/// Back-compat shim — forwards to [`serve_with_auth_full_v12`]
+/// with `live_blocks = vec![]`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v11(
     addr: &str,
@@ -447,6 +457,58 @@ pub async fn serve_with_auth_full_v11(
     user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
     tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v12(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        user_quota,
+        tls_cert_watcher,
+        Vec::new(),
+    )
+    .await
+}
+
+/// v12 of [`serve_with_auth_full`] — adds an `Vec<Arc<LiveMetricsBlock>>`
+/// of caller-supplied closures whose render output is appended to
+/// every `/metrics` scrape AND to the `/diagnose` body. Designed for
+/// the panic-counter case where the gauge value can change between
+/// scrapes — `config_presence` is one-shot-at-startup so it can't
+/// host a live counter without losing scrape-time freshness.
+///
+/// Closures are invoked once per request, in the order supplied; each
+/// must return a self-contained Prometheus block (HELP + TYPE + line)
+/// so the order between blocks doesn't matter to dashboards. Failure
+/// surface is bounded — closures are run in the same task as the
+/// request handler, so a panic inside a closure WOULD be caught by
+/// the same panic hook that's likely supplying the counter; expensive
+/// closures slow the scrape. Keep them cheap (atomic load + format!()).
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v12(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+    tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
+    live_blocks: Vec<Arc<LiveMetricsBlock>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -460,6 +522,7 @@ pub async fn serve_with_auth_full_v11(
     let user_quarantine_enabled = user_quarantine.is_some();
     let user_quota_enabled = user_quota.is_some();
     let tls_cert_watcher_enabled = tls_cert_watcher.is_some();
+    let live_blocks_count = live_blocks.len();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -474,6 +537,7 @@ pub async fn serve_with_auth_full_v11(
         user_quarantine = user_quarantine_enabled,
         user_quota = user_quota_enabled,
         tls_cert_watcher = tls_cert_watcher_enabled,
+        live_blocks = live_blocks_count,
         "metrics endpoint bound",
     );
     loop {
@@ -491,7 +555,8 @@ pub async fn serve_with_auth_full_v11(
         let user_quarantine = user_quarantine.clone();
         let user_quota = user_quota.clone();
         let tls_cert_watcher = tls_cert_watcher.clone();
-        tokio::spawn(handle_connection_v11(
+        let live_blocks = live_blocks.clone();
+        tokio::spawn(handle_connection_v12(
             stream,
             metrics,
             auth,
@@ -506,6 +571,7 @@ pub async fn serve_with_auth_full_v11(
             user_quarantine,
             user_quota,
             tls_cert_watcher,
+            live_blocks,
         ));
     }
 }
@@ -828,7 +894,7 @@ async fn handle_connection_v10(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_v11(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -843,12 +909,71 @@ async fn handle_connection_v11(
     user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
     tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
 ) {
+    handle_connection_v12(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        user_quarantine,
+        user_quota,
+        tls_cert_watcher,
+        Vec::new(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v12(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    user_quota: Option<Arc<crate::user_quota::PerUserQuotaTracker>>,
+    tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
+    live_blocks: Vec<Arc<LiveMetricsBlock>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
+    // Render the live blocks once per request and concatenate
+    // them into a single string for handoff to the existing
+    // render_full_v11. Since the live blocks need to appear
+    // BOTH in /metrics and /diagnose, we pass them through the
+    // config_presence concat point — but only when actually
+    // serving those paths. We can't always append because that
+    // would corrupt /healthz / /readyz / /diagnose-summary
+    // responses. The cheap path: concatenate live blocks to
+    // config_presence ONCE for this request.
+    let merged_presence: Option<Arc<String>> = if live_blocks.is_empty() {
+        config_presence.clone()
+    } else {
+        let mut buf = String::with_capacity(2048);
+        if let Some(cp) = config_presence.as_deref() {
+            buf.push_str(cp);
+        }
+        for block in &live_blocks {
+            buf.push_str(&block());
+        }
+        Some(Arc::new(buf))
+    };
     let (status_line, content_type, body) = render_full_v11(
         head,
         &metrics,
@@ -856,7 +981,7 @@ async fn handle_connection_v11(
         probe_anomaly.as_deref(),
         auto_deny.as_deref(),
         tls_acceptor.as_ref(),
-        config_presence.as_deref().map(String::as_str),
+        merged_presence.as_deref().map(String::as_str),
         process_info.as_deref(),
         per_user.as_deref(),
         per_user_conn_limiter.as_deref(),
