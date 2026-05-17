@@ -81,6 +81,14 @@ pub struct RelayConfig {
     /// user_id with the configured TTL. Subsequent handshakes from
     /// that user_id are rejected at the post-handshake admission
     /// gate.
+    ///
+    /// When wired, the relay ALSO registers this session's
+    /// cancellation notify with the list at session start — so
+    /// if the user_id is quarantined while this session is
+    /// in-flight, the session's main `tokio::select!` immediately
+    /// fires the cancel branch and tears down. Closes the gap
+    /// where a mid-burst exfiltrator's session kept running until
+    /// idle timeout.
     pub user_quarantine: Option<Arc<proteus_transport_alpha::user_quarantine::UserQuarantineList>>,
     /// Whether `byte_budget` fires should trigger an auto-
     /// quarantine insert. Operator-set; matches the bool
@@ -145,7 +153,20 @@ where
     let quarantine_on_byte_budget = cfg.quarantine_on_byte_budget;
     let started = Instant::now();
 
-    let outcome = handle_session_inner(session, cfg).await;
+    // Register this session with the auto-quarantine list (when
+    // both wired AND the session has an authenticated user_id) so
+    // a fresh quarantine insert can `notify_waiters()` and tear
+    // the session down mid-burst. The notify Arc lives here in
+    // the outer scope, so it stays alive for the entire session
+    // and drops only when handle_session returns. The list holds
+    // a Weak<Notify> internally, so this drop drives the list's
+    // vacuum.
+    let session_cancel = match (user_quarantine.as_ref(), user_id) {
+        (Some(qlist), Some(uid)) => Some(qlist.register_session(uid)),
+        _ => None,
+    };
+
+    let outcome = handle_session_inner(session, cfg, session_cancel.clone()).await;
 
     let close_reason: Option<&'static str> = match &outcome {
         Ok(reason) => Some(*reason),
@@ -227,6 +248,7 @@ where
 async fn handle_session_inner<R, W>(
     session: AlphaSession<R, W>,
     cfg: RelayConfig,
+    session_cancel: Option<Arc<tokio::sync::Notify>>,
 ) -> Result<&'static str, Box<dyn std::error::Error + Send + Sync>>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -513,6 +535,20 @@ where
     // unblocking the underlying read futures. Both halves are
     // already structured to set a clean close reason before exiting,
     // so `reason_cell` still reports correctly.
+    // Auto-quarantine cancel future. When no quarantine list is
+    // wired (or the session has no user_id), we still need a
+    // future to satisfy the select! branch — use a never-resolving
+    // pending() so the branch is effectively disabled. When the
+    // notify IS wired, this branch fires the moment
+    // `qlist.tear_down_user(uid)` is called for this user_id
+    // (typically on a fresh quarantine insert for that user).
+    let cancel_fut = async {
+        match session_cancel.as_ref() {
+            Some(n) => n.notified().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(cancel_fut);
     tokio::select! {
         _ = client_to_upstream => {
             // Client closed (or upstream write failed). Upstream side
@@ -523,6 +559,17 @@ where
             // record was already emitted by upstream_to_client; the
             // client→upstream future is dropped here, cancelling its
             // `recv_record()` cleanly.
+        }
+        _ = &mut cancel_fut => {
+            // Auto-quarantine fired for this session's user_id.
+            // Set a distinct close_reason so the access log + the
+            // outer handle_session see "session was killed by
+            // quarantine" — operators reading access logs can
+            // grep `quarantine_tear_down` to find every mid-burst
+            // exfil that was interrupted.
+            if let Ok(mut g) = reason_cell.lock() {
+                *g = Some("quarantine_tear_down");
+            }
         }
     }
     debug!("session closed");

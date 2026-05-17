@@ -541,6 +541,22 @@ banned).
 a botnet of residential IPs defeats per-IP enforcement. Per-
 credential enforcement attacks what's actually leaked.
 
+**Mid-burst tear-down**: when an abuse fire quarantines a user_id,
+ALL in-flight sessions for that user_id are torn down immediately
+(via `tokio::sync::Notify` woken by `notify_waiters()`). Without
+this, the attacker mid-burst would get to finish their current
+upload before the quarantine took effect (the per-session pumps
+were parked on reads inside the relay's `tokio::select!`, blocked
+on `recv_record()` until idle timeout, byte budget, or peer
+close). The relay's `select!` now has a third branch listening
+on a per-session `Arc<Notify>` registered at session start; the
+quarantine list holds a `Vec<Weak<Notify>>` per user_id so a
+single insert wakes every active session for that user at once.
+`proteus_user_quarantine_sessions_torn_down_total` is the
+operator-facing counter for this — alert on it to catch every
+mid-burst exfil that was interrupted, not just every new
+handshake that was blocked.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit
