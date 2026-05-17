@@ -96,11 +96,11 @@ Tiangou 的 SSL/TLS 攔截 + ML 行為分析 ≠ 古典 DPI 簽名匹配。我�
 **Proteus 當前覆蓋**：
 - ✅ 設計上就是 client → VPS 直連，無境內中轉依賴
 - ✅ `proteus-client validate` 已能預檢配置
-- ❌ 沒有 **deployment topology 建議文檔** —— operator 不知道「不要用中轉」是死命令
+- ✅ **NEW 2026-05-18**：`deploy/README.md` 「Deployment topology」section 完整警告 + Mermaid 三圖（direct-dial 推薦、relay 死亡、商用 farm 高風險）+ security checklist 三項 operator-action item
 - ❌ 沒有 multi-VPS 自動故障轉移（spec §10.4 multipath QUIC 還沒做）
 
 **TODO**：
-1. **`deploy/README.md` 增加「Topology Recommendations」一節**：明確警告中轉架構在 2026-04 後已死，推薦直連 + multi-region active-active。
+1. ~~**`deploy/README.md` 增加「Topology Recommendations」一節**~~ ✅ **DONE 2026-05-18** —— see new "Deployment topology" section with TL;DR + 3 Mermaid diagrams + IP-preflight workflow + security-checklist items.
 2. **Multi-VPS HA 客戶端模式**（M3）：`server_endpoints: [a, b, c]`，當前 endpoint 連續 3 次握手失敗 → 自動 fail over，無需操作員介入。
 3. **健康探測**：客戶端每 N 分鐘對備用 VPS 做隱蔽性 keepalive（藏在 cover-traffic 裡），第一手感知 endpoint 不可用。
 
@@ -289,9 +289,9 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 2. ~~**`proteus-server preflight --check-ip-reputation`**（主線 1 + 4）~~ ✅ **DONE 2026-05-17** —— `ip_reputation.rs` + `preflight.rs` + CLI subcommand + 35 個測試
 3. ~~**`bootstrap_dns: direct_ip`**（主線 6）~~ ✅ **DONE 2026-05-17** —— bootstrap.rs + validate WARN + client.example.yaml 全部就位
 4. ~~**β prefix-noise 調整前 6 字節為可印**（主線 7）~~ ✅ **DONE 2026-05-17 (commit a187ea4)**
-5. **`deploy/README.md` topology 警告**（主線 2）—— operator 教育 + 反中轉模型（使用者本次澄清：是個人乾淨 VPS 直連節點，*非*中轉，所以這一條對使用者場景已天然滿足。但 README 仍應寫清楚，避免後續 operator 走錯架構。）
+5. ~~**`deploy/README.md` topology 警告**（主線 2）~~ ✅ **DONE 2026-05-18** —— `deploy/README.md` 新增「Deployment topology — direct-dial vs. relay (2026 GFW reality check)」section：完整 TL;DR、Mermaid 圖、2026-04 物理拔線時間軸引用、direct-dial vs 中轉 vs 商用 farm 三種架構對比、預檢工作流（含 `proteus-server preflight check-ip-reputation` + operator watchlist）。Security checklist 也新增三項對應 P0：topology direct-dial / preflight pass / bootstrap_dns pinned。
 
-**P0 status**：5 個中已完成 3 個。剩餘 2 個：ECH（多週工程，需要 fork rustls）+ `deploy/README.md` 反中轉警告（純文檔，可下次 iteration 完成）。
+**P0 status**：5 個中已完成 4 個。剩餘 1 個：**ECH（多週工程，需要 fork rustls 0.23 的 ClientHello assembler + 配套 HTTPS RR ECH key 輪轉 workflow）**。下個迭代開始 chip away — 可從 rustls ECH client-side prototype 開始試驗。
 
 **P1（M3 前需完成）**：
 

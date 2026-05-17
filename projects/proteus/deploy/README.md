@@ -481,6 +481,197 @@ Reload semantics:
   followed by SIGHUP clears the rules — the next accept admits
   everything subject only to rate-limit / max-connections.
 
+## Deployment topology — direct-dial vs. relay (2026 GFW reality check)
+
+The single biggest deployment decision that affects Proteus's
+survival under 2026 GFW pressure is **not** any in-protocol knob.
+It's the **physical topology** of where your server lives and how
+the client reaches it.
+
+### TL;DR
+
+- ✅ **Direct-dial from client to a single offshore VPS you control.**
+  This is the only topology that survived the 2026-04 mass-takedown
+  wave intact. Use it.
+- ❌ **Domestic-relay / "中转机场" topology** (client → IDC inside
+  the censoring country → exit IP offshore). Wiped at the IDC layer
+  during the 2026-04 takedown — physical disconnection, not protocol
+  detection. Even a perfect protocol won't save you if your relay
+  server's network cable is pulled out of the rack. **Do not deploy
+  Proteus in this topology.**
+- ⚠ **Shared-IP commercial proxy farm** (one VPS, many users from
+  many subscriptions). Subject to the Geedge / Tiangou cross-deployment
+  shared-blocklist attack (`qa/2026-05-17-gfw-2026-q1q2-threat-intel.md`
+  main line 1). Acceptable for short-lived testing; not acceptable
+  for a node you want to keep running.
+
+### Why this matters more than the protocol
+
+The 2026 GFW threat surface has moved beyond "can the adversary
+identify the protocol's wire signature?" Two of the seven active
+2026 attack lines hit the *deployment*, not the protocol:
+
+| Attack line | What it targets | Defense at the protocol layer? |
+|---|---|---|
+| **Tiangou shared IP blocklist** (main line 1) | The IP address itself, regardless of what protocol it runs | None. Your job is to pick an unburned IP. |
+| **2026-04 IDC physical disconnection** (main line 2) | The hosting provider's coercion exposure, not the wire signal | None. Your job is to not depend on an IDC inside the censoring country's jurisdiction. |
+
+Full analysis lives in the threat-intel doc; the operational
+takeaway is below.
+
+### Recommended topology (direct-dial)
+
+```mermaid
+flowchart LR
+    Client["Client device<br/>(laptop, phone)"]
+    VPS["Offshore VPS<br/>(your own, single-tenant)"]
+    Upstream["Upstream target<br/>(Google, GitHub, ...)"]
+
+    Client == "β QUIC / α TLS<br/>(Proteus inner handshake)" ==> VPS
+    VPS -- "plain TCP" --> Upstream
+
+    classDef ours fill:#fde,stroke:#c39,stroke-width:2px
+    class Client,VPS ours
+```
+
+Properties:
+
+- **Single-hop, no intermediary.** Client opens a TCP/UDP socket
+  directly to the VPS's offshore IP. No domestic forwarder, no
+  jurisdiction layering.
+- **You alone control the server.** Not a shared subscription with
+  unknown other users — your IP is yours to keep clean. Shared IPs
+  inherit other users' policy violations and end up on shared
+  blocklists.
+- **Personal-scale workload.** A handful of users you know, not
+  hundreds of paying strangers. Reduces both the IP-reputation
+  decay rate and the legal blast radius if your provider asks
+  questions.
+- **Operator picks the IP.** Run `proteus-server preflight
+  check-ip-reputation --public-ip <ip>` before deploying (see
+  `## Pre-deploy IP reputation check` further down) — catches the
+  "I rented a Vultr droplet last month, didn't realize it was
+  previously hosting a SS service" failure mode.
+- **Bootstrap-DNS pinned.** Client config pins the VPS IP literal
+  (`server_endpoint: "<vps-ip>:8443"`) OR pairs the hostname with
+  `bootstrap_dns: { direct_ip: <vps-ip> }`. Either way, the client
+  never issues an A/AAAA lookup for the VPS hostname — defeats the
+  2026 GFW DoH/DoT identification attack at the bootstrap layer.
+
+### Anti-pattern: domestic relay (do not deploy)
+
+```mermaid
+flowchart LR
+    Client["Client device"]
+    DomesticRelay["Domestic IDC relay<br/>(WIPED 2026-04)"]
+    Exit["Offshore exit VPS"]
+    Upstream["Upstream target"]
+
+    Client --> DomesticRelay
+    DomesticRelay --> Exit
+    Exit --> Upstream
+
+    classDef dead fill:#fcc,stroke:#900,stroke-width:2px,stroke-dasharray: 5 5
+    class DomesticRelay dead
+```
+
+Why this died:
+
+- **2026-04-01 onward**: executive coordination between authorities
+  and major IDCs in Guangdong, Shanghai, Beijing led to **physical**
+  network cable removal + power-down of identified relay servers
+  ([RelyVPN April 2026 crackdown
+  report](https://relyvpn.com/blog/china-vpn-crackdown-2026.html)).
+  Not selective; entire racks went dark within hours.
+- **The relay's wire protocol is irrelevant.** SS, V2Ray (VMess),
+  Trojan, VLESS, and even VLESS+Reality nodes hosted on the wiped
+  IDCs all died the same way. No amount of in-protocol obfuscation
+  helps when the cable is unplugged.
+- **The economic upstream had its own attack**: provincial authorities
+  ordered ISPs to terminate the cross-border dedicated leased lines
+  (跨境专线 / IEPL) that fed many relay services. Even relays that
+  physically survived found their upstream capacity vanish.
+- **It hits "中转机场" services hardest** because their cost model
+  requires a domestic IDC for latency reasons. Pure-offshore services
+  (which is what direct-dial is) were untouched by the IDC wave.
+
+If you read this and your config looks like the second diagram, the
+right action is **redeploy on a single offshore VPS** before adding
+any more features. The protocol on top doesn't matter if the topology
+is wrong.
+
+### Anti-pattern: commercial proxy farm (avoid for long-lived nodes)
+
+If you set up Proteus to resell access — say, a small subscription
+shop with shared exit IPs — every user's misuse becomes your
+problem. The Tiangou shared-blocklist model means one user
+hammering a sensitive service from your shared IP poisons the IP
+for every other user concurrently and for an unknown future
+window. The 9 commercial VPN brands flagged "resolved" in the
+Geedge leak tickets all share this exposure shape.
+
+The user scenario this project targets — **a single person with
+one clean offshore VPS, running Proteus for themselves and a small
+trusted circle** — explicitly avoids this failure mode. If your
+plan deviates from that, factor in the IP-rotation overhead
+explicitly and budget for `proteus-server preflight
+check-ip-reputation --watchlist` to drive automated IP refresh.
+
+### Pre-deploy IP reputation check
+
+Before binding the listener:
+
+```bash
+# Discover your VPS's actual outbound IP (cloud providers expose this
+# in the console, or use a one-off lookup):
+MY_VPS_IP="$(curl -s https://api.ipify.org)"
+
+# Classify it against the offline reputation table (special-use IPs,
+# known commercial-cloud CIDRs, optional operator watchlist):
+proteus-server preflight check-ip-reputation \
+    --public-ip "$MY_VPS_IP" \
+    --config /etc/proteus/server.yaml
+```
+
+Exit codes:
+
+- `0` — PASS or WARN (proceed if WARN is acceptable, e.g. "yes I know
+  this is a Vultr IP, I just rented it fresh and accept the rotation
+  budget"). The WARN line names the provider so you can decide.
+- `1` — FAIL. Either the IP is special-use (config error: the listener
+  is bound to `127.0.0.1` / RFC 1918 / CGNAT etc.) or it matches an
+  operator-supplied `--watchlist` rule for an IP you previously
+  burned. Fix before proceeding.
+
+Run this in your provisioning pipeline (Ansible / Terraform / hand-
+rolled deploy script) **before** `systemctl start proteus-server`.
+Documented in detail at
+`crates/proteus-server/src/ip_reputation.rs` — the table is
+intentionally non-exhaustive, so a CLEAN result is "no obvious
+red flag", not "verified safe by us".
+
+### Operator-supplied watchlist (your own burned-IP record)
+
+```bash
+# /etc/proteus/burned-ips.txt — track IPs that have failed in the past
+# so a future operator (or future-you) doesn't accidentally re-rent one.
+cat > /etc/proteus/burned-ips.txt <<'EOF'
+# Format: CIDR  human-readable reason
+198.51.100.42/32   2026-03-15: blocked within 2 days of deploy, suspect carry-over
+203.0.113.0/24     2026-02-04: entire /24 from provider X went dark mid-quarter
+EOF
+
+proteus-server preflight check-ip-reputation \
+    --public-ip "$MY_VPS_IP" \
+    --watchlist /etc/proteus/burned-ips.txt
+```
+
+Treat this file as part of your deployment state — version-control
+it alongside your `server.yaml`. Each entry encodes one fact you've
+paid for; losing the record means re-paying.
+
+---
+
 ## Security checklist before going live
 
 - [ ] `proteus-server keygen` ran on the **server itself** (never copy
@@ -497,6 +688,18 @@ Reload semantics:
 - [ ] NTP is running. Spec §8.2 rejects timestamps skewed > 90 s.
 - [ ] Logs at `/var/log/proteus/*` are rotated (use `logrotate` or
       `journald` retention policy).
+- [ ] **Topology is direct-dial offshore VPS** (see `## Deployment
+      topology` above). NOT a domestic relay (wiped 2026-04), NOT a
+      shared-IP commercial proxy farm (Tiangou shared-blocklist
+      exposure). Required for the design's threat model to hold.
+- [ ] **`proteus-server preflight check-ip-reputation` ran clean OR
+      WARN** for the VPS's actual outbound IP. A WARN with an
+      acknowledged provider name is acceptable for a freshly-rented
+      VPS; a FAIL is not.
+- [ ] **Client-side bootstrap DNS is pinned**: either `server_endpoint`
+      contains a literal IP, OR `bootstrap_dns: { direct_ip: <vps-ip> }`
+      is set in `client.yaml`. `proteus-client validate ~/.proteus.yaml`
+      should print PASS for the bootstrap row, not WARN.
 
 ## Threat surface (what this build actually defends)
 
