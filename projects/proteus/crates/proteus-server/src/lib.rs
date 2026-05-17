@@ -7,6 +7,7 @@
 
 pub mod admin;
 pub mod config;
+pub mod host_preflight;
 pub mod ip_reputation;
 pub mod preflight;
 pub mod relay;

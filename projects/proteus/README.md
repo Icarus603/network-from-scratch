@@ -180,6 +180,19 @@ proteus-server preflight check-ip-reputation \
 # the exit code and proceeding. Operators with a known-burned-IP list
 # can feed it as --watchlist /etc/proteus/burned-ips.txt.
 
+# 7b. Host-posture preflight: audits key file modes, ulimits, kernel
+#     sysctls that govern β QUIC throughput, /dev/urandom availability,
+#     NTP sync, and disk free. Catches the silent-degradation classes
+#     that bite operators AFTER a green `validate`: world-readable PQ
+#     keys (mode 0644 silent compromise), distro-default ulimit 1024
+#     (accept loop EMFILEs at ~2k sessions), Ubuntu 22.04's 212992-byte
+#     SO_RCVBUF clamp that silently caps β QUIC's BBR window, broken
+#     NTP causing every handshake to look like a replay.
+proteus-server preflight check-host --config /etc/proteus/server.yaml
+# Exit 0 on PASS+WARN-only, 1 on any FAIL. Read-only — no chmod, no
+# sysctl writes, no external probes. Suitable for Ansible/Terraform
+# deploy gates.
+
 # 8. systemd unit
 sudo install -m 0644 deploy/systemd/proteus-server.service /etc/systemd/system/
 sudo systemctl daemon-reload

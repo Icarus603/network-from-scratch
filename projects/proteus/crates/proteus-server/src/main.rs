@@ -141,6 +141,30 @@ enum PreflightCmd {
         #[arg(long)]
         watchlist: Option<PathBuf>,
     },
+    /// Audit the deployment **host's runtime posture** — key file
+    /// modes, ulimits, sysctl values that govern β QUIC throughput,
+    /// /dev/urandom availability, NTP sync, disk free. Every check
+    /// is read-only (no writes, no chmod, no probes).
+    ///
+    /// Catches the silent-degradation classes that bite operators
+    /// AFTER a green `validate` run: world-readable PQ keys,
+    /// distro-default ulimit 1024 (accept loop EMFILEs at a few
+    /// thousand sessions), Ubuntu's 212992-byte SO_RCVBUF cap that
+    /// silently clamps β QUIC's BBR window, broken NTP causing
+    /// every handshake to look like a replay, etc.
+    ///
+    /// Exit code 0 on PASS+WARN-only; 1 on any FAIL. Wire into
+    /// CI / Ansible / Terraform deploy gates the same way as
+    /// `check-ip-reputation` and `fingerprint`.
+    CheckHost {
+        /// Path to YAML config — the audit reads it to locate key
+        /// files for permission checks (relative paths resolve
+        /// against the config's directory). Optional: when absent,
+        /// only host-level checks (ulimit, sysctls, urandom, NTP,
+        /// disk free) run; the key-file mode check is skipped.
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -249,6 +273,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     watchlist_path: watchlist,
                 };
                 let code = proteus_server::preflight::cli_run(input)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            PreflightCmd::CheckHost { config } => {
+                let input = proteus_server::host_preflight::HostPreflightInput {
+                    config_path: config,
+                    ..Default::default()
+                };
+                let code = proteus_server::host_preflight::cli_run(input)?;
                 if code != 0 {
                     std::process::exit(code);
                 }
