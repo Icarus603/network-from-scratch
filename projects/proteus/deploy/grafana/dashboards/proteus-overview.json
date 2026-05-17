@@ -460,6 +460,80 @@
           }
         }
       }
+    },
+    {
+      "id": 53,
+      "type": "timeseries",
+      "title": "Client per-endpoint suppression (pool)",
+      "description": "proteus_client_endpoint_suppressed{addr=...} — one series per pool entry. Steady-state 0 = endpoint healthy. Single-entry transient bump = ProteusClientEndpointSuppressed (WARN); EVERY series at 1 simultaneously = ProteusClientAllEndpointsSuppressed (CRIT). Iter-36 surfaced pool reload; iter-37 closes the per-endpoint dashboard gap. No panel = operator could only see suppression via /status JSON.",
+      "gridPos": {"x": 0, "y": 52, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "proteus_client_endpoint_suppressed",
+          "refId": "supp",
+          "legendFormat": "{{addr}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 54,
+      "type": "timeseries",
+      "title": "Client per-endpoint dial rate (pool)",
+      "description": "rate(proteus_client_endpoint_successes_total{addr=...}[5m]) vs rate(proteus_client_endpoint_failures_total{addr=...}[5m]) — one pair per pool entry. The asymmetry is the operator's demote signal: an endpoint whose failure series stays above its success series for 10+ min is a VPS to investigate (GFW IP-blackhole / IDC routing flap / credential drift). Pre-iter-37 operators had no visual cue and would have to compare /status counters by hand.",
+      "gridPos": {"x": 12, "y": 52, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_client_endpoint_successes_total[5m])",
+          "refId": "ok",
+          "legendFormat": "{{addr}} ok"
+        },
+        {
+          "expr": "rate(proteus_client_endpoint_failures_total[5m])",
+          "refId": "fail",
+          "legendFormat": "{{addr}} fail"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 55,
+      "type": "stat",
+      "title": "Client pool reload backlog (SIGHUP failures)",
+      "description": "proteus_client_pool_reload_attempts_total - proteus_client_pool_reload_succeeded_total — gap > 0 means at least one SIGHUP attempted to swap in a new server_endpoints list but failed (parse error / IO error); the running pool still uses the pre-SIGHUP config and the operator's edit didn't take effect. ProteusClientPoolReloadFailing fires on this. Iter-37 surfaces the running gap so the operator notices BEFORE the next restart silently 'fixes' it.",
+      "gridPos": {"x": 0, "y": 60, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "proteus_client_pool_reload_attempts_total - proteus_client_pool_reload_succeeded_total",
+          "refId": "A"
+        }
+      ],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
     }
   ]
 }

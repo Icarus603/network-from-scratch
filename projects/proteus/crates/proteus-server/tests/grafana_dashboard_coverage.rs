@@ -106,6 +106,11 @@ fn known_metric_names() -> HashSet<&'static str> {
         "proteus_client_last_dial_success_unix_seconds",
         "proteus_client_carrier_suppressed",
         "proteus_client_endpoint_suppressed",
+        // Iter-37: per-endpoint dial outcome panels surface
+        // these on the bundled dashboard so operators see the
+        // demote-this-VPS signal visually.
+        "proteus_client_endpoint_successes_total",
+        "proteus_client_endpoint_failures_total",
         "proteus_client_bootstrap_via_system_resolver_total",
         "proteus_client_pool_reload_attempts_total",
         "proteus_client_pool_reload_succeeded_total",
