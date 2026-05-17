@@ -378,6 +378,254 @@ fn push_json_str_inner(s: &mut String, v: &str) {
     }
 }
 
+impl ClientStatusSnapshot {
+    /// Emit Prometheus 0.0.4 text exposition. Stable metric names
+    /// (`proteus_client_*` prefix) so a single Prometheus instance
+    /// can scrape both server and client without collisions.
+    ///
+    /// Series shape:
+    ///   - `proteus_client_up` (gauge 0/1) — SOCKS5 listener bound
+    ///   - `proteus_client_dials_attempted_total` (counter)
+    ///   - `proteus_client_dials_succeeded_total` (counter)
+    ///   - `proteus_client_dials_failed_total` (counter)
+    ///   - `proteus_client_in_flight_sessions` (gauge; omitted when
+    ///     cap disabled)
+    ///   - `proteus_client_max_inflight_sessions` (gauge; same omission)
+    ///   - `proteus_client_carrier_suppressed` (gauge 0/1; omitted
+    ///     when β unconfigured)
+    ///   - `proteus_client_carrier_failure_streak` (gauge; same)
+    ///   - `proteus_client_carrier_suppression_secs_remaining` (gauge;
+    ///     emitted only while currently suppressed)
+    ///   - `proteus_client_endpoint_attempts_total{addr="..."}`
+    ///   - `proteus_client_endpoint_successes_total{addr="..."}`
+    ///   - `proteus_client_endpoint_failures_total{addr="..."}`
+    ///   - `proteus_client_endpoint_suppressed{addr="..."}` (gauge 0/1)
+    ///   - `proteus_client_endpoint_failure_streak{addr="..."}` (gauge)
+    ///   - `proteus_client_endpoint_suppression_secs_remaining{addr="..."}`
+    ///     (gauge; emitted only while currently suppressed)
+    ///
+    /// Per-endpoint series are labelled with the entry's `addr` so a
+    /// single PromQL `sum by (addr)(rate(proteus_client_endpoint_failures_total[5m]))`
+    /// surfaces "which VPS am I currently demoting" without operator
+    /// intervention.
+    #[must_use]
+    pub fn to_prometheus(&self) -> String {
+        let mut s = String::with_capacity(1024);
+        use std::fmt::Write;
+
+        // up gauge — symmetric with server's `proteus_up`.
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_up SOCKS5 listener bound and accepting."
+        );
+        let _ = writeln!(s, "# TYPE proteus_client_up gauge");
+        let _ = writeln!(s, "proteus_client_up {}", if self.alive { 1 } else { 0 });
+
+        // Global dial counters.
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_dials_attempted_total Lifetime SOCKS5 CONNECTs dispatched (every try)."
+        );
+        let _ = writeln!(s, "# TYPE proteus_client_dials_attempted_total counter");
+        let _ = writeln!(
+            s,
+            "proteus_client_dials_attempted_total {}",
+            self.dials.attempted
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_dials_succeeded_total Subset of dials_attempted_total that returned Ok."
+        );
+        let _ = writeln!(s, "# TYPE proteus_client_dials_succeeded_total counter");
+        let _ = writeln!(
+            s,
+            "proteus_client_dials_succeeded_total {}",
+            self.dials.succeeded
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_dials_failed_total Subset of dials_attempted_total that returned Err."
+        );
+        let _ = writeln!(s, "# TYPE proteus_client_dials_failed_total counter");
+        let _ = writeln!(s, "proteus_client_dials_failed_total {}", self.dials.failed);
+
+        // Concurrency (omit when cap disabled — operator sees the
+        // "no series" as "no cap" rather than a confusing zero).
+        if let Some(c) = self.concurrency {
+            let _ = writeln!(
+                s,
+                "# HELP proteus_client_in_flight_sessions Active SOCKS5 sessions right now."
+            );
+            let _ = writeln!(s, "# TYPE proteus_client_in_flight_sessions gauge");
+            let _ = writeln!(s, "proteus_client_in_flight_sessions {}", c.in_flight);
+            let _ = writeln!(
+                s,
+                "# HELP proteus_client_max_inflight_sessions Configured concurrency cap."
+            );
+            let _ = writeln!(s, "# TYPE proteus_client_max_inflight_sessions gauge");
+            let _ = writeln!(s, "proteus_client_max_inflight_sessions {}", c.max_inflight);
+        }
+
+        // Carrier (β) — omitted entirely when β isn't configured.
+        if let Some(cv) = &self.carrier {
+            let _ = writeln!(
+                s,
+                "# HELP proteus_client_carrier_suppressed β carrier suppression state (1 = suppressed)."
+            );
+            let _ = writeln!(s, "# TYPE proteus_client_carrier_suppressed gauge");
+            let _ = writeln!(
+                s,
+                "proteus_client_carrier_suppressed {}",
+                if cv.suppressed { 1 } else { 0 }
+            );
+            let _ = writeln!(
+                s,
+                "# HELP proteus_client_carrier_failure_streak Consecutive β failures (resets on success)."
+            );
+            let _ = writeln!(s, "# TYPE proteus_client_carrier_failure_streak gauge");
+            let _ = writeln!(
+                s,
+                "proteus_client_carrier_failure_streak {}",
+                cv.failure_streak
+            );
+            if let Some(secs) = cv.suppression_secs_remaining {
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_carrier_suppression_secs_remaining Seconds left in the current β back-off window."
+                );
+                let _ = writeln!(
+                    s,
+                    "# TYPE proteus_client_carrier_suppression_secs_remaining gauge"
+                );
+                let _ = writeln!(
+                    s,
+                    "proteus_client_carrier_suppression_secs_remaining {secs}"
+                );
+            }
+        }
+
+        // Per-endpoint pool series — labelled. Emit HELP/TYPE rows
+        // ONCE before the labelled values (Prometheus 0.0.4 requires
+        // exactly one HELP per metric name; subsequent values on
+        // different label sets share it).
+        if let Some(p) = &self.pool {
+            if !p.entries.is_empty() {
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_endpoint_attempts_total Per-endpoint lifetime CONNECT attempts."
+                );
+                let _ = writeln!(s, "# TYPE proteus_client_endpoint_attempts_total counter");
+                for e in &p.entries {
+                    let _ = writeln!(
+                        s,
+                        r#"proteus_client_endpoint_attempts_total{{addr="{}"}} {}"#,
+                        escape_label(&e.addr),
+                        e.attempts_total
+                    );
+                }
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_endpoint_successes_total Per-endpoint lifetime CONNECT successes."
+                );
+                let _ = writeln!(s, "# TYPE proteus_client_endpoint_successes_total counter");
+                for e in &p.entries {
+                    let _ = writeln!(
+                        s,
+                        r#"proteus_client_endpoint_successes_total{{addr="{}"}} {}"#,
+                        escape_label(&e.addr),
+                        e.successes_total
+                    );
+                }
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_endpoint_failures_total Per-endpoint lifetime CONNECT failures."
+                );
+                let _ = writeln!(s, "# TYPE proteus_client_endpoint_failures_total counter");
+                for e in &p.entries {
+                    let _ = writeln!(
+                        s,
+                        r#"proteus_client_endpoint_failures_total{{addr="{}"}} {}"#,
+                        escape_label(&e.addr),
+                        e.failures_total
+                    );
+                }
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_endpoint_suppressed Per-endpoint suppression state (1 = suppressed)."
+                );
+                let _ = writeln!(s, "# TYPE proteus_client_endpoint_suppressed gauge");
+                for e in &p.entries {
+                    let _ = writeln!(
+                        s,
+                        r#"proteus_client_endpoint_suppressed{{addr="{}"}} {}"#,
+                        escape_label(&e.addr),
+                        if e.suppressed { 1 } else { 0 }
+                    );
+                }
+                let _ = writeln!(
+                    s,
+                    "# HELP proteus_client_endpoint_failure_streak Per-endpoint consecutive failure count."
+                );
+                let _ = writeln!(s, "# TYPE proteus_client_endpoint_failure_streak gauge");
+                for e in &p.entries {
+                    let _ = writeln!(
+                        s,
+                        r#"proteus_client_endpoint_failure_streak{{addr="{}"}} {}"#,
+                        escape_label(&e.addr),
+                        e.failure_streak
+                    );
+                }
+                // suppression_secs_remaining: only emit for currently-
+                // suppressed entries — otherwise the gauge would be
+                // perpetually zero for healthy entries, which Grafana's
+                // "absent or zero" alerting can't distinguish.
+                let suppressed: Vec<_> = p
+                    .entries
+                    .iter()
+                    .filter(|e| e.suppression_secs_remaining.is_some())
+                    .collect();
+                if !suppressed.is_empty() {
+                    let _ = writeln!(
+                        s,
+                        "# HELP proteus_client_endpoint_suppression_secs_remaining Seconds left in each suppressed entry's back-off window."
+                    );
+                    let _ = writeln!(
+                        s,
+                        "# TYPE proteus_client_endpoint_suppression_secs_remaining gauge"
+                    );
+                    for e in suppressed {
+                        let secs = e.suppression_secs_remaining.unwrap_or(0);
+                        let _ = writeln!(
+                            s,
+                            r#"proteus_client_endpoint_suppression_secs_remaining{{addr="{}"}} {}"#,
+                            escape_label(&e.addr),
+                            secs
+                        );
+                    }
+                }
+            }
+        }
+        s
+    }
+}
+
+/// Escape a Prometheus label value per the 0.0.4 exposition spec:
+/// `\` → `\\`, `"` → `\"`, `\n` → `\n` (literal two chars). Most
+/// host:port strings need no escaping; this is the defense-in-depth
+/// path for unusual hostnames.
+fn escape_label(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for c in v.chars() {
+        match c {
+            '\\' => out.push_str(r"\\"),
+            '"' => out.push_str(r#"\""#),
+            '\n' => out.push_str(r"\n"),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 impl std::fmt::Display for ClientStatusSnapshot {
     /// Operator-friendly text rendering — what `proteus-client
     /// status` or `curl -s :9091/status` returns when the caller
@@ -456,11 +704,15 @@ pub type AliveFlag = Arc<std::sync::atomic::AtomicBool>;
 
 /// Bind a loopback HTTP listener and serve the status snapshot.
 ///
-/// Three routes:
-///   - `GET /healthz`  → 200 "alive" once SOCKS5 has bound; 503 before.
-///   - `GET /status`   → 200 text snapshot (Content-Type: text/plain).
+/// Four routes:
+///   - `GET /healthz`     → 200 "alive" once SOCKS5 has bound; 503 before.
+///   - `GET /status`      → 200 text snapshot (Content-Type: text/plain).
 ///   - `GET /status.json` → 200 JSON snapshot (Content-Type:
 ///     application/json), line-delimited (one record + trailing `\n`).
+///   - `GET /metrics`     → 200 Prometheus 0.0.4 exposition with
+///     `proteus_client_*`-prefixed series (Content-Type:
+///     `text/plain; version=0.0.4`). Per-endpoint counters are
+///     labelled with `addr="host:port"` so PromQL can group by VPS.
 ///
 /// Any other path returns 404. POST / other methods return 404 too —
 /// the surface is strictly read-only.
@@ -579,6 +831,12 @@ pub fn route(
         )
     } else if matches_path(request_head, "/status.json") {
         ("HTTP/1.1 200 OK\r\n", "application/json", snap.to_json())
+    } else if matches_path(request_head, "/metrics") {
+        (
+            "HTTP/1.1 200 OK\r\n",
+            "text/plain; version=0.0.4",
+            snap.to_prometheus(),
+        )
     } else {
         (
             "HTTP/1.1 404 Not Found\r\n",
@@ -1112,6 +1370,359 @@ mod tests {
         assert_eq!(entries[1].attempts_total, 1);
         assert_eq!(entries[1].successes_total, 0);
         assert_eq!(entries[1].failures_total, 1);
+    }
+
+    // ----- Prometheus exposition tests -----
+
+    #[test]
+    fn prometheus_emits_up_gauge_zero_when_not_alive() {
+        let s = empty_snap().to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_up 0\n"),
+            "expected up=0 line in: {s}"
+        );
+        // Mandatory HELP/TYPE rows.
+        assert!(s.contains("# HELP proteus_client_up"));
+        assert!(s.contains("# TYPE proteus_client_up gauge"));
+    }
+
+    #[test]
+    fn prometheus_emits_up_gauge_one_when_alive() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_up 1\n"),
+            "expected up=1 line in: {s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_always_emits_dial_counters() {
+        // Even when no dials have happened, the three counters are
+        // present with value 0 so scrapers don't see absent-counter
+        // gaps that break rate() calculations.
+        let s = empty_snap().to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_dials_attempted_total 0\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_dials_succeeded_total 0\n"),
+            "{s}"
+        );
+        assert!(s.contains("\nproteus_client_dials_failed_total 0\n"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_reflects_dial_counter_values() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 97,
+                failed: 3,
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_dials_attempted_total 100\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_dials_succeeded_total 97\n"),
+            "{s}"
+        );
+        assert!(s.contains("\nproteus_client_dials_failed_total 3\n"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_omits_concurrency_when_cap_disabled() {
+        let s = empty_snap().to_prometheus();
+        assert!(!s.contains("proteus_client_in_flight_sessions"), "{s}");
+        assert!(!s.contains("proteus_client_max_inflight_sessions"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_emits_concurrency_when_cap_configured() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            concurrency: Some(ConcurrencyView {
+                in_flight: 5,
+                max_inflight: 32,
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(s.contains("\nproteus_client_in_flight_sessions 5\n"), "{s}");
+        assert!(
+            s.contains("\nproteus_client_max_inflight_sessions 32\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_omits_carrier_block_when_unconfigured() {
+        // β unconfigured → carrier view is None → no carrier_* series.
+        let s = empty_snap().to_prometheus();
+        assert!(!s.contains("proteus_client_carrier"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_emits_carrier_healthy_state() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            carrier: Some(CarrierHealthView {
+                failure_streak: 0,
+                suppressed: false,
+                suppression_secs_remaining: None,
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(s.contains("\nproteus_client_carrier_suppressed 0\n"), "{s}");
+        assert!(
+            s.contains("\nproteus_client_carrier_failure_streak 0\n"),
+            "{s}"
+        );
+        // suppression_secs_remaining is omitted when not suppressed
+        // (operator's "this gauge exists ⇒ we're currently in
+        // back-off" semantics).
+        assert!(
+            !s.contains("proteus_client_carrier_suppression_secs_remaining"),
+            "should NOT emit remaining-secs when healthy: {s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_emits_carrier_suppressed_state_with_remaining_secs() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            carrier: Some(CarrierHealthView {
+                failure_streak: 8,
+                suppressed: true,
+                suppression_secs_remaining: Some(45),
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(s.contains("\nproteus_client_carrier_suppressed 1\n"), "{s}");
+        assert!(
+            s.contains("\nproteus_client_carrier_failure_streak 8\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_carrier_suppression_secs_remaining 45\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_emits_per_endpoint_labelled_series() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![
+                    EndpointEntryView {
+                        addr: "primary:8443".into(),
+                        failure_streak: 0,
+                        suppressed: false,
+                        suppression_secs_remaining: None,
+                        attempts_total: 50,
+                        successes_total: 50,
+                        failures_total: 0,
+                    },
+                    EndpointEntryView {
+                        addr: "backup:8443".into(),
+                        failure_streak: 3,
+                        suppressed: true,
+                        suppression_secs_remaining: Some(60),
+                        attempts_total: 8,
+                        successes_total: 5,
+                        failures_total: 3,
+                    },
+                ],
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        // Per-entry attempts.
+        assert!(
+            s.contains(r#"proteus_client_endpoint_attempts_total{addr="primary:8443"} 50"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"proteus_client_endpoint_attempts_total{addr="backup:8443"} 8"#),
+            "{s}"
+        );
+        // Successes.
+        assert!(
+            s.contains(r#"proteus_client_endpoint_successes_total{addr="primary:8443"} 50"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"proteus_client_endpoint_successes_total{addr="backup:8443"} 5"#),
+            "{s}"
+        );
+        // Failures.
+        assert!(
+            s.contains(r#"proteus_client_endpoint_failures_total{addr="backup:8443"} 3"#),
+            "{s}"
+        );
+        // Suppression state.
+        assert!(
+            s.contains(r#"proteus_client_endpoint_suppressed{addr="primary:8443"} 0"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"proteus_client_endpoint_suppressed{addr="backup:8443"} 1"#),
+            "{s}"
+        );
+        // Failure streak.
+        assert!(
+            s.contains(r#"proteus_client_endpoint_failure_streak{addr="backup:8443"} 3"#),
+            "{s}"
+        );
+        // Per-entry remaining-secs ONLY for suppressed entry.
+        assert!(
+            s.contains(
+                r#"proteus_client_endpoint_suppression_secs_remaining{addr="backup:8443"} 60"#
+            ),
+            "{s}"
+        );
+        assert!(
+            !s.contains(
+                r#"proteus_client_endpoint_suppression_secs_remaining{addr="primary:8443"}"#
+            ),
+            "should NOT emit remaining-secs for non-suppressed primary: {s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_omits_pool_block_when_pool_unconfigured() {
+        let s = empty_snap().to_prometheus();
+        assert!(!s.contains("proteus_client_endpoint"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_omits_pool_block_when_pool_empty() {
+        // Edge case: pool wired but no entries (shouldn't happen in
+        // practice — EndpointPool::new returns None for empty Vec —
+        // but defense-in-depth here).
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView { entries: vec![] }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(!s.contains("proteus_client_endpoint_attempts_total"), "{s}");
+    }
+
+    #[test]
+    fn prometheus_escapes_dangerous_chars_in_addr_label() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![EndpointEntryView {
+                    addr: r#"weird"host:8443"#.into(),
+                    attempts_total: 1,
+                    ..EndpointEntryView::default()
+                }],
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        // Must contain the escaped form, NOT the raw form.
+        assert!(
+            s.contains(r#"addr="weird\"host:8443""#),
+            "should escape quote in label: {s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_help_and_type_appear_exactly_once_per_metric_name() {
+        // Prometheus 0.0.4 requires exactly one HELP + TYPE per
+        // metric NAME across the entire payload (label sets share
+        // the metadata). Pool series have multiple values but should
+        // emit metadata only once.
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool: Some(EndpointPoolView {
+                entries: vec![
+                    EndpointEntryView {
+                        addr: "a:1".into(),
+                        attempts_total: 1,
+                        ..EndpointEntryView::default()
+                    },
+                    EndpointEntryView {
+                        addr: "b:2".into(),
+                        attempts_total: 2,
+                        ..EndpointEntryView::default()
+                    },
+                ],
+            }),
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        let metric_names = [
+            "proteus_client_up",
+            "proteus_client_dials_attempted_total",
+            "proteus_client_dials_succeeded_total",
+            "proteus_client_dials_failed_total",
+            "proteus_client_endpoint_attempts_total",
+            "proteus_client_endpoint_successes_total",
+            "proteus_client_endpoint_failures_total",
+            "proteus_client_endpoint_suppressed",
+            "proteus_client_endpoint_failure_streak",
+        ];
+        for name in metric_names {
+            let help_count = s.matches(&format!("# HELP {name} ")).count();
+            let type_count = s.matches(&format!("# TYPE {name} ")).count();
+            assert_eq!(
+                help_count, 1,
+                "{name}: expected exactly 1 HELP row, got {help_count} in: {s}"
+            );
+            assert_eq!(
+                type_count, 1,
+                "{name}: expected exactly 1 TYPE row, got {type_count} in: {s}"
+            );
+        }
+    }
+
+    #[test]
+    fn route_metrics_200_with_prometheus_content_type() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let (status, ctype, body) = route("GET /metrics HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(
+            ctype.contains("text/plain") && ctype.contains("version=0.0.4"),
+            "unexpected content-type: {ctype}"
+        );
+        assert!(body.contains("proteus_client_up 1"), "{body}");
+    }
+
+    #[test]
+    fn route_metrics_with_query_string_matches() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            ..empty_snap()
+        };
+        let (status, _ctype, _body) = route("GET /metrics?debug=1 HTTP/1.1\r\n\r\n", &snap);
+        assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn route_404_on_metrics_substring_path() {
+        // /metricsleak should NOT match /metrics — mirrors the
+        // server-side admin endpoint's substring-rejection rule.
+        let (status, _ctype, _body) = route("GET /metricsleak HTTP/1.1\r\n\r\n", &empty_snap());
+        assert!(status.starts_with("HTTP/1.1 404"));
     }
 
     #[test]

@@ -346,3 +346,135 @@ async fn admin_status_with_ctx_omits_concurrency_when_cap_disabled() {
 
     server_task.abort();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_metrics_endpoint_returns_prometheus_exposition() {
+    // Full e2e of the /metrics route over a real socket. Confirms
+    // the Prometheus body crosses the HTTP boundary intact AND has
+    // the expected content-type for Prometheus scraper compatibility.
+    let alive: AliveFlag = Arc::new(AtomicBool::new(true));
+    let pool = Arc::new(
+        proteus_client::endpoint_pool::EndpointPool::new(vec![
+            "primary:8443".into(),
+            "backup:8443".into(),
+        ])
+        .expect("pool"),
+    );
+    // Bump primary's cumulative counters via the public API so the
+    // Prometheus body has measurable per-endpoint values.
+    let h0 = pool.endpoint_health(0).unwrap();
+    h0.record_attempt();
+    h0.record_attempt();
+    h0.record_attempt();
+    h0.record_success();
+    h0.record_success();
+    h0.record_failure(std::time::Instant::now());
+
+    let ctx = Arc::new(ClientCtx::new(
+        Arc::new(CarrierHealth::new()),
+        Some(Arc::clone(&pool)),
+        Some(Arc::new(Semaphore::new(16))),
+        16,
+        true,
+    ));
+    // Global dial counters too.
+    ctx.record_dial_attempt();
+    ctx.record_dial_attempt();
+    ctx.record_dial_success();
+
+    let port = pick_free_port().await;
+    let bind = format!("127.0.0.1:{port}");
+    let alive_for_serve = Arc::clone(&alive);
+    let ctx_for_serve = Arc::clone(&ctx);
+    let server_task = tokio::spawn(async move {
+        let _ = admin::serve_with_ctx(bind, alive_for_serve, ctx_for_serve).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Issue a real Prometheus scrape and verify the body.
+    let body = fetch_body(port, "/metrics").await;
+    // Headline gauges.
+    assert!(body.contains("proteus_client_up 1"), "missing up=1: {body}");
+    // Global dial counters.
+    assert!(
+        body.contains("proteus_client_dials_attempted_total 2"),
+        "missing global dials: {body}"
+    );
+    assert!(
+        body.contains("proteus_client_dials_succeeded_total 1"),
+        "missing global successes: {body}"
+    );
+    // Concurrency.
+    assert!(
+        body.contains("proteus_client_in_flight_sessions 0"),
+        "missing in-flight gauge: {body}"
+    );
+    assert!(
+        body.contains("proteus_client_max_inflight_sessions 16"),
+        "missing max-inflight gauge: {body}"
+    );
+    // Per-endpoint counters with labels.
+    assert!(
+        body.contains(r#"proteus_client_endpoint_attempts_total{addr="primary:8443"} 3"#),
+        "missing per-endpoint attempts: {body}"
+    );
+    assert!(
+        body.contains(r#"proteus_client_endpoint_successes_total{addr="primary:8443"} 2"#),
+        "missing per-endpoint successes: {body}"
+    );
+    assert!(
+        body.contains(r#"proteus_client_endpoint_failures_total{addr="primary:8443"} 1"#),
+        "missing per-endpoint failures: {body}"
+    );
+    // Backup entry — no activity yet, but the counter rows must
+    // still exist with value 0 (per-entry gauges are emitted for
+    // every entry, not just the active ones — that's what makes
+    // Grafana "rate of zero" alerts work).
+    assert!(
+        body.contains(r#"proteus_client_endpoint_attempts_total{addr="backup:8443"} 0"#),
+        "missing zero-valued backup attempts row: {body}"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_metrics_content_type_is_prometheus_compatible() {
+    // Prometheus scrapers verify the Content-Type matches
+    // `text/plain; version=0.0.4` (or compatible). A wrong header
+    // causes silent scrape failures.
+    let alive: AliveFlag = Arc::new(AtomicBool::new(true));
+    let ctx = Arc::new(ClientCtx::new(
+        Arc::new(CarrierHealth::new()),
+        None,
+        None,
+        0,
+        false,
+    ));
+    let port = pick_free_port().await;
+    let bind = format!("127.0.0.1:{port}");
+    let alive_for_serve = Arc::clone(&alive);
+    let ctx_for_serve = Arc::clone(&ctx);
+    let server_task = tokio::spawn(async move {
+        let _ = admin::serve_with_ctx(bind, alive_for_serve, ctx_for_serve).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Read the FULL response (headers + body) so we can inspect
+    // Content-Type.
+    let mut stream = TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connect");
+    let req =
+        format!("GET /metrics HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
+    stream.write_all(req.as_bytes()).await.expect("write GET");
+    let mut buf = Vec::with_capacity(4096);
+    stream.read_to_end(&mut buf).await.expect("read response");
+    let s = String::from_utf8(buf).expect("UTF-8 response");
+    assert!(
+        s.contains("Content-Type: text/plain; version=0.0.4"),
+        "missing Prometheus content-type header: {s}"
+    );
+
+    server_task.abort();
+}

@@ -213,6 +213,29 @@ proteus-client status --format json # parseable JSON
 curl -s http://127.0.0.1:9091/status
 curl -s http://127.0.0.1:9091/status.json | jq .
 curl -s http://127.0.0.1:9091/healthz   # 200 alive / 503 starting
+
+# Prometheus scrape — symmetric with the server-side /metrics
+# endpoint. All series use the `proteus_client_*` prefix so a single
+# Prometheus instance can scrape both ends without label collisions.
+curl -s http://127.0.0.1:9091/metrics
+```
+
+Prometheus series exposed:
+
+- Global: `proteus_client_up`, `proteus_client_dials_{attempted,succeeded,failed}_total`
+- Concurrency: `proteus_client_{in_flight,max_inflight}_sessions` (when cap configured)
+- Carrier (β): `proteus_client_carrier_{suppressed,failure_streak,suppression_secs_remaining}`
+- Per-endpoint (labelled with `addr="host:port"`):
+  `proteus_client_endpoint_{attempts,successes,failures}_total`,
+  `proteus_client_endpoint_{suppressed,failure_streak,suppression_secs_remaining}`
+
+PromQL example — alert when any endpoint's 5-minute success rate
+drops below 80 %:
+
+```promql
+sum by (addr) (rate(proteus_client_endpoint_successes_total[5m]))
+/ sum by (addr) (rate(proteus_client_endpoint_attempts_total[5m]))
+  < 0.8
 ```
 
 Surfaces:
