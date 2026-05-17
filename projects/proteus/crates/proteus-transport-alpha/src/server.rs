@@ -1191,7 +1191,10 @@ where
     Fut: std::future::Future<Output = ()> + Send,
 {
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match accept_with_backoff(&listener, accept_error_throttle()).await? {
+            AcceptOutcome::Got(p) => p,
+            AcceptOutcome::Transient => continue,
+        };
         let ctx = Arc::clone(&ctx);
         let acceptor = acceptor.clone();
         let handle = handle.clone();
@@ -1282,7 +1285,10 @@ where
     Fut: std::future::Future<Output = ()> + Send,
 {
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match accept_with_backoff(&listener, accept_error_throttle()).await? {
+            AcceptOutcome::Got(p) => p,
+            AcceptOutcome::Transient => continue,
+        };
         let ctx = Arc::clone(&ctx);
         // Read-lock the current acceptor. After this clone the
         // operator is free to swap in a new cert; we keep ours for
@@ -1402,7 +1408,10 @@ where
     Fut: std::future::Future<Output = ()> + Send,
 {
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match accept_with_backoff(&listener, accept_error_throttle()).await? {
+            AcceptOutcome::Got(p) => p,
+            AcceptOutcome::Transient => continue,
+        };
         let ctx = Arc::clone(&ctx);
         let current_acceptor = acceptor.current();
         let handle = handle.clone();
@@ -1523,7 +1532,10 @@ where
     Fut: std::future::Future<Output = ()> + Send,
 {
     loop {
-        let (stream, peer) = listener.accept().await?;
+        let (stream, peer) = match accept_with_backoff(&listener, accept_error_throttle()).await? {
+            AcceptOutcome::Got(p) => p,
+            AcceptOutcome::Transient => continue,
+        };
         let ctx = Arc::clone(&ctx);
         let handle = handle.clone();
 
@@ -1728,6 +1740,112 @@ pub async fn bind_listener_with_reuseaddr(addr: &str) -> std::io::Result<TcpList
 // SOCKS5, server upstream) share one implementation. Local
 // re-export keeps the existing call sites unchanged.
 use crate::socket_opts::apply_tcp_keepalive;
+
+/// Outcome of a single `listener.accept().await` attempt,
+/// post-iter-18 with transient-error backoff.
+enum AcceptOutcome {
+    /// Got a usable stream + peer. Caller proceeds normally.
+    Got((TcpStream, std::net::SocketAddr)),
+    /// Transient kernel error — we logged + backed off; caller
+    /// should `continue` to the next loop iteration.
+    Transient,
+}
+
+/// Classify a raw OS error from `accept()` into "transient
+/// (back off)" vs "fatal (propagate up)". Exposed as a pure
+/// fn so unit tests can drive the classification logic
+/// without needing to actually exhaust the kernel's FD pool
+/// in-process.
+///
+/// Transient set:
+///   * EMFILE (per-process FD limit hit)
+///   * ENFILE (system-wide FD limit hit)
+///   * ENOMEM (kernel out of memory for the socket)
+///
+/// Everything else (the listener fd itself going bad, etc.)
+/// is fatal — the operator's systemd restart picks up the
+/// pieces.
+#[must_use]
+fn is_transient_accept_error(raw_os_error: Option<i32>) -> bool {
+    matches!(raw_os_error, Some(24) | Some(23) | Some(12))
+}
+
+/// Backoff applied after EMFILE / ENFILE / ENOMEM on accept.
+/// 100 ms is long enough that one already-spawned per-conn
+/// task can plausibly complete + release an FD before we
+/// re-try, but short enough that legitimate inbound traffic
+/// doesn't see a multi-second stall under a probe flood.
+const ACCEPT_TRANSIENT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Robust `listener.accept()` wrapper for the server's
+/// accept loops (iter-18).
+///
+/// Pre-iter-18 every `pub async fn serve*` had the shape
+/// `let (stream, peer) = listener.accept().await?;` — the `?`
+/// propagated ANY io::Error and KILLED the accept loop. The
+/// fatal class here is **EMFILE / ENFILE / ENOMEM**: under a
+/// real probe storm the kernel runs out of file descriptors
+/// faster than the cover-forward tasks can release them, the
+/// next `accept()` returns EMFILE, the loop dies, the server
+/// stops accepting new connections — but is still alive enough
+/// that systemd doesn't restart it, AND its `/healthz` endpoint
+/// (a Tokio task that already has its own listener FD) keeps
+/// returning 200. From the operator's POV: the server is
+/// "healthy" but silently refusing all new traffic. The worst
+/// kind of production failure mode.
+///
+/// Real-world production servers (nginx, HAProxy, envoy) all
+/// handle EMFILE the same way: log at WARN-throttled, briefly
+/// sleep (100 ms is the de-facto industry value), continue.
+/// The TCP backlog buffers incoming SYNs for ~tens of seconds
+/// of EMFILE-induced pause, so a transient FD shortage is
+/// invisible to clients.
+///
+/// Non-transient errors (the listener socket itself is gone:
+/// EBADF, ECONNABORTED on the listener fd, ENETDOWN) are
+/// propagated up — the operator's systemd unit should restart
+/// the binary in those cases.
+async fn accept_with_backoff(
+    listener: &TcpListener,
+    throttle: &Throttle,
+) -> std::io::Result<AcceptOutcome> {
+    match listener.accept().await {
+        Ok(pair) => Ok(AcceptOutcome::Got(pair)),
+        Err(e) => {
+            let raw = e.raw_os_error();
+            if is_transient_accept_error(raw) {
+                if matches!(throttle.try_acquire(), AcquireResult::Allowed) {
+                    tracing::warn!(
+                        error = %e,
+                        raw_os_error = ?raw,
+                        backoff_ms = ACCEPT_TRANSIENT_BACKOFF.as_millis() as u64,
+                        "accept() hit FD exhaustion — backing off briefly; \
+                         in-flight cover-forward / handshake tasks should release \
+                         FDs and the next accept will succeed"
+                    );
+                }
+                tokio::time::sleep(ACCEPT_TRANSIENT_BACKOFF).await;
+                Ok(AcceptOutcome::Transient)
+            } else {
+                // Non-transient: kill the loop (operator's systemd
+                // restart catches this).
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Per-server-instance log throttle for accept-error WARN spam.
+/// EMFILE under a probe storm fires hundreds of times per
+/// second; we want exactly one log line every few seconds, not
+/// a flood that itself becomes the FD pressure source.
+fn accept_error_throttle() -> &'static Throttle {
+    static T: OnceLock<Throttle> = OnceLock::new();
+    // burst=3 (cluster of three fires after a long pause, then
+    // throttle kicks in); 0.2 tokens/sec = one log line every
+    // 5 seconds of sustained EMFILE.
+    T.get_or_init(|| Throttle::new(3, 0.2))
+}
 
 struct HandshakeFailure {
     buffer: Vec<u8>,
@@ -2596,4 +2714,67 @@ fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
 fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     use subtle::ConstantTimeEq;
     bool::from(a.ct_eq(b))
+}
+
+#[cfg(test)]
+mod accept_classifier_tests {
+    //! Iter-18: unit tests for the accept-error classifier.
+    //! Placed at the END of this file (not inline with the
+    //! helper) so `clippy::items_after_test_module` stays
+    //! satisfied — the lint rejects production items
+    //! defined after a `#[cfg(test)]` block.
+
+    use super::*;
+
+    /// EMFILE = errno 24 (per-process FD limit). Most common
+    /// transient on a busy server.
+    #[test]
+    fn emfile_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(24)));
+    }
+
+    /// ENFILE = errno 23 (system-wide FD limit).
+    #[test]
+    fn enfile_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(23)));
+    }
+
+    /// ENOMEM = errno 12 (kernel out of memory for the socket).
+    #[test]
+    fn enomem_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(12)));
+    }
+
+    /// EBADF (errno 9, listener fd is dead) MUST kill the
+    /// accept loop — systemd should restart us. If we
+    /// accidentally classified this as transient we'd spin
+    /// forever logging EBADF every 5 seconds.
+    #[test]
+    fn ebadf_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(9)));
+    }
+
+    /// EINTR / EAGAIN are technically transient but tokio's
+    /// `accept().await` already retries on those internally
+    /// — they should NEVER bubble up to our layer. If they
+    /// do, treat as fatal so we don't accidentally double-
+    /// retry. Same logic for "no raw_os_error" — that's an
+    /// io::Error from some other source (libstd-internal),
+    /// not a kernel-level transient.
+    #[test]
+    fn eagain_and_none_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(11))); // EAGAIN/EWOULDBLOCK
+        assert!(!is_transient_accept_error(Some(4))); // EINTR
+        assert!(!is_transient_accept_error(None));
+    }
+
+    /// Sanity: ECONNRESET (104) is a per-CONNECTION error,
+    /// not an accept-level problem. The kernel still hands us
+    /// the accepted fd; the read on that fd later returns
+    /// ECONNRESET. So `accept()` itself returning 104 is
+    /// pathological and we kill the loop.
+    #[test]
+    fn econnreset_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(104)));
+    }
 }
