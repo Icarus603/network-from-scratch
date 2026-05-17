@@ -363,6 +363,14 @@ pub struct ServerCtx {
     /// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
     /// on `/metrics`. None = feature disabled (back-compat).
     per_user_bandwidth: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    /// Optional per-user concurrent-session cap. When set, the
+    /// session-handler closure consults `try_acquire(user_id)` AFTER
+    /// the handshake completes (and user_id is known) but BEFORE
+    /// the relay opens upstream — a user already at the cap gets
+    /// their session torn down cleanly with the rejection counter
+    /// bumped. Mirrors the commercial-VPN "N devices per account"
+    /// model that VLESS / Hy2 / TUIC5 lack at the protocol level.
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
 }
 
 impl ServerCtx {
@@ -386,7 +394,33 @@ impl ServerCtx {
             user_limiter: None,
             abuse_detector_rate_limit: None,
             per_user_bandwidth: None,
+            per_user_conn_limiter: None,
         }
+    }
+
+    /// Install a per-user concurrent-session limiter. Once set, every
+    /// session whose user_id is already at the cap is rejected (with
+    /// `proteus_per_user_conn_limit_rejected_total++`) instead of
+    /// being relayed. See [`crate::per_user_conn_limit`] for the
+    /// design rationale.
+    #[must_use]
+    pub fn with_per_user_conn_limiter(
+        mut self,
+        limiter: Arc<crate::per_user_conn_limit::PerUserConnLimiter>,
+    ) -> Self {
+        self.per_user_conn_limiter = Some(limiter);
+        self
+    }
+
+    /// Read the per-user concurrent-session limiter handle. Returns
+    /// the cloneable `Arc` so the binary's session-handler closure
+    /// can call `try_acquire(user_id)` without holding a borrow on
+    /// the `ServerCtx`.
+    #[must_use]
+    pub fn per_user_conn_limiter(
+        &self,
+    ) -> Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>> {
+        self.per_user_conn_limiter.clone()
     }
 
     /// Install a per-user bandwidth accumulator. When set, every

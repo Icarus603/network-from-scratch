@@ -284,6 +284,25 @@ pub struct ServerConfig {
     #[serde(default)]
     pub per_user_bandwidth_rate: Option<PerUserBandwidthRateCfg>,
 
+    /// Optional **per-user concurrent-session cap**. Mirrors the
+    /// commercial-VPN "N devices per account" model that
+    /// VLESS/Hy2/TUIC5 lack at the protocol layer. When a user_id
+    /// holds `max_per_user` open sessions, additional sessions are
+    /// rejected with `proteus_per_user_conn_limit_rejected_total++`.
+    ///
+    /// Sensible production values (commercial reference points):
+    /// - 4-6 for personal-VPN-for-friends (mostly mobile + laptop)
+    /// - 6-10 for small workgroups (NordVPN-grade)
+    /// - 0 = limiter wired but disabled (SIGHUP-swap slot)
+    ///
+    /// Critical defense against stolen credentials: an attacker
+    /// with a leaked user_id can open hundreds of small sessions
+    /// in parallel (each one stays under per-session byte budget),
+    /// exfiltrating GBs aggregated. This cap stops that without
+    /// affecting legitimate users who almost never need >5 devices.
+    #[serde(default)]
+    pub per_user_conn_limit: Option<PerUserConnLimitCfg>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -463,6 +482,17 @@ fn default_per_user_bw_exit_factor() -> f64 {
     0.5
 }
 
+/// Per-user concurrent-session cap config (see
+/// [`ServerConfig::per_user_conn_limit`] for the operator-facing
+/// docstring).
+#[derive(Debug, Deserialize)]
+pub struct PerUserConnLimitCfg {
+    /// Max simultaneous sessions per user_id. 0 = wired but disabled
+    /// (operator gets the gauge surface for SIGHUP-swap workflows
+    /// but no session is ever rejected).
+    pub max_per_user: usize,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FirewallCfg {
     /// CIDR rules — only sources matching one of these are admitted.
@@ -631,6 +661,7 @@ impl ServerConfig {
             max_connections: self.max_connections.is_some(),
             metrics_listen: self.metrics_listen.is_some(),
             per_user_bandwidth_rate: self.per_user_bandwidth_rate.is_some(),
+            per_user_conn_limit: self.per_user_conn_limit.is_some(),
             cover_endpoint_count: self.cover_endpoints.len() as u64,
             client_allowlist_count: self.client_allowlist.len() as u64,
         }
@@ -660,6 +691,9 @@ pub struct ConfigPresence {
     /// `per_user_bandwidth_rate:` block — 1 when the detector is
     /// configured (even with threshold=0 — the slot is wired).
     pub per_user_bandwidth_rate: bool,
+    /// `per_user_conn_limit:` block — 1 when the cap is configured
+    /// (even with max=0 — the slot is wired).
+    pub per_user_conn_limit: bool,
     /// Number of entries in `cover_endpoints:`. Operators read the
     /// SIZE of the pool as a sanity check ("I configured 5 cover
     /// endpoints, why does this show 3?") which a bare presence bit
@@ -702,6 +736,7 @@ impl ConfigPresence {
             ("max_connections", self.max_connections),
             ("metrics_listen", self.metrics_listen),
             ("per_user_bandwidth_rate", self.per_user_bandwidth_rate),
+            ("per_user_conn_limit", self.per_user_conn_limit),
         ] {
             let _ = writeln!(
                 s,
@@ -907,6 +942,30 @@ per_user_bandwidth_rate:\n  \
         let prom = p.prometheus();
         assert!(
             prom.contains(r#"proteus_config_section_active{section="per_user_bandwidth_rate"} 1"#),
+            "{prom}"
+        );
+    }
+
+    #[test]
+    fn presence_reports_per_user_conn_limit_when_configured() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+per_user_conn_limit:\n  \
+  max_per_user: 6\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let l = cfg.per_user_conn_limit.as_ref().expect("must deserialize");
+        assert_eq!(l.max_per_user, 6);
+        let p = cfg.presence();
+        assert!(p.per_user_conn_limit, "presence bit must reflect section");
+        let prom = p.prometheus();
+        assert!(
+            prom.contains(r#"proteus_config_section_active{section="per_user_conn_limit"} 1"#),
             "{prom}"
         );
     }

@@ -42,6 +42,7 @@ pub mod metrics_http;
 pub mod outbound_filter;
 pub mod per_user_bandwidth;
 pub mod per_user_bandwidth_rate_detector;
+pub mod per_user_conn_limit;
 pub mod pow;
 pub mod probe_anomaly;
 pub mod process_info;

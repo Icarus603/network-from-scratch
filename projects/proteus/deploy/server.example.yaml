@@ -221,6 +221,25 @@ handshake_deadline_secs: 15
 #   max_users: 4096
 #   exit_factor: 0.5
 
+# Per-user **concurrent session cap**. Stops a stolen-credential
+# attacker from amplifying via N parallel sessions (each one under
+# byte / rate limits, but aggregate is huge). Mirrors the
+# commercial-VPN "N devices per account" model — NordVPN 6,
+# ExpressVPN 8, Mullvad 5. VLESS/Hy2/TUIC5 don't have this at the
+# protocol level; this is one of the headline production-safety
+# wins of running Proteus.
+#
+# max_per_user=0 = limiter wired but disabled (operator gets the
+# gauge surface for SIGHUP-swap workflows but no session is
+# rejected).
+#
+# Recommended:
+# - 4-6 for personal VPN for friends
+# - 6-10 for small workgroups (NordVPN-grade)
+#
+# per_user_conn_limit:
+#   max_per_user: 6
+
 # Per-session byte budget (tx + rx plaintext). Sessions whose total
 # bytes crosses this threshold are torn down with close_reason
 # "byte_budget_exhausted". Defends against a compromised credential

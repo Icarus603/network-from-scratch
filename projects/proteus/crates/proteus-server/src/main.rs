@@ -543,6 +543,38 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         );
     }
 
+    // Per-user concurrent-session cap. When wired, every session-
+    // handler closure (β/α-TCP/α-TLS) consults the limiter AFTER
+    // handshake (user_id known) and BEFORE the relay. A user_id at
+    // the cap gets its session torn down without paying the relay
+    // cost; bumps `proteus_per_user_conn_limit_rejected_total`.
+    //
+    // The limiter handle ALSO threads into ctx (`with_per_user_conn_limiter`)
+    // so other code paths can introspect / render its Prometheus
+    // block via the metrics endpoint (separate wire below).
+    let per_user_conn_limiter = cfg.per_user_conn_limit.as_ref().map(|c| {
+        let l = proteus_transport_alpha::per_user_conn_limit::PerUserConnLimiter::new(c.max_per_user);
+        if c.max_per_user == 0 {
+            info!(
+                "per-user concurrent-session limiter WIRED but DISABLED (max_per_user=0)"
+            );
+        } else {
+            info!(
+                max_per_user = c.max_per_user,
+                "per-user concurrent-session cap configured — credential abuse via parallel-session amplification is now bounded"
+            );
+        }
+        l
+    });
+    if let Some(l) = per_user_conn_limiter.as_ref() {
+        ctx = ctx.with_per_user_conn_limiter(Arc::clone(l));
+    } else {
+        info!(
+            "per_user_conn_limit unset — one stolen credential could open unbounded \
+             parallel sessions. Recommended: max_per_user=4-10 (mirrors commercial-VPN per-account device cap)."
+        );
+    }
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics
@@ -670,8 +702,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             ),
         ));
         let per_user_for_metrics = Some(Arc::clone(&per_user_bandwidth));
+        let per_user_conn_limiter_for_metrics = per_user_conn_limiter.as_ref().map(Arc::clone);
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v6(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v7(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -681,6 +714,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 config_presence_block,
                 process_info,
                 per_user_for_metrics,
+                per_user_conn_limiter_for_metrics,
             )
             .await
             {
@@ -1091,6 +1125,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            // Per-user concurrent-session cap. On
+                            // reject the session is torn down without
+                            // paying the relay cost.
+                            let _conn_guard = match check_per_user_conn_cap(
+                                ctx_pu.per_user_conn_limiter().as_ref(),
+                                session.user_id,
+                            ) {
+                                ConnCapDecision::Allow(g) => g,
+                                ConnCapDecision::Reject { user_id, cap } => {
+                                    warn!(
+                                        user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
+                                        cap,
+                                        "β session rejected: user_id at per-user concurrent-session cap"
+                                    );
+                                    return;
+                                }
+                            };
                             // Hold the LIVE session metrics so the
                             // drop snapshot reflects final byte totals
                             // (snapshotting at enter would always
@@ -1156,6 +1207,21 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 metrics
                     .handshakes_succeeded
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                // Per-user concurrent-session cap.
+                let _conn_guard = match check_per_user_conn_cap(
+                    ctx_pu.per_user_conn_limiter().as_ref(),
+                    session.user_id,
+                ) {
+                    ConnCapDecision::Allow(g) => g,
+                    ConnCapDecision::Reject { user_id, cap } => {
+                        warn!(
+                            user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
+                            cap,
+                            "session rejected: user_id at per-user concurrent-session cap"
+                        );
+                        return;
+                    }
+                };
                 // RAII guard: increments in_flight_sessions; decrements
                 // AND merges per-session totals on drop, even if the
                 // handler future panics. Wires per-user accounting
@@ -1203,6 +1269,20 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let _conn_guard = match check_per_user_conn_cap(
+                                ctx_pu.per_user_conn_limiter().as_ref(),
+                                session.user_id,
+                            ) {
+                                ConnCapDecision::Allow(g) => g,
+                                ConnCapDecision::Reject { user_id, cap } => {
+                                    warn!(
+                                        user_id = %proteus_transport_alpha::per_user_bandwidth::render_user_id_pub(&user_id),
+                                        cap,
+                                        "TLS session rejected: user_id at per-user concurrent-session cap"
+                                    );
+                                    return;
+                                }
+                            };
                             // Live Arc<SessionMetrics> — snapshotted at
                             // guard drop so the merge reflects the
                             // session's final byte totals.
@@ -1455,6 +1535,52 @@ fn build_outbound_filter(
         "outbound destination filter configured"
     );
     Ok(Some(Arc::new(policy)))
+}
+
+/// Outcome of [`check_per_user_conn_cap`]. Allow wraps the
+/// RAII guard whose drop releases the slot; Reject carries the
+/// user_id + cap so the caller can render the structured WARN log
+/// without re-fetching state.
+enum ConnCapDecision {
+    /// Cap was not installed, or a slot was acquired. The Option
+    /// inside the variant is `None` for the "limiter not installed"
+    /// case and `Some(guard)` for the "acquired" case — both are
+    /// handled uniformly by the caller (drop at session-end).
+    Allow(Option<proteus_transport_alpha::per_user_conn_limit::PerUserConnGuard>),
+    /// The user_id was already at the per-user cap. The caller MUST
+    /// tear down the session WITHOUT routing to `cover_endpoint` —
+    /// the user authenticated successfully; routing to cover would
+    /// mis-leadingly imply auth-fail.
+    Reject { user_id: [u8; 8], cap: usize },
+}
+
+/// Check the per-user concurrent-session cap. Three-valued return:
+///   - limiter not installed (None) → Allow(None)
+///   - session has no user_id (e.g. pre-allowlist) → Allow(None)
+///     (the limiter is gated on having a user_id; without one, this
+///     cap has nothing to attribute against and falls through)
+///   - acquired → Allow(Some(guard))
+///   - rejected → Reject { user_id, cap }
+fn check_per_user_conn_cap(
+    limiter: Option<
+        &std::sync::Arc<proteus_transport_alpha::per_user_conn_limit::PerUserConnLimiter>,
+    >,
+    user_id: Option<[u8; 8]>,
+) -> ConnCapDecision {
+    let (Some(limiter), Some(uid)) = (limiter, user_id) else {
+        return ConnCapDecision::Allow(None);
+    };
+    match limiter.try_acquire(uid) {
+        proteus_transport_alpha::per_user_conn_limit::AcquireOutcome::Acquired(g) => {
+            ConnCapDecision::Allow(Some(g))
+        }
+        proteus_transport_alpha::per_user_conn_limit::AcquireOutcome::Rejected { current } => {
+            ConnCapDecision::Reject {
+                user_id: uid,
+                cap: current,
+            }
+        }
+    }
 }
 
 fn build_firewall_from_cfg(

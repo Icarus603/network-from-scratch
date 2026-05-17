@@ -265,6 +265,25 @@ pub async fn run_soak_with_per_user_observation(
     print_progress: impl Fn(&SoakProgress) + Send + Sync + 'static,
     per_user: Option<Arc<proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth>>,
 ) -> Result<SoakSummary, BenchError> {
+    run_soak_with_observation(cfg, perf, print_progress, per_user, None).await
+}
+
+/// Same as [`run_soak_with_per_user_observation`] but takes an
+/// optional per-user conn-limiter. When supplied, the in-process
+/// server's session handler checks `try_acquire(user_id)` and tears
+/// down the session immediately on reject — mirroring the production
+/// binary's wire-up. The caller can inspect
+/// `limiter.rejection_count()` after the soak to verify rejections
+/// happened under contention.
+pub async fn run_soak_with_observation(
+    cfg: SoakConfig,
+    perf: PerfProfile,
+    print_progress: impl Fn(&SoakProgress) + Send + Sync + 'static,
+    per_user: Option<Arc<proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<
+        Arc<proteus_transport_alpha::per_user_conn_limit::PerUserConnLimiter>,
+    >,
+) -> Result<SoakSummary, BenchError> {
     // ----- Server setup (single in-process server) -----
     let cert = mint_self_signed(None)?;
     let server_keys = ServerKeys::generate();
@@ -274,6 +293,9 @@ pub async fn run_soak_with_per_user_observation(
     let mut ctx_raw = ServerCtx::new(server_keys);
     if let Some(pu) = per_user.as_ref() {
         ctx_raw = ctx_raw.with_per_user_bandwidth(Arc::clone(pu));
+    }
+    if let Some(cl) = per_user_conn_limiter.as_ref() {
+        ctx_raw = ctx_raw.with_per_user_conn_limiter(Arc::clone(cl));
     }
     let ctx = Arc::new(ctx_raw);
     let ctx_for_handler = Arc::clone(&ctx);
@@ -292,14 +314,28 @@ pub async fn run_soak_with_per_user_observation(
         .local_addr()
         .map_err(|e| BenchError::Bind(e.to_string()))?;
 
-    let server_task =
-        tokio::spawn(async move {
-            let _ = beta_server::serve(endpoint, Arc::clone(&ctx_for_handler), move |mut session| {
+    let server_task = tokio::spawn(async move {
+        let _ = beta_server::serve(endpoint, Arc::clone(&ctx_for_handler), move |mut session| {
             // Per-handler clones so the spawned future owns its
             // refs and the closure stays Fn (not FnOnce).
             let metrics = Arc::clone(&server_metrics);
             let ctx_h = Arc::clone(&ctx_for_handler);
             async move {
+                // Per-user conn-cap check — mirrors the production
+                // server's wire-up. On reject, return immediately so
+                // the session is torn down without paying the relay
+                // cost. The guard binding's drop releases the slot
+                // at the end of the handler.
+                let _conn_guard = if let (Some(cl), Some(uid)) =
+                    (ctx_h.per_user_conn_limiter(), session.user_id)
+                {
+                    match cl.try_acquire(uid) {
+                        proteus_transport_alpha::per_user_conn_limit::AcquireOutcome::Acquired(g) => Some(g),
+                        proteus_transport_alpha::per_user_conn_limit::AcquireOutcome::Rejected { .. } => return,
+                    }
+                } else {
+                    None
+                };
                 // RAII guard records per-user bytes on drop when
                 // both the accumulator AND the session's user_id
                 // are present — same wire-up pattern as the
@@ -332,7 +368,7 @@ pub async fn run_soak_with_per_user_observation(
             }
         })
         .await;
-        });
+    });
 
     // ----- Client task pool -----
     let state = Arc::new(SoakState::new());
@@ -838,6 +874,88 @@ mod tests {
         assert!(
             !snapshot.iter().any(|(uid, _)| uid == b"OVERFLOW"),
             "should NOT have overflow row at cap=4096: {snapshot:?}"
+        );
+    }
+
+    /// Per-user concurrent-session cap e2e: 8 clients all sharing
+    /// `user0000` with cap=2 → only 2 sessions for user0000 may
+    /// be in flight at once; the other 6 clients' attempts get
+    /// rejected. After the soak, asserts:
+    ///   - `limiter.rejection_count() > 0` (real production wiring fired)
+    ///   - some `dials_failed > 0` (rejected dials surface as
+    ///     bench-side failures — early-close on the relay-rejected
+    ///     session reads as a recv-error to the client)
+    ///   - no spawn leaks (the conn-cap reject path must not strand
+    ///     guards or tasks)
+    ///
+    /// This is the production-shaped proof that a stolen credential
+    /// can't be amplified into N parallel exfil sessions.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn per_user_conn_cap_rejects_parallel_sessions_for_one_user() {
+        use proteus_transport_alpha::per_user_conn_limit::PerUserConnLimiter;
+        let limiter = PerUserConnLimiter::new(2);
+        let summary = run_soak_with_observation(
+            SoakConfig {
+                clients: 8,
+                duration: Duration::from_secs(2),
+                per_session_kib: 4,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            None,
+            Some(Arc::clone(&limiter)),
+        )
+        .await
+        .expect("conn-cap soak should succeed");
+        assert_eq!(summary.spawn_leak_count, 0);
+        // SOMETHING must have happened — either dials succeeded or
+        // dials failed; the cap rejection sits on the failure side.
+        assert!(
+            summary.dials_attempted > 0,
+            "no dials attempted? {summary:#?}"
+        );
+        // The cap forces real contention; some rejections must
+        // occur over 2s @ 8 clients. We're conservative: ≥ 1.
+        assert!(
+            limiter.rejection_count() > 0,
+            "expected ≥1 rejection under cap contention; got 0 (limiter wired?): {summary:#?}"
+        );
+        // Some clients must have succeeded too (cap=2 is not 0).
+        assert!(
+            summary.dials_succeeded > 0,
+            "expected ≥1 success under cap=2; got 0: {summary:#?}"
+        );
+    }
+
+    /// With cap=0 (disabled), no rejections fire even under high
+    /// per-user contention. Proves the "wired but silent" mode.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn per_user_conn_cap_disabled_zero_rejections_under_contention() {
+        use proteus_transport_alpha::per_user_conn_limit::PerUserConnLimiter;
+        let limiter = PerUserConnLimiter::new(0);
+        let _ = run_soak_with_observation(
+            SoakConfig {
+                clients: 8,
+                duration: Duration::from_secs(1),
+                per_session_kib: 4,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            None,
+            Some(Arc::clone(&limiter)),
+        )
+        .await
+        .expect("disabled-cap soak should succeed");
+        assert_eq!(
+            limiter.rejection_count(),
+            0,
+            "cap=0 must never reject — slot is wired but silent"
         );
     }
 

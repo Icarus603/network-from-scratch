@@ -406,6 +406,48 @@ still emit so operators can confirm via
 `proteus_per_user_bandwidth_rate_threshold_bytes_per_sec` that the
 slot is alive.
 
+### Per-user **concurrent session cap** (server)
+
+The bandwidth-rate detector above catches *sustained throughput*
+abuse. A smart attacker with a stolen credential side-steps it by
+opening many short parallel sessions — each one stays under any
+single-session threshold, but the aggregate FD / RAM / upstream-
+bandwidth footprint is enormous. Real-world reference: NordVPN
+caps 6 simultaneous devices per account, ExpressVPN 8, Mullvad 5;
+VLESS / Hy2 / TUIC5 have **nothing** at the protocol layer.
+
+Proteus closes that gap:
+
+```yaml
+# server.yaml
+per_user_conn_limit:
+  max_per_user: 6    # commercial-VPN-grade per-account device cap
+```
+
+Wire-up: every session-handler closure (β-QUIC / α-TCP / α-TLS)
+calls `try_acquire(user_id)` AFTER handshake (so the user_id is
+authenticated) but BEFORE the relay opens upstream. On reject the
+session is torn down immediately — *not* routed to `cover_endpoint`,
+because the user authenticated successfully and a cover-redirect
+would mis-leadingly imply "wrong credential". The RAII guard
+decrements the count on drop, including panic unwind.
+
+`/metrics` series (always emitted, even at zero):
+- `proteus_per_user_conn_limit_max_per_user` — gauge of the cap
+- `proteus_per_user_conn_limit_active_users` — distinct user_ids
+  currently holding ≥1 slot
+- `proteus_per_user_conn_limit_rejected_total` — counter, alert on
+  `rate(...) > 0` (credential abuse OR under-provisioned cap)
+
+**max_per_user = 0 = "wired but disabled"**: same SIGHUP-swap slot
+pattern as the bandwidth-rate detector. Recommended defaults: 4-6
+for personal-VPN-for-friends; 6-10 for small workgroups.
+
+The cap is per-user *across* the three carriers (β-QUIC, α-TCP,
+α-TLS) — all of them share the same limiter instance, so a user
+opening 3 QUIC sessions + 3 TCP sessions hits the cap of 6 across
+the union.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

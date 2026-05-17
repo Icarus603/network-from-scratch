@@ -247,6 +247,9 @@ pub async fn serve_with_auth_full_v5(
 /// series + the `proteus_per_user_bandwidth_tracked_users` gauge.
 /// Operators query `topk(5, rate(proteus_per_user_bytes_sent_total[1m]))`
 /// to see who's hogging bandwidth in real time.
+///
+/// Back-compat shim — forwards to v7 with
+/// `per_user_conn_limiter = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v6(
     addr: &str,
@@ -259,6 +262,40 @@ pub async fn serve_with_auth_full_v6(
     process_info: Option<Arc<crate::process_info::ProcessInfo>>,
     per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v7(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        None,
+    )
+    .await
+}
+
+/// v7 of [`serve_with_auth_full`] — adds an optional
+/// `PerUserConnLimiter`. When supplied, the `/metrics` exposition
+/// includes the
+/// `proteus_per_user_conn_limit_{max_per_user,active_users,rejected_total}`
+/// series. Operators alert on `rate(proteus_per_user_conn_limit_rejected_total[5m]) > 0`
+/// to catch credential abuse via parallel-session amplification.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v7(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -267,6 +304,7 @@ pub async fn serve_with_auth_full_v6(
     let config_presence_enabled = config_presence.is_some();
     let process_info_enabled = process_info.is_some();
     let per_user_enabled = per_user.is_some();
+    let per_user_conn_limit_enabled = per_user_conn_limiter.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -276,6 +314,7 @@ pub async fn serve_with_auth_full_v6(
         config_presence = config_presence_enabled,
         process_info = process_info_enabled,
         per_user_bandwidth = per_user_enabled,
+        per_user_conn_limit = per_user_conn_limit_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -288,7 +327,8 @@ pub async fn serve_with_auth_full_v6(
         let config_presence = config_presence.clone();
         let process_info = process_info.clone();
         let per_user = per_user.clone();
-        tokio::spawn(handle_connection(
+        let per_user_conn_limiter = per_user_conn_limiter.clone();
+        tokio::spawn(handle_connection_v7(
             stream,
             metrics,
             auth,
@@ -298,6 +338,7 @@ pub async fn serve_with_auth_full_v6(
             config_presence,
             process_info,
             per_user,
+            per_user_conn_limiter,
         ));
     }
 }
@@ -464,7 +505,7 @@ pub async fn serve_on_listener_full_v6(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -474,13 +515,42 @@ async fn handle_connection(
     process_info: Option<Arc<crate::process_info::ProcessInfo>>,
     per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
 ) {
+    // Back-compat shim: forwards to v7 with no conn-limiter.
+    handle_connection_v7(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v7(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v6(
+    let (status_line, content_type, body) = render_full_v7(
         head,
         &metrics,
         auth.as_ref(),
@@ -490,6 +560,7 @@ async fn handle_connection(
         config_presence.as_deref().map(String::as_str),
         process_info.as_deref(),
         per_user.as_deref(),
+        per_user_conn_limiter.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -931,6 +1002,8 @@ pub fn render_full_v5(
 /// `proteus_per_user_bytes_{sent,received}_total{user_id="…"}`
 /// series. See [`serve_with_auth_full_v6`] for the operator
 /// rationale.
+///
+/// Back-compat shim — forwards to v7 with no conn-limiter.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v6(
@@ -943,6 +1016,38 @@ pub fn render_full_v6(
     config_presence: Option<&str>,
     process_info: Option<&crate::process_info::ProcessInfo>,
     per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+) -> (&'static str, &'static str, String) {
+    render_full_v7(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        None,
+    )
+}
+
+/// v7 of [`render_full`] — adds optional per-user
+/// concurrent-session limiter. When supplied, the `/metrics` body
+/// includes the `proteus_per_user_conn_limit_*` series. See
+/// [`serve_with_auth_full_v7`] for the operator rationale.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v7(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+    per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -986,6 +1091,9 @@ pub fn render_full_v6(
         }
         if let Some(pu) = per_user {
             body.push_str(&pu.prometheus());
+        }
+        if let Some(cl) = per_user_conn_limiter {
+            body.push_str(&cl.prometheus());
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -1508,6 +1616,66 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v7 with per_user_conn_limiter supplied emits the limiter's
+    /// three Prometheus series. Operator-facing test: confirms the
+    /// caller can wire the limiter through metrics_http and have it
+    /// surface on `/metrics`.
+    #[test]
+    fn render_full_v7_emits_per_user_conn_limit_block_when_limiter_supplied() {
+        use crate::per_user_conn_limit::PerUserConnLimiter;
+        let m = ServerMetrics::default();
+        let limiter = PerUserConnLimiter::new(6);
+        // Hold one slot for alice so active_users=1.
+        let _g = limiter.try_acquire(*b"alice001");
+        let (status, _ctype, body) = render_full_v7(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&limiter),
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(
+            body.contains("proteus_per_user_conn_limit_max_per_user 6"),
+            "{body}"
+        );
+        assert!(
+            body.contains("proteus_per_user_conn_limit_active_users 1"),
+            "{body}"
+        );
+        assert!(
+            body.contains("proteus_per_user_conn_limit_rejected_total 0"),
+            "{body}"
+        );
+    }
+
+    /// v7 with no limiter omits the conn-limit block entirely.
+    #[test]
+    fn render_full_v7_omits_conn_limit_block_when_limiter_none() {
+        let m = ServerMetrics::default();
+        let (_s, _c, body) = render_full_v7(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(
+            !body.contains("proteus_per_user_conn_limit_max_per_user"),
+            "{body}"
+        );
     }
 
     /// When the per-user accumulator has a rate detector wired,
