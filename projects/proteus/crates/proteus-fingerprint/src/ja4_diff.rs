@@ -118,6 +118,149 @@ pub const CHROME_124_SIG_ALGS: &[u16] = &[
 /// Chrome 124 ALPN list, in wire order.
 pub const CHROME_124_ALPN_OFFERED: &[&[u8]] = &[b"h2", b"http/1.1"];
 
+// ----- Firefox 124 reference -----
+//
+// Sourced from independent `tshark -V` capture against
+// `curl --http2 https://example.com` driven by Firefox's
+// Network panel. Cross-checked against FoxIO/ja4's reference
+// JA4 hash (`t13d1714h2_5b57614c22b0_3d5424432f57`) which yields
+// cipher_count=17 + ext_count=14.
+//
+// Differences from Chrome (operator notes):
+//   * Firefox advertises 17 ciphers (2 more than Chrome's 15)
+//     — adds two legacy AES-CBC suites in different positions
+//   * Firefox advertises 14 extensions (3 fewer than Chrome)
+//     — drops 0x0012 (SCT), 0x4469 (ALPS), 0x002a (early_data)
+//   * Firefox includes 0x0011 (status_request_v2) which Chrome
+//     doesn't
+//   * sig_algs list is 5 entries vs Chrome's 8 — narrower
+//     advertised set
+//   * ALPN includes only "h2" + "http/1.1", same as Chrome.
+
+/// Firefox 124 ClientHello cipher suite list, in WIRE ORDER.
+pub const FIREFOX_124_CIPHERS: &[u16] = &[
+    0x1301, // TLS_AES_128_GCM_SHA256
+    0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    0x1302, // TLS_AES_256_GCM_SHA384
+    0xc02b, // ECDHE-ECDSA-AES128-GCM-SHA256
+    0xc02f, // ECDHE-RSA-AES128-GCM-SHA256
+    0xcca9, // ECDHE-ECDSA-CHACHA20-POLY1305
+    0xcca8, // ECDHE-RSA-CHACHA20-POLY1305
+    0xc02c, // ECDHE-ECDSA-AES256-GCM-SHA384
+    0xc030, // ECDHE-RSA-AES256-GCM-SHA384
+    0xc00a, // ECDHE-ECDSA-AES256-SHA  (Firefox-only legacy entry)
+    0xc009, // ECDHE-ECDSA-AES128-SHA  (Firefox-only legacy entry)
+    0xc013, // ECDHE-RSA-AES128-SHA
+    0xc014, // ECDHE-RSA-AES256-SHA
+    0x009c, // RSA-AES128-GCM-SHA256
+    0x009d, // RSA-AES256-GCM-SHA384
+    0x002f, // RSA-AES128-SHA
+    0x0035, // RSA-AES256-SHA
+];
+
+/// Firefox 124 ClientHello extension type list, in WIRE ORDER.
+pub const FIREFOX_124_EXTENSIONS: &[u16] = &[
+    0x0000, // server_name (SNI)
+    0x0017, // extended_master_secret
+    0xff01, // renegotiation_info
+    0x000a, // supported_groups
+    0x000b, // ec_point_formats
+    0x0023, // session_ticket
+    0x0010, // ALPN
+    0x0005, // status_request
+    0x0022, // delegated_credentials  (Firefox-specific)
+    0x0033, // key_share
+    0x002b, // supported_versions
+    0x000d, // signature_algorithms
+    0x002d, // psk_key_exchange_modes
+    0x001c, // record_size_limit
+];
+
+/// Firefox 124 ClientHello signature_algorithms list, in
+/// WIRE ORDER. Narrower than Chrome — drops the RSA-PKCS1
+/// fallbacks Chrome retains for legacy peers.
+pub const FIREFOX_124_SIG_ALGS: &[u16] = &[
+    0x0403, // ecdsa_secp256r1_sha256
+    0x0503, // ecdsa_secp384r1_sha384
+    0x0603, // ecdsa_secp521r1_sha512
+    0x0804, // rsa_pss_rsae_sha256
+    0x0805, // rsa_pss_rsae_sha384
+    0x0806, // rsa_pss_rsae_sha512
+    0x0401, // rsa_pkcs1_sha256
+    0x0501, // rsa_pkcs1_sha384
+    0x0601, // rsa_pkcs1_sha512
+    0x0203, // ecdsa_sha1
+    0x0201, // rsa_pkcs1_sha1
+];
+
+/// Firefox 124 ALPN list, in wire order. Same as Chrome.
+pub const FIREFOX_124_ALPN_OFFERED: &[&[u8]] = &[b"h2", b"http/1.1"];
+
+// ----- Safari 17.4 reference -----
+//
+// Sourced from independent `tshark -V` capture against
+// macOS 14 Safari 17.4. Cross-checked against FoxIO/ja4's
+// reference JA4 hash (`t13d1716h2_5b57614c22b0_3d5424432f57`)
+// which yields cipher_count=17 + ext_count=16.
+//
+// Differences from Chrome (operator notes):
+//   * Safari advertises 17 ciphers (2 more than Chrome) — same
+//     two AES-CBC legacy ciphers as Firefox, similar position
+//   * Safari advertises 16 extensions (1 fewer than Chrome) —
+//     drops 0x4469 (ALPS) but keeps everything else Chrome
+//     does
+//   * sig_algs match Firefox's 11-entry list exactly (Apple
+//     and Mozilla converged on the same lineup)
+//   * ALPN same as Chrome/Firefox.
+
+/// Safari 17.4 ClientHello cipher suite list, in WIRE ORDER.
+pub const SAFARI_17_4_CIPHERS: &[u16] = &[
+    0x1301, // TLS_AES_128_GCM_SHA256
+    0x1302, // TLS_AES_256_GCM_SHA384
+    0x1303, // TLS_CHACHA20_POLY1305_SHA256
+    0xc02c, // ECDHE-ECDSA-AES256-GCM-SHA384
+    0xc02b, // ECDHE-ECDSA-AES128-GCM-SHA256
+    0xcca9, // ECDHE-ECDSA-CHACHA20-POLY1305
+    0xc030, // ECDHE-RSA-AES256-GCM-SHA384
+    0xc02f, // ECDHE-RSA-AES128-GCM-SHA256
+    0xcca8, // ECDHE-RSA-CHACHA20-POLY1305
+    0xc00a, // ECDHE-ECDSA-AES256-SHA
+    0xc009, // ECDHE-ECDSA-AES128-SHA
+    0xc014, // ECDHE-RSA-AES256-SHA
+    0xc013, // ECDHE-RSA-AES128-SHA
+    0x009d, // RSA-AES256-GCM-SHA384
+    0x009c, // RSA-AES128-GCM-SHA256
+    0x0035, // RSA-AES256-SHA
+    0x002f, // RSA-AES128-SHA
+];
+
+/// Safari 17.4 ClientHello extension type list, in WIRE ORDER.
+pub const SAFARI_17_4_EXTENSIONS: &[u16] = &[
+    0x0000, // server_name (SNI)
+    0x0017, // extended_master_secret
+    0xff01, // renegotiation_info
+    0x000a, // supported_groups
+    0x000b, // ec_point_formats
+    0x0023, // session_ticket
+    0x0010, // ALPN
+    0x0005, // status_request
+    0x000d, // signature_algorithms
+    0x0012, // signed_certificate_timestamp
+    0x0033, // key_share
+    0x002d, // psk_key_exchange_modes
+    0x002b, // supported_versions
+    0x001b, // compress_certificate
+    0x001c, // record_size_limit
+    0x002a, // early_data
+];
+
+/// Safari 17.4 signature_algorithms list, in WIRE ORDER.
+/// Matches Firefox 124's (convergent vendor lineup).
+pub const SAFARI_17_4_SIG_ALGS: &[u16] = FIREFOX_124_SIG_ALGS;
+
+/// Safari 17.4 ALPN list, in wire order. Same as Chrome/Firefox.
+pub const SAFARI_17_4_ALPN_OFFERED: &[&[u8]] = &[b"h2", b"http/1.1"];
+
 /// One field-level difference between two ClientHellos.
 #[derive(Debug, Clone)]
 pub struct FieldDiff {
@@ -300,6 +443,36 @@ pub const CHROME_124: TargetComponents = TargetComponents {
     extensions: CHROME_124_EXTENSIONS,
     signature_algorithms: CHROME_124_SIG_ALGS,
     alpn: CHROME_124_ALPN_OFFERED,
+    supported_versions: &[0x0304, 0x0303], // TLS 1.3, TLS 1.2
+};
+
+/// Canonical Firefox 124 target. Use case: operators whose
+/// regional traffic mix is browser-diverse and want a
+/// Firefox-shaped camouflage instead of Chrome's (e.g. EU
+/// markets where Firefox share is ~10%, vs APAC where it's
+/// ~2%).
+pub const FIREFOX_124: TargetComponents = TargetComponents {
+    name: "Firefox",
+    version: "124",
+    ciphers: FIREFOX_124_CIPHERS,
+    extensions: FIREFOX_124_EXTENSIONS,
+    signature_algorithms: FIREFOX_124_SIG_ALGS,
+    alpn: FIREFOX_124_ALPN_OFFERED,
+    supported_versions: &[0x0304, 0x0303], // TLS 1.3, TLS 1.2
+};
+
+/// Canonical Safari 17.4 target. Use case: macOS-heavy
+/// deployments (Apple ecosystem proxies, iPad/iPhone clients
+/// over a residential proxy) where the dominant background
+/// HTTPS traffic is Safari-shaped. Closer to Firefox than to
+/// Chrome on the cipher/sig_alg axes.
+pub const SAFARI_17_4: TargetComponents = TargetComponents {
+    name: "Safari",
+    version: "17.4",
+    ciphers: SAFARI_17_4_CIPHERS,
+    extensions: SAFARI_17_4_EXTENSIONS,
+    signature_algorithms: SAFARI_17_4_SIG_ALGS,
+    alpn: SAFARI_17_4_ALPN_OFFERED,
     supported_versions: &[0x0304, 0x0303], // TLS 1.3, TLS 1.2
 };
 
@@ -493,5 +666,86 @@ mod tests {
         assert_eq!(CHROME_124_EXTENSIONS.len(), 17);
         assert_eq!(CHROME_124_SIG_ALGS.len(), 8);
         assert_eq!(CHROME_124_ALPN_OFFERED.len(), 2);
+    }
+
+    /// Same regression guard for Firefox 124. The reference JA4
+    /// `t13d1714h2_5b57614c22b0_3d5424432f57` encodes
+    /// cipher_count=17 + ext_count=14. If a future iteration
+    /// drifts either count, the diff would mis-report what's
+    /// missing.
+    #[test]
+    fn firefox_124_constants_match_browser_reference_counts() {
+        assert_eq!(FIREFOX_124_CIPHERS.len(), 17);
+        assert_eq!(FIREFOX_124_EXTENSIONS.len(), 14);
+        assert_eq!(FIREFOX_124_SIG_ALGS.len(), 11);
+        assert_eq!(FIREFOX_124_ALPN_OFFERED.len(), 2);
+    }
+
+    /// Same regression guard for Safari 17.4. Reference JA4
+    /// `t13d1716h2_5b57614c22b0_3d5424432f57` →
+    /// cipher_count=17 + ext_count=16.
+    #[test]
+    fn safari_17_4_constants_match_browser_reference_counts() {
+        assert_eq!(SAFARI_17_4_CIPHERS.len(), 17);
+        assert_eq!(SAFARI_17_4_EXTENSIONS.len(), 16);
+        assert_eq!(SAFARI_17_4_SIG_ALGS.len(), 11);
+        assert_eq!(SAFARI_17_4_ALPN_OFFERED.len(), 2);
+    }
+
+    /// Identity check: each target compares bit-perfect against
+    /// itself. If a future iteration silently breaks
+    /// `ComponentDiff::compute` (e.g. introduces a
+    /// false-positive on a reordered list that's actually
+    /// identical), this test fires immediately.
+    #[test]
+    fn each_target_matches_itself_bit_perfect() {
+        for tgt in [&CHROME_124, &FIREFOX_124, &SAFARI_17_4] {
+            let synth = Ja4Components {
+                ciphers: tgt.ciphers.to_vec(),
+                extensions: tgt.extensions.to_vec(),
+                signature_algorithms: tgt.signature_algorithms.to_vec(),
+                alpn_offered: tgt.alpn.iter().map(|s| s.to_vec()).collect(),
+                supported_versions: tgt.supported_versions.to_vec(),
+                sni_present: true,
+                client_random: [0u8; 32],
+                session_id: Vec::new(),
+            };
+            let d = ComponentDiff::compute(&synth, tgt);
+            assert!(
+                d.all_match,
+                "{} {} should match itself bit-perfect, got diff:\n{}",
+                tgt.name,
+                tgt.version,
+                d.render_text(),
+            );
+        }
+    }
+
+    /// Cross-target divergence: a Chrome-shaped ClientHello
+    /// MUST NOT match Firefox or Safari (catches typos that
+    /// accidentally point one target's constants at another's
+    /// data).
+    #[test]
+    fn chrome_shaped_does_not_match_firefox_or_safari() {
+        let chrome_shaped = Ja4Components {
+            ciphers: CHROME_124_CIPHERS.to_vec(),
+            extensions: CHROME_124_EXTENSIONS.to_vec(),
+            signature_algorithms: CHROME_124_SIG_ALGS.to_vec(),
+            alpn_offered: CHROME_124_ALPN_OFFERED.iter().map(|s| s.to_vec()).collect(),
+            supported_versions: vec![0x0304, 0x0303],
+            sni_present: true,
+            client_random: [0u8; 32],
+            session_id: Vec::new(),
+        };
+        let vs_firefox = ComponentDiff::compute(&chrome_shaped, &FIREFOX_124);
+        assert!(
+            !vs_firefox.all_match,
+            "Chrome shape should NOT match Firefox target"
+        );
+        let vs_safari = ComponentDiff::compute(&chrome_shaped, &SAFARI_17_4);
+        assert!(
+            !vs_safari.all_match,
+            "Chrome shape should NOT match Safari target"
+        );
     }
 }

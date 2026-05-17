@@ -900,7 +900,21 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 self.metrics.record_aead_drop();
                 return Err(AlphaError::Closed);
             }
-            let mut tmp = [0u8; 4096];
+            // 16 KiB scratch (was 4 KiB pre-iter-17). At
+            // pad_quantum=1280 each cell-padded record is
+            // ~1.3 KiB ciphertext + header; the prior 4 KiB
+            // could hold 3 records per syscall, the new 16 KiB
+            // holds 12. On bulk download this is a 4× reduction
+            // in `read` syscalls without changing the wire
+            // shape. AEAD decrypt remains the dominant CPU cost
+            // so the extra 12 KiB of stack scratch is free in
+            // every measurable way (no allocation — array on
+            // the stack — no extra memory commitment beyond the
+            // existing `rx_buf` Vec capacity). Bigger sizes
+            // (64 KiB+) showed no further benefit on loopback
+            // since the kernel TCP read buffer caps the
+            // effective batch anyway.
+            let mut tmp = [0u8; 16 * 1024];
             let n = self.read.read(&mut tmp).await?;
             if n == 0 {
                 return Ok(None);

@@ -1783,13 +1783,18 @@ latest hardening pass:
   and ext_count still differ from Chrome (`09`/`11` vs Chrome's
   `15`/`17`). Closing this fully needs forking rustls's
   ClientHello assembler — multi-week build. **This is the one
-  street REALITY still leads on.** Now operator-actionable via
-  `proteus-server fingerprint --target chrome-124` which prints
-  a **byte-level diff** vs Chrome 124's reference ClientHello —
-  exact list of ciphers/extensions/sig_algs to add/remove and
-  per-item wire-position mismatches. The diff goes to "all_match"
-  the moment uTLS-replay lands, gating the fork-rustls work
-  with a measurable target instead of a hand-decoded pcap diff.
+  street REALITY still leads on.** Operator-actionable via
+  `proteus-server fingerprint --target {chrome-124, firefox-124,
+  safari-17.4}` which prints a **byte-level diff** vs that
+  browser's reference ClientHello — exact list of
+  ciphers/extensions/sig_algs to add/remove and per-item
+  wire-position mismatches. The diff goes to "all_match" the
+  moment uTLS-replay lands, gating the fork-rustls work with a
+  measurable target instead of a hand-decoded pcap diff. Iter-17
+  added the Firefox + Safari targets so operators with
+  non-Chrome-dominant traffic mixes (EU / Apple-ecosystem
+  deployments) can pick the closer camouflage for the local
+  background-traffic shape.
 - ❌ **Multipath QUIC** (spec §10.4): not started.
 - ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
   publication. Needed to hide `proteus-β-v1` ALPN in flight.

@@ -139,20 +139,29 @@ enum Cmd {
         /// Output format: `text` (default) or `json`.
         #[arg(long, default_value = "text")]
         format: String,
-        /// When set to `chrome-124`, append a COMPONENT-LEVEL
-        /// diff vs Chrome 124's ClientHello (cipher / extension /
-        /// sig_algs / ALPN / supported_versions lists with
-        /// per-item add/remove/reorder bullets). This is the
-        /// operator-facing surface for closing the uTLS gap:
-        /// the JA4 hash alone tells you "they differ"; the
-        /// component diff tells you "remove cipher 0xc0a8, add
-        /// extension 0x4469 at position 16, swap sig_alg
-        /// positions 2↔3". When uTLS-replay ships and the diff
-        /// hits zero, the whole tool becomes the gate.
+        /// When set to a target browser label, append a
+        /// COMPONENT-LEVEL diff vs that browser's ClientHello
+        /// (cipher / extension / sig_algs / ALPN /
+        /// supported_versions lists with per-item
+        /// add/remove/reorder bullets). The JA4 hash alone tells
+        /// you "they differ"; the component diff tells you
+        /// "remove cipher 0xc0a8, add extension 0x4469 at
+        /// position 16, swap sig_alg positions 2↔3". When uTLS-
+        /// replay ships and the diff hits zero, the whole tool
+        /// becomes the gate.
+        ///
+        /// Supported targets (iter-17):
+        ///   * `chrome-124`  — Chrome/Edge 124 (Chromium 124).
+        ///     Dominant desktop browser fingerprint.
+        ///   * `firefox-124` — Firefox 124. EU markets where
+        ///     Firefox share is ~10%.
+        ///   * `safari-17.4` — Safari 17.4 on macOS 14. Apple-
+        ///     ecosystem deployments (Mac/iOS traffic mix).
         ///
         /// Empty string (default) skips the diff section.
-        /// Currently the only supported target is `chrome-124`;
-        /// follow-on iterations add `firefox-124`, `safari-17`.
+        /// Other browsers (Edge mobile, Chrome Android, Safari
+        /// iOS) tend to converge to one of these three on the
+        /// JA4-relevant axes.
         #[arg(long, default_value = "")]
         target: String,
     },
@@ -548,22 +557,45 @@ async fn run_fingerprint_cmd(
     // the loopback observer because the underlying observer
     // doesn't return the raw bytes; the cost is one extra
     // ~50ms handshake, only when the operator asked.
-    let component_diff = match target {
-        "" => None,
-        "chrome-124" => {
-            proteus_server::tls_fingerprint_observer::observe_live_ja4_with_components(leaf)
-                .await
-                .map(|(_ja4, components)| {
-                    proteus_fingerprint::ja4_diff::ComponentDiff::compute(
-                        &components,
-                        &proteus_fingerprint::ja4_diff::CHROME_124,
-                    )
-                })
-        }
+    // Iter-17: --target now accepts chrome-124, firefox-124,
+    // safari-17.4. The diff infrastructure is target-agnostic;
+    // we just route the operator's label to the corresponding
+    // canonical `TargetComponents` const. Other browsers (Edge,
+    // mobile Chrome / Safari iOS) tend to converge to one of
+    // these three — operators with niche needs can add a row
+    // to ja4_diff.rs and a case here.
+    let (target_components, target_label): (
+        Option<&proteus_fingerprint::ja4_diff::TargetComponents>,
+        &str,
+    ) = match target {
+        "" => (None, ""),
+        "chrome-124" => (
+            Some(&proteus_fingerprint::ja4_diff::CHROME_124),
+            "chrome-124",
+        ),
+        "firefox-124" => (
+            Some(&proteus_fingerprint::ja4_diff::FIREFOX_124),
+            "firefox-124",
+        ),
+        "safari-17.4" => (
+            Some(&proteus_fingerprint::ja4_diff::SAFARI_17_4),
+            "safari-17.4",
+        ),
         other => {
-            eprintln!("unknown --target {other:?}; supported: chrome-124 (or empty for no diff)");
+            eprintln!(
+                "unknown --target {other:?}; supported: chrome-124, firefox-124, safari-17.4 (or empty for no diff)"
+            );
             return Ok(2);
         }
+    };
+    let component_diff = if let Some(tgt) = target_components {
+        proteus_server::tls_fingerprint_observer::observe_live_ja4_with_components(leaf)
+            .await
+            .map(|(_ja4, components)| {
+                proteus_fingerprint::ja4_diff::ComponentDiff::compute(&components, tgt)
+            })
+    } else {
+        None
     };
 
     match format {
@@ -589,8 +621,8 @@ async fn run_fingerprint_cmd(
             if let Some(diff) = component_diff.as_ref() {
                 let _ = write!(
                     s,
-                    r#","component_diff_target":"chrome-124","component_diff_all_match":{}"#,
-                    diff.all_match
+                    r#","component_diff_target":"{}","component_diff_all_match":{}"#,
+                    target_label, diff.all_match
                 );
                 for (field_name, field) in [
                     ("ciphers", &diff.ciphers),
