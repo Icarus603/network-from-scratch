@@ -87,8 +87,9 @@ pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
 }
 
 /// Performance + privacy knobs for β QUIC. The defaults match what
-/// `apply_perf_tuning` ships — Hy2/TUIC5-grade throughput, no
-/// extra traffic-analysis padding at the UDP layer.
+/// `apply_perf_tuning` ships — Hy2/TUIC5-grade throughput, *plus*
+/// a privacy default (`allow_spin_bit = false`) that quinn itself
+/// does not enable by default.
 ///
 /// Operators who care more about wire-fingerprint uniformity than
 /// raw throughput can flip `pad_quic_datagrams_to_mtu = true`.
@@ -110,6 +111,65 @@ pub struct PerfProfile {
     /// for production anti-censorship deployments where bandwidth
     /// >> detectability.
     pub pad_quic_datagrams_to_mtu: bool,
+    /// **Wire-visible RTT inference via the QUIC spin bit
+    /// (RFC 9000 §17.4)**. When true, on-path passive observers can
+    /// measure the connection's round-trip time by watching the
+    /// spin bit's toggle frequency in the 1-RTT header. The
+    /// information is unencrypted by design — the spin bit is a
+    /// deliberate operator-debugging escape hatch QUIC carves out
+    /// of its otherwise-encrypted header.
+    ///
+    /// quinn's default is `true` (set by upstream for ecosystem
+    /// compatibility). Proteus's default is **`false`** — we are
+    /// not going to leak RTT to any GFW-class observer who has the
+    /// budget to watch the spin bit. Set `true` only if you have a
+    /// specific operational reason to want the leak (e.g.,
+    /// debugging an enterprise network's QoS that uses spin-bit RTT
+    /// as a SLA signal).
+    pub allow_spin_bit: bool,
+    /// **Reduced ACK frequency via RFC 9802 (draft-ietf-quic-ack-frequency)**.
+    ///
+    /// When set > 1, we ask the peer to bunch up to N ack-eliciting
+    /// packets per ACK frame instead of the default 1-ACK-per-2-packets.
+    /// On a high-bandwidth bulk-data flow at 1 Gbps (≈ 80 k pkts/s),
+    /// this can cut the ACK packet rate by ~5–10× and reclaim CPU
+    /// (also the per-packet small-write cost) on the data path.
+    /// Hysteria2 and similar quinn-based VPN stacks tune this for
+    /// bulk throughput on long-fat-pipe paths.
+    ///
+    /// **Default: `1` (disabled / quinn upstream behavior).**
+    ///
+    /// We deliberately ship the disabled default after measuring that
+    /// `ack_eliciting_threshold = 10` *catastrophically* harms loopback
+    /// throughput (0.5 MiB/s vs 100+ MiB/s) — BBR's bandwidth
+    /// estimator cannot converge on a very-low-RTT path when the
+    /// peer holds ACKs back by 10 packets. The cost manifests on any
+    /// short-RTT scenario (LAN, intra-DC), which means a static
+    /// default is a footgun for the operator who happens to deploy
+    /// in those regimes.
+    ///
+    /// Operators with measured long-fat-pipe paths (e.g. cross-
+    /// Pacific VPS deployments where the RTT × bandwidth product is
+    /// high enough that ACK overhead is meaningful) can opt in via
+    /// `beta_ack_eliciting_threshold: 10` in `server.yaml` /
+    /// `client.yaml`. The peer is free to ignore the request if it
+    /// doesn't support the extension; this knob is best-effort.
+    ///
+    /// Regression source: tests/throughput_smoke.rs went from
+    /// 107 MiB/s → 0.5 MiB/s on loopback when this defaulted to 10.
+    pub ack_eliciting_threshold: u32,
+    /// Upper bound that MTU discovery will probe up to (bytes).
+    ///
+    /// quinn's default is 1452 — fits under a 1500-byte Ethernet
+    /// MTU with v6 + UDP overhead. Bumping this to e.g. 9000 lets
+    /// us discover jumbo-frame paths on intra-DC / IPv6-tunnel
+    /// routes that support it, with no downside on standard paths
+    /// (quinn just probes and stops when packets start dropping).
+    ///
+    /// Default: 1452 (matches quinn). Operators with a known
+    /// jumbo-frame path can raise this in `server.yaml` /
+    /// `client.yaml` (`beta_mtu_upper_bound: 9000`).
+    pub mtu_upper_bound: u16,
 }
 
 impl Default for PerfProfile {
@@ -117,6 +177,21 @@ impl Default for PerfProfile {
         Self {
             initial_mtu: 1350,
             pad_quic_datagrams_to_mtu: false,
+            // PRIVACY: deliberately diverge from quinn's `true`
+            // default. The spin bit is a wire-visible RTT side
+            // channel and we have no operational use for it.
+            allow_spin_bit: false,
+            // ACK-frequency reduction — see field doc for why this
+            // defaults to DISABLED. Operators on long-fat-pipe paths
+            // can opt in via YAML (`beta_ack_eliciting_threshold:
+            // 10`); the default-disabled is what prevents the
+            // loopback / LAN / intra-DC catastrophic-throughput
+            // footgun.
+            ack_eliciting_threshold: 1,
+            // SPEED: explicit MTU discovery upper bound — matches
+            // quinn's current default but pins it so a future quinn
+            // upgrade can't silently regress paths that depend on it.
+            mtu_upper_bound: 1452,
         }
     }
 }
@@ -148,7 +223,29 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         // MTU bump — see PerfProfile docs.
         .initial_mtu(profile.initial_mtu)
         // Optional UDP-layer padding — see PerfProfile docs.
-        .pad_to_mtu(profile.pad_quic_datagrams_to_mtu);
+        .pad_to_mtu(profile.pad_quic_datagrams_to_mtu)
+        // PRIVACY: spin bit off by default. See PerfProfile docs.
+        .allow_spin(profile.allow_spin_bit);
+
+    // SPEED (opt-in): ACK-frequency reduction (RFC 9802). Only set
+    // when operator explicitly raised the threshold > 1 — the
+    // default of `1` ships disabled because the BBR / low-RTT
+    // interaction breaks loopback throughput. See PerfProfile
+    // docstring for the measurement.
+    if profile.ack_eliciting_threshold > 1 {
+        let mut ack = quinn::AckFrequencyConfig::default();
+        ack.ack_eliciting_threshold(quinn::VarInt::from_u32(profile.ack_eliciting_threshold));
+        transport.ack_frequency_config(Some(ack));
+    }
+
+    // SPEED: explicit MTU discovery configuration. Pinning the
+    // upper_bound prevents quinn-default drift from silently changing
+    // jumbo-frame discovery behavior across version bumps. Safe to
+    // always enable — quinn searches up to the bound and stops on
+    // packet loss.
+    let mut mtud = quinn::MtuDiscoveryConfig::default();
+    mtud.upper_bound(profile.mtu_upper_bound);
+    transport.mtu_discovery_config(Some(mtud));
 }
 
 /// The β-profile ALPN identifier, per spec §14.4 ("ALPN Protocol IDs:
@@ -165,5 +262,83 @@ mod alpn_test {
         // 0xce 0xb2. The full bytestring decodes to "proteus-β-v1".
         let s = std::str::from_utf8(ALPN).expect("ALPN must be UTF-8");
         assert_eq!(s, "proteus-β-v1");
+    }
+}
+
+#[cfg(test)]
+mod perf_profile_defaults {
+    use super::PerfProfile;
+
+    /// Privacy regression guard: if some future change flips the
+    /// spin-bit default back on (matching quinn upstream's default),
+    /// this fails loudly. The spin bit is a wire-visible RTT side
+    /// channel — defaulting it ON would silently weaken every β
+    /// connection's privacy.
+    #[test]
+    fn spin_bit_is_off_by_default() {
+        let p = PerfProfile::default();
+        assert!(
+            !p.allow_spin_bit,
+            "PerfProfile::default().allow_spin_bit MUST be false — \
+             the spin bit (RFC 9000 §17.4) is a wire-visible RTT \
+             oracle for on-path observers. quinn defaults this to true \
+             for ecosystem compatibility; Proteus deliberately overrides."
+        );
+    }
+
+    /// ACK-frequency reduction defaults to DISABLED (= 1).
+    ///
+    /// **Footgun preventer**: setting this > 1 by default
+    /// catastrophically harms loopback / LAN / intra-DC throughput
+    /// (measured: 107 MiB/s → 0.5 MiB/s on loopback with threshold = 10).
+    /// BBR's bandwidth estimator cannot converge on very-low-RTT
+    /// paths when ACKs are bunched 10× behind. Operators with
+    /// measured long-fat-pipe paths opt in via YAML.
+    #[test]
+    fn ack_eliciting_threshold_default_is_disabled() {
+        let p = PerfProfile::default();
+        assert_eq!(
+            p.ack_eliciting_threshold, 1,
+            "PerfProfile::default().ack_eliciting_threshold MUST be 1 (disabled). \
+             A higher default breaks loopback / LAN throughput (BBR can't converge \
+             when ACKs are bunched on a sub-ms RTT path); operators opt into the \
+             long-fat-pipe optimization via `beta_ack_eliciting_threshold` in YAML.",
+        );
+    }
+
+    /// MTU discovery upper bound is pinned, not relying on quinn's
+    /// default. If quinn ever changes its default (e.g. raises to
+    /// support jumbo frames out of the box), our wire behavior
+    /// stays predictable.
+    #[test]
+    fn mtu_upper_bound_is_pinned_to_ethernet_max() {
+        let p = PerfProfile::default();
+        assert_eq!(
+            p.mtu_upper_bound, 1452,
+            "default MTU upper_bound must stay at 1452 (Ethernet \
+             max under IPv6+UDP overhead); raise deliberately in \
+             operator YAML for jumbo-frame paths",
+        );
+    }
+
+    /// Initial MTU stays conservative — covers ≥ 99 % of real-world
+    /// paths without triggering ICMP-blackhole drops.
+    #[test]
+    fn initial_mtu_default_is_safe() {
+        let p = PerfProfile::default();
+        assert!(
+            (1200..=1452).contains(&p.initial_mtu),
+            "initial_mtu must be in [1200, 1452]; got {}",
+            p.initial_mtu,
+        );
+    }
+
+    /// Pad-to-MTU defaults to OFF for raw throughput. The traffic-
+    /// analysis defense is a deliberate operator opt-in
+    /// (`beta_pad_quic_to_mtu: true`) per README.
+    #[test]
+    fn pad_to_mtu_default_is_off() {
+        let p = PerfProfile::default();
+        assert!(!p.pad_quic_datagrams_to_mtu);
     }
 }

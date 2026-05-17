@@ -539,13 +539,34 @@ mod tests {
     use std::path::PathBuf;
 
     fn tmpdir() -> PathBuf {
+        // Three discriminators stacked because validate's unit tests
+        // run in parallel inside ONE process — PID alone collides
+        // across tests in the same binary; nanos alone collides on
+        // fast machines that emit two SystemTime::now()s in the same
+        // ns; thread id alone is reused across executor parks. The
+        // tuple `(pid, nanos, thread_id, atomic_counter)` is
+        // belt-and-suspenders against every collision class we've
+        // hit. Without this, `negative_rate_limit_fails` (and any
+        // other test using `tmpdir()`) intermittently fails under
+        // heavy parallel workspace test load when two tests pick the
+        // same dir and one trashes the other's placeholder key files
+        // mid-flight — manifested as "report did not contain
+        // expected FAIL" because the FAIL came from missing files
+        // instead of the rate-limit check.
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = format!("{:?}", std::thread::current().id());
+        let tid_digits: String = tid.chars().filter(|c| c.is_ascii_digit()).collect();
         let p = std::env::temp_dir().join(format!(
-            "proteus-preflight-{}-{}",
+            "proteus-preflight-{}-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_nanos()
+                .as_nanos(),
+            tid_digits,
+            n,
         ));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).unwrap();
@@ -567,6 +588,9 @@ mod tests {
             beta_private_key: None,
             beta_initial_mtu: None,
             beta_pad_quic_to_mtu: None,
+            beta_allow_spin_bit: None,
+            beta_ack_eliciting_threshold: None,
+            beta_mtu_upper_bound: None,
             keys: KeysCfg {
                 mlkem_pk: dir.join("mlkem.pk"),
                 mlkem_sk: dir.join("mlkem.sk"),

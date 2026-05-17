@@ -67,8 +67,15 @@ server_endpoint: "vps.example.com:8443"
 # beta_first_timeout_secs: 3
 #
 # β QUIC performance / traffic-analysis tunables. Defaults:
-#   beta_initial_mtu = 1350         (conservative, covers most paths)
-#   beta_pad_quic_to_mtu = false    (max throughput; UDP wire-length leaks)
+#   beta_initial_mtu = 1350              (conservative; covers most paths)
+#   beta_pad_quic_to_mtu = false         (max throughput; UDP wire-length leaks)
+#   beta_allow_spin_bit = false          (PRIVACY: defeats passive on-path RTT
+#                                         inference; quinn upstream defaults to true)
+#   beta_ack_eliciting_threshold = 1     (DISABLED — RFC 9802 ACK reduction
+#                                         breaks BBR on sub-ms RTT paths;
+#                                         opt in to 10 ONLY for measured
+#                                         long-fat-pipe deploys)
+#   beta_mtu_upper_bound = 1452          (Ethernet max under IPv6+UDP)
 #
 # Production anti-censorship config (match server-side settings —
 # the choices interact with quinn's path-MTU discovery):

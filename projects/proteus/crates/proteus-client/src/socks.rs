@@ -237,6 +237,15 @@ async fn try_beta(
     if let Some(v) = cfg.beta_pad_quic_to_mtu {
         perf.pad_quic_datagrams_to_mtu = v;
     }
+    if let Some(v) = cfg.beta_allow_spin_bit {
+        perf.allow_spin_bit = v;
+    }
+    if let Some(v) = cfg.beta_ack_eliciting_threshold {
+        perf.ack_eliciting_threshold = v;
+    }
+    if let Some(v) = cfg.beta_mtu_upper_bound {
+        perf.mtu_upper_bound = v;
+    }
     let connect_fut = proteus_transport_beta::client::connect_with_timeout_and_perf(
         server_name,
         server_addr,

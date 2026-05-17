@@ -1054,6 +1054,15 @@ fn build_beta_endpoint(
     if let Some(v) = cfg.beta_pad_quic_to_mtu {
         perf.pad_quic_datagrams_to_mtu = v;
     }
+    if let Some(v) = cfg.beta_allow_spin_bit {
+        perf.allow_spin_bit = v;
+    }
+    if let Some(v) = cfg.beta_ack_eliciting_threshold {
+        perf.ack_eliciting_threshold = v;
+    }
+    if let Some(v) = cfg.beta_mtu_upper_bound {
+        perf.mtu_upper_bound = v;
+    }
     let endpoint = proteus_transport_beta::server::make_endpoint_with_perf(bind, chain, key, perf)
         .map_err(|e| format!("β endpoint: {e}"))?;
     Ok(Some(endpoint))

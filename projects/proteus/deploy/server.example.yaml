@@ -19,9 +19,19 @@ listen_alpha: "0.0.0.0:8443"
 # when UDP is blocked.
 # listen_beta: "0.0.0.0:8443"
 #
-# β QUIC performance / traffic-analysis tunables. Defaults:
-#   beta_initial_mtu = 1350         (conservative, covers most paths)
-#   beta_pad_quic_to_mtu = false    (max throughput, wire-byte-length leaks)
+# β QUIC performance / traffic-analysis / privacy tunables. Defaults:
+#   beta_initial_mtu = 1350              (conservative; covers most paths)
+#   beta_pad_quic_to_mtu = false         (max throughput, wire-byte-length leaks)
+#   beta_allow_spin_bit = false          (PRIVACY: defeats passive on-path
+#                                         RTT inference; quinn upstream
+#                                         defaults this to true)
+#   beta_ack_eliciting_threshold = 1     (DISABLED — RFC 9802 ACK reduction
+#                                         catastrophically harms loopback /
+#                                         LAN / intra-DC throughput because
+#                                         BBR can't converge with bunched
+#                                         ACKs on sub-ms RTT paths; opt in
+#                                         ONLY for measured long-fat-pipe)
+#   beta_mtu_upper_bound = 1452          (Ethernet max under IPv6+UDP)
 #
 # For production anti-censorship deployments where bandwidth >>
 # detectability:
@@ -32,6 +42,22 @@ listen_alpha: "0.0.0.0:8443"
 #                                    AEAD padding)
 # beta_initial_mtu: 1350
 # beta_pad_quic_to_mtu: false
+#
+# For known jumbo-frame paths (intra-DC, IPv6 tunnels):
+#   beta_mtu_upper_bound: 9000      (lets MTU discovery probe up to 9k)
+#
+# For MEASURED long-fat-pipe paths only (e.g. cross-Pacific deploy
+# with > 100 ms RTT and > 100 Mbit/s bandwidth — only opt in after
+# benchmarking on the actual production path; the value 10 is what
+# Hy2-class deployments use):
+#   beta_ack_eliciting_threshold: 10
+#
+# Operators almost never need to flip these — defaults are safer
+# than the underlying quinn defaults. The only common override is
+# `beta_pad_quic_to_mtu: true` for censorship-resistance deploys.
+# beta_allow_spin_bit: false
+# beta_ack_eliciting_threshold: 1
+# beta_mtu_upper_bound: 1452
 
 # Prometheus exposition + container health probes (optional). The
 # same listener serves three routes:

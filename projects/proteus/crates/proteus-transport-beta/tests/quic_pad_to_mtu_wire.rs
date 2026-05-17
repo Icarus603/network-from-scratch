@@ -68,6 +68,7 @@ async fn beta_pad_to_mtu_uniform_datagram_size_on_wire() {
     let perf = proteus_transport_beta::PerfProfile {
         initial_mtu: PAD_MTU,
         pad_quic_datagrams_to_mtu: true,
+        ..Default::default()
     };
     let endpoint = proteus_transport_beta::server::make_endpoint_with_perf(
         server_bind,
@@ -158,6 +159,7 @@ async fn beta_pad_to_mtu_uniform_datagram_size_on_wire() {
             proteus_transport_beta::PerfProfile {
                 initial_mtu: PAD_MTU,
                 pad_quic_datagrams_to_mtu: true,
+                ..Default::default()
             },
         ),
     )

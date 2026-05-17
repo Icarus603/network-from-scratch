@@ -57,6 +57,34 @@ pub struct ServerConfig {
     /// detectability.
     #[serde(default)]
     pub beta_pad_quic_to_mtu: Option<bool>,
+    /// β QUIC: **spin bit** (RFC 9000 §17.4). When `false` (default),
+    /// the server emits a random value in the spin-bit position on
+    /// every 1-RTT packet — defeats passive on-path RTT inference.
+    /// When `true`, quinn's spin-bit logic is active and the bit
+    /// toggles in lock-step with RTT (a wire-visible side channel
+    /// for any on-path observer including the GFW). Operators
+    /// should leave this off; the only reason to set it true is to
+    /// debug enterprise SLA dashboards that key on spin-bit RTT.
+    #[serde(default)]
+    pub beta_allow_spin_bit: Option<bool>,
+    /// β QUIC: ACK-frequency reduction (RFC 9802 /
+    /// draft-ietf-quic-ack-frequency-04). Asks the peer to bundle up
+    /// to N ack-eliciting packets per ACK instead of every other one.
+    /// Default 10 — same value Hysteria2 and other quinn-based
+    /// stacks tune for bulk throughput. Set 1 to disable (= quinn
+    /// default of ACK per 2 packets). Set higher for known long-
+    /// fat-pipe paths where you've measured the ACK overhead.
+    /// Peers without the extension silently ignore it.
+    #[serde(default)]
+    pub beta_ack_eliciting_threshold: Option<u32>,
+    /// β QUIC: MTU discovery upper bound. quinn searches up to this
+    /// value during path-MTU probes. Default 1452 (Ethernet under
+    /// IPv6+UDP). Raise to 9000 on known jumbo-frame paths
+    /// (intra-DC / IPv6 tunnels) for a real throughput win.
+    /// quinn just probes higher and stops when packets drop, so a
+    /// too-high value is harmless on non-jumbo paths.
+    #[serde(default)]
+    pub beta_mtu_upper_bound: Option<u16>,
     pub keys: KeysCfg,
     #[serde(default)]
     pub client_allowlist: Vec<ClientCfg>,

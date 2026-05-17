@@ -37,6 +37,18 @@
 //! -p proteus-transport-beta` when run alongside the other 8 β tests
 //! that all hammer multi-threaded tokio runtimes — a regression
 //! we hit on 2026-05-17.
+//!
+//! ## 2026-05-18: caught a real BBR regression
+//!
+//! Adding new perf knobs to `PerfProfile` accidentally defaulted
+//! RFC 9802 ACK reduction to `threshold = 10` — this *catastrophically*
+//! collapsed loopback throughput from 107 MiB/s → 0.5 MiB/s because
+//! BBR's bandwidth estimator can't converge when ACKs are bunched
+//! 10× behind on a sub-ms RTT path. This test surfaced the bug
+//! within one iteration; the fix is to default the knob to 1 and
+//! make it an explicit operator opt-in for measured long-fat-pipe
+//! deploys. Test stays active in the default workspace pass — the
+//! floor is the production guarantee.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};

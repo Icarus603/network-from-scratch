@@ -65,6 +65,28 @@ pub struct ClientConfig {
     /// censorship deployments where bandwidth >> detectability.
     #[serde(default)]
     pub beta_pad_quic_to_mtu: Option<bool>,
+    /// β QUIC: spin bit (RFC 9000 §17.4). **Off by default** —
+    /// quinn's upstream default is `true` (set for ecosystem
+    /// compatibility); Proteus deliberately overrides because the
+    /// spin bit is a wire-visible passive-RTT side channel for any
+    /// on-path observer including the GFW. Operators should leave
+    /// this unset; the only use case for enabling it is debugging
+    /// enterprise SLA dashboards that key on spin-bit RTT.
+    #[serde(default)]
+    pub beta_allow_spin_bit: Option<bool>,
+    /// β QUIC: ACK-frequency reduction (RFC 9802 /
+    /// draft-ietf-quic-ack-frequency-04). Default 10. Tells the
+    /// peer it may bundle up to N ack-eliciting packets per ACK
+    /// frame. Cuts ACK overhead by ~5-10× on high-bandwidth flows.
+    /// Set 1 to disable (= quinn default of ACK per 2 packets);
+    /// peers without the extension silently ignore it.
+    #[serde(default)]
+    pub beta_ack_eliciting_threshold: Option<u32>,
+    /// β QUIC: MTU discovery upper bound. quinn probes path-MTU up
+    /// to this value. Default 1452. Raise to 9000 on known jumbo-
+    /// frame paths for a real throughput win.
+    #[serde(default)]
+    pub beta_mtu_upper_bound: Option<u16>,
     /// Data-plane padding quantum (bytes). When non-zero, every
     /// outgoing DATA record's plaintext is wrapped as
     /// `[4-byte BE real_len | real_payload | zero-pad]` and rounded

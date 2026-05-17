@@ -93,6 +93,9 @@ SNI-based QUIC Censorship of the Great Firewall of China" — applied to β only
 | compress_certificate (ext 0x001b) | ✅ rustls `brotli` feature | ❌ | n/a |
 | ML-KEM-768 hybrid handshake (PQ) | ✅ X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
 | QUIC CONNECTION_CLOSE indistinguishability (no wire-visible reject signal, RFC 9000 §19.19) | ✅ all closes are NO_ERROR+empty (3 wire tests + 1 static-source audit) | n/a (TCP) | ❌ distinct close codes leak policy |
+| QUIC spin bit (RFC 9000 §17.4) — wire-visible passive RTT inference | ✅ `allow_spin_bit = false` default + random-fill compensation (wire-test pinned, 30-70% Bernoulli band) | n/a (TCP) | ❌ quinn upstream default = `true` |
+| QUIC ACK frequency (RFC 9802) — bulk-flow ACK overhead | ⚠ knob exposed, **default disabled** — value `10` breaks BBR on sub-ms RTT (measured 107 → 0.5 MiB/s loopback collapse); operators opt in via `beta_ack_eliciting_threshold: 10` for measured long-fat-pipe paths only | n/a | ⚠ Hy2 tunes similarly, TUIC-v5 doesn't |
+| QUIC MTU discovery upper bound | ✅ explicit `mtu_upper_bound = 1452` (pinned against quinn default drift; raise to 9000 for jumbo-frame paths) | n/a | ⚠ implicit reliance on quinn default |
 
 ---
 

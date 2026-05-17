@@ -325,6 +325,9 @@ mod tests {
             beta_private_key: None,
             beta_initial_mtu: None,
             beta_pad_quic_to_mtu: None,
+            beta_allow_spin_bit: None,
+            beta_ack_eliciting_threshold: None,
+            beta_mtu_upper_bound: None,
             keys: KeysCfg {
                 mlkem_pk: PathBuf::from("/dev/null"),
                 mlkem_sk: PathBuf::from("/dev/null"),
