@@ -729,6 +729,7 @@ mod tests {
             handshake_deadline_secs: None,
             tcp_keepalive_secs: None,
             restart_state_file: None,
+            knock_psk_file: None,
             tls: None,
             pow_difficulty: None,
             drain_secs: None,

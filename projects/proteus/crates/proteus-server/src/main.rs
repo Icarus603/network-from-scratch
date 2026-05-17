@@ -26,6 +26,7 @@ use tracing_subscriber::EnvFilter;
 
 mod gencert;
 mod keygen;
+mod knock_keygen;
 
 use proteus_server::config;
 use proteus_server::relay;
@@ -59,6 +60,30 @@ enum Cmd {
         dns_name: String,
         /// Output directory.
         #[arg(long, default_value = "./keys/tls")]
+        out: PathBuf,
+    },
+    /// Mint a fresh 32-byte server-knock PSK and write it to
+    /// `--out` with mode 0600. Operator distributes the SAME bytes
+    /// to every Proteus client via the existing out-of-band
+    /// channel; the client sends an HMAC-bound knock with each
+    /// connection so the server can distinguish "real Proteus
+    /// client" from "GFW active prober" BEFORE TLS even
+    /// terminates locally (Path A → REALITY-grade probe
+    /// resistance, builds on `proteus_handshake::knock`).
+    ///
+    /// Rotation: independent from the identity-key lifecycle
+    /// (`keygen`) — rotate frequently after a client device is
+    /// lost, infrequently when the distribution channel is
+    /// expensive.
+    ///
+    /// File format: two comment lines + one base64-encoded line
+    /// containing the 32 bytes. Hand-editable for emergency
+    /// rotations; the loader rejects multi-data-line files so
+    /// half-edits surface clearly.
+    KnockKeygen {
+        /// Output file path (NOT a directory — the knock PSK is
+        /// a single key, not a bundle).
+        #[arg(long, default_value = "/etc/proteus/keys/server.knock_psk")]
         out: PathBuf,
     },
     /// Start the server.
@@ -355,6 +380,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Keygen { out } => keygen::run(&out)?,
         Cmd::Gencert { dns_name, out } => gencert::run(&dns_name, &out)?,
+        Cmd::KnockKeygen { out } => {
+            knock_keygen::run(&out)?;
+        }
         Cmd::Run { config } => run(&config).await?,
         Cmd::Validate { config } => {
             let ok = proteus_server::validate::run(&config).await?;
@@ -725,6 +753,49 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
     let keys = load_server_keys(&cfg)?;
     let mut ctx = ServerCtx::new(keys);
+
+    // Load the optional knock PSK. When set, this PSK gates
+    // the Path A pre-auth-passthrough behavior (REALITY-grade
+    // probe resistance) — the transport-layer consumer ships
+    // in a follow-up iteration. Loading at startup catches
+    // file-permission / format errors NOW rather than at the
+    // first connection.
+    let _knock_psk: Option<proteus_handshake::knock::KnockPsk> = match cfg.knock_psk_file.as_ref() {
+        Some(path) => {
+            match knock_keygen::load(path) {
+                Ok(bytes) => {
+                    info!(
+                        path = ?path,
+                        "knock PSK loaded — Path A probe-resistance primitive ready \
+                         (transport-layer passthrough wiring is a follow-up iteration)"
+                    );
+                    Some(proteus_handshake::knock::KnockPsk::from_bytes(bytes))
+                }
+                Err(e) => {
+                    // Fatal — operator explicitly asked for
+                    // probe-resistance, refusing to start with
+                    // an invalid file is safer than silently
+                    // running without the gate.
+                    return Err(format!(
+                        "knock_psk_file {path:?} load failed: {e}. \
+                         Mint a fresh one with `proteus-server knock-keygen \
+                         --out {path:?}` or remove the `knock_psk_file:` line \
+                         from server.yaml to disable probe-resistance."
+                    )
+                    .into());
+                }
+            }
+        }
+        None => {
+            info!(
+                "knock_psk_file unset — probe-resistance gate is OFF \
+                 (binary runs in legacy auth-fail-then-cover-forward mode). \
+                 Run `proteus-server knock-keygen` and set knock_psk_file: \
+                 in server.yaml to enable."
+            );
+            None
+        }
+    };
     // Cover-endpoint wiring with precedence:
     //   1. `cover_endpoints` (the POOL with per-source-IP affinity) — wins
     //      when non-empty; defeats time-series active probing.
