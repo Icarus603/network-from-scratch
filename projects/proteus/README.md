@@ -222,6 +222,11 @@ Surfaces:
 - **EndpointPool (multi-VPS)**: per-entry health — addr, suppressed?,
   failure streak. Operator sees "which VPS am I dialing right now"
   without grepping logs.
+- **Concurrency**: `in_flight / max_inflight` — how saturated is the
+  session-slot semaphore right now?
+- **Dials**: cumulative `attempted` / `succeeded` / `failed`
+  counters — script saturation alerts against the failure ratio,
+  same shape as the server-side reload-success counters.
 
 No authentication on this endpoint — bind loopback only.
 `proteus-client validate` emits a WARN when `admin_listen` is bound

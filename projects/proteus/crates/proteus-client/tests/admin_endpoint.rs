@@ -13,9 +13,11 @@ use std::time::{Duration, Instant};
 
 use proteus_client::admin::{self, AliveFlag};
 use proteus_client::carrier_health::CarrierHealth;
+use proteus_client::ctx::ClientCtx;
 use proteus_client::endpoint_pool::EndpointPool;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Semaphore;
 
 /// Fetch the full HTTP response body from `127.0.0.1:port + path`.
 /// Returns the body string (after the `\r\n\r\n` header break).
@@ -235,6 +237,111 @@ async fn admin_random_path_returns_404() {
     assert!(
         status.starts_with("HTTP/1.1 404"),
         "expected 404 on random path, got: {status}"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_status_with_ctx_surfaces_concurrency_and_dials() {
+    // Full e2e of the new serve_with_ctx path: build a real ctx with
+    // a slot semaphore + dial counter bumps, scrape /status + /status.json,
+    // assert the concurrency view and dial counters round-trip
+    // through the live HTTP path.
+    let alive: AliveFlag = Arc::new(AtomicBool::new(true));
+    let ctx = Arc::new(ClientCtx::new(
+        Arc::new(CarrierHealth::new()),
+        None,
+        Some(Arc::new(Semaphore::new(8))),
+        8,
+        true, // β configured
+    ));
+    // Simulate 5 dials: 3 succeed, 2 fail.
+    for _ in 0..5 {
+        ctx.record_dial_attempt();
+    }
+    for _ in 0..3 {
+        ctx.record_dial_success();
+    }
+    for _ in 0..2 {
+        ctx.record_dial_failure();
+    }
+    // Hold one permit so /status sees in_flight=1.
+    let _permit = ctx
+        .session_slots
+        .as_ref()
+        .unwrap()
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("acquire permit");
+
+    let port = pick_free_port().await;
+    let bind = format!("127.0.0.1:{port}");
+    let alive_for_serve = Arc::clone(&alive);
+    let ctx_for_serve = Arc::clone(&ctx);
+    let server_task = tokio::spawn(async move {
+        let _ = admin::serve_with_ctx(bind, alive_for_serve, ctx_for_serve).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let body = fetch_body(port, "/status").await;
+    assert!(
+        body.contains("Concurrency: 1/8 in-flight"),
+        "missing concurrency block: {body}"
+    );
+    assert!(
+        body.contains("Dials: 5 attempted (3 ok, 2 failed)"),
+        "missing dials line: {body}"
+    );
+
+    let json = fetch_body(port, "/status.json").await;
+    assert!(
+        json.contains(r#""concurrency":{"in_flight":1,"max_inflight":8}"#),
+        "missing concurrency object in json: {json}"
+    );
+    assert!(
+        json.contains(r#""dials":{"attempted":5,"succeeded":3,"failed":2}"#),
+        "missing dials object in json: {json}"
+    );
+
+    server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn admin_status_with_ctx_omits_concurrency_when_cap_disabled() {
+    let alive: AliveFlag = Arc::new(AtomicBool::new(true));
+    let ctx = Arc::new(ClientCtx::new(
+        Arc::new(CarrierHealth::new()),
+        None,
+        None, // no cap
+        0,
+        false, // β unconfigured → carrier view collapses to None
+    ));
+    let port = pick_free_port().await;
+    let bind = format!("127.0.0.1:{port}");
+    let alive_for_serve = Arc::clone(&alive);
+    let ctx_for_serve = Arc::clone(&ctx);
+    let server_task = tokio::spawn(async move {
+        let _ = admin::serve_with_ctx(bind, alive_for_serve, ctx_for_serve).await;
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let body = fetch_body(port, "/status").await;
+    // Cap disabled: text rendering shows the disabled note.
+    assert!(body.contains("Concurrency: cap disabled"), "{body}");
+    // β unconfigured: carrier row collapses to "not configured".
+    assert!(
+        body.contains("Carrier (β): not configured"),
+        "missing not-configured carrier line: {body}"
+    );
+
+    let json = fetch_body(port, "/status.json").await;
+    assert!(json.contains(r#""concurrency":null"#), "{json}");
+    assert!(json.contains(r#""carrier":null"#), "{json}");
+    assert!(
+        json.contains(r#""dials":{"attempted":0,"succeeded":0,"failed":0}"#),
+        "{json}"
     );
 
     server_task.abort();

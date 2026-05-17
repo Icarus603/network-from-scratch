@@ -25,6 +25,7 @@ mod keygen;
 use proteus_client::admin::{self, AliveFlag};
 use proteus_client::carrier_health::CarrierHealth;
 use proteus_client::config::ClientConfig;
+use proteus_client::ctx::ClientCtx;
 use proteus_client::endpoint_pool::EndpointPool;
 use proteus_client::socks;
 use std::sync::atomic::AtomicBool;
@@ -201,6 +202,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // /healthz. We flip BEFORE spawning the admin task so the
     // first scrape after admin-listener bind sees alive=true.
     let alive: AliveFlag = Arc::new(AtomicBool::new(true));
+    // beta_configured is read once and shared via ClientCtx so the
+    // admin snapshot and the dispatch path agree on whether β is
+    // wired (vs. legacy paths that recomputed from cfg each time).
+    let beta_configured = cfg.server_endpoint_beta.is_some();
 
     // Multi-VPS HA endpoint pool (operator-opt-in via
     // `server_endpoints: [...]` in client.yaml). When unset or
@@ -220,30 +225,6 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         }
         pool
     };
-
-    // Admin HTTP endpoint (operator-opt-in via `admin_listen:` in
-    // client.yaml). When set, spawn a loopback HTTP server exposing
-    // /healthz + /status + /status.json. Disabled by default so
-    // operators who don't want the extra port don't pay for it.
-    if let Some(admin_addr) = cfg.admin_listen.clone() {
-        let alive_for_admin = Arc::clone(&alive);
-        let health_for_admin = Arc::clone(&health);
-        let pool_for_admin = endpoint_pool.clone();
-        let beta_configured = cfg.server_endpoint_beta.is_some();
-        tokio::spawn(async move {
-            if let Err(e) = admin::serve(
-                admin_addr,
-                alive_for_admin,
-                Some(health_for_admin),
-                beta_configured,
-                pool_for_admin,
-            )
-            .await
-            {
-                warn!(error = %e, "client admin endpoint exited");
-            }
-        });
-    }
 
     // ----- Concurrency cap -----
     //
@@ -269,6 +250,39 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let _ = s; // hold-handle for clarity in logs.
     } else {
         warn!("max_inflight_sessions=0 — concurrency cap disabled, vulnerable to local OOM");
+    }
+
+    // ----- ClientCtx assembly -----
+    //
+    // Everything the dispatch path and admin endpoint need to share
+    // (carrier health, endpoint pool, session slots, dial counters)
+    // lives in one struct from here on. Built AFTER the concurrency
+    // cap is decided so `max_inflight` is final; built BEFORE the
+    // admin endpoint spawn so the admin's first scrape sees the
+    // real ctx (not a placeholder).
+    let ctx = Arc::new(ClientCtx::new(
+        Arc::clone(&health),
+        endpoint_pool.clone(),
+        session_slots.clone(),
+        max_inflight,
+        beta_configured,
+    ));
+
+    // ----- Admin HTTP endpoint -----
+    //
+    // Operator-opt-in via `admin_listen:` in client.yaml. When set,
+    // spawn a loopback HTTP server exposing /healthz + /status +
+    // /status.json. Disabled by default — operators who don't want
+    // the extra port don't pay for it.
+    if let Some(admin_addr) = cfg.admin_listen.clone() {
+        let alive_for_admin = Arc::clone(&alive);
+        let ctx_for_admin = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            if let Err(e) = admin::serve_with_ctx(admin_addr, alive_for_admin, ctx_for_admin).await
+            {
+                warn!(error = %e, "client admin endpoint exited");
+            }
+        });
     }
 
     // ----- Graceful shutdown wiring -----
@@ -319,17 +333,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // notice this immediately.
                         let _ = stream.set_nodelay(true);
                         let cfg = Arc::clone(&cfg);
-                        let health = Arc::clone(&health);
-                        let endpoint_pool = endpoint_pool.clone();
+                        let ctx_for_task = Arc::clone(&ctx);
                         tokio::spawn(async move {
                             let _permit = permit; // drop on task exit
-                            if let Err(e) = socks::handle_socks5_with_health_and_pool(
-                                stream,
-                                &cfg,
-                                &health,
-                                endpoint_pool.as_ref(),
-                            )
-                            .await
+                            if let Err(e) =
+                                socks::handle_socks5_with_ctx(stream, &cfg, &ctx_for_task).await
                             {
                                 warn!(peer = %peer, error = %e, "socks5 session ended");
                             }

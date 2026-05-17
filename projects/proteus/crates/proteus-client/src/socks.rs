@@ -97,6 +97,33 @@ pub async fn handle_socks5_with_health(
     handle_socks5_with_health_and_pool(sock, cfg, health, None).await
 }
 
+/// Full-featured dispatch via the shared `ClientCtx`. Same per-CONNECT
+/// behavior as `handle_socks5_with_health_and_pool`, but additionally
+/// bumps the dial counters (attempted / succeeded / failed) so the
+/// admin `/status` endpoint can surface cumulative dial activity.
+///
+/// New entry point added 2026-05-18 — the older
+/// `handle_socks5_with_health_and_pool` remains as a back-compat
+/// wrapper for integration tests that build their own `CarrierHealth`
+/// + `EndpointPool` directly.
+pub async fn handle_socks5_with_ctx(
+    sock: TcpStream,
+    cfg: &Arc<ClientConfig>,
+    ctx: &Arc<crate::ctx::ClientCtx>,
+) -> Result<(), SocksError> {
+    ctx.record_dial_attempt();
+    let res = handle_socks5_with_health_and_pool(sock, cfg, &ctx.carrier, ctx.pool.as_ref()).await;
+    match &res {
+        Ok(()) => {
+            ctx.record_dial_success();
+        }
+        Err(_) => {
+            ctx.record_dial_failure();
+        }
+    }
+    res
+}
+
 /// Full-featured dispatch: optionally consults a multi-VPS
 /// `EndpointPool` for primary-then-fallback routing. When `pool`
 /// is `None`, falls back to the single-endpoint behavior using

@@ -51,6 +51,7 @@ use tokio::net::TcpListener;
 use tracing::{info, warn};
 
 use crate::carrier_health::CarrierHealth;
+use crate::ctx::{ClientCtx, DialCounters};
 use crate::endpoint_pool::EndpointPool;
 
 /// In-process snapshot built at scrape time. All fields are `Option`
@@ -69,6 +70,22 @@ pub struct ClientStatusSnapshot {
     /// means single-endpoint deployment (legacy `server_endpoint`
     /// only, no `server_endpoints: [...]`).
     pub pool: Option<EndpointPoolView>,
+    /// Concurrency view — in-flight session count + configured cap.
+    /// `None` when `max_inflight_sessions = 0` (cap disabled).
+    pub concurrency: Option<ConcurrencyView>,
+    /// Cumulative dial counters. Always present; zero-valued when
+    /// no CONNECTs have been dispatched yet.
+    pub dials: DialCounters,
+}
+
+/// Concurrency view rendered from the slot semaphore + configured
+/// ceiling. Operator gets "how saturated am I" in one place.
+#[derive(Debug, Clone, Copy)]
+pub struct ConcurrencyView {
+    /// Active SOCKS5 sessions right now.
+    pub in_flight: u64,
+    /// Configured `max_inflight_sessions`.
+    pub max_inflight: u64,
 }
 
 /// Single-host carrier-health view rendered from a `CarrierHealth`.
@@ -102,9 +119,46 @@ pub struct EndpointEntryView {
 }
 
 impl ClientStatusSnapshot {
+    /// Build a snapshot from a live [`ClientCtx`] + the alive flag.
+    /// This is the production path — the one the admin endpoint
+    /// uses. Carries through every field including the concurrency
+    /// view and cumulative dial counters.
+    #[must_use]
+    pub fn from_ctx(alive: bool, ctx: &ClientCtx, now: Instant) -> Self {
+        let mut snap = Self::capture(
+            alive,
+            Some(&ctx.carrier),
+            ctx.beta_configured,
+            ctx.pool.as_deref(),
+            now,
+        );
+        // If β isn't configured, downgrade the carrier view back to
+        // None — operator should see "carrier: not configured" not
+        // "carrier: healthy" when there's no β endpoint at all. The
+        // capture() helper above doesn't know about beta_configured
+        // (it always returns carrier=Some when a tracker is supplied)
+        // so we patch it here. This keeps capture() the
+        // tracker-state-only primitive and from_ctx() the
+        // policy-aware view.
+        if !ctx.beta_configured {
+            snap.carrier = None;
+        }
+        snap.concurrency = ctx.in_flight_sessions().map(|n| ConcurrencyView {
+            in_flight: n as u64,
+            max_inflight: ctx.max_inflight as u64,
+        });
+        snap.dials = ctx.dial_counters();
+        snap
+    }
+
     /// Build a snapshot from the live in-process state at instant
     /// `now`. Pure read — no mutation, no atomics touched besides
     /// the existing accessors.
+    ///
+    /// **Note**: this lower-level constructor does NOT populate
+    /// `concurrency` or `dials` — use [`Self::from_ctx`] for the
+    /// full snapshot. `capture` is kept for tests that drive
+    /// individual fields without building a full `ClientCtx`.
     #[must_use]
     pub fn capture(
         alive: bool,
@@ -180,6 +234,12 @@ impl ClientStatusSnapshot {
             alive,
             carrier: carrier_view,
             pool: pool_view,
+            // `capture` is the low-level constructor — concurrency
+            // and dials are populated by `from_ctx` which has access
+            // to the `ClientCtx`. Tests that call `capture` directly
+            // get default-zero values here.
+            concurrency: None,
+            dials: DialCounters::default(),
         }
     }
 
@@ -243,6 +303,32 @@ impl ClientStatusSnapshot {
                 s.push(']');
             }
         }
+
+        // concurrency: nested object or null. Operators script
+        // saturation alerts against the `in_flight / max_inflight`
+        // ratio (PromQL-equivalent: client-side saturation gauge).
+        s.push_str(r#","concurrency":"#);
+        match self.concurrency {
+            None => s.push_str("null"),
+            Some(c) => {
+                let _ = write!(
+                    s,
+                    r#"{{"in_flight":{},"max_inflight":{}}}"#,
+                    c.in_flight, c.max_inflight
+                );
+            }
+        }
+
+        // dials: cumulative counters. Always emitted so scripts can
+        // rely on the field's presence (zero-valued when nothing's
+        // happened yet).
+        s.push_str(r#","dials":"#);
+        let _ = write!(
+            s,
+            r#"{{"attempted":{},"succeeded":{},"failed":{}}}"#,
+            self.dials.attempted, self.dials.succeeded, self.dials.failed
+        );
+
         s.push_str("}\n");
         s
     }
@@ -314,6 +400,22 @@ impl std::fmt::Display for ClientStatusSnapshot {
                 }
             }
         }
+        match self.concurrency {
+            None => writeln!(f, " Concurrency: cap disabled (max_inflight_sessions = 0)")?,
+            Some(c) => writeln!(
+                f,
+                " Concurrency: {in_flight}/{max_inflight} in-flight",
+                in_flight = c.in_flight,
+                max_inflight = c.max_inflight,
+            )?,
+        }
+        writeln!(
+            f,
+            " Dials: {attempted} attempted ({succeeded} ok, {failed} failed)",
+            attempted = self.dials.attempted,
+            succeeded = self.dials.succeeded,
+            failed = self.dials.failed,
+        )?;
         Ok(())
     }
 }
@@ -345,6 +447,29 @@ pub async fn serve(
     beta_configured: bool,
     pool: Option<Arc<EndpointPool>>,
 ) -> std::io::Result<()> {
+    // Back-compat wrapper: build a minimal ClientCtx synthesized
+    // from the legacy arguments. The full-fidelity entry point is
+    // `serve_with_ctx` which takes a ClientCtx (so it can surface
+    // concurrency + dial counters).
+    let ctx = Arc::new(ClientCtx::new(
+        carrier.unwrap_or_else(|| Arc::new(CarrierHealth::new())),
+        pool,
+        None, // no semaphore handle → concurrency view stays None
+        0,
+        beta_configured,
+    ));
+    serve_with_ctx(bind_addr, alive, ctx).await
+}
+
+/// Full-featured serve: takes a `ClientCtx` so the snapshot includes
+/// the concurrency view + cumulative dial counters. This is the
+/// entry point `main.rs` calls in production; the legacy `serve`
+/// wrapper above is kept for tests that don't build a full ctx.
+pub async fn serve_with_ctx(
+    bind_addr: String,
+    alive: AliveFlag,
+    ctx: Arc<ClientCtx>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(&bind_addr).await?;
     let local = listener.local_addr()?;
     if !is_loopback(local) {
@@ -367,33 +492,24 @@ pub async fn serve(
             }
         };
         let alive = Arc::clone(&alive);
-        let carrier = carrier.clone();
-        let pool = pool.clone();
+        let ctx = Arc::clone(&ctx);
         tokio::spawn(async move {
-            if let Err(e) = handle_connection(stream, alive, carrier, beta_configured, pool).await {
+            if let Err(e) = handle_connection_ctx(stream, alive, ctx).await {
                 warn!(peer = %peer, error = %e, "client admin connection ended");
             }
         });
     }
 }
 
-async fn handle_connection(
+async fn handle_connection_ctx(
     mut stream: tokio::net::TcpStream,
     alive: AliveFlag,
-    carrier: Option<Arc<CarrierHealth>>,
-    beta_configured: bool,
-    pool: Option<Arc<EndpointPool>>,
+    ctx: Arc<ClientCtx>,
 ) -> std::io::Result<()> {
     let mut req = [0u8; 1024];
     let n = stream.read(&mut req).await?;
     let head = std::str::from_utf8(&req[..n]).unwrap_or("");
-    let snap = ClientStatusSnapshot::capture(
-        alive.load(Ordering::Relaxed),
-        carrier.as_deref(),
-        beta_configured,
-        pool.as_deref(),
-        Instant::now(),
-    );
+    let snap = ClientStatusSnapshot::from_ctx(alive.load(Ordering::Relaxed), &ctx, Instant::now());
     let (status_line, content_type, body) = route(head, &snap);
     let response = format!(
         "{status_line}\
@@ -466,11 +582,7 @@ mod tests {
     /// pool, not yet alive). Used as a baseline so every test
     /// asserts only the field it changes.
     fn empty_snap() -> ClientStatusSnapshot {
-        ClientStatusSnapshot {
-            alive: false,
-            carrier: None,
-            pool: None,
-        }
+        ClientStatusSnapshot::default()
     }
 
     #[test]
@@ -492,7 +604,7 @@ mod tests {
                 suppressed: false,
                 suppression_secs_remaining: None,
             }),
-            pool: None,
+            ..ClientStatusSnapshot::default()
         };
         let s = snap.to_json();
         assert!(s.contains(r#""alive":true"#));
@@ -510,7 +622,7 @@ mod tests {
                 suppressed: true,
                 suppression_secs_remaining: Some(42),
             }),
-            pool: None,
+            ..ClientStatusSnapshot::default()
         };
         let s = snap.to_json();
         assert!(s.contains(r#""failure_streak":5"#));
@@ -522,7 +634,6 @@ mod tests {
     fn json_pool_renders_every_entry_in_order() {
         let snap = ClientStatusSnapshot {
             alive: true,
-            carrier: None,
             pool: Some(EndpointPoolView {
                 entries: vec![
                     EndpointEntryView {
@@ -539,6 +650,7 @@ mod tests {
                     },
                 ],
             }),
+            ..ClientStatusSnapshot::default()
         };
         let s = snap.to_json();
         let primary_at = s.find("primary:8443").expect("primary line missing");
@@ -558,7 +670,6 @@ mod tests {
         // break parsers downstream.
         let snap = ClientStatusSnapshot {
             alive: true,
-            carrier: None,
             pool: Some(EndpointPoolView {
                 entries: vec![EndpointEntryView {
                     addr: r#"weird"host:8443"#.into(),
@@ -567,6 +678,7 @@ mod tests {
                     suppression_secs_remaining: None,
                 }],
             }),
+            ..ClientStatusSnapshot::default()
         };
         let s = snap.to_json();
         assert!(
@@ -600,7 +712,7 @@ mod tests {
                 suppressed: true,
                 suppression_secs_remaining: Some(60),
             }),
-            pool: None,
+            ..ClientStatusSnapshot::default()
         };
         let s = format!("{snap}");
         assert!(s.contains("SUPPRESSED (60s remaining)"), "{s}");
@@ -611,7 +723,6 @@ mod tests {
     fn text_pool_entry_renders_index_addr_state_streak() {
         let snap = ClientStatusSnapshot {
             alive: true,
-            carrier: None,
             pool: Some(EndpointPoolView {
                 entries: vec![EndpointEntryView {
                     addr: "vps1:8443".into(),
@@ -620,6 +731,7 @@ mod tests {
                     suppression_secs_remaining: None,
                 }],
             }),
+            ..ClientStatusSnapshot::default()
         };
         let s = format!("{snap}");
         assert!(s.contains("[0] vps1:8443: healthy, streak=2"), "{s}");
@@ -759,5 +871,150 @@ mod tests {
         };
         let (status, _ctype, _body) = route("GET /status?fmt=text HTTP/1.1\r\n\r\n", &snap);
         assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    // ----- New ClientCtx-aware snapshot tests -----
+
+    fn ctx_with_slots(
+        slots: Option<usize>,
+        max_inflight: usize,
+        beta_configured: bool,
+    ) -> Arc<ClientCtx> {
+        let sem = slots.map(|n| Arc::new(tokio::sync::Semaphore::new(n)));
+        Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            None,
+            sem,
+            max_inflight,
+            beta_configured,
+        ))
+    }
+
+    #[test]
+    fn from_ctx_includes_concurrency_when_cap_configured() {
+        let ctx = ctx_with_slots(Some(4), 4, true);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        let c = snap.concurrency.expect("concurrency should be Some");
+        assert_eq!(c.max_inflight, 4);
+        assert_eq!(c.in_flight, 0);
+    }
+
+    #[test]
+    fn from_ctx_omits_concurrency_when_cap_disabled() {
+        let ctx = ctx_with_slots(None, 0, true);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert!(snap.concurrency.is_none());
+    }
+
+    #[test]
+    fn from_ctx_carrier_is_none_when_beta_unconfigured() {
+        // β not configured: carrier view must collapse to None even
+        // though the tracker exists internally — operator should see
+        // "carrier: not configured", not "carrier: healthy".
+        let ctx = ctx_with_slots(Some(4), 4, false);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert!(
+            snap.carrier.is_none(),
+            "carrier must be None when beta_configured=false: {:?}",
+            snap.carrier
+        );
+    }
+
+    #[test]
+    fn from_ctx_carrier_is_some_when_beta_configured() {
+        let ctx = ctx_with_slots(Some(4), 4, true);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert!(
+            snap.carrier.is_some(),
+            "carrier must be Some when beta_configured=true"
+        );
+    }
+
+    #[test]
+    fn from_ctx_dials_default_to_zero() {
+        let ctx = ctx_with_slots(Some(4), 4, true);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert_eq!(snap.dials.attempted, 0);
+        assert_eq!(snap.dials.succeeded, 0);
+        assert_eq!(snap.dials.failed, 0);
+    }
+
+    #[test]
+    fn from_ctx_dials_reflect_bumps() {
+        let ctx = ctx_with_slots(Some(4), 4, true);
+        ctx.record_dial_attempt();
+        ctx.record_dial_attempt();
+        ctx.record_dial_success();
+        ctx.record_dial_failure();
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert_eq!(snap.dials.attempted, 2);
+        assert_eq!(snap.dials.succeeded, 1);
+        assert_eq!(snap.dials.failed, 1);
+    }
+
+    #[test]
+    fn json_includes_concurrency_object() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            concurrency: Some(ConcurrencyView {
+                in_flight: 3,
+                max_inflight: 16,
+            }),
+            ..ClientStatusSnapshot::default()
+        };
+        let s = snap.to_json();
+        assert!(
+            s.contains(r#""concurrency":{"in_flight":3,"max_inflight":16}"#),
+            "expected concurrency object in: {s}"
+        );
+    }
+
+    #[test]
+    fn json_includes_dials_object_always() {
+        let s = empty_snap().to_json();
+        assert!(
+            s.contains(r#""dials":{"attempted":0,"succeeded":0,"failed":0}"#),
+            "dials must always be emitted: {s}"
+        );
+    }
+
+    #[test]
+    fn json_includes_concurrency_null_when_disabled() {
+        let s = empty_snap().to_json();
+        assert!(s.contains(r#""concurrency":null"#), "{s}");
+    }
+
+    #[test]
+    fn text_renders_concurrency_block_when_cap_configured() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            concurrency: Some(ConcurrencyView {
+                in_flight: 7,
+                max_inflight: 32,
+            }),
+            ..ClientStatusSnapshot::default()
+        };
+        let s = format!("{snap}");
+        assert!(s.contains("Concurrency: 7/32 in-flight"), "{s}");
+    }
+
+    #[test]
+    fn text_renders_concurrency_disabled_note_when_cap_off() {
+        let s = format!("{}", empty_snap());
+        assert!(s.contains("Concurrency: cap disabled"), "{s}");
+    }
+
+    #[test]
+    fn text_renders_dials_line_always() {
+        let snap = ClientStatusSnapshot {
+            dials: DialCounters {
+                attempted: 100,
+                succeeded: 95,
+                failed: 5,
+            },
+            ..ClientStatusSnapshot::default()
+        };
+        let s = format!("{snap}");
+        assert!(s.contains("Dials: 100 attempted (95 ok, 5 failed)"), "{s}");
     }
 }
