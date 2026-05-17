@@ -583,6 +583,45 @@ Persistence counters (`proteus_user_quarantine_persist_attempts_total`,
 visible: a non-zero `failed_total` means bans will NOT survive a
 restart, alert on it. Mirrors the SIGHUP-reload counter pattern.
 
+**Live operator override via SIGHUP**: when a false positive bans
+a user that operators need to unblock RIGHT NOW (or operators
+spot abuse via dashboards and want to ban a user BEFORE the
+detectors fire), the persistence file becomes the source of
+truth for live reconciliation:
+
+```bash
+# Lift alice's false-positive ban:
+sudo vim /var/lib/proteus/user_quarantine.jsonl  # delete alice's line
+sudo systemctl kill --signal=HUP proteus-server
+
+# Manually ban a known-abusive user immediately:
+sudo bash -c 'cat >> /var/lib/proteus/user_quarantine.jsonl' <<EOF
+{"user_id":"bob00002","expires_unix_seconds":$(($(date +%s)+3600)),"triggered_by":"manual"}
+EOF
+sudo systemctl kill --signal=HUP proteus-server
+```
+
+The SIGHUP handler calls `reload_from_disk()` which reconciles
+in-memory state against the file:
+
+- File entries not in memory → INSERT + tear down in-flight
+  sessions for those user_ids (mirrors the auto-ban path).
+- Memory entries not in file → REMOVE (operator unban; no
+  session tear-down).
+- Entries in both → UPDATE in place. Sessions torn down only
+  when the expiry moves FORWARD (extending a ban re-arms
+  enforcement; shortening one doesn't punish further).
+- Missing file → clear every in-memory entry (operator deleted
+  the file to lift all bans).
+
+Plus three operator-visible counters surface live ops:
+- `proteus_user_quarantine_manual_unquarantines_total` — calls
+  to the programmatic `unquarantine()` API.
+- `proteus_user_quarantine_reload_attempts_total` /
+  `_failed_total` — SIGHUP-driven reload cycles; alert on
+  `failed > 0` to spot operator hand-edits that produced an
+  unreadable file.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

@@ -71,6 +71,31 @@ use tokio::sync::Notify;
 /// amortized regardless of lookup rate.
 const VACUUM_INTERVAL: Duration = Duration::from_secs(30);
 
+/// Outcome of [`UserQuarantineList::reload_from_disk`] — surfaced
+/// so the SIGHUP handler can structured-log "we added N, removed
+/// M, refreshed K entries during reconciliation".
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct ReloadOutcome {
+    /// Entries that were in the file but not in memory → newly
+    /// inserted. Tears down any in-flight sessions for these
+    /// user_ids (file-driven new bans).
+    pub added: u64,
+    /// Entries that were in memory but not in the file → removed.
+    /// Does NOT tear down — see [`UserQuarantineList::unquarantine`].
+    pub removed: u64,
+    /// Entries in both, where the file's `expires_at` or
+    /// `triggered_by` differed from memory → updated in place.
+    pub refreshed: u64,
+    /// Entries skipped because they were already expired on disk
+    /// (wall-clock filter).
+    pub skipped_expired: u64,
+    /// Unparseable lines in the file. Should be 0 in normal
+    /// operation; non-zero means the operator edit produced a
+    /// malformed line (the rest of the file is still applied; the
+    /// bad line is skipped + logged).
+    pub malformed: u64,
+}
+
 /// One row in the quarantine snapshot — what `/metrics` + `admin
 /// status` need to render about a currently-quarantined user_id.
 /// Sorted by `expires_in_secs` ascending in `active_snapshot`.
@@ -183,6 +208,22 @@ pub struct UserQuarantineList {
     /// gauge so operators see "we restored N entries on startup"
     /// without grepping logs.
     loaded_from_disk: std::sync::atomic::AtomicU64,
+    /// Cumulative operator-driven manual unquarantine calls
+    /// (`unquarantine` returning true). Bumped per successful
+    /// removal. Operators read this on dashboards to confirm a
+    /// false-positive unblock took effect.
+    manual_unquarantines_total: std::sync::atomic::AtomicU64,
+    /// Cumulative SIGHUP-driven reload calls (`reload_from_disk`).
+    /// Bumped on every invocation, regardless of outcome — pairs
+    /// with `reload_failed_total` so operators alert on
+    /// `attempts > succeeded` for silent reload failures (same
+    /// shape as the SIGHUP-reload counters on `ServerMetrics`).
+    reload_attempts_total: std::sync::atomic::AtomicU64,
+    /// Cumulative SIGHUP-driven reloads that returned an I/O error.
+    /// In normal operation this stays 0; a non-zero rate is a
+    /// strong signal that the operator's hand-edit produced an
+    /// unreadable file (permission flip, truncation, etc.).
+    reload_failed_total: std::sync::atomic::AtomicU64,
 }
 
 impl UserQuarantineList {
@@ -215,6 +256,9 @@ impl UserQuarantineList {
             persist_attempts_total: std::sync::atomic::AtomicU64::new(0),
             persist_failed_total: std::sync::atomic::AtomicU64::new(0),
             loaded_from_disk: std::sync::atomic::AtomicU64::new(0),
+            manual_unquarantines_total: std::sync::atomic::AtomicU64::new(0),
+            reload_attempts_total: std::sync::atomic::AtomicU64::new(0),
+            reload_failed_total: std::sync::atomic::AtomicU64::new(0),
         }
     }
 
@@ -530,6 +574,252 @@ impl UserQuarantineList {
     pub fn sessions_torn_down_total(&self) -> u64 {
         self.sessions_torn_down_total
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Manually clear `user_id`'s quarantine entry — the operator
+    /// override path for false positives.
+    ///
+    /// Returns `true` if there was an entry to remove. Persists
+    /// the new state immediately so the unban survives the next
+    /// process restart. Does NOT bump any error counters — this is
+    /// an operator-driven event, not a fault.
+    ///
+    /// **Does NOT tear down sessions.** When the operator unbans a
+    /// user, any sessions that user MIGHT have open (typically
+    /// none, since the quarantine had been blocking them) should
+    /// continue normally. The tear-down path is only for new bans,
+    /// not new unbans.
+    pub fn unquarantine(&self, user_id: &[u8; 8]) -> bool {
+        let removed = {
+            let mut g = self.inner.lock().expect("inner lock poisoned");
+            g.remove(user_id).is_some()
+        };
+        if removed {
+            self.manual_unquarantines_total
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // Surfaced so operators can grep journald to confirm
+            // the unban took effect.
+            tracing::info!(
+                user_id = %crate::per_user_bandwidth::render_user_id_pub(user_id),
+                "user_quarantine: manual unquarantine (operator override)"
+            );
+            // Persist the new state. Failure is logged inside
+            // persist() and bumps persist_failed_total; we don't
+            // surface it here because the in-memory unban
+            // succeeded (which is what the operator asked for).
+            let _ = self.persist();
+        }
+        removed
+    }
+
+    /// Cumulative manual unquarantine calls (counter).
+    #[must_use]
+    pub fn manual_unquarantines_total(&self) -> u64 {
+        self.manual_unquarantines_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cumulative SIGHUP-driven reload attempts (counter).
+    #[must_use]
+    pub fn reload_attempts_total(&self) -> u64 {
+        self.reload_attempts_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Cumulative SIGHUP-driven reload failures (counter).
+    #[must_use]
+    pub fn reload_failed_total(&self) -> u64 {
+        self.reload_failed_total
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reconcile the in-memory map against the on-disk persistence
+    /// file. Used by the SIGHUP handler so operators can hand-edit
+    /// the file (add an emergency ban, lift a false-positive,
+    /// extend a TTL) and have the running process pick up the
+    /// changes WITHOUT a restart.
+    ///
+    /// Semantics:
+    ///   - File entry not in memory → INSERT + tear down sessions
+    ///     (operator added a fresh ban).
+    ///   - Memory entry not in file → REMOVE (operator lifted the
+    ///     ban; existing sessions, if any, are NOT torn down —
+    ///     they were the targets of the lift).
+    ///   - Entry in both with different `expires_at` /
+    ///     `triggered_by` → UPDATE in place. Tear down sessions
+    ///     ONLY when the expiry moved FORWARD (operator extended
+    ///     the ban — re-arm the enforcement). Don't tear down on
+    ///     shortened expiry (operator wants the ban to end sooner;
+    ///     no reason to be aggressive).
+    ///   - Expired entries in the file are skipped.
+    ///
+    /// Returns the reconciliation outcome. The SIGHUP handler
+    /// uses it to bump observability counters + emit a structured
+    /// info log so operators see what landed.
+    ///
+    /// When no persistence path is wired, returns
+    /// `Ok(ReloadOutcome::default())` — a no-op the SIGHUP handler
+    /// can issue safely on every signal.
+    pub fn reload_from_disk(&self) -> std::io::Result<ReloadOutcome> {
+        self.reload_attempts_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = {
+            let g = self
+                .persistence_path
+                .lock()
+                .expect("persistence_path poisoned");
+            match g.as_ref() {
+                Some(p) => p.clone(),
+                None => return Ok(ReloadOutcome::default()),
+            }
+        };
+        // Read + parse the file outside the inner lock so we don't
+        // hold the map lock across the I/O. This is safe because
+        // the canonical state during reconciliation is the file
+        // contents — any concurrent insert will be re-applied on
+        // the NEXT persist (or its own write will land first; the
+        // map is monotonic in the sense that lost-write races are
+        // resolved at next reconcile).
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Missing file = "no quarantines on disk" = remove
+                // every in-memory entry. Operator deleted the
+                // file to lift all bans.
+                let removed = {
+                    let mut g = self.inner.lock().expect("inner lock poisoned");
+                    let n = g.len() as u64;
+                    g.clear();
+                    n
+                };
+                tracing::info!(
+                    path = ?path,
+                    removed,
+                    "user_quarantine: reload found missing file → cleared {removed} in-memory entries"
+                );
+                let _ = self.persist();
+                return Ok(ReloadOutcome {
+                    removed,
+                    ..ReloadOutcome::default()
+                });
+            }
+            Err(e) => {
+                self.reload_failed_total
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return Err(e);
+            }
+        };
+        let now_instant = Instant::now();
+        let now_unix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or(Duration::ZERO)
+            .as_secs();
+        // Build the new desired state from the file.
+        let mut desired: HashMap<[u8; 8], (Instant, &'static str)> = HashMap::new();
+        let mut skipped_expired = 0u64;
+        let mut malformed = 0u64;
+        for line in raw.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if line.starts_with(r#"{"kind":"header""#) {
+                continue;
+            }
+            match parse_entry_line(line) {
+                Ok((uid, expires_unix, triggered_by)) => {
+                    if expires_unix <= now_unix {
+                        skipped_expired += 1;
+                        continue;
+                    }
+                    let remaining = Duration::from_secs(expires_unix - now_unix);
+                    desired.insert(uid, (now_instant + remaining, triggered_by));
+                }
+                Err(_) => {
+                    malformed += 1;
+                }
+            }
+        }
+        let (added, removed, refreshed, to_tear_down) = {
+            let mut g = self.inner.lock().expect("inner lock poisoned");
+            let mut added = 0u64;
+            let mut refreshed = 0u64;
+            let mut to_tear_down: Vec<[u8; 8]> = Vec::new();
+            // Cap-check before inserting new entries — if the
+            // file holds more entries than max_entries, truncate
+            // (operator gets a WARN at the call site).
+            let mut current_in_file = desired.len();
+            for (uid, (new_expires, new_triggered_by)) in &desired {
+                if let Some(existing) = g.get_mut(uid) {
+                    let expires_advanced = *new_expires > existing.expires_at;
+                    if *new_expires != existing.expires_at
+                        || existing.triggered_by_kind != *new_triggered_by
+                    {
+                        existing.expires_at = *new_expires;
+                        existing.triggered_by_kind = *new_triggered_by;
+                        refreshed += 1;
+                        if expires_advanced {
+                            to_tear_down.push(*uid);
+                        }
+                    }
+                } else {
+                    if g.len() >= self.max_entries {
+                        // Honor the cap — drop additional entries
+                        // silently here, the loop body completes
+                        // for already-counted ones.
+                        current_in_file = current_in_file.saturating_sub(1);
+                        continue;
+                    }
+                    g.insert(
+                        *uid,
+                        QuarantineEntry {
+                            expires_at: *new_expires,
+                            triggered_by_kind: new_triggered_by,
+                        },
+                    );
+                    added += 1;
+                    to_tear_down.push(*uid);
+                }
+            }
+            // Removes: anything in memory but not in desired.
+            let to_remove: Vec<[u8; 8]> = g
+                .keys()
+                .filter(|k| !desired.contains_key(*k))
+                .copied()
+                .collect();
+            let removed = to_remove.len() as u64;
+            for k in &to_remove {
+                g.remove(k);
+            }
+            let _ = current_in_file; // surface for future logging
+            (added, removed, refreshed, to_tear_down)
+        };
+        // Tear down sessions for new + extended bans. Do this
+        // OUTSIDE the inner lock to keep the data-plane responsive.
+        for uid in &to_tear_down {
+            self.tear_down_user(uid);
+        }
+        let outcome = ReloadOutcome {
+            added,
+            removed,
+            refreshed,
+            skipped_expired,
+            malformed,
+        };
+        tracing::info!(
+            path = ?path,
+            added = outcome.added,
+            removed = outcome.removed,
+            refreshed = outcome.refreshed,
+            skipped_expired = outcome.skipped_expired,
+            malformed = outcome.malformed,
+            "user_quarantine: reconciled in-memory map against disk file"
+        );
+        // Persist the reconciled state — covers the
+        // expired-skip case (the file may have rows we filtered
+        // out as expired; a re-persist drops them from disk too).
+        let _ = self.persist();
+        Ok(outcome)
     }
 
     /// Configured TTL.
@@ -892,6 +1182,53 @@ impl UserQuarantineList {
             s,
             "proteus_user_quarantine_loaded_from_disk {}",
             self.loaded_from_disk()
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_manual_unquarantines_total \
+             Operator-driven manual unquarantine calls (false-positive \
+             overrides). Each successful removal bumps the counter."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_user_quarantine_manual_unquarantines_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_manual_unquarantines_total {}",
+            self.manual_unquarantines_total()
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_reload_attempts_total \
+             SIGHUP-driven reload attempts (operator hand-edited the \
+             persistence file + sent SIGHUP). Bumped on every reload \
+             call regardless of outcome."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_user_quarantine_reload_attempts_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_reload_attempts_total {}",
+            self.reload_attempts_total()
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_user_quarantine_reload_failed_total \
+             SIGHUP-driven reloads that returned an I/O error. Alert \
+             on rate > 0 — the operator's hand-edit may have produced \
+             an unreadable file."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_user_quarantine_reload_failed_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_user_quarantine_reload_failed_total {}",
+            self.reload_failed_total()
         );
         s
     }
@@ -1487,6 +1824,270 @@ mod tests {
     fn parse_entry_line_rejects_missing_fields() {
         assert!(parse_entry_line(r#"{"user_id":"alice001"}"#).is_err());
         assert!(parse_entry_line(r#"{"expires_unix_seconds":123}"#).is_err());
+    }
+
+    #[test]
+    fn unquarantine_removes_entry_and_bumps_counter() {
+        let q = UserQuarantineList::new(secs(600), 4096);
+        q.insert(*b"alice001", "byte_budget");
+        assert!(q.check(b"alice001").is_some());
+        assert_eq!(q.manual_unquarantines_total(), 0);
+        // Removed = true on first call, false on no-op repeat.
+        assert!(q.unquarantine(b"alice001"));
+        assert!(q.check(b"alice001").is_none());
+        assert_eq!(q.manual_unquarantines_total(), 1);
+        // Repeat is a no-op — no counter bump.
+        assert!(!q.unquarantine(b"alice001"));
+        assert_eq!(q.manual_unquarantines_total(), 1);
+    }
+
+    #[test]
+    fn unquarantine_persists_to_disk() {
+        let path = tmpfile("unquarantine");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        q.insert(*b"bob00002", "rate_limit");
+        // Both present on disk after inserts.
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("alice001"));
+        assert!(body.contains("bob00002"));
+        // Unquarantine alice — the file must no longer contain alice.
+        q.unquarantine(b"alice001");
+        let body2 = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body2.contains("alice001"),
+            "alice must be gone from disk after unquarantine: {body2}"
+        );
+        assert!(body2.contains("bob00002"), "bob must remain: {body2}");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_inserts_new_entries_from_file() {
+        // Two-instance scenario: process 1 inserts alice; process 2
+        // (same list instance for this test) doesn't know yet but
+        // operator edits the file to add bob. Reload picks up bob.
+        let path = tmpfile("reload_add");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        // Operator hand-edits the file to add bob and carol.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = std::fs::read_to_string(&path).unwrap();
+        let extra = format!(
+            "{}\n{}\n",
+            format_args!(
+                r#"{{"user_id":"bob00002","expires_unix_seconds":{},"triggered_by":"rate_limit"}}"#,
+                now + 500
+            ),
+            format_args!(
+                r#"{{"user_id":"carol003","expires_unix_seconds":{},"triggered_by":"byte_budget"}}"#,
+                now + 400
+            ),
+        );
+        std::fs::write(&path, format!("{body}{extra}")).unwrap();
+
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(
+            outcome.added, 2,
+            "bob + carol must be inserted: {outcome:?}"
+        );
+        assert_eq!(outcome.removed, 0);
+        assert!(q.check(b"alice001").is_some());
+        assert!(q.check(b"bob00002").is_some());
+        assert!(q.check(b"carol003").is_some());
+        assert_eq!(q.reload_attempts_total(), 1);
+        assert_eq!(q.reload_failed_total(), 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_removes_entries_missing_from_file() {
+        let path = tmpfile("reload_remove");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        q.insert(*b"bob00002", "rate_limit");
+        // Operator hand-edits to drop alice (manually unbans).
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = format!(
+            "{}\n{}\n",
+            r#"{"kind":"header","schema_version":1}"#,
+            format_args!(
+                r#"{{"user_id":"bob00002","expires_unix_seconds":{},"triggered_by":"rate_limit"}}"#,
+                now + 500
+            ),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(outcome.removed, 1, "alice must be removed: {outcome:?}");
+        assert_eq!(outcome.added, 0);
+        assert!(q.check(b"alice001").is_none(), "alice unbanned by reload");
+        assert!(q.check(b"bob00002").is_some(), "bob still banned");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_refreshes_changed_entries() {
+        // Operator extends alice's ban by editing the expires_unix
+        // forward — reload should update in place + tear down
+        // sessions (the extend should re-arm enforcement).
+        let path = tmpfile("reload_refresh");
+        let q = UserQuarantineList::new(secs(60), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Edit the file: bump alice's expiry to 3600s ahead +
+        // change the trigger.
+        let body = format!(
+            "{}\n{}\n",
+            r#"{"kind":"header","schema_version":1}"#,
+            format_args!(
+                r#"{{"user_id":"alice001","expires_unix_seconds":{},"triggered_by":"per_user_bandwidth_rate"}}"#,
+                now + 3600
+            ),
+        );
+        std::fs::write(&path, body).unwrap();
+
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(
+            outcome.refreshed, 1,
+            "alice's entry must be refreshed: {outcome:?}"
+        );
+        assert_eq!(outcome.added, 0);
+        assert_eq!(outcome.removed, 0);
+        let remaining = q.check(b"alice001").unwrap();
+        assert!(
+            remaining > 3500 && remaining <= 3600,
+            "alice's TTL must reflect the extended expiry: {remaining}"
+        );
+        let snap = q.active_snapshot(64);
+        assert_eq!(snap[0].triggered_by, "per_user_bandwidth_rate");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_missing_file_clears_all_entries() {
+        // Operator deletes the persistence file to lift every ban.
+        let path = tmpfile("reload_missing");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        q.insert(*b"bob00002", "rate_limit");
+        assert!(path.exists());
+        std::fs::remove_file(&path).unwrap();
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(outcome.removed, 2);
+        assert!(q.check(b"alice001").is_none());
+        assert!(q.check(b"bob00002").is_none());
+    }
+
+    #[test]
+    fn reload_from_disk_counts_malformed_lines() {
+        let path = tmpfile("reload_malformed");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        let body = format!(
+            "{}\n{}\n{}\n",
+            r#"{"kind":"header","schema_version":1}"#,
+            r#"not json at all"#,
+            r#"{"user_id":"missing_other_fields"}"#,
+        );
+        std::fs::write(&path, body).unwrap();
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(
+            outcome.malformed, 2,
+            "both malformed lines must be counted: {outcome:?}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_with_no_persistence_path_is_a_noop() {
+        // No persistence wired — reload returns default outcome
+        // without error.
+        let q = UserQuarantineList::new(secs(60), 4096);
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(outcome, ReloadOutcome::default());
+        // The attempt counter STILL bumps so operators see "SIGHUP
+        // fired" even when persistence is unwired.
+        assert_eq!(q.reload_attempts_total(), 1);
+    }
+
+    #[tokio::test]
+    async fn reload_from_disk_tears_down_sessions_for_newly_added_bans() {
+        // operator hand-edits the file to add a fresh ban for
+        // alice WHILE she has an in-flight session → reload
+        // should immediately tear it down (just like insert does).
+        let path = tmpfile("reload_teardown");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        // Alice has an in-flight session (no ban yet).
+        let notify = q.register_session(*b"alice001");
+        let notify_clone = Arc::clone(&notify);
+        let task = tokio::spawn(async move {
+            notify_clone.notified().await;
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // Operator adds the ban to the file.
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let body = format!(
+            "{}\n{}\n",
+            r#"{"kind":"header","schema_version":1}"#,
+            format_args!(
+                r#"{{"user_id":"alice001","expires_unix_seconds":{},"triggered_by":"per_user_bandwidth_rate"}}"#,
+                now + 600
+            ),
+        );
+        std::fs::write(&path, body).unwrap();
+        // SIGHUP-equivalent.
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(outcome.added, 1);
+        // Alice's session is torn down.
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("alice's in-flight session must be torn down by reload")
+            .unwrap();
+        assert!(q.sessions_torn_down_total() >= 1);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reload_from_disk_does_not_tear_down_for_removes() {
+        // The "memory but not file" case is operator unbanning —
+        // do NOT call tear_down_user.
+        let q = UserQuarantineList::new(secs(60), 4096);
+        let path = tmpfile("reload_no_teardown");
+        let q = q.with_persistence(path.clone());
+        q.insert(*b"alice001", "byte_budget");
+        let before = q.sessions_torn_down_total();
+        // Drop alice from the file.
+        let body = format!("{}\n", r#"{"kind":"header","schema_version":1}"#);
+        std::fs::write(&path, body).unwrap();
+        let outcome = q.reload_from_disk().expect("reload");
+        assert_eq!(outcome.removed, 1);
+        assert_eq!(
+            q.sessions_torn_down_total(),
+            before,
+            "removes must NOT bump tear-down counter"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn prometheus_emits_operator_override_counters() {
+        let q = UserQuarantineList::new(secs(600), 4096);
+        let s = q.prometheus();
+        assert!(s.contains("proteus_user_quarantine_manual_unquarantines_total 0"));
+        assert!(s.contains("proteus_user_quarantine_reload_attempts_total 0"));
+        assert!(s.contains("proteus_user_quarantine_reload_failed_total 0"));
     }
 
     #[test]

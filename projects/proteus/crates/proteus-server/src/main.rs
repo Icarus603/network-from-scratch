@@ -944,6 +944,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // `reloadable_acceptor`; this brings the firewall + 3 rate-
         // limit reloads to the same observability bar.
         let metrics_for_reload = Arc::clone(&metrics);
+        // Hold the quarantine list so SIGHUP can reconcile the
+        // in-memory map against the on-disk persistence file —
+        // operators hand-edit the file (lift a false-positive,
+        // add an emergency manual ban, extend a TTL) and SIGHUP
+        // picks it up without a restart.
+        let user_quarantine_for_reload = user_quarantine_list.as_ref().map(Arc::clone);
         tokio::spawn(async move {
             let mut sighup =
                 match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
@@ -954,7 +960,10 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     }
                 };
             while sighup.recv().await.is_some() {
-                info!("SIGHUP received — reloading TLS cert and firewall rules");
+                info!(
+                    "SIGHUP received — reloading TLS cert, firewall rules, \
+                     rate limits, and user_quarantine state"
+                );
 
                 // ----- 1. TLS cert reload (if configured) -----
                 if let (Some(tls_cfg), Some(reloadable)) =
@@ -1114,6 +1123,38 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     }
                     Err(e) => {
                         error!(error = %e, "config re-read failed; keeping old firewall + rate-limit state");
+                    }
+                }
+
+                // ----- 3. User-quarantine reconcile from disk -----
+                //
+                // Operators hand-edit /var/lib/proteus/user_quarantine.jsonl
+                // (lift a false-positive ban by deleting a line,
+                // add an emergency manual ban, extend a TTL) and
+                // SIGHUP picks the edits up without a restart.
+                // The reconciliation is bidirectional (file is
+                // canonical) — see `reload_from_disk` docstring.
+                if let Some(qlist) = user_quarantine_for_reload.as_ref() {
+                    match qlist.reload_from_disk() {
+                        Ok(outcome) => {
+                            if outcome.added > 0
+                                || outcome.removed > 0
+                                || outcome.refreshed > 0
+                                || outcome.malformed > 0
+                            {
+                                info!(
+                                    added = outcome.added,
+                                    removed = outcome.removed,
+                                    refreshed = outcome.refreshed,
+                                    skipped_expired = outcome.skipped_expired,
+                                    malformed = outcome.malformed,
+                                    "user_quarantine reconciled from disk"
+                                );
+                            }
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "user_quarantine reload failed; keeping in-memory state");
+                        }
                     }
                 }
             }
