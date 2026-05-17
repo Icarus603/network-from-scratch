@@ -1512,6 +1512,25 @@ exactly which Prometheus query to run.
 (client side, for fleet deploys with multiple endpoint
 laptops/containers — single-user setups can rely on
 `proteus-client alerts-check` instead).
+
+**Full reference observability stack** —
+[`deploy/docker-compose.full.yml`](deploy/docker-compose.full.yml)
+brings up `proteus-server` + `proteus-client` + Prometheus +
+Grafana, with the bundled alert rules pre-loaded and a starter
+dashboard at
+[`deploy/grafana/dashboards/proteus-overview.json`](deploy/grafana/dashboards/proteus-overview.json)
+auto-provisioned. `docker compose -f deploy/docker-compose.full.yml
+up -d` and the operator gets the complete production surface at
+`http://localhost:3000` (admin/admin) without hand-writing a
+single PromQL or Grafana panel. The starter dashboard has 19
+panels covering liveness, cert expiry, panics, handshake
+throughput + p99 latency, DNS resolver health, log-throttle
+suppression, self-test hysteresis, access-log writer health,
+and client dial outcomes. Drift-protected: the
+`grafana_dashboard_coverage` integration test asserts every
+PromQL metric the dashboard references exists in the known
+production set — a future iteration that renames a metric
+without updating the dashboard breaks CI.
 Load via `rule_files:` in `prometheus.yml` or mount into a
 Prometheus Operator `PrometheusRule`. Covers every series
 documented in this section: liveness (`up == 0`, `proteus_up

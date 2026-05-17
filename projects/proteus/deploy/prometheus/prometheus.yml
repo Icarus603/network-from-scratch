@@ -1,0 +1,46 @@
+# Prometheus config for the bundled docker-compose.full.yml
+# reference stack. Loads the two bundled rule files
+# (proteus-alerts.yaml + proteus-client-alerts.yaml) and
+# scrapes the proteus-server + proteus-client containers via
+# container-DNS.
+#
+# Operators wiring Proteus into an EXISTING Prometheus stack
+# replicate the `scrape_configs` block + `rule_files` entries
+# into their own prometheus.yml; the same metric names + alert
+# semantics work unchanged.
+
+global:
+  scrape_interval: 30s
+  evaluation_interval: 30s
+  external_labels:
+    deployment: proteus-bundled-stack
+
+rule_files:
+  - /etc/prometheus/proteus-alerts.yaml
+  - /etc/prometheus/proteus-client-alerts.yaml
+
+scrape_configs:
+  # proteus-server metrics. The server.example.yaml in the
+  # bundle binds metrics_listen on 127.0.0.1:9090, but in the
+  # docker-compose.full.yml topology we override to bind on
+  # 0.0.0.0:9090 inside the container so Prometheus (different
+  # container) can reach it. Operators running with the default
+  # loopback-only bind should use host networking or share a
+  # network namespace.
+  - job_name: proteus-server
+    static_configs:
+      - targets: ["proteus-server:9090"]
+
+  # proteus-client metrics. Same pattern: client.example.yaml
+  # default `admin_listen: 127.0.0.1:9091` is overridden in the
+  # bundled config to bind 0.0.0.0:9091 inside the container.
+  - job_name: proteus-client
+    static_configs:
+      - targets: ["proteus-client:9091"]
+
+  # Prometheus self-scrape so the meta-alert
+  # `up{job="prometheus"} == 0` still works (a Prometheus that
+  # forgot to scrape itself can't report its own scrape failures).
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]

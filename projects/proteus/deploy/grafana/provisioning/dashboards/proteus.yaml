@@ -1,0 +1,24 @@
+# Grafana dashboard provisioning — auto-imports the bundled
+# `proteus-overview.json` dashboard at startup. Loaded via the
+# docker-compose mount at /etc/grafana/provisioning/dashboards/.
+#
+# `updateIntervalSeconds: 30` lets operators iterate on the
+# dashboard JSON without restarting Grafana — Grafana re-reads
+# the file every 30s. `allowUiUpdates: true` lets operators
+# tweak panels in the UI for local exploration (changes are
+# NOT persisted back to the JSON file by default; for that the
+# operator must explicitly Export → overwrite the file).
+
+apiVersion: 1
+
+providers:
+  - name: Proteus
+    orgId: 1
+    folder: Proteus
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      # Container path — must match the docker-compose mount.
+      path: /var/lib/grafana/dashboards

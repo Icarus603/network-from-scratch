@@ -1,0 +1,25 @@
+# Grafana datasource provisioning — auto-wires the bundled
+# Prometheus container as the default datasource.
+#
+# Loaded at Grafana startup via the docker-compose mount at
+# /etc/grafana/provisioning/datasources/. Operators editing the
+# Prometheus address (e.g. moving to an external Prometheus) edit
+# this file and restart the Grafana container — same workflow as
+# any provisioning-driven Grafana deploy.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    # In docker-compose.full.yml, the prometheus service is named
+    # `prometheus` and listens on the default 9090. Container-to-
+    # container DNS resolves the name; operators using a
+    # different deploy topology (external Prometheus, host
+    # networking, etc.) override this URL.
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+    jsonData:
+      timeInterval: 30s

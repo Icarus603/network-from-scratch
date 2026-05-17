@@ -1,0 +1,412 @@
+{
+  "title": "Proteus — production overview",
+  "uid": "proteus-overview",
+  "schemaVersion": 38,
+  "version": 1,
+  "editable": true,
+  "tags": ["proteus"],
+  "timezone": "browser",
+  "time": {
+    "from": "now-1h",
+    "to": "now"
+  },
+  "refresh": "30s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Server liveness",
+      "description": "1 = accept loop bound. Pairs with proteus_ready (drains to 0 on SIGTERM).",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "proteus_up", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN"}, "1": {"text": "UP"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Client liveness",
+      "description": "1 = SOCKS5 listener bound.",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "proteus_client_up", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DOWN"}, "1": {"text": "UP"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "TLS cert days remaining",
+      "description": "(notAfter - now) / 86400. Alerts: <14d WARN, <1d CRIT.",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "targets": [
+        {
+          "expr": "(proteus_tls_cert_not_after_unix_seconds - time()) / 86400",
+          "refId": "A"
+        }
+      ],
+      "options": {"colorMode": "value"},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "orange", "value": 1},
+              {"color": "yellow", "value": 14},
+              {"color": "green", "value": 30}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Panics captured",
+      "description": "proteus_panic_hook counter. ANY non-zero is investigation-worthy.",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "proteus_panics_total", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Previous run unclean",
+      "description": "1 = last shutdown was panic-abort / OOM / SIGKILL.",
+      "gridPos": {"x": 16, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "proteus_previous_run_unclean", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 1}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "CLEAN"}, "1": {"text": "UNCLEAN"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Restart count",
+      "description": "Cumulative process starts. Alert on rate(>1/hr).",
+      "gridPos": {"x": 20, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "proteus_restarts_total", "refId": "A"}],
+      "options": {"colorMode": "value"}
+    },
+    {
+      "id": 10,
+      "type": "timeseries",
+      "title": "Handshakes per second",
+      "description": "Successful + failed + timed-out, stacked.",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_handshakes_succeeded_total[5m])",
+          "refId": "succeeded",
+          "legendFormat": "succeeded"
+        },
+        {
+          "expr": "rate(proteus_handshakes_failed_total[5m])",
+          "refId": "failed",
+          "legendFormat": "failed"
+        },
+        {
+          "expr": "rate(proteus_handshake_timeouts_total[5m])",
+          "refId": "timeouts",
+          "legendFormat": "timeouts"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 11,
+      "type": "timeseries",
+      "title": "In-flight sessions (server)",
+      "description": "proteus_in_flight_sessions gauge.",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [{"expr": "proteus_in_flight_sessions", "refId": "A"}],
+      "fieldConfig": {
+        "defaults": {"unit": "short"}
+      }
+    },
+    {
+      "id": 20,
+      "type": "timeseries",
+      "title": "Bytes per second (server)",
+      "description": "tx + rx rates over 5min windows.",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_tx_bytes_total[5m])",
+          "refId": "tx",
+          "legendFormat": "tx"
+        },
+        {
+          "expr": "rate(proteus_rx_bytes_total[5m])",
+          "refId": "rx",
+          "legendFormat": "rx"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "Bps"}
+      }
+    },
+    {
+      "id": 21,
+      "type": "timeseries",
+      "title": "Handshake duration histogram (p50/p95/p99)",
+      "description": "histogram_quantile over proteus_handshake_duration_seconds_bucket.",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, rate(proteus_handshake_duration_seconds_bucket[5m]))",
+          "refId": "p50",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, rate(proteus_handshake_duration_seconds_bucket[5m]))",
+          "refId": "p95",
+          "legendFormat": "p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m]))",
+          "refId": "p99",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "s"}
+      }
+    },
+    {
+      "id": 30,
+      "type": "timeseries",
+      "title": "DNS lookup outcomes",
+      "description": "ok / failed / timeout from outbound dial path. Sustained `timeout > 0` = wedged resolver.",
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_dns_lookups_total{outcome=\"ok\"}[5m])",
+          "refId": "ok",
+          "legendFormat": "ok"
+        },
+        {
+          "expr": "rate(proteus_dns_lookups_total{outcome=\"failed\"}[5m])",
+          "refId": "failed",
+          "legendFormat": "failed"
+        },
+        {
+          "expr": "rate(proteus_dns_lookups_total{outcome=\"timeout\"}[5m])",
+          "refId": "timeout",
+          "legendFormat": "timeout"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 31,
+      "type": "timeseries",
+      "title": "Log-throttle suppression rate (server)",
+      "description": "rate(proteus_log_throttle_suppressed_total) by site — sustained = scanner / DoS hammer on the labeled rejection path.",
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_log_throttle_suppressed_total[5m])",
+          "refId": "A",
+          "legendFormat": "{{site}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 40,
+      "type": "stat",
+      "title": "Periodic self-test streak",
+      "description": "consecutive_periodic_self_test_failures. Compare against the threshold (default 2).",
+      "gridPos": {"x": 0, "y": 28, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "proteus_consecutive_periodic_self_test_failures",
+          "refId": "streak",
+          "legendFormat": "streak"
+        },
+        {
+          "expr": "proteus_periodic_self_test_failure_threshold",
+          "refId": "threshold",
+          "legendFormat": "threshold"
+        }
+      ]
+    },
+    {
+      "id": 41,
+      "type": "stat",
+      "title": "Access-log writer alive",
+      "description": "0 = audit log writer task DEAD (disk full / FS RO / fsync fail).",
+      "gridPos": {"x": 6, "y": 28, "w": 6, "h": 4},
+      "targets": [{"expr": "proteus_access_log_writer_alive", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": null},
+              {"color": "green", "value": 1}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "DEAD"}, "1": {"text": "OK"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 42,
+      "type": "timeseries",
+      "title": "Access-log records (server)",
+      "description": "written / dropped_channel_full / dropped_writer_dead.",
+      "gridPos": {"x": 12, "y": 28, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_access_log_records_total{outcome=\"written\"}[5m])",
+          "refId": "written",
+          "legendFormat": "written"
+        },
+        {
+          "expr": "rate(proteus_access_log_records_total{outcome=\"dropped_channel_full\"}[5m])",
+          "refId": "dropped_full",
+          "legendFormat": "dropped_channel_full"
+        },
+        {
+          "expr": "rate(proteus_access_log_records_total{outcome=\"dropped_writer_dead\"}[5m])",
+          "refId": "dropped_dead",
+          "legendFormat": "dropped_writer_dead"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 50,
+      "type": "timeseries",
+      "title": "Client dial outcomes",
+      "description": "succeeded vs failed dispatched dials over 5min windows.",
+      "gridPos": {"x": 0, "y": 36, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_client_dials_succeeded_total[5m])",
+          "refId": "ok",
+          "legendFormat": "succeeded"
+        },
+        {
+          "expr": "rate(proteus_client_dials_failed_total[5m])",
+          "refId": "failed",
+          "legendFormat": "failed"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
+      "id": 51,
+      "type": "stat",
+      "title": "Client β carrier suppressed",
+      "description": "1 = β backing off; α fallback still works.",
+      "gridPos": {"x": 12, "y": 36, "w": 6, "h": 4},
+      "targets": [{"expr": "proteus_client_carrier_suppressed", "refId": "A"}],
+      "options": {"colorMode": "background"},
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1}
+            ]
+          },
+          "mappings": [
+            {"type": "value", "options": {"0": {"text": "ACTIVE"}, "1": {"text": "SUPPRESSED"}}}
+          ]
+        }
+      }
+    },
+    {
+      "id": 52,
+      "type": "stat",
+      "title": "Client bootstrap-via-system-resolver (DoH leak)",
+      "description": "Non-zero rate = the OS resolver is being used for bootstrap; pin bootstrap_dns.direct_ip.",
+      "gridPos": {"x": 18, "y": 36, "w": 6, "h": 4},
+      "targets": [
+        {
+          "expr": "rate(proteus_client_bootstrap_via_system_resolver_total[5m])",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.001}
+            ]
+          }
+        }
+      }
+    }
+  ]
+}
