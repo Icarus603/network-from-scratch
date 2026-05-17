@@ -138,6 +138,15 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         "proteus_log_throttle_suppressed_total",
         "proteus_access_log_writer_alive",
         "proteus_access_log_records_total",
+        // Iter-26: bundled-alerts coverage now includes the
+        // cover-forward observability surface. Iter-20 added
+        // the rejection counter + iter-26 added the matching
+        // alert rules (ProteusCoverForwardRejecting,
+        // ProteusCoverForwardStorm). Without this entry the
+        // alerts could be silently removed in a future
+        // refactor.
+        "proteus_cover_forwards_rejected_total",
+        "proteus_cover_forwards_total",
     ]
     .into_iter()
     .collect();

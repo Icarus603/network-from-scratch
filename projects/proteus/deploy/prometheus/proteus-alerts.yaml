@@ -225,6 +225,62 @@ groups:
         signal is preserved (the throttle is per-site); this
         is just visibility.
 
+  # Iter-20 added the `cover_forward_limit` semaphore that caps
+  # concurrent cover-forward tasks. Rejections here mean
+  # either (a) the cap is set too low for the probe-load
+  # profile, OR (b) the cover endpoint is slow/unhealthy
+  # (cover tasks not exiting → semaphore stays drained →
+  # legitimate cover-forwards get dropped instead of being
+  # spliced). Either way it's an operator-visible symptom
+  # they should investigate — bump `max_cover_forwards` or
+  # check cover endpoint health.
+  - alert: ProteusCoverForwardRejecting
+    expr: |
+      rate(proteus_cover_forwards_rejected_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus cover-forward semaphore rejecting"
+      description: |
+        {{ $labels.instance }} is dropping cover-forward
+        requests at {{ printf "%.2f" $value }} per second.
+        Either the configured `max_cover_forwards` cap is too
+        low for the current probe-load profile, OR the cover
+        endpoint is slow/unhealthy (existing cover tasks not
+        exiting → semaphore drained). Bump
+        `max_cover_forwards` OR check cover endpoint latency
+        / availability. Pre-iter-20 these would have manifested
+        as EMFILE on the accept loop (iter-18 backoff would
+        kick in but the server would be under sustained FD
+        pressure).
+
+  # Cover-forward sustained-burst rate. Even with the cap in
+  # place, a high success rate of cover-forwards indicates
+  # active probing. The probe-anomaly detector
+  # (`proteus_probe_anomalies_fired_total`) catches the
+  # per-/24 burst pattern; this is the absolute-rate alert
+  # for "the box is under a sustained probe storm of any
+  # source distribution." Bumps to `warning` severity at
+  # sustained >100/sec — that's roughly the rate where
+  # iter-14 NAT keepalive + iter-15 timeouts + iter-20
+  # cover-cap start mattering operationally.
+  - alert: ProteusCoverForwardStorm
+    expr: |
+      rate(proteus_cover_forwards_total[5m]) > 100
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus sustained cover-forward storm"
+      description: |
+        {{ $labels.instance }} cover-forwarded
+        {{ printf "%.0f" $value }} connections/sec for 10
+        min. Almost certainly active probing against this
+        VPS. Cross-reference with
+        `proteus_probe_anomalies_fired_total` to see if any
+        particular /24 prefix is the source.
+
 - name: proteus-audit
   interval: 1m
   rules:
