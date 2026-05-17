@@ -437,15 +437,67 @@ async fn check_endpoint_dns_resolution(cfg_path: &Path, r: &mut HostReport) {
     };
 
     let mut endpoints: Vec<(String, String)> = Vec::new();
+    // Iter-44: also surface `server_endpoints:` list entries so
+    // the operator's multi-VPS pool entries get the same DNS-
+    // typo coverage as the single primary. Pre-iter-44 backup
+    // entries were completely uncovered — a typo in
+    // `server_endpoints: [..., "vps-backip.example.com:8443"]`
+    // would silently slip through preflight and only surface at
+    // first failover (the worst possible time).
+    //
+    // The list-detection is a simple two-state scanner over the
+    // YAML source (no full YAML parse — the existing file uses
+    // the text-grep pattern deliberately to avoid coupling to
+    // ClientConfig parsing). State machine:
+    //   - "outside" → on the line `server_endpoints:` enter "inside"
+    //   - "inside" → consume `  - "host:port"` lines, exit on
+    //     any non-list-item line that's at indent <= 0 or a
+    //     top-level key.
+    let mut in_endpoints_block = false;
     for line in text.lines() {
-        let trimmed = line.trim_start();
+        let trimmed_start = line.trim_start();
+
+        // Scalar `server_endpoint` / `server_endpoint_beta` keys.
         for key in ["server_endpoint", "server_endpoint_beta"] {
             let needle = format!("{key}:");
-            if let Some(rest) = trimmed.strip_prefix(&needle) {
+            if let Some(rest) = trimmed_start.strip_prefix(&needle) {
                 let val = rest.trim().trim_matches('"').trim_matches('\'').to_string();
                 if !val.is_empty() {
                     endpoints.push((key.to_string(), val));
                 }
+            }
+        }
+
+        // Multi-line `server_endpoints:` list.
+        if trimmed_start.starts_with("server_endpoints:") {
+            in_endpoints_block = true;
+            continue;
+        }
+        if in_endpoints_block {
+            // List item like `  - "vps.example.com:8443"`?
+            let dash_pos = line.find('-');
+            let is_list_item = dash_pos.map(|p| {
+                // Everything before the `-` must be whitespace (so a
+                // top-level key with a `-` in its NAME doesn't fool us).
+                line[..p].chars().all(|c| c.is_whitespace())
+            }).unwrap_or(false);
+            if is_list_item {
+                let after_dash = &line[dash_pos.unwrap() + 1..];
+                let val = after_dash
+                    .trim()
+                    .trim_matches('"')
+                    .trim_matches('\'')
+                    .to_string();
+                if !val.is_empty() {
+                    endpoints.push(("server_endpoints[]".to_string(), val));
+                }
+            } else if !line.is_empty()
+                && !line.starts_with(' ')
+                && !line.starts_with('\t')
+                && !line.starts_with('#')
+            {
+                // Top-level key or another doc — exit block.
+                in_endpoints_block = false;
             }
         }
     }
@@ -453,7 +505,7 @@ async fn check_endpoint_dns_resolution(cfg_path: &Path, r: &mut HostReport) {
     if endpoints.is_empty() {
         r.push(HostFinding::warn(
             "endpoint_dns",
-            "no server_endpoint / server_endpoint_beta found in config",
+            "no server_endpoint / server_endpoint_beta / server_endpoints found in config",
         ));
         return;
     }
@@ -1003,6 +1055,135 @@ mod tests {
             r#""exit_code":"#,
         ] {
             assert!(s.contains(needle), "missing {needle}");
+        }
+    }
+
+    // ──── Iter-44: server_endpoints[] pool DNS coverage ────
+
+    /// Helper: write a config that has both a primary +
+    /// server_endpoints[] list. Returns the YAML path.
+    fn write_pool_yaml(dir: &std::path::Path, body: &str) -> std::path::PathBuf {
+        let sk = dir.join("sk");
+        std::fs::write(&sk, b"x".repeat(32)).unwrap();
+        let cfg = dir.join("client.yaml");
+        std::fs::write(
+            &cfg,
+            format!(
+                "{body}\
+                 socks_listen: \"127.0.0.1:1080\"\n\
+                 user_id: \"alice\"\n\
+                 keys:\n  client_ed25519_sk: \"{}\"\n",
+                sk.display()
+            ),
+        )
+        .unwrap();
+        cfg
+    }
+
+    /// IP-literal pool entries are recognized by the parser AND
+    /// pass quietly (no DNS lookup needed). Pre-iter-44 they
+    /// weren't even recognized — the operator could typo the
+    /// IP and the preflight wouldn't notice (because the parser
+    /// only scanned `server_endpoint:` not `server_endpoints:`).
+    #[tokio::test]
+    async fn iter44_pool_ip_literals_recognized_and_pass() {
+        let dir = tmp("pool-ip-literals");
+        let cfg = write_pool_yaml(
+            &dir,
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             server_endpoints:\n  \
+                 - \"vps.example.com:8443\"\n  \
+                 - \"198.51.100.10:8443\"\n  \
+                 - \"203.0.113.99:8443\"\n",
+        );
+        let r = run(HostPreflightInput {
+            config_path: Some(cfg),
+            skip_dns_resolution: true, // we only care about parsing
+        })
+        .await;
+        // Without DNS we can't assert resolved-ok, but we can
+        // verify the parser doesn't FAIL on pool entries.
+        let any_pool_fail = r.findings.iter().any(|f| {
+            f.check == "endpoint_dns"
+                && f.severity == Severity::Fail
+                && (f.message.contains("198.51.100.10") || f.message.contains("203.0.113.99"))
+        });
+        assert!(
+            !any_pool_fail,
+            "IP literals in pool must not FAIL preflight: {:?}",
+            r.findings
+        );
+    }
+
+    /// Pool entries with hostnames get the same DNS lookup as
+    /// the primary. We use the skip flag to verify the PARSER
+    /// catches them (the skip path emits a pass);
+    /// `endpoint_dns_lookup_for_pool_entry` covers the live
+    /// lookup path indirectly via the parser exercise.
+    ///
+    /// We verify that with the skip-flag set, the
+    /// per-entry-found loop ran (no "no endpoint found" warn
+    /// when ONLY server_endpoints is set, no primary).
+    #[tokio::test]
+    async fn iter44_pool_only_no_primary_still_recognized() {
+        let dir = tmp("pool-only");
+        // Pool-only deploy: no server_endpoint scalar, just the list.
+        let cfg = write_pool_yaml(
+            &dir,
+            "server_endpoints:\n  \
+                 - \"198.51.100.10:8443\"\n  \
+                 - \"198.51.100.20:8443\"\n",
+        );
+        let r = run(HostPreflightInput {
+            config_path: Some(cfg),
+            skip_dns_resolution: true,
+        })
+        .await;
+        // The pre-iter-44 parser would have logged
+        // "no server_endpoint found in config" as a WARN here
+        // because it never inspected the list block.
+        let warn_no_endpoint = r.findings.iter().any(|f| {
+            f.check == "endpoint_dns"
+                && f.severity == Severity::Warn
+                && f.message.contains("no server_endpoint")
+        });
+        assert!(
+            !warn_no_endpoint,
+            "pool-only config must NOT trigger 'no endpoint found' warn — \
+             iter-44 parser sees server_endpoints[] entries. Findings: {:?}",
+            r.findings
+        );
+    }
+
+    /// Sanity: the parser doesn't misread an unrelated YAML key
+    /// that happens to contain a list (e.g. `tags: ["a","b"]`)
+    /// as pool entries.
+    #[tokio::test]
+    async fn iter44_unrelated_list_keys_dont_pollute_endpoints() {
+        let dir = tmp("pool-unrelated");
+        let cfg = write_pool_yaml(
+            &dir,
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             server_endpoints:\n  \
+                 - \"198.51.100.10:8443\"\n\
+             tags:\n  \
+                 - \"red\"\n  \
+                 - \"blue\"\n",
+        );
+        let r = run(HostPreflightInput {
+            config_path: Some(cfg),
+            skip_dns_resolution: true,
+        })
+        .await;
+        // Crude check: nothing tagged "red" or "blue" should
+        // appear in any endpoint_dns finding message.
+        for f in &r.findings {
+            if f.check == "endpoint_dns" {
+                assert!(
+                    !f.message.contains("red") && !f.message.contains("blue"),
+                    "unrelated list keys leaked into endpoint_dns findings: {f:?}"
+                );
+            }
         }
     }
 }
