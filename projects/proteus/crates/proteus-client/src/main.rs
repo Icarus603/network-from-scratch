@@ -757,7 +757,20 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 let fresh_cfg = match ClientConfig::load(&config_path).await {
                     Ok(c) => c,
                     Err(e) => {
-                        warn!(error = %e, "SIGHUP: config reload failed; keeping current pool");
+                        // Iter-40: bump the failed-attempt counter so
+                        // (reload_attempts - reload_succeeded) > 0
+                        // and the entire ProteusClientPoolReloadFailing
+                        // pentad (Prometheus alert + in-process check
+                        // + dashboard panel + structured log) fires.
+                        // Pre-iter-40 this silent edit-didn't-apply
+                        // was invisible to every operator surface.
+                        ctx_for_reload.reloadable_pool.record_attempt_failed();
+                        warn!(
+                            error = %e,
+                            reload_attempts = ctx_for_reload.reloadable_pool.reload_attempts(),
+                            reload_succeeded = ctx_for_reload.reloadable_pool.reload_succeeded(),
+                            "SIGHUP: config reload FAILED; keeping current pool. Operator edit silently did NOT apply — investigate parse error above",
+                        );
                         let _ = proteus_sd_notify::notify_ready().await;
                         let _ = proteus_sd_notify::notify_status(
                             "SIGHUP reload FAILED (config parse) — current pool preserved",

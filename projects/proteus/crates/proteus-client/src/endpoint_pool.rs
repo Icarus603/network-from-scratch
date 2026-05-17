@@ -149,6 +149,31 @@ impl ReloadablePool {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Record one reload attempt that ABORTED before reaching the
+    /// atomic swap — e.g., the operator SIGHUPed but the on-disk
+    /// `client.yaml` failed to parse, or some I/O error prevented
+    /// reading the new endpoint list. Bumps `reload_attempts`
+    /// WITHOUT bumping `reload_succeeded`, so the gap
+    /// `(attempts - succeeded) > 0` becomes the alertable signal
+    /// that `ProteusClientPoolReloadFailing` (iter-36 alert +
+    /// in-process check + iter-37 dashboard panel) was designed
+    /// to detect.
+    ///
+    /// Iter-40 bug fix: pre-iter-40, the SIGHUP handler in
+    /// main.rs early-returned on a config-parse error WITHOUT
+    /// bumping any counter, leaving the operator's silent
+    /// edit-didn't-apply event invisible to the entire
+    /// observability stack — the alert that was meant to catch
+    /// this exact failure mode could literally never fire,
+    /// because every call into `reload_from_addrs` always
+    /// incremented both counters in lockstep.
+    pub fn record_attempt_failed(&self) {
+        self.reload_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // Deliberately DO NOT bump reload_succeeded — that's the
+        // whole point. The gap is the alertable signal.
+    }
+
     /// Build a new pool from `endpoints`, transplanting counters
     /// from the current pool, then atomically swap it in. Convenience
     /// wrapper around the [`Self::current`] →
@@ -188,10 +213,11 @@ impl ReloadablePool {
     }
 
     /// Reload-succeeded counter (every reload that completed the
-    /// swap — today always equal to attempts since we don't have a
-    /// failure case in pool reload, but kept symmetric with the
-    /// server-side ReloadableAcceptor surface for operator muscle
-    /// memory).
+    /// atomic swap). Iter-40: the gap
+    /// `(reload_attempts - reload_succeeded)` now reflects real
+    /// failed-SIGHUP events because the main.rs SIGHUP handler
+    /// calls [`Self::record_attempt_failed`] on config-parse
+    /// errors. Symmetric with the server-side reloadable surfaces.
     #[must_use]
     pub fn reload_succeeded(&self) -> u64 {
         self.reload_succeeded
@@ -1070,6 +1096,92 @@ mod tests {
         assert_eq!(prev_addrs, vec!["a:1"]);
         assert!(new_addrs.is_empty());
         assert!(r.current().is_none());
+    }
+
+    // ----- Iter-40 failed-attempt counter tests -----
+
+    /// record_attempt_failed bumps attempts WITHOUT bumping succeeded
+    /// — this is what makes the (attempts - succeeded) gap a true
+    /// signal of failed SIGHUP events.
+    #[test]
+    fn record_attempt_failed_creates_gap() {
+        let r = ReloadablePool::new(None);
+        assert_eq!(r.reload_attempts(), 0);
+        assert_eq!(r.reload_succeeded(), 0);
+
+        r.record_attempt_failed();
+        assert_eq!(
+            r.reload_attempts(),
+            1,
+            "attempts must increment on failed reload"
+        );
+        assert_eq!(
+            r.reload_succeeded(),
+            0,
+            "succeeded must NOT increment on failed reload"
+        );
+        // Gap = 1 — this is what the alert detects.
+        assert_eq!(r.reload_attempts() - r.reload_succeeded(), 1);
+    }
+
+    /// Mixed sequence: real reloads succeed, failed-config events
+    /// create asymmetry. Pre-iter-40 this asymmetry was impossible
+    /// because every failure path silently no-oped — the alert
+    /// could literally never fire.
+    #[test]
+    fn record_attempt_failed_interleaved_with_real_reloads() {
+        let r = ReloadablePool::new(Some(Arc::new(
+            EndpointPool::new(vec!["a:1".into()]).unwrap(),
+        )));
+        // Two good SIGHUPs.
+        r.reload(Some(Arc::new(
+            EndpointPool::new(vec!["b:2".into()]).unwrap(),
+        )));
+        r.reload(Some(Arc::new(
+            EndpointPool::new(vec!["c:3".into()]).unwrap(),
+        )));
+        assert_eq!(r.reload_attempts(), 2);
+        assert_eq!(r.reload_succeeded(), 2);
+
+        // One bad SIGHUP (config parse failed in main.rs path).
+        r.record_attempt_failed();
+        assert_eq!(r.reload_attempts(), 3);
+        assert_eq!(r.reload_succeeded(), 2);
+        assert_eq!(
+            r.reload_attempts() - r.reload_succeeded(),
+            1,
+            "gap == 1 → ProteusClientPoolReloadFailing fires"
+        );
+
+        // Subsequent good SIGHUP doesn't retroactively close the
+        // gap — the failed event remains observable in the
+        // cumulative totals. This is intentional: operators want
+        // to see "you had 1 failed reload at some point" even
+        // after subsequent successes, because the underlying
+        // config-parse bug may still be lurking.
+        r.reload(Some(Arc::new(
+            EndpointPool::new(vec!["d:4".into()]).unwrap(),
+        )));
+        assert_eq!(r.reload_attempts(), 4);
+        assert_eq!(r.reload_succeeded(), 3);
+        assert_eq!(
+            r.reload_attempts() - r.reload_succeeded(),
+            1,
+            "successful reload does NOT close the historical gap; \
+             operator alerting still trips until the metric is reset \
+             on process restart"
+        );
+    }
+
+    /// Multiple consecutive failures all count.
+    #[test]
+    fn record_attempt_failed_accumulates() {
+        let r = ReloadablePool::new(None);
+        for _ in 0..5 {
+            r.record_attempt_failed();
+        }
+        assert_eq!(r.reload_attempts(), 5);
+        assert_eq!(r.reload_succeeded(), 0);
     }
 
     /// pool_addr_diff: standard add/remove case.
