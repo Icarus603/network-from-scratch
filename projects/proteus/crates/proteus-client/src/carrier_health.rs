@@ -53,6 +53,8 @@
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use tracing::{info, warn};
+
 /// Default consecutive failures before β suppression engages.
 ///
 /// Rationale: 3 is the smallest number that distinguishes "transient
@@ -162,6 +164,15 @@ impl CarrierHealth {
             .suppressed_connect_count
             .fetch_add(1, Ordering::Relaxed);
         if n.is_multiple_of(PROBE_INTERVAL) {
+            // Log at DEBUG (not INFO) — a probe attempt is routine
+            // operator-curiosity material, not actionable. The actual
+            // outcome (success/failure) is logged by
+            // `record_beta_success` / `record_beta_failure`.
+            tracing::debug!(
+                target: "proteus_client::carrier_health",
+                "β recovery probe scheduled (1-in-{} during suppression)",
+                PROBE_INTERVAL
+            );
             BetaDecision::Probe
         } else {
             BetaDecision::SkipSuppressed
@@ -171,15 +182,38 @@ impl CarrierHealth {
     /// Record one β success. Clears the failure streak and lifts
     /// any active suppression. Safe to call on every β success
     /// (cheap atomics).
+    ///
+    /// Emits an `info!` log line ONLY when this success transitions
+    /// the carrier OUT of suppression — so the operator gets a
+    /// clear "β recovered" signal in `journalctl` without one log
+    /// line per CONNECT in the happy path.
     pub fn record_beta_success(&self) {
-        self.failure_streak.store(0, Ordering::Relaxed);
-        self.suppression_deadline_ns.store(0, Ordering::Release);
+        // Swap the deadline to zero. The previous value tells us if
+        // we were suppressed (non-zero) — that's the transition we
+        // want to log. Releasing the zero makes the "no longer
+        // suppressed" view visible to other threads atomically.
+        let prev_deadline_ns = self.suppression_deadline_ns.swap(0, Ordering::AcqRel);
+        let prev_streak = self.failure_streak.swap(0, Ordering::Relaxed);
         self.suppressed_connect_count.store(0, Ordering::Relaxed);
+        if prev_deadline_ns != 0 {
+            info!(
+                target: "proteus_client::carrier_health",
+                prev_streak,
+                "β carrier RECOVERED (suppression cleared on successful CONNECT)"
+            );
+        }
     }
 
     /// Record one β failure. Bumps the streak; if the streak hits
     /// the threshold, engages or extends suppression with capped
     /// exponential back-off.
+    ///
+    /// Emits a `warn!` log when crossing the suppression threshold
+    /// (first time → operator should care) and a lower-noise `info!`
+    /// when extending an already-active suppression. Sub-threshold
+    /// failures (the first N-1 in a streak) are silent because
+    /// they're indistinguishable from transient network blips and
+    /// would otherwise flood logs during legitimate retries.
     pub fn record_beta_failure(&self, now: Instant) {
         let streak = self.failure_streak.fetch_add(1, Ordering::Relaxed) + 1;
         if streak < self.failure_threshold {
@@ -198,14 +232,50 @@ impl CarrierHealth {
             .unwrap_or(MAX_SUPPRESSION)
             .min(MAX_SUPPRESSION);
         let deadline = now + window;
-        self.suppression_deadline_ns
-            .store(self.to_nanos(deadline), Ordering::Release);
+        // Pre-transition check: if deadline was zero we're entering
+        // suppression for the first time (this burst); otherwise
+        // we're extending an existing window.
+        let prev_deadline = self
+            .suppression_deadline_ns
+            .swap(self.to_nanos(deadline), Ordering::Release);
+        let window_secs = window.as_secs();
+        if prev_deadline == 0 {
+            warn!(
+                target: "proteus_client::carrier_health",
+                streak,
+                threshold = self.failure_threshold,
+                window_secs,
+                "β carrier SUPPRESSED — consecutive failures hit threshold; \
+                 subsequent CONNECTs skip β for the back-off window (1-in-{} probe interval)",
+                PROBE_INTERVAL
+            );
+        } else {
+            info!(
+                target: "proteus_client::carrier_health",
+                streak,
+                window_secs,
+                "β suppression extended (back-off escalated by another failure)"
+            );
+        }
     }
 
     /// Diagnostic: current failure streak count.
     #[must_use]
     pub fn failure_streak(&self) -> u32 {
         self.failure_streak.load(Ordering::Relaxed)
+    }
+
+    /// Diagnostic: current suppression deadline as an `Instant`, or
+    /// `None` if not currently suppressed. Useful for the
+    /// `proteus-client status` surface when it lands.
+    #[must_use]
+    pub fn suppression_deadline(&self) -> Option<Instant> {
+        let ns = self.suppression_deadline_ns.load(Ordering::Acquire);
+        if ns == 0 {
+            None
+        } else {
+            Some(self.decode_nanos(ns))
+        }
     }
 
     /// Diagnostic: true iff β is currently suppressed at instant

@@ -127,20 +127,33 @@ impl EndpointHealth {
         }
     }
 
-    /// Record one success — clears streak + suppression.
-    pub fn record_success(&self) {
+    /// Record one success — clears streak + suppression. Returns
+    /// `true` IFF this call transitioned the endpoint OUT of an
+    /// active suppression window. The dispatch site uses this return
+    /// value to emit a single structured `info!` log per recovery
+    /// (no log noise during the steady-state happy path).
+    pub fn record_success(&self) -> bool {
+        let prev_deadline_ns = self.suppression_deadline_ns.swap(0, Ordering::AcqRel);
         self.failure_streak.store(0, Ordering::Relaxed);
-        self.suppression_deadline_ns.store(0, Ordering::Release);
         self.suppressed_connect_count.store(0, Ordering::Relaxed);
+        prev_deadline_ns != 0
     }
 
     /// Record one failure — bumps streak; engages capped exponential
     /// suppression at/past threshold. Identical schedule to
     /// `CarrierHealth`.
-    pub fn record_failure(&self, now: Instant) {
+    ///
+    /// Returns `Some(window_secs)` when this failure newly engages
+    /// suppression (i.e. the previous deadline was zero AND this
+    /// failure crossed the threshold) so the dispatch site can log a
+    /// structured `warn!`. Returns `None` for both sub-threshold
+    /// failures AND for additional failures during an already-active
+    /// suppression window (the second case is logged at `debug!` by
+    /// the caller if desired).
+    pub fn record_failure(&self, now: Instant) -> Option<u64> {
         let streak = self.failure_streak.fetch_add(1, Ordering::Relaxed) + 1;
         if streak < self.failure_threshold {
-            return;
+            return None;
         }
         let extra = streak.saturating_sub(self.failure_threshold).min(5);
         let window = INITIAL_SUPPRESSION
@@ -148,8 +161,14 @@ impl EndpointHealth {
             .unwrap_or(MAX_SUPPRESSION)
             .min(MAX_SUPPRESSION);
         let deadline = now + window;
-        self.suppression_deadline_ns
-            .store(self.to_nanos(deadline), Ordering::Release);
+        let prev_deadline = self
+            .suppression_deadline_ns
+            .swap(self.to_nanos(deadline), Ordering::Release);
+        if prev_deadline == 0 {
+            Some(window.as_secs())
+        } else {
+            None
+        }
     }
 
     #[must_use]
@@ -373,6 +392,75 @@ mod tests {
         h.record_success();
         assert!(!h.is_suppressed(t));
         assert_eq!(h.failure_streak(), 0);
+    }
+
+    /// `record_success` returns `true` exactly when this success
+    /// transitions OUT of an active suppression window. Two-phase
+    /// proof: sub-threshold success returns `false` (we were never
+    /// suppressed), post-suppression success returns `true`.
+    #[test]
+    fn endpoint_health_record_success_returns_true_only_on_recovery() {
+        let h = EndpointHealth::with_threshold(2);
+        let t = Instant::now();
+        assert!(
+            !h.record_success(),
+            "fresh-state success must NOT report a transition"
+        );
+        h.record_failure(t);
+        // Single sub-threshold failure; success here clears the
+        // streak but didn't lift suppression (none existed).
+        assert!(
+            !h.record_success(),
+            "sub-threshold success must NOT report a transition"
+        );
+        // Now drive to suppression.
+        h.record_failure(t);
+        h.record_failure(t);
+        assert!(h.is_suppressed(t));
+        // The success that clears it must return true.
+        assert!(
+            h.record_success(),
+            "success that lifts suppression MUST report a transition"
+        );
+        // A second success in a row is a no-op transition.
+        assert!(!h.record_success());
+    }
+
+    /// `record_failure` returns `Some(window_secs)` exactly on the
+    /// failure that newly engages suppression; further failures
+    /// during the active window extend back-off silently (return
+    /// None) so the dispatch site only logs one suppression-engaged
+    /// event per burst.
+    #[test]
+    fn endpoint_health_record_failure_returns_window_only_on_engagement() {
+        let h = EndpointHealth::with_threshold(2);
+        let t = Instant::now();
+        // First failure: sub-threshold, no engagement.
+        assert_eq!(h.record_failure(t), None);
+        // Second failure: hits threshold, suppression engaged.
+        let engaged = h.record_failure(t);
+        assert_eq!(
+            engaged,
+            Some(INITIAL_SUPPRESSION.as_secs()),
+            "first cross-threshold failure must report the back-off window"
+        );
+        // Third+ failures while still suppressed: extension, no
+        // re-engagement log.
+        assert_eq!(
+            h.record_failure(t),
+            None,
+            "additional failures during active suppression must NOT re-report engagement"
+        );
+        assert_eq!(h.record_failure(t), None);
+        // After success + a fresh streak hits threshold again, we
+        // get a new engagement.
+        h.record_success();
+        h.record_failure(t);
+        assert_eq!(
+            h.record_failure(t),
+            Some(INITIAL_SUPPRESSION.as_secs()),
+            "fresh streak crossing threshold after recovery must report engagement"
+        );
     }
 
     #[tokio::test]

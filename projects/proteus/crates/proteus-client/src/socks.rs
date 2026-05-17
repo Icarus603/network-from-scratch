@@ -298,17 +298,41 @@ async fn dispatch_via_pool(
         let result = attempt_one_pool_entry(cfg, health, &addr_owned, &target_bytes, sock).await;
         match result {
             Ok(()) => {
-                endpoint_health.record_success();
+                // record_success returns true IFF this transitioned
+                // the entry OUT of an active suppression window. The
+                // operator wants exactly one INFO line per recovery,
+                // not one per CONNECT.
+                if endpoint_health.record_success() {
+                    tracing::info!(
+                        endpoint = %addr_owned,
+                        "endpoint RECOVERED — suppression cleared by successful CONNECT"
+                    );
+                }
                 return Ok(());
             }
             Err(e) => {
-                endpoint_health.record_failure(std::time::Instant::now());
-                tracing::warn!(
-                    endpoint = %addr_owned,
-                    error = %e,
-                    streak = endpoint_health.failure_streak(),
-                    "pool entry failed — trying next"
-                );
+                // record_failure returns Some(window_secs) IFF this
+                // newly engaged suppression. Use that to escalate the
+                // log: warn! on the engagement (a real signal to
+                // investigate) vs the existing per-attempt warn!.
+                let engaged = endpoint_health.record_failure(std::time::Instant::now());
+                if let Some(window_secs) = engaged {
+                    tracing::warn!(
+                        endpoint = %addr_owned,
+                        error = %e,
+                        streak = endpoint_health.failure_streak(),
+                        window_secs,
+                        "endpoint SUPPRESSED — consecutive failures hit threshold; \
+                         dispatcher will skip this entry until window expires"
+                    );
+                } else {
+                    tracing::warn!(
+                        endpoint = %addr_owned,
+                        error = %e,
+                        streak = endpoint_health.failure_streak(),
+                        "pool entry failed — trying next"
+                    );
+                }
                 last_err = Some(e);
             }
         }
