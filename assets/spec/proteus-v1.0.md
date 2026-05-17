@@ -21,7 +21,7 @@ Proteus v1.0 同時達成下列三個 SOTA 屬性 —— **這是現有任一單
 並額外有 **三條 v0.1 沒有、SOTA 沒有** 的能力：
 
 1. **Shape-shifting (§22)** —— 每 session 隨機選 cover shape（streaming / api-poll / video-call / file-download / web-browsing 五種 IAT/size profile），週期性 mid-session 切換。對 long-term flow aggregator ([`wu-fep-2023`]) 與 adaptive eval ([`sheffey-adaptive-2024`]) 都增加 ε-bound。
-2. **Transport agility under blanket block (§10.3)** —— 對 2025-08-20-style 全域 TCP/443 RST 事件 ([`gfw-report-20250820-port443`])、Russian TSPU 15-20 KB freeze、Henan provincial firewall ([`wu-henan-sp25`]) 做 normative fallback：P95 切換時間 ≤ 5 秒。
+2. **Transport agility under blanket block (§10.3)** —— 對 2025-08-20-style 全域 TCP/443 RST 事件 ([`2025-08-20-port443-rst-incident`])、Russian TSPU 15-20 KB freeze、Henan provincial firewall ([`wu-henan-sp25`]) 做 normative fallback：P95 切換時間 ≤ 5 秒。
 3. **Cover-IAT online learning (§20)** —— Server 對自己的 cover URL 持續抽樣 IAT/size distribution（24 hr rolling），shaping engine 用該 distribution 而非寫死的「streaming/api-poll」profile。對手如果想用「Cloudflare CDN 真實流量分佈」做 baseline 比對，Proteus 的分佈會跟著 cover 的部署變動而漂移，使分類器訓練資料天然過時。
 
 ---
@@ -750,7 +750,7 @@ Multipath scheduler default: **lowest-srtt + roundrobin**. Other schedulers (pri
 
 ### §10.3 Transport profile switching under blanket block (normative)
 
-This is the v1.0 hard upgrade against C15 (transient blanket port block; [`gfw-report-20250820-port443`]).
+This is the v1.0 hard upgrade against C15 (transient blanket port block; [`2025-08-20-port443-rst-incident`]).
 
 #### §10.3.1 Detection
 
@@ -1043,7 +1043,7 @@ Until IETF approval, all values are **internal use only**.
 - Fischlin-Günther, *Multi-Stage Key Exchange*, CCS 2014 ([`fischlin-gunther-zero-rtt`]).
 - Frolov et al., *Probe-Resistant Proxies*, NDSS 2020 ([`frolov-ndss20-probe-resistant`]).
 - Frolov, Wustrow, *uTLS*, NDSS 2019.
-- GFW.report blog 2025-08-22, *Port 443 Block* ([`gfw-report-20250820-port443`]).
+- GFW.report blog 2025-08-22, *Port 443 Block* ([`2025-08-20-port443-rst-incident`]).
 - Houmansadr, Brubaker, Shmatikov, *Parrot is Dead*, IEEE S&P 2013 ([`houmansadr-parrot-is-dead`]).
 - Krawczyk, SIGMA, CRYPTO 2003 ([`krawczyk-sigma-2003`]).
 - Krawczyk, HMQV, CRYPTO 2005 ([`krawczyk-hmqv-2005`]).

@@ -1,8 +1,10 @@
 ---
-name: gfw-report-20250820-port443
-description: GFW.report 2025-08-20 analysis of unconditional TCP/443 RST event — distinct fingerprint suggests new or misconfigured GFW device
+name: 2025-08-20-port443-rst-incident
+description: GFW.report 2025-08-22 analysis of 2025-08-20 unconditional TCP/443 RST event — 74 min blanket block with novel incrementing RST fingerprint suggests new or misconfigured GFW device
 metadata:
-  type: paper-precis
+  type: gfw-incident-note
+  source_kind: blog-post-with-packet-captures
+  prior_path: notes/papers/gfw-report-20250820-port443.md
 ---
 
 # Analysis of the GFW's Unconditional Port 443 Block on August 20, 2025

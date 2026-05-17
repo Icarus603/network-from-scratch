@@ -92,6 +92,43 @@ SNI-based QUIC Censorship of the Great Firewall of China" — applied to β only
 | JA4 cipher wire-order Chrome-aligned | ✅ 0x1301 first | ❌ rustls default 0x1302 first | n/a |
 | compress_certificate (ext 0x001b) | ✅ rustls `brotli` feature | ❌ | n/a |
 | ML-KEM-768 hybrid handshake (PQ) | ✅ X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
+| QUIC CONNECTION_CLOSE indistinguishability (no wire-visible reject signal, RFC 9000 §19.19) | ✅ all closes are NO_ERROR+empty (3 wire tests + 1 static-source audit) | n/a (TCP) | ❌ distinct close codes leak policy |
+
+---
+
+## 2026 GFW threat intelligence — what we're tracking
+
+Threat model updated 2026-05 to reflect the post-2025-09 commercial-DPI
+era. Full analysis: [`qa/2026-05-17-gfw-2026-q1q2-threat-intel.md`](../../qa/2026-05-17-gfw-2026-q1q2-threat-intel.md).
+Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-09-11-geedge-mesa-leak.md).
+
+**Seven active attack lines (2025 Q3 → 2026 Q2)**:
+
+| # | Attack line | Status | Proteus coverage |
+|---|---|---|---|
+| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ⚠ partial — need P0 `--check-ip-reputation` preflight + uTLS bit-perfect ClientHello |
+| 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; TODO: multi-VPS HA + topology doc |
+| 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
+| 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ❌ cover-endpoint pool + probe-anomaly detector |
+| 5 | UDP / QUIC throttling (Hy2 / TUIC visibly degrades 2026 Q1+) | nationally deployed | ⚠ α survives, β no auto-fallback; TODO: carrier auto-switch + γ profile (MASQUE) |
+| 6 | DoH / DoT identification (bootstrap-layer attack on the client itself) | rolling out 2026 Q2 | ❌ `bootstrap_dns:` config + `direct_ip` recommendation needed |
+| 7 | Fully-encrypted-traffic heuristics (USENIX Sec '23, 5 rules — still active) | stable | ✅ α satisfies rule 2 naturally; ⚠ β prefix-noise needs printable-byte tweak to satisfy rule 1 |
+
+**Roadmap priorities driven by this threat intel**:
+
+- **P0** (must precede any "production-ready" claim): ECH integration, IP reputation preflight tool, `bootstrap_dns: direct_ip`, β prefix-noise printable-byte tweak, `deploy/README.md` anti-relay topology warning.
+- **P1** (M3): uTLS bit-perfect ClientHello, cover-endpoint pool, carrier auto-switch, multi-VPS HA client.
+- **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
+
+The single most important update is conceptual: the adversary is no longer
+a static research target. Geedge sells GFW as a product with paying
+Belt-and-Road customers, which drives iteration faster than the public-research
+community can keep up. Designs that beat "GFW as documented in USENIX
+23–25" are necessary but not sufficient — we must beat "GFW as it will
+be in 2027 after Geedge ships its next 4 customer-requested classifier
+updates." This is why the protocol layer (already strictly stronger
+than Reality + Hy2/TUIC5) is no longer the binding gap; **engineering
++ deployment posture** is.
 
 ---
 
