@@ -492,7 +492,17 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
-    // 9. Access-log parent dir exists and is writable.
+    // 9. Access-log parent dir exists AND is writable.
+    //
+    // Iter-50: pre-iter-50 we only checked the parent EXISTS +
+    // is a directory. A common operator trap: `/var/log/proteus`
+    // exists but is owned by root:root mode 0700, while proteus
+    // runs as `proteus:proteus`. The access_log open() fails at
+    // startup with "Permission denied"; the binary exits before
+    // ever writing a line — but `validate` previously said
+    // green. Now we actually test write permission by creating
+    // + immediately removing a uniquely-named probe file in the
+    // parent dir.
     if let Some(path) = cfg.access_log.as_ref() {
         let parent = path.parent().unwrap_or_else(|| Path::new("/"));
         match parent.metadata() {
@@ -500,7 +510,40 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                 if !md.is_dir() {
                     r.push_fail(format!("access_log parent {parent:?} is not a directory"));
                 } else {
-                    r.push_pass(format!("access_log parent dir exists ({parent:?})"));
+                    // Probe write access by attempting to create
+                    // a uniquely-named file then immediately
+                    // remove it. We don't write to the actual
+                    // access_log path because (a) it might
+                    // already exist and we'd clobber it, (b)
+                    // even on success we'd leave residual data.
+                    let probe_name = format!(
+                        ".proteus-validate-probe-{}-{}",
+                        std::process::id(),
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_nanos())
+                            .unwrap_or(0),
+                    );
+                    let probe_path = parent.join(&probe_name);
+                    match std::fs::File::create(&probe_path) {
+                        Ok(_) => {
+                            // Clean up; ignore unlink errors —
+                            // worst case is operator sees one
+                            // stale probe file.
+                            let _ = std::fs::remove_file(&probe_path);
+                            r.push_pass(format!(
+                                "access_log parent dir exists and is writable ({parent:?})"
+                            ));
+                        }
+                        Err(e) => {
+                            r.push_fail(format!(
+                                "access_log parent {parent:?} exists but is NOT writable as \
+                                 the current user: {e}. The access_log writer task will fail \
+                                 at startup. Check ownership: `sudo chown -R proteus:proteus \
+                                 {parent:?}` (or the user the systemd unit runs as)."
+                            ));
+                        }
+                    }
                 }
             }
             Err(e) => r.push_fail(format!("access_log parent {parent:?}: {e}")),
@@ -1011,6 +1054,67 @@ mod tests {
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-50: access_log parent dir exists AND is writable.
+    /// Probe a tmp file under the parent; the PASS message must
+    /// say "writable" so the operator knows the new check ran.
+    #[test]
+    fn iter50_access_log_writable_dir_passes_with_writable_label() {
+        let dir = tmpdir();
+        let log_path = dir.join("access.log");
+        let mut cfg = minimal_cfg(&dir);
+        cfg.access_log = Some(log_path);
+        let report = preflight(&cfg);
+        assert!(!report.has_failures(), "writable parent must PASS: {report}");
+        let writable_pass = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Pass(m) if m.contains("access_log") && m.contains("writable")));
+        assert!(
+            writable_pass,
+            "PASS message must call out 'writable' so operator knows the iter-50 check ran: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-50: access_log parent dir is read-only → FAIL with
+    /// an actionable chown hint. Unix-only (chmod is meaningless
+    /// on Windows; the bug class is Unix-deploy-specific).
+    #[cfg(unix)]
+    #[test]
+    fn iter50_access_log_readonly_dir_fails_with_chown_hint() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tmpdir();
+        let log_dir = dir.join("ro");
+        std::fs::create_dir(&log_dir).unwrap();
+        // Mode 0500 = readable + executable for owner, no write.
+        // Even if we ARE the owner, write() will fail.
+        std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.access_log = Some(log_dir.join("access.log"));
+        let report = preflight(&cfg);
+        // The check should FAIL.
+        let writable_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(m) => m.contains("access_log") && m.contains("NOT writable"),
+            _ => false,
+        });
+        // Cleanup: restore mode so the tmpdir can be deleted.
+        let _ = std::fs::set_permissions(&log_dir, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Skip the assertion entirely when running as root —
+        // root ignores write-bit and the test would be
+        // meaningless. We detect root by checking $USER (cheap,
+        // no unsafe block needed; the validate crate forbids
+        // unsafe at the lib level).
+        let is_root = std::env::var("USER").as_deref() == Ok("root")
+            || std::env::var("LOGNAME").as_deref() == Ok("root");
+        if !is_root {
+            assert!(
+                writable_fail,
+                "non-writable access_log parent must FAIL with the iter-50 write-probe diagnostic: {report}"
+            );
+        }
     }
 
     #[test]
