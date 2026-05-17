@@ -240,6 +240,32 @@ handshake_deadline_secs: 15
 # per_user_conn_limit:
 #   max_per_user: 6
 
+# Auto-quarantine list — closes the loop from abuse detection to
+# enforcement WITHOUT a human in the loop. When the operator-selected
+# abuse detectors fire, the offending user_id lands in a TTL-bounded
+# ban list; subsequent handshakes from that user_id are rejected at
+# the post-handshake admission gate (with
+# `proteus_user_quarantine_rejected_total++`).
+#
+# `on_kinds` opts specific abuse-fire kinds into auto-enforcement:
+#   - per_user_bandwidth_rate: strongest signal (rate-based, hysteresis-
+#                              protected). Always opt in.
+#   - rate_limit:              fires on repeated rate-limit hits. Fine
+#                              to opt in.
+#   - byte_budget:             noisier (per-session cap hits). Opt in
+#                              only if the operator trusts the detector
+#                              for their workload.
+#
+# Defaults: ttl_secs=600 (10-min ban), max_entries=4096.
+# ttl_secs=0 = list wired but disabled (SIGHUP-swap slot).
+#
+# user_quarantine:
+#   ttl_secs: 600
+#   max_entries: 4096
+#   on_kinds:
+#     - per_user_bandwidth_rate
+#     - rate_limit
+
 # Per-session byte budget (tx + rx plaintext). Sessions whose total
 # bytes crosses this threshold are torn down with close_reason
 # "byte_budget_exhausted". Defends against a compromised credential

@@ -492,6 +492,55 @@ The buffer is wired **automatically** in the binary — no YAML opt-
 in. The memory footprint is fixed and the operational value is
 high enough that every deployment gets it.
 
+### Auto-quarantine — detection → enforcement, without humans in the loop
+
+The abuse-fires ring buffer surfaces WHO fired, but operators still
+need to MANUALLY rotate the credential or restart the server.
+While they sleep, the attacker keeps exfiltrating. The IP-based
+[`auto_deny`](#) closes the same loop for source-IP /24 prefixes
+flagged by the probe-anomaly detector; this is the per-credential
+sibling.
+
+```yaml
+user_quarantine:
+  ttl_secs: 600                    # 10-minute ban; refreshes on each fire
+  max_entries: 4096                # memory bound; matches other per-user caps
+  on_kinds:
+    - per_user_bandwidth_rate      # strongest signal — always opt in
+    - rate_limit                   # optional — fires on repeated rate hits
+    # byte_budget                  # noisiest; opt in only if you trust it
+```
+
+Wire-up: when an opted-in abuse-fire kind fires (anywhere among
+the three detectors), the offending user_id is inserted into a
+TTL-bounded HashMap. The `user_admission_ok` post-handshake gate
+checks this map BEFORE the per-user rate limiter, so subsequent
+handshakes from the banned user_id are torn down cleanly.
+
+Operator surfaces:
+
+- **`/metrics`** — six gauges + counters:
+  `proteus_user_quarantine_{ttl_seconds,max_entries,active_entries,inserted_total,refused_inserts_total,hits_total}`,
+  plus the always-emitted server-level
+  `proteus_user_quarantine_rejected_total` (handshakes blocked at
+  the admission gate). Operators alert on
+  `rate(proteus_user_quarantine_hits_total[5m]) > 0` — the "did
+  the quarantine actually save us?" PromQL.
+- **`/diagnose`** — USER QUARANTINE table prepended right after
+  the RECENT ABUSE FIRES table, so operators read the narrative
+  top-down: "abuse fired → user_id auto-banned → ban expires in
+  Ns".
+
+**`ttl_secs=0`** = wired but disabled (SIGHUP-swap slot). Entries
+auto-expire so transient false positives self-heal without
+operator intervention; refreshes on repeat fires extend the ban
+clock from "now" (so a user that keeps tripping detectors stays
+banned).
+
+**Why per-user-id, not per-IP**: a stolen credential used across
+a botnet of residential IPs defeats per-IP enforcement. Per-
+credential enforcement attacks what's actually leaked.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

@@ -75,6 +75,19 @@ pub struct RelayConfig {
     /// `admin abuse-fires` — not just the aggregate counter. Mirrors
     /// the per-user bandwidth-rate path's automatic ring push.
     pub abuse_fires: Option<Arc<proteus_transport_alpha::abuse_fires::AbuseFireBuffer>>,
+    /// Optional auto-quarantine list. When wired AND the operator
+    /// has opted `byte_budget` into `quarantine_on_kinds`, every
+    /// byte-budget detector fire ALSO inserts the offending
+    /// user_id with the configured TTL. Subsequent handshakes from
+    /// that user_id are rejected at the post-handshake admission
+    /// gate.
+    pub user_quarantine: Option<Arc<proteus_transport_alpha::user_quarantine::UserQuarantineList>>,
+    /// Whether `byte_budget` fires should trigger an auto-
+    /// quarantine insert. Operator-set; matches the bool
+    /// returned by `ctx.should_quarantine_on("byte_budget")` (held
+    /// here as a flat bool to avoid wiring a full ServerCtx
+    /// reference through RelayConfig).
+    pub quarantine_on_byte_budget: bool,
     /// Data-plane padding quantum for the server→client direction.
     /// When non-zero, every outgoing AEAD record's plaintext is
     /// length-prefixed and zero-padded to a multiple of this value
@@ -102,6 +115,8 @@ impl std::fmt::Debug for RelayConfig {
             )
             .field("outbound_filter", &self.outbound_filter.is_some())
             .field("abuse_fires", &self.abuse_fires.is_some())
+            .field("user_quarantine", &self.user_quarantine.is_some())
+            .field("quarantine_on_byte_budget", &self.quarantine_on_byte_budget)
             .field("pad_quantum", &self.pad_quantum)
             .finish()
     }
@@ -126,6 +141,8 @@ where
     let metrics_for_alerts = cfg.metrics.clone();
     let abuse_detector = cfg.abuse_detector_byte_budget.clone();
     let abuse_fires = cfg.abuse_fires.clone();
+    let user_quarantine = cfg.user_quarantine.clone();
+    let quarantine_on_byte_budget = cfg.quarantine_on_byte_budget;
     let started = Instant::now();
 
     let outcome = handle_session_inner(session, cfg).await;
@@ -162,6 +179,26 @@ where
                         uid,
                         0,
                     );
+                }
+                // Auto-quarantine when the operator has opted this
+                // kind in. The byte_budget detector fires once-per-
+                // burst on its own sliding-window threshold, so a
+                // single fire already represents "repeated cap
+                // hits" and is enough signal to ban for TTL.
+                if quarantine_on_byte_budget {
+                    if let Some(qlist) = user_quarantine.as_ref() {
+                        if qlist.insert(
+                            uid,
+                            proteus_transport_alpha::abuse_fires::AbuseFireKind::ByteBudget
+                                .as_label(),
+                        ) {
+                            tracing::warn!(
+                                user_id = ?uid,
+                                ttl_secs = qlist.ttl().as_secs(),
+                                "auto-quarantine: user_id banned for TTL on byte_budget abuse fire"
+                            );
+                        }
+                    }
                 }
             }
         }

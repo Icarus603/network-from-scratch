@@ -311,6 +311,14 @@ pub struct ServerMetrics {
     /// Operator workflow: alert on `rate(...) > 0` in any log/metrics
     /// pipeline — even a single uptick is operator-actionable.
     pub abuse_alerts_per_user_bandwidth: AtomicU64,
+    /// **Post-handshake admission gate rejections** for a quarantined
+    /// `user_id`. Bumped once per attempted handshake that lands on
+    /// an active quarantine entry — the "auto-quarantine actually
+    /// blocked an attacker mid-burst" counter. Distinct from
+    /// `user_rate_rejected` (which is a transient rate-limit
+    /// rejection): a hit here means the user_id was explicitly
+    /// banned for a TTL.
+    pub user_quarantine_rejected: AtomicU64,
     /// Upstream dial requests blocked by the outbound destination
     /// filter. Includes SSRF-style attempts (`169.254.169.254`,
     /// RFC 1918, loopback, IPv6 ULA / mapped-v4 bypass) and
@@ -379,6 +387,7 @@ impl Default for ServerMetrics {
             abuse_alerts_byte_budget: AtomicU64::new(0),
             abuse_alerts_rate_limit: AtomicU64::new(0),
             abuse_alerts_per_user_bandwidth: AtomicU64::new(0),
+            user_quarantine_rejected: AtomicU64::new(0),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             firewall_reload_attempts: AtomicU64::new(0),
@@ -476,6 +485,9 @@ impl ServerMetrics {
              # HELP proteus_abuse_alerts_per_user_bandwidth_total Per-user sustained-bandwidth abuse alert fires (sliding window + hysteresis).\n\
              # TYPE proteus_abuse_alerts_per_user_bandwidth_total counter\n\
              proteus_abuse_alerts_per_user_bandwidth_total {}\n\
+             # HELP proteus_user_quarantine_rejected_total Handshakes rejected because the user_id was in the auto-quarantine list.\n\
+             # TYPE proteus_user_quarantine_rejected_total counter\n\
+             proteus_user_quarantine_rejected_total {}\n\
              # HELP proteus_outbound_blocked_total Upstream dials blocked by the outbound destination filter.\n\
              # TYPE proteus_outbound_blocked_total counter\n\
              proteus_outbound_blocked_total {}\n\
@@ -532,6 +544,7 @@ impl ServerMetrics {
             s(&self.abuse_alerts_byte_budget),
             s(&self.abuse_alerts_rate_limit),
             s(&self.abuse_alerts_per_user_bandwidth),
+            s(&self.user_quarantine_rejected),
             s(&self.outbound_blocked),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),

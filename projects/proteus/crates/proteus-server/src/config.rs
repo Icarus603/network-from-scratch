@@ -303,6 +303,33 @@ pub struct ServerConfig {
     #[serde(default)]
     pub per_user_conn_limit: Option<PerUserConnLimitCfg>,
 
+    /// Optional **auto-quarantine list** — TTL-bounded ban for
+    /// user_ids that trip the operator-selected abuse detectors.
+    /// Closes the loop from observation (counters + WARN logs +
+    /// recent-fires ring) to enforcement (subsequent handshakes
+    /// from the banned user_id are rejected at the post-handshake
+    /// admission gate). The IP-based `auto_deny` does the same
+    /// for source-IP /24 prefixes; this is the per-credential
+    /// sibling — the right level for stolen-credential abuse.
+    ///
+    /// Sensible production values:
+    ///
+    /// ```yaml
+    /// user_quarantine:
+    ///   ttl_secs: 600                  # 10-minute ban
+    ///   max_entries: 4096              # match other per-user caps
+    ///   on_kinds:
+    ///     - per_user_bandwidth_rate    # strongest signal — always opt in
+    ///     - rate_limit                 # optional — fires on repeated rate hits
+    ///     # byte_budget                # noisiest; opt in only if you trust the detector
+    /// ```
+    ///
+    /// Unset = quarantine disabled (the detectors still fire alerts
+    ///   + push to the recent-fires ring; just no auto-enforcement).
+    ///     `ttl_secs=0` = list wired but disabled (SIGHUP-swap slot).
+    #[serde(default)]
+    pub user_quarantine: Option<UserQuarantineCfg>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -493,6 +520,40 @@ pub struct PerUserConnLimitCfg {
     pub max_per_user: usize,
 }
 
+/// Auto-quarantine config (see [`ServerConfig::user_quarantine`]
+/// for the operator-facing docstring).
+#[derive(Debug, Deserialize)]
+pub struct UserQuarantineCfg {
+    /// TTL applied to each new (or refreshed) quarantine entry.
+    /// Operator defaults: 600 (10 min) for personal-VPN, 3600
+    /// (1 hour) for stricter deployments. 0 = list wired but
+    /// disabled (no insert ever sticks).
+    #[serde(default = "default_user_quarantine_ttl_secs")]
+    pub ttl_secs: u64,
+    /// Hard cap on map size (memory bound). Matches the per-user
+    /// bandwidth/conn-limit defaults; raise only if the operator
+    /// expects more than 4096 distinct user_ids active in the
+    /// quarantine window.
+    #[serde(default = "default_user_quarantine_max_entries")]
+    pub max_entries: usize,
+    /// Abuse-fire kinds eligible for auto-quarantine. Each entry
+    /// must be one of `byte_budget`, `rate_limit`,
+    /// `per_user_bandwidth_rate`. Unknown labels are silently
+    /// stored (forward-compat) but never fire enforcement.
+    ///
+    /// Empty list = quarantine list installed for observability
+    /// only — no detector opted in, nothing ever gets banned.
+    #[serde(default)]
+    pub on_kinds: Vec<String>,
+}
+
+const fn default_user_quarantine_ttl_secs() -> u64 {
+    600
+}
+const fn default_user_quarantine_max_entries() -> usize {
+    4096
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct FirewallCfg {
     /// CIDR rules — only sources matching one of these are admitted.
@@ -662,6 +723,7 @@ impl ServerConfig {
             metrics_listen: self.metrics_listen.is_some(),
             per_user_bandwidth_rate: self.per_user_bandwidth_rate.is_some(),
             per_user_conn_limit: self.per_user_conn_limit.is_some(),
+            user_quarantine: self.user_quarantine.is_some(),
             cover_endpoint_count: self.cover_endpoints.len() as u64,
             client_allowlist_count: self.client_allowlist.len() as u64,
         }
@@ -694,6 +756,9 @@ pub struct ConfigPresence {
     /// `per_user_conn_limit:` block — 1 when the cap is configured
     /// (even with max=0 — the slot is wired).
     pub per_user_conn_limit: bool,
+    /// `user_quarantine:` block — 1 when the auto-quarantine list
+    /// is configured (even with ttl_secs=0 — the slot is wired).
+    pub user_quarantine: bool,
     /// Number of entries in `cover_endpoints:`. Operators read the
     /// SIZE of the pool as a sanity check ("I configured 5 cover
     /// endpoints, why does this show 3?") which a bare presence bit
@@ -737,6 +802,7 @@ impl ConfigPresence {
             ("metrics_listen", self.metrics_listen),
             ("per_user_bandwidth_rate", self.per_user_bandwidth_rate),
             ("per_user_conn_limit", self.per_user_conn_limit),
+            ("user_quarantine", self.user_quarantine),
         ] {
             let _ = writeln!(
                 s,
@@ -968,6 +1034,54 @@ per_user_conn_limit:\n  \
             prom.contains(r#"proteus_config_section_active{section="per_user_conn_limit"} 1"#),
             "{prom}"
         );
+    }
+
+    #[test]
+    fn presence_reports_user_quarantine_when_configured() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+user_quarantine:\n  \
+  ttl_secs: 600\n  \
+  max_entries: 4096\n  \
+  on_kinds:\n    \
+    - per_user_bandwidth_rate\n    \
+    - rate_limit\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let q = cfg.user_quarantine.as_ref().expect("must deserialize");
+        assert_eq!(q.ttl_secs, 600);
+        assert_eq!(q.max_entries, 4096);
+        assert_eq!(q.on_kinds, vec!["per_user_bandwidth_rate", "rate_limit"]);
+        let p = cfg.presence();
+        assert!(p.user_quarantine);
+        assert!(p
+            .prometheus()
+            .contains(r#"proteus_config_section_active{section="user_quarantine"} 1"#),);
+    }
+
+    #[test]
+    fn user_quarantine_defaults_apply_when_subfields_missing() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+user_quarantine:\n  \
+  on_kinds:\n    \
+    - per_user_bandwidth_rate\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        let q = cfg.user_quarantine.as_ref().unwrap();
+        assert_eq!(q.ttl_secs, 600); // default
+        assert_eq!(q.max_entries, 4096); // default
+        assert_eq!(q.on_kinds.len(), 1);
     }
 
     #[test]

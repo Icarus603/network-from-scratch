@@ -877,6 +877,121 @@ mod tests {
         );
     }
 
+    /// Auto-quarantine e2e: wire a low-threshold bandwidth-rate
+    /// detector + a quarantine list that opts the
+    /// `per_user_bandwidth_rate` kind in. Run a single-user soak
+    /// long enough to trigger ≥1 detector fire, then assert:
+    ///
+    /// 1. The quarantine list contains the user_id with non-zero
+    ///    remaining TTL.
+    /// 2. The list's `inserted_total` counter ticked up.
+    ///
+    /// Note: we don't assert the post-handshake admission gate
+    /// hit count here because the soak harness's in-process server
+    /// uses the bench-shaped handler that DOES wire the per-user
+    /// bandwidth → quarantine path, but does NOT wire the
+    /// admission-gate check (that lives in the production
+    /// server.rs:user_admission_ok which the bench's bare beta
+    /// handler bypasses). The admission-gate path is exercised by
+    /// the production `server.rs::user_admission_ok` unit logic +
+    /// the existing rate-limit tests; the missing piece this e2e
+    /// covers is "does the auto-insert ACTUALLY happen under a
+    /// real handshake-protected pipeline".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn user_quarantine_auto_inserts_on_bandwidth_rate_fire() {
+        use proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth;
+        use proteus_transport_alpha::per_user_bandwidth_rate_detector::PerUserBandwidthRateDetector;
+        use proteus_transport_alpha::user_quarantine::UserQuarantineList;
+
+        let per_user = Arc::new(PerUserBandwidth::new(4096));
+        let detector = Arc::new(PerUserBandwidthRateDetector::new(
+            Duration::from_secs(10),
+            1024, // 1 KiB/s — trivially exceeded
+            4096,
+        ));
+        let qlist = Arc::new(UserQuarantineList::new(Duration::from_secs(600), 4096));
+        per_user.set_rate_detector(Some(Arc::clone(&detector)));
+        // opt_in = true so Fired → quarantine insert.
+        per_user.set_quarantine(Some(Arc::clone(&qlist)), true);
+
+        let _summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 2,
+                duration: Duration::from_secs(2),
+                per_session_kib: 16,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("auto-quarantine soak");
+
+        // The accumulator's Fired path must have inserted user0000
+        // into the quarantine list.
+        assert!(
+            qlist.inserted_total() > 0,
+            "expected ≥1 quarantine insert; got 0 (auto-quarantine wire-up broken?)"
+        );
+        let remaining = qlist.check(b"user0000");
+        assert!(
+            remaining.is_some(),
+            "user0000 must be quarantined after the bandwidth-rate fire"
+        );
+        let remaining_secs = remaining.unwrap();
+        assert!(
+            remaining_secs > 500 && remaining_secs <= 600,
+            "quarantine TTL not in the expected band (~600s): {remaining_secs}"
+        );
+    }
+
+    /// Quarantine list with `opt_in=false` MUST NOT auto-insert
+    /// even when the rate detector fires repeatedly.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn user_quarantine_opt_in_false_does_not_auto_insert() {
+        use proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth;
+        use proteus_transport_alpha::per_user_bandwidth_rate_detector::PerUserBandwidthRateDetector;
+        use proteus_transport_alpha::user_quarantine::UserQuarantineList;
+
+        let per_user = Arc::new(PerUserBandwidth::new(4096));
+        let detector = Arc::new(PerUserBandwidthRateDetector::new(
+            Duration::from_secs(10),
+            1024,
+            4096,
+        ));
+        let qlist = Arc::new(UserQuarantineList::new(Duration::from_secs(600), 4096));
+        per_user.set_rate_detector(Some(Arc::clone(&detector)));
+        // opt_in = false — list wired for observability but no
+        // auto-enforcement on fire.
+        per_user.set_quarantine(Some(Arc::clone(&qlist)), false);
+
+        let _summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 2,
+                duration: Duration::from_secs(2),
+                per_session_kib: 16,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("opt-in=false soak");
+
+        assert_eq!(
+            qlist.inserted_total(),
+            0,
+            "opt_in=false MUST NOT auto-insert"
+        );
+        assert_eq!(qlist.active_count(), 0);
+    }
+
     /// Recent-abuse-fires ring buffer e2e: wire a low-threshold
     /// rate detector + an abuse-fires buffer to the per-user
     /// bandwidth accumulator, run a single-user soak, and verify

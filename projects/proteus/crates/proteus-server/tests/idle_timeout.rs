@@ -68,6 +68,8 @@ async fn idle_session_reaps_within_deadline() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         abuse_fires: None,
+        user_quarantine: None,
+        quarantine_on_byte_budget: false,
         outbound_filter: None,
         pad_quantum: None,
     };
@@ -196,6 +198,8 @@ async fn active_session_not_killed_by_idle_timeout() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         abuse_fires: None,
+        user_quarantine: None,
+        quarantine_on_byte_budget: false,
         outbound_filter: None,
         pad_quantum: None,
     };

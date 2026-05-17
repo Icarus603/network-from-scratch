@@ -597,6 +597,90 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         "recent-abuse-fires ring buffer wired (query via /diagnose or `admin abuse-fires`)"
     );
 
+    // Auto-quarantine list (optional). When configured, abuse-fire
+    // detectors flagged in `on_kinds` will auto-insert the offending
+    // user_id into a TTL-bounded ban list. Subsequent handshakes
+    // from that user_id are rejected at the post-handshake admission
+    // gate — closing the loop from observation to enforcement
+    // automatically, with no human in the loop. The IP-based
+    // auto_deny.rs does the analogous job for source-IP prefixes;
+    // this is the per-credential sibling that defends against
+    // stolen-credential abuse spread across many source IPs.
+    let user_quarantine_list: Option<
+        Arc<proteus_transport_alpha::user_quarantine::UserQuarantineList>,
+    > = match cfg.user_quarantine.as_ref() {
+        Some(qcfg) => {
+            let list = Arc::new(
+                proteus_transport_alpha::user_quarantine::UserQuarantineList::new(
+                    std::time::Duration::from_secs(qcfg.ttl_secs),
+                    qcfg.max_entries,
+                ),
+            );
+            // Filter on_kinds to the known set of labels (forward-
+            // compat: unknown labels are silently accepted but
+            // never trigger enforcement). Build the static-str set
+            // by matching exactly so the ServerCtx slot stays
+            // `&'static str`-keyed.
+            let mut accepted: Vec<&'static str> = Vec::new();
+            for k in &qcfg.on_kinds {
+                let lit: Option<&'static str> = match k.as_str() {
+                    "byte_budget" => Some(
+                        proteus_transport_alpha::abuse_fires::AbuseFireKind::ByteBudget.as_label(),
+                    ),
+                    "rate_limit" => Some(
+                        proteus_transport_alpha::abuse_fires::AbuseFireKind::RateLimit.as_label(),
+                    ),
+                    "per_user_bandwidth_rate" => Some(
+                        proteus_transport_alpha::abuse_fires::AbuseFireKind::PerUserBandwidthRate
+                            .as_label(),
+                    ),
+                    other => {
+                        warn!(
+                            kind = %other,
+                            "user_quarantine.on_kinds entry not recognized — ignored \
+                             (valid: byte_budget, rate_limit, per_user_bandwidth_rate)"
+                        );
+                        None
+                    }
+                };
+                if let Some(l) = lit {
+                    accepted.push(l);
+                }
+            }
+            ctx = ctx
+                .with_user_quarantine(Arc::clone(&list))
+                .with_quarantine_on_kinds(accepted.iter().copied());
+            // The per-user bandwidth accumulator needs its own
+            // handle because its `Fired` outcome happens INSIDE
+            // record_with_rate_check (not at the post-handshake
+            // gate where ctx is consulted).
+            let opt_in_pubr = accepted.contains(
+                &proteus_transport_alpha::abuse_fires::AbuseFireKind::PerUserBandwidthRate
+                    .as_label(),
+            );
+            per_user_bandwidth.set_quarantine(Some(Arc::clone(&list)), opt_in_pubr);
+            if qcfg.ttl_secs == 0 {
+                info!("user_quarantine WIRED but DISABLED (ttl_secs=0; SIGHUP-swap slot ready)");
+            } else {
+                info!(
+                    ttl_secs = qcfg.ttl_secs,
+                    max_entries = qcfg.max_entries,
+                    on_kinds = ?accepted,
+                    "user_quarantine configured — abuse fires from listed kinds AUTO-BAN the user_id for TTL"
+                );
+            }
+            Some(list)
+        }
+        None => {
+            info!(
+                "user_quarantine unset — abuse fires emit alerts + recent-fires ring entries \
+                 but DO NOT auto-ban. Recommended for production: enable with at least \
+                 `on_kinds: [per_user_bandwidth_rate]` so stolen credentials self-block."
+            );
+            None
+        }
+    };
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics
@@ -726,8 +810,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         let per_user_for_metrics = Some(Arc::clone(&per_user_bandwidth));
         let per_user_conn_limiter_for_metrics = per_user_conn_limiter.as_ref().map(Arc::clone);
         let abuse_fires_for_metrics = Some(Arc::clone(&abuse_fires_buffer));
+        let user_quarantine_for_metrics = user_quarantine_list.as_ref().map(Arc::clone);
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v8(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v9(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -739,6 +824,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 per_user_for_metrics,
                 per_user_conn_limiter_for_metrics,
                 abuse_fires_for_metrics,
+                user_quarantine_for_metrics,
             )
             .await
             {
@@ -1100,6 +1186,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         max_session_bytes: cfg.max_session_bytes,
         abuse_detector_byte_budget,
         abuse_fires: Some(Arc::clone(&abuse_fires_buffer)),
+        user_quarantine: user_quarantine_list.as_ref().map(Arc::clone),
+        quarantine_on_byte_budget: cfg
+            .user_quarantine
+            .as_ref()
+            .map(|q| q.on_kinds.iter().any(|k| k == "byte_budget"))
+            .unwrap_or(false),
         outbound_filter: outbound_filter.clone(),
         pad_quantum: cfg.pad_quantum,
     };

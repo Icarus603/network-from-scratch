@@ -96,6 +96,14 @@ pub struct PerUserBandwidth {
     /// record time; threading it to the detector would require
     /// changing its API for one consumer.
     abuse_fires: Mutex<Option<Arc<crate::abuse_fires::AbuseFireBuffer>>>,
+    /// Optional auto-quarantine list + opt-in flag. When the
+    /// operator opts `per_user_bandwidth_rate` into quarantine,
+    /// `Fired` from the rate detector ALSO inserts the user_id
+    /// into the quarantine list. Held here (same slot pattern as
+    /// `abuse_fires` above) so the binary can SIGHUP-swap without
+    /// rebuilding the accumulator.
+    quarantine: Mutex<Option<Arc<crate::user_quarantine::UserQuarantineList>>>,
+    quarantine_on_fire: std::sync::atomic::AtomicBool,
 }
 
 impl PerUserBandwidth {
@@ -111,7 +119,38 @@ impl PerUserBandwidth {
             overflow: Arc::new(UserBytes::default()),
             rate_detector: Mutex::new(None),
             abuse_fires: Mutex::new(None),
+            quarantine: Mutex::new(None),
+            quarantine_on_fire: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Attach an auto-quarantine list + opt-in flag. When `opt_in
+    /// = true`, every `Fired` outcome from the rate detector
+    /// inserts the user_id into the quarantine list with the
+    /// list's configured TTL. When `opt_in = false`, the list is
+    /// still wired (operator gets the observability surface for
+    /// SIGHUP swap) but no auto-insert happens.
+    pub fn set_quarantine(
+        &self,
+        list: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+        opt_in: bool,
+    ) {
+        let mut g = self
+            .quarantine
+            .lock()
+            .expect("PerUserBandwidth quarantine lock poisoned");
+        *g = list;
+        self.quarantine_on_fire
+            .store(opt_in, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Read-only accessor for the current auto-quarantine list.
+    #[must_use]
+    pub fn quarantine(&self) -> Option<Arc<crate::user_quarantine::UserQuarantineList>> {
+        self.quarantine
+            .lock()
+            .expect("PerUserBandwidth quarantine lock poisoned")
+            .clone()
     }
 
     /// Attach a recent-abuse-fires ring buffer. When wired, every
@@ -222,13 +261,37 @@ impl PerUserBandwidth {
             // buffer (when wired). Context_value carries the
             // computed rate so the `/diagnose` table / CLI shows
             // the magnitude of the burst.
-            if let RateAlertOutcome::Fired { bytes_per_sec } = outcome {
+            if let RateAlertOutcome::Fired { bytes_per_sec: _ } = outcome {
                 if let Some(buf) = self.abuse_fires() {
-                    buf.push(
-                        crate::abuse_fires::AbuseFireKind::PerUserBandwidthRate,
-                        user_id,
-                        bytes_per_sec,
-                    );
+                    if let RateAlertOutcome::Fired { bytes_per_sec } = outcome {
+                        buf.push(
+                            crate::abuse_fires::AbuseFireKind::PerUserBandwidthRate,
+                            user_id,
+                            bytes_per_sec,
+                        );
+                    }
+                }
+                // Auto-quarantine when the operator opted this
+                // detector kind in. Strongest signal of all three
+                // detectors (hysteresis-protected, sliding-window
+                // RATE — not a single-event spike), so a single
+                // fire is enough to ban for the TTL.
+                if self
+                    .quarantine_on_fire
+                    .load(std::sync::atomic::Ordering::Relaxed)
+                {
+                    if let Some(qlist) = self.quarantine() {
+                        if qlist.insert(
+                            user_id,
+                            crate::abuse_fires::AbuseFireKind::PerUserBandwidthRate.as_label(),
+                        ) {
+                            tracing::warn!(
+                                user_id = %crate::per_user_bandwidth::render_user_id_pub(&user_id),
+                                ttl_secs = qlist.ttl().as_secs(),
+                                "auto-quarantine: user_id banned for TTL on per_user_bandwidth_rate abuse fire"
+                            );
+                        }
+                    }
                 }
             }
             return outcome;

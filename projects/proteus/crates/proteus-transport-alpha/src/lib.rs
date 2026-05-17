@@ -52,3 +52,4 @@ pub mod rate_limit;
 pub mod server;
 pub mod session;
 pub mod tls;
+pub mod user_quarantine;

@@ -315,12 +315,8 @@ pub async fn serve_with_auth_full_v7(
 }
 
 /// v8 of [`serve_with_auth_full`] — adds an optional
-/// `AbuseFireBuffer`. When supplied, the `/metrics` exposition
-/// includes the
-/// `proteus_abuse_recent_fires_{capacity,count}` gauges AND
-/// the `/diagnose` body adds the recent-abuse-fires table.
-/// Operators use this to answer "WHICH user_id fired alerts?"
-/// without grepping journald.
+/// `AbuseFireBuffer`. Back-compat shim — forwards to v9 with
+/// `user_quarantine = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v8(
     addr: &str,
@@ -335,6 +331,44 @@ pub async fn serve_with_auth_full_v8(
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
     abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v9(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        None,
+    )
+    .await
+}
+
+/// v9 of [`serve_with_auth_full`] — adds an optional
+/// `UserQuarantineList`. When supplied, the `/metrics` body
+/// includes the six `proteus_user_quarantine_*` series AND the
+/// `/diagnose` body adds the USER QUARANTINE table. Operators
+/// use this to verify auto-quarantine is firing (counter > 0)
+/// and to see WHICH user_ids are currently banned.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v9(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -345,6 +379,7 @@ pub async fn serve_with_auth_full_v8(
     let per_user_enabled = per_user.is_some();
     let per_user_conn_limit_enabled = per_user_conn_limiter.is_some();
     let abuse_fires_enabled = abuse_fires.is_some();
+    let user_quarantine_enabled = user_quarantine.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -356,6 +391,7 @@ pub async fn serve_with_auth_full_v8(
         per_user_bandwidth = per_user_enabled,
         per_user_conn_limit = per_user_conn_limit_enabled,
         abuse_fires = abuse_fires_enabled,
+        user_quarantine = user_quarantine_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -370,7 +406,8 @@ pub async fn serve_with_auth_full_v8(
         let per_user = per_user.clone();
         let per_user_conn_limiter = per_user_conn_limiter.clone();
         let abuse_fires = abuse_fires.clone();
-        tokio::spawn(handle_connection_v8(
+        let user_quarantine = user_quarantine.clone();
+        tokio::spawn(handle_connection_v9(
             stream,
             metrics,
             auth,
@@ -382,6 +419,7 @@ pub async fn serve_with_auth_full_v8(
             per_user,
             per_user_conn_limiter,
             abuse_fires,
+            user_quarantine,
         ));
     }
 }
@@ -605,7 +643,7 @@ async fn handle_connection_v7(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_v8(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -617,13 +655,45 @@ async fn handle_connection_v8(
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
     abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
 ) {
+    handle_connection_v9(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v9(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v8(
+    let (status_line, content_type, body) = render_full_v9(
         head,
         &metrics,
         auth.as_ref(),
@@ -635,6 +705,7 @@ async fn handle_connection_v8(
         per_user.as_deref(),
         per_user_conn_limiter.as_deref(),
         abuse_fires.as_deref(),
+        user_quarantine.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -733,10 +804,8 @@ pub fn render_diagnose(
     )
 }
 
-/// v2 of [`render_diagnose`] — adds the recent-abuse-fires table
-/// when an `AbuseFireBuffer` is supplied. The table renders BEFORE
-/// the METRICS dump so operators reading top-down see the
-/// actionable abuse data first.
+/// v2 of [`render_diagnose`] — adds the recent-abuse-fires table.
+/// Back-compat shim — forwards to v3 with `user_quarantine = None`.
 #[must_use]
 pub fn render_diagnose_v2(
     metrics: &ServerMetrics,
@@ -746,6 +815,35 @@ pub fn render_diagnose_v2(
     config_presence: Option<&str>,
     process_info: Option<&crate::process_info::ProcessInfo>,
     abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+) -> String {
+    render_diagnose_v3(
+        metrics,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        abuse_fires,
+        None,
+    )
+}
+
+/// v3 of [`render_diagnose`] — adds the USER QUARANTINE table
+/// when a `UserQuarantineList` is supplied. Table renders right
+/// after the recent-abuse-fires table; together they form the
+/// operator's "abuse-state-right-now" view at the top of the
+/// diagnose body.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_diagnose_v3(
+    metrics: &ServerMetrics,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+    user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
 ) -> String {
     let findings = run_diagnose_rules(metrics, tls_acceptor, process_info);
     let mut s = String::with_capacity(4096);
@@ -782,6 +880,19 @@ pub fn render_diagnose_v2(
         s.push_str(&af.diagnose_table(now_epoch));
         s.push('\n');
     }
+    // User quarantine table — currently-banned user_ids + how
+    // long until each entry expires. Operators reading the
+    // diagnose body top-down see "abuse fired (recent fires
+    // table) → user_id was auto-banned (this table)" as one
+    // narrative.
+    if let Some(uq) = user_quarantine {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.push_str(&uq.diagnose_table(now_epoch));
+        s.push('\n');
+    }
 
     s.push_str("METRICS (text/plain; version=0.0.4)\n");
     s.push_str("-----------------------------------\n");
@@ -808,6 +919,9 @@ pub fn render_diagnose_v2(
     }
     if let Some(af) = abuse_fires {
         s.push_str(&af.prometheus());
+    }
+    if let Some(uq) = user_quarantine {
+        s.push_str(&uq.prometheus());
     }
     s
 }
@@ -1179,10 +1293,8 @@ pub fn render_full_v7(
     )
 }
 
-/// v8 of [`render_full`] — adds optional recent-abuse-fires ring
-/// buffer. When supplied, the `/metrics` body includes the
-/// `proteus_abuse_recent_fires_{capacity,count}` gauges, and the
-/// `/diagnose` body adds a "RECENT ABUSE FIRES" table.
+/// v8 of [`render_full`] — back-compat shim. Forwards to v9 with
+/// `user_quarantine = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v8(
@@ -1197,6 +1309,42 @@ pub fn render_full_v8(
     per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
     per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
     abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+) -> (&'static str, &'static str, String) {
+    render_full_v9(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        abuse_fires,
+        None,
+    )
+}
+
+/// v9 of [`render_full`] — adds optional user_quarantine list.
+/// When supplied, `/metrics` includes the six
+/// `proteus_user_quarantine_*` series and `/diagnose` adds the
+/// USER QUARANTINE table.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v9(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+    per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+    user_quarantine: Option<&crate::user_quarantine::UserQuarantineList>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -1247,6 +1395,9 @@ pub fn render_full_v8(
         if let Some(af) = abuse_fires {
             body.push_str(&af.prometheus());
         }
+        if let Some(uq) = user_quarantine {
+            body.push_str(&uq.prometheus());
+        }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
         if metrics.alive.load(Ordering::Relaxed) {
@@ -1273,7 +1424,7 @@ pub fn render_full_v8(
                 );
             }
         }
-        let body = render_diagnose_v2(
+        let body = render_diagnose_v3(
             metrics,
             probe_anomaly,
             auto_deny,
@@ -1281,6 +1432,7 @@ pub fn render_full_v8(
             config_presence,
             process_info,
             abuse_fires,
+            user_quarantine,
         );
         ("HTTP/1.1 200 OK\r\n", "text/plain; charset=utf-8", body)
     } else if matches_path(request_head, "/readyz") {
@@ -1769,6 +1921,93 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v9 with user_quarantine supplied emits the six
+    /// `proteus_user_quarantine_*` series on `/metrics` AND adds
+    /// the USER QUARANTINE table to `/diagnose`. End-to-end proof
+    /// the wire-up reaches the HTTP layer.
+    #[test]
+    fn render_full_v9_emits_user_quarantine_block_when_supplied() {
+        use crate::user_quarantine::UserQuarantineList;
+        use std::time::Duration;
+        let m = ServerMetrics::default();
+        let q = UserQuarantineList::new(Duration::from_secs(600), 4096);
+        q.insert(*b"alice001", "per_user_bandwidth_rate");
+        q.insert(*b"bob00002", "rate_limit");
+        let (_status, _ctype, metrics_body) = render_full_v9(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&q),
+        );
+        assert!(metrics_body.contains("proteus_user_quarantine_ttl_seconds 600"));
+        assert!(metrics_body.contains("proteus_user_quarantine_max_entries 4096"));
+        assert!(metrics_body.contains("proteus_user_quarantine_active_entries 2"));
+        assert!(metrics_body.contains("proteus_user_quarantine_inserted_total 2"));
+        let (_status, _ctype, diag_body) = render_full_v9(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&q),
+        );
+        assert!(
+            diag_body.contains("USER QUARANTINE"),
+            "diagnose missing table: {diag_body}"
+        );
+        assert!(diag_body.contains("alice001"), "{diag_body}");
+        assert!(diag_body.contains("bob00002"), "{diag_body}");
+        assert!(diag_body.contains("per_user_bandwidth_rate"), "{diag_body}");
+    }
+
+    /// v9 with no quarantine list omits the list-emitted block
+    /// (six `*_ttl_seconds`/`*_max_entries`/`*_active_entries`/
+    /// `*_inserted_total`/`*_refused_inserts_total`/`*_hits_total`
+    /// series). The `proteus_user_quarantine_rejected_total`
+    /// counter on ServerMetrics IS still emitted (it's a server-
+    /// level counter, always present so operators can write
+    /// `rate(...)` against it from t=0).
+    #[test]
+    fn render_full_v9_omits_user_quarantine_list_block_when_none() {
+        let m = ServerMetrics::default();
+        let (_s, _c, body) = render_full_v9(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        // List-emitted series are absent.
+        assert!(!body.contains("proteus_user_quarantine_ttl_seconds"));
+        assert!(!body.contains("proteus_user_quarantine_max_entries"));
+        assert!(!body.contains("proteus_user_quarantine_active_entries"));
+        assert!(!body.contains("proteus_user_quarantine_inserted_total"));
+        assert!(!body.contains("proteus_user_quarantine_hits_total"));
+        // Server-level rejection counter IS emitted (always).
+        assert!(body.contains("proteus_user_quarantine_rejected_total 0"));
     }
 
     /// v8 with abuse_fires supplied emits the buffer's two gauges

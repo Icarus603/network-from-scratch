@@ -103,6 +103,8 @@ async fn server_does_not_leak_session_permits_on_upstream_eof() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         abuse_fires: None,
+        user_quarantine: None,
+        quarantine_on_byte_budget: false,
         outbound_filter: None,
         pad_quantum: None,
     };

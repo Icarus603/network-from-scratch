@@ -179,6 +179,28 @@ where
     let Some(uid) = session.user_id else {
         return true; // no allowlist configured → no user-rate check
     };
+    // Auto-quarantine check FIRST — if the user_id is currently
+    // banned, short-circuit before the rate-limiter sees it.
+    // Reasons it's first: (1) quarantine is a strictly-stronger
+    // denial than rate-limit (banned vs. throttled), (2) checking
+    // it first avoids counting a quarantined user's attempts
+    // against their rate-limit bucket (would inflate the
+    // rate_limit detector's view of the burst).
+    if let Some(qlist) = ctx.user_quarantine() {
+        if let Some(remaining) = qlist.check(&uid) {
+            tracing::warn!(
+                user_id = ?uid,
+                peer = ?session.peer_addr,
+                remaining_secs = remaining,
+                "user_id auto-quarantined; closing session"
+            );
+            if let Some(m) = ctx.metrics() {
+                m.user_quarantine_rejected
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return false;
+        }
+    }
     if ctx.check_user_rate(&uid) {
         return true;
     }
@@ -212,6 +234,24 @@ where
             // journald.
             if let Some(buf) = ctx.abuse_fires() {
                 buf.push(crate::abuse_fires::AbuseFireKind::RateLimit, uid, 0);
+            }
+            // Auto-quarantine on rate_limit fire, if the operator
+            // has opted this kind in. The detector already fires
+            // once-per-burst (sliding-window threshold), so this is
+            // a single-touch path; no need for a separate fire-
+            // count threshold on top.
+            if ctx.should_quarantine_on(crate::abuse_fires::AbuseFireKind::RateLimit.as_label()) {
+                if let Some(qlist) = ctx.user_quarantine() {
+                    let inserted =
+                        qlist.insert(uid, crate::abuse_fires::AbuseFireKind::RateLimit.as_label());
+                    if inserted {
+                        tracing::warn!(
+                            user_id = ?uid,
+                            ttl_secs = qlist.ttl().as_secs(),
+                            "auto-quarantine: user_id banned for TTL on rate_limit abuse fire"
+                        );
+                    }
+                }
             }
         }
     }
@@ -385,6 +425,24 @@ pub struct ServerCtx {
     /// `/metrics` (capacity + count gauges), `/diagnose` (table),
     /// and `admin abuse-fires` (CLI text/JSON).
     abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+    /// Optional auto-quarantine list — TTL-bounded HashMap of
+    /// user_ids currently denied at the post-handshake admission
+    /// gate. Populated by abuse-fire push sites (relay byte_budget,
+    /// server rate_limit, per-user bandwidth-rate drop hook) when
+    /// the operator has opted those detector kinds into auto-
+    /// quarantine via `quarantine_on_kinds`. Drained by TTL.
+    user_quarantine: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
+    /// Set of abuse-fire kinds that should trigger an immediate
+    /// quarantine insert. Empty set = quarantine wired but no
+    /// detector kinds opted in (the list still admits queries via
+    /// /metrics + /diagnose so operators see "feature ready,
+    /// nothing fired into it yet").
+    ///
+    /// Default-empty so an operator who installs the quarantine
+    /// list without opting any kinds in gets the observability
+    /// surface but no enforcement until they explicitly opt a kind
+    /// in. Defense against operator surprise.
+    quarantine_on_kinds: std::collections::HashSet<&'static str>,
 }
 
 impl ServerCtx {
@@ -410,7 +468,57 @@ impl ServerCtx {
             per_user_bandwidth: None,
             per_user_conn_limiter: None,
             abuse_fires: None,
+            user_quarantine: None,
+            quarantine_on_kinds: std::collections::HashSet::new(),
         }
+    }
+
+    /// Install the auto-quarantine list. Operators who want abuse
+    /// fires to AUTOMATICALLY ban a user_id for a TTL (instead of
+    /// just observing them in the recent-fires ring) wire this in
+    /// addition to opting kinds in via [`Self::with_quarantine_on_kinds`].
+    #[must_use]
+    pub fn with_user_quarantine(
+        mut self,
+        list: Arc<crate::user_quarantine::UserQuarantineList>,
+    ) -> Self {
+        self.user_quarantine = Some(list);
+        self
+    }
+
+    /// Opt the supplied abuse-fire kinds into auto-quarantine. Each
+    /// label must be one of `byte_budget`, `rate_limit`,
+    /// `per_user_bandwidth_rate` (matches
+    /// `AbuseFireKind::as_label()`). Unknown kinds are stored
+    /// silently (no enforcement; harmless), so adding new fire
+    /// kinds in the future doesn't break this builder.
+    ///
+    /// Operators who only want to quarantine on the strongest
+    /// signal (`per_user_bandwidth_rate`) pass just that one and
+    /// leave the noisier event-based kinds out — the latter still
+    /// fire alerts + push into the ring, just don't enforce.
+    #[must_use]
+    pub fn with_quarantine_on_kinds<I: IntoIterator<Item = &'static str>>(
+        mut self,
+        kinds: I,
+    ) -> Self {
+        for k in kinds {
+            self.quarantine_on_kinds.insert(k);
+        }
+        self
+    }
+
+    /// Read the auto-quarantine list handle.
+    #[must_use]
+    pub fn user_quarantine(&self) -> Option<Arc<crate::user_quarantine::UserQuarantineList>> {
+        self.user_quarantine.clone()
+    }
+
+    /// Returns `true` when fires of `kind` should trigger an
+    /// auto-quarantine insert. Used by the abuse-fire push sites.
+    #[must_use]
+    pub fn should_quarantine_on(&self, kind: &str) -> bool {
+        self.quarantine_on_kinds.contains(kind)
     }
 
     /// Install a recent-abuse-fires ring buffer. When wired, the

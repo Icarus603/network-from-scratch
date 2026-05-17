@@ -79,6 +79,8 @@ async fn access_log_emits_one_record_per_session() {
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
         abuse_fires: None,
+        user_quarantine: None,
+        quarantine_on_byte_budget: false,
         outbound_filter: None,
         pad_quantum: None,
     };

@@ -740,6 +740,7 @@ mod tests {
             abuse_detector: None,
             per_user_bandwidth_rate: None,
             per_user_conn_limit: None,
+            user_quarantine: None,
             outbound_filter: None,
         }
     }

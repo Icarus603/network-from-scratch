@@ -108,6 +108,8 @@ async fn abuse_detector_fires_once_per_burst_on_repeated_byte_cap_hits() {
         max_session_bytes: Some(32 * 1024),
         abuse_detector_byte_budget: Some(Arc::clone(&detector)),
         abuse_fires: None,
+        user_quarantine: None,
+        quarantine_on_byte_budget: false,
         outbound_filter: None,
         pad_quantum: None,
     };
