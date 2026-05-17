@@ -13,6 +13,43 @@ use crate::bootstrap::{resolve_for_client, BootstrapError, Resolved, ResolvedVia
 use crate::carrier_health::{BetaDecision, CarrierHealth};
 use crate::config::ClientConfig;
 use crate::endpoint_pool::{EndpointDecision, EndpointPool};
+use proteus_transport_alpha::log_throttle::{AcquireResult, Throttle};
+
+// ----- iter-23: per-process throttles for high-spam failure paths -----
+//
+// Pre-iter-23 a sustained upstream-VPS-down failure produced
+// one log line per CONNECT (β-dial-fail, α-fallback, pool-entry-
+// fail, etc.). A browser opening 50 parallel HTTP/2 connections
+// while the VPS was unreachable swamped operator logs with
+// hundreds of redundant lines per second — the actual
+// diagnostic signal (carrier_health state transition, pool
+// suppression engagement) was buried in noise.
+//
+// Each throttle below uses `burst=3, refill=0.2/sec` — first
+// three failures fire normally so the operator sees the
+// transition cleanly, then we throttle to one line every ~5 s
+// of sustained failure. Matches the iter-18/iter-20 server-side
+// pattern (`accept_error_throttle`, `cover_forward_throttle`).
+//
+// State-transition logs (carrier_health flipping, pool entry
+// engaging suppression, primary-probe forcing) are NOT
+// throttled — those fire once per transition and the
+// operator wants every one of them.
+
+fn beta_dial_fail_throttle() -> &'static Throttle {
+    static T: std::sync::OnceLock<Throttle> = std::sync::OnceLock::new();
+    T.get_or_init(|| Throttle::new(3, 0.2))
+}
+
+fn pool_entry_fail_throttle() -> &'static Throttle {
+    static T: std::sync::OnceLock<Throttle> = std::sync::OnceLock::new();
+    T.get_or_init(|| Throttle::new(3, 0.2))
+}
+
+fn pool_entry_beta_fail_throttle() -> &'static Throttle {
+    static T: std::sync::OnceLock<Throttle> = std::sync::OnceLock::new();
+    T.get_or_init(|| Throttle::new(3, 0.2))
+}
 
 #[derive(thiserror::Error, Debug)]
 pub enum SocksError {
@@ -389,11 +426,20 @@ async fn single_endpoint_dispatch(
             }
             Err(e) => {
                 health.record_beta_failure(std::time::Instant::now());
-                tracing::warn!(
-                    error = %e,
-                    streak = health.failure_streak(),
-                    "β dial failed — falling back to α (TCP/TLS)"
-                );
+                // iter-23: throttle the per-CONNECT
+                // β-fail log so a sustained VPS-down event
+                // doesn't flood operator logs.
+                if matches!(
+                    beta_dial_fail_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(
+                        error = %e,
+                        streak = health.failure_streak(),
+                        suppressed = beta_dial_fail_throttle().total_suppressed(),
+                        "β dial failed — falling back to α (TCP/TLS)"
+                    );
+                }
                 // Fall through to α path below.
             }
         }
@@ -521,11 +567,20 @@ async fn dispatch_via_pool(
                         "endpoint SUPPRESSED — consecutive failures hit threshold; \
                          dispatcher will skip this entry until window expires"
                     );
-                } else {
+                } else if matches!(
+                    pool_entry_fail_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    // iter-23: throttle the per-CONNECT × per-entry
+                    // fail spam. The SUPPRESSED log above ALWAYS
+                    // fires on state transition; this one is the
+                    // routine "trying next" line that floods under
+                    // sustained pool-wide failure.
                     tracing::warn!(
                         endpoint = %addr_owned,
                         error = %e,
                         streak = endpoint_health.failure_streak(),
+                        suppressed = pool_entry_fail_throttle().total_suppressed(),
                         "pool entry failed — trying next"
                     );
                 }
@@ -615,11 +670,19 @@ async fn attempt_one_pool_entry(
             }
             Err(e) => {
                 health.record_beta_failure(std::time::Instant::now());
-                tracing::warn!(
-                    endpoint = %endpoint,
-                    error = %e,
-                    "pool entry: β dial failed; falling to α on this same entry"
-                );
+                // iter-23: throttled — fires per CONNECT × per
+                // pool entry under sustained β-down conditions.
+                if matches!(
+                    pool_entry_beta_fail_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(
+                        endpoint = %endpoint,
+                        error = %e,
+                        suppressed = pool_entry_beta_fail_throttle().total_suppressed(),
+                        "pool entry: β dial failed; falling to α on this same entry"
+                    );
+                }
             }
         }
     }
