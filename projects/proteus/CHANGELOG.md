@@ -7,6 +7,118 @@ and adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
 once we hit `1.0.0`. Pre-1.0 minor bumps may include breaking changes;
 patch bumps are bug-fix only.
 
+## [Unreleased] — production-stability iteration arc (post-0.1.0)
+
+This window covers the M2 production-stability work between v0.1.0
+and the next tagged release. Iteration numbers in commit messages
+correspond to the Ralph Loop iteration counter; they are
+implementation-internal, not user-visible. The user-visible groupings
+below are organised by concern.
+
+### Added — multi-VPS HA client (`server_endpoints:` pool)
+
+- `EndpointPool` + per-entry `EndpointHealth` with streak-based
+  suppression + capped exponential back-off (mirrors
+  `CarrierHealth`'s state machine).
+- YAML `server_endpoints: [primary, backup1, backup2, ...]` —
+  operator-pre-configured pool dispatched in declaration order.
+- SIGHUP-driven hot-reload: edit `client.yaml` and SIGHUP to swap
+  in a new endpoint list without restart; per-entry counters +
+  suppression state are carried over for any entry whose address
+  string is preserved (`EndpointPool::new_with_carryover`).
+- `proteus_client_pool_reload_{attempts,succeeded}_total` counters
+  + `ReloadablePool::record_attempt_failed()` so config-parse
+  failures during SIGHUP show up as a real
+  `(attempts - succeeded) > 0` gap that the bundled
+  `ProteusClientPoolReloadFailing` alert + `alerts-check`
+  evaluator + Grafana dashboard panel all detect.
+- `proteus-client connect-test --all-endpoints` exercises every
+  pool entry independently (fresh DNS + TCP + handshake per
+  entry, one failure does not abort the rest). Overall exit code
+  is 0 IFF every entry succeeded.
+- `proteus-client validate` now detects:
+  - SNI consistency — pool entries with hostnames that diverge
+    from `tls.server_name` (cert verification would fail at
+    dispatch time); IP literals are correctly skipped.
+- `proteus-client host-preflight` now scans `server_endpoints:`
+  list entries for DNS resolvability (pre-iter-44 only the
+  primary `server_endpoint:` scalar was checked).
+
+### Added — observability (Prometheus + alerts + dashboard pentad)
+
+- 4 SIGHUP reload-failing alerts for the server-side reload
+  surfaces (firewall, rate_limit, user_rate_limit,
+  handshake_budget) with matching in-process `alerts-check`
+  evaluator rules and a stacked Grafana dashboard panel
+  (`id=60`) showing all four `(attempts - succeeded)` gaps.
+- 3 per-endpoint pool panels on the bundled Grafana dashboard:
+  per-endpoint suppression state, per-endpoint dial outcome
+  rate, pool-reload backlog stat (`id=53,54,55`).
+- Cover-forward observability pentad — metric +
+  `ProteusCoverForwardRejecting` / `ProteusCoverForwardStorm`
+  alerts + alerts-check evaluator + Grafana dashboard panels
+  (`id=32,33`).
+- Pool-reload-failing client-side alert
+  `ProteusClientPoolReloadFailing` + in-process `alerts-check`
+  evaluator.
+
+### Fixed — observability correctness (false-positive / false-negative class)
+
+- **Client pool SIGHUP** (iter 40): SIGHUP-with-config-parse-error
+  silently no-op'd. The alert designed to catch silent edit-
+  didn't-apply events literally could never fire — every
+  `reload()` call incremented both attempts AND succeeded in
+  lockstep. Fix: bump attempts WITHOUT bumping succeeded on
+  the config-parse-failure path; gap is now a true signal.
+- **Server SIGHUP per-section** (iter 41): operators who SIGHUPed
+  without a `rate_limit:` / `user_rate_limit:` /
+  `handshake_budget:` block saw the gap grow by 1 on every
+  SIGHUP, permanently tripping the matching alerts as a false
+  positive. Fix: bump succeeded on every non-parse-failure
+  outcome — section-absent counts as "reload completed (no-op)".
+
+### Added — stability hardening
+
+- `panic = "unwind"` workspace release profile (replaces
+  pre-iter-24 `panic = "abort"`) so a panic in one tokio spawned
+  task no longer tears down the whole binary. Pinned by tests
+  on both server + client + workspace `Cargo.toml`.
+- TCP_USER_TIMEOUT (Linux-only) on outbound client dials — catches
+  DEAD ACTIVE peers that go silent mid-stream within ~120 s
+  instead of waiting for the kernel's ~15-minute retransmit
+  deadline.
+- TCP keepalive on every outbound dial — closes the silent-NAT-
+  death class for long-idle Proteus sessions.
+- EMFILE / ENFILE / ENOMEM survival in every accept loop (4
+  server + 1 client SOCKS5 + 1 metrics-http + 1 admin) — the
+  loop now distinguishes transient kernel errors (backoff + retry)
+  from fatal listener-dead errors (clean exit + supervisor
+  restart).
+- Cover-forward concurrency cap (semaphore) so a probe storm
+  cannot exhaust FDs by spinning up unbounded cover-tunnel
+  tasks.
+- Poisoned-lock recovery on `ReloadableAcceptor` + `ReloadablePool`
+  — a panic mid-write no longer makes the next read a CRIT.
+- SOCKS5 RFC 1928 §6 REP codes (0x03/0x04/0x05/0x06) on upstream
+  dial failure — pre-iter-29 every failure showed up as
+  generic "could not connect to proxy" to the browser/curl
+  downstream.
+- Log throttling on per-CONNECT × per-entry pool-failure spam.
+
+### Added — speed (data-plane micro-optimisations)
+
+- Per-CONNECT startup-cached `TlsConnector` + `HandshakeConfigSource`
+  + `BetaClientCrypto` — eliminates per-CONNECT disk reads +
+  crypto setup.
+- Adaptive flush + 64 KiB read buffer on relay pumps.
+- ChaCha20-Poly1305 cipher cached + scratch reused in α data plane.
+
+### Documentation
+
+- systemd units document the `RUST_PANIC_ABORT=1` opt-in for
+  operators who prefer systemd-restart-on-panic over keep-
+  running semantics.
+
 ## [0.1.0] — 2026-05-16
 
 First production-deployable milestone (M1). Ships the α-profile (TLS 1.3
