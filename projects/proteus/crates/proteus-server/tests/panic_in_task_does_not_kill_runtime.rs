@@ -110,3 +110,54 @@ async fn await_of_panicked_task_returns_join_error_not_abort() {
     assert!(r.unwrap_err().is_panic());
     // Process still alive — we can continue running tests.
 }
+
+/// Iter-34: read the workspace Cargo.toml and pin
+/// `[profile.release] panic = "unwind"` literally. The
+/// runtime-behavior tests above (iter-24) prove tokio task
+/// isolation works UNDER the dev/test profile (which inherits
+/// `panic = unwind` from the same workspace config); this test
+/// pins the RELEASE PROFILE setting directly so a future
+/// refactor flipping it back to "abort" fires immediately
+/// without needing a separate release-mode test harness.
+///
+/// Both proteus-server and proteus-client inherit this setting
+/// (verified by `nm target/release/proteus-{server,client} |
+/// grep _Unwind_` in the iter-24/iter-34 commit messages).
+/// Per-crate `[profile.release]` overrides are a separate
+/// failure mode caught by the corresponding crate's
+/// `panic_in_task_does_not_kill_runtime` test.
+#[test]
+fn workspace_release_profile_pins_panic_unwind() {
+    use std::path::Path;
+    let workspace_toml = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("Cargo.toml");
+    let body = std::fs::read_to_string(&workspace_toml)
+        .unwrap_or_else(|e| panic!("read {}: {e}", workspace_toml.display()));
+
+    // Find the [profile.release] section and confirm it
+    // contains `panic = "unwind"` (NOT `panic = "abort"`).
+    let release_section = body
+        .split("[profile.")
+        .find(|s| s.starts_with("release]"))
+        .expect("[profile.release] section must exist in workspace Cargo.toml");
+    // Bound the search to the section (next [profile.* or EOF).
+    let release_section = release_section
+        .split_once("\n[profile.")
+        .map(|(head, _)| head)
+        .unwrap_or(release_section);
+    assert!(
+        release_section.contains(r#"panic = "unwind""#),
+        "workspace Cargo.toml [profile.release] MUST set `panic = \"unwind\"` (iter-24 contract). \
+         Section body:\n{release_section}"
+    );
+    assert!(
+        !release_section.contains(r#"panic = "abort""#),
+        "workspace Cargo.toml [profile.release] MUST NOT set `panic = \"abort\"` — that's the \
+         pre-iter-24 silent-failure mode where any tokio task panic abort the whole process. \
+         Section body:\n{release_section}"
+    );
+}
