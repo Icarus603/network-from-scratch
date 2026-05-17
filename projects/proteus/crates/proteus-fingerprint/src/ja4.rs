@@ -137,6 +137,18 @@ pub struct Ja4Components {
     pub supported_versions: Vec<u16>,
     /// True iff the SNI extension (0x0000) was present.
     pub sni_present: bool,
+    /// Raw `client_random` (32 bytes, RFC 8446 §4.1.2). The
+    /// future server-side knock-gate (Path A iteration 5)
+    /// passes this into
+    /// [`crate::knock::verify_knock`](../../proteus_handshake/knock/fn.verify_knock.html)
+    /// as the per-handshake binding so a captured knock token
+    /// can't be replayed against a fresh ClientHello.
+    pub client_random: [u8; 32],
+    /// Raw `session_id` bytes from the ClientHello (RFC 8446
+    /// §4.1.2, 0–32 bytes). The future server-side knock-gate
+    /// extracts the embedded knock token from here via
+    /// `proteus_handshake::knock_wire::decode_and_verify_session_id`.
+    pub session_id: Vec<u8>,
 }
 
 /// Parse a TLS 1.2/1.3 ClientHello from a raw byte stream and
@@ -401,9 +413,11 @@ pub fn parse_client_hello_with_components(
 
     let mut cur = Cursor::new(ch);
     let _legacy_version = cur.read_u16_be()?;
-    let _random = cur.read_n(32)?;
+    let random_bytes = cur.read_n(32)?;
+    let mut client_random = [0u8; 32];
+    client_random.copy_from_slice(random_bytes);
     let sid_len = cur.read_u8()? as usize;
-    let _sid = cur.read_n(sid_len)?;
+    let session_id = cur.read_n(sid_len)?.to_vec();
 
     let ciphers_len = cur.read_u16_be()? as usize;
     let ciphers_bytes = cur.read_n(ciphers_len)?;
@@ -491,6 +505,8 @@ pub fn parse_client_hello_with_components(
             alpn_offered,
             supported_versions,
             sni_present,
+            client_random,
+            session_id,
         },
     ))
 }

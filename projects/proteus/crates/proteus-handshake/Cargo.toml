@@ -16,6 +16,16 @@ hmac.workspace = true
 subtle.workspace = true
 zeroize.workspace = true
 thiserror.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+
+[dev-dependencies]
+# proteus-fingerprint exercises the wire-format round-trip in
+# the knock_wire_e2e integration test: craft ClientHello bytes,
+# parse via parse_client_hello_with_components, feed
+# session_id + client_random back into decode_and_verify_session_id.
+# Strictly a test dep — production proteus-handshake doesn't
+# need a parser.
+proteus-fingerprint = { path = "../proteus-fingerprint" }
 
 [lints.rust]
 unsafe_code = "forbid"

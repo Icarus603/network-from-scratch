@@ -383,6 +383,15 @@ mod tests {
             alpn_offered: CHROME_124_ALPN_OFFERED.iter().map(|s| s.to_vec()).collect(),
             supported_versions: vec![0x0304, 0x0303],
             sni_present: true,
+            // Test fixtures — Ja4Components is the parser's
+            // OUTPUT, but for diff tests we synthesize an
+            // instance that "matches Chrome exactly". The
+            // client_random + session_id aren't part of JA4
+            // diff semantics (they're per-handshake values,
+            // not fingerprint axes), so test-fixture instances
+            // use stable filler bytes.
+            client_random: [0u8; 32],
+            session_id: Vec::new(),
         }
     }
 
