@@ -966,6 +966,72 @@ A unit test in `tls_fingerprint_observer.rs` keeps the two
 crate's CI test) in sync — drift in one without the other
 fails the build.
 
+### `proteus-server fingerprint` — offline operator diff
+
+The live observer surfaces drift at runtime, but operators
+want to verify the wire fingerprint **BEFORE** binding the
+public listener — at deploy time, in CI, while the binary is
+being smoke-tested. The `fingerprint` subcommand does exactly
+that with zero network access and zero running server:
+
+```bash
+$ proteus-server fingerprint
+Proteus α — live TLS ClientHello JA4 fingerprint
+=================================================
+  Live JA4:  t13d0911h2_f91f431d341e_165ef185bad8
+  Baseline:  t13d0911h2_f91f431d341e_165ef185bad8
+  Match:     yes (locked baseline)
+
+Closest browser in reference table:
+  Browser:   Firefox 124
+  Platform:  macOS / Windows / Linux desktop
+  Their JA4: t13d1714h2_5b57614c22b0_3d5424432f57
+  Identical: no — ext_count and/or hashes still differ
+  Counts:    ours [cipher=9, ext=11] vs theirs [cipher=17, ext=14]
+
+All reference browsers in table:
+  Chrome   124    macOS / Windows / Linux desktop  t13d1517h2_8daaf6152771_b0da82dd1658
+  Firefox  124    macOS / Windows / Linux desktop  t13d1714h2_5b57614c22b0_3d5424432f57
+  Safari   17.4   macOS 14                         t13d1716h2_5b57614c22b0_3d5424432f57
+  Edge     124    Windows 11                       t13d1517h2_8daaf6152771_b0da82dd1658
+```
+
+Mechanics: mints a throwaway self-signed leaf in-process, runs
+one loopback TLS handshake, captures the ClientHello bytes
+server-side, computes JA4 via the `proteus-fingerprint` crate,
+and diffs against (a) the locked baseline (b) the curated
+browser reference table.
+
+**Exit codes** — wire into CI / deploy gates:
+
+- `0` — live JA4 matches `EXPECTED_BASELINE` (safe to deploy)
+- `1` — drift (rustls upgrade, dependency bump, intentional
+  uTLS-replay milestone — operator decides)
+
+**JSON Lines mode** for scripted alerting:
+
+```bash
+$ proteus-server fingerprint --format json
+{"kind":"fingerprint","live_ja4":"t13d0911h2_...","expected_baseline":"...","matches_baseline":true,"closest_browser":"Firefox","closest_version":"124","closest_platform":"macOS / Windows / Linux desktop","closest_ja4":"t13d1714h2_...","closest_exact":false}
+```
+
+Schema is append-only — new fields land but `live_ja4`,
+`matches_baseline`, `closest_exact` stay stable so existing
+jq pipelines don't break.
+
+**Closeness metric** (used to pick `closest_browser`):
+
+1. ALPN tag match (`h2` vs `h1`) → +10
+2. JA4 cipher_hash exact match → +100
+3. JA4 ext_hash exact match → +100
+4. Penalty `-|cipher_count_delta|` and `-|ext_count_delta|`
+
+`closest_exact == true` is the uTLS bit-perfect milestone — when
+Proteus's wire shape matches a real browser byte-for-byte. As
+of α it's `false` for every entry (Proteus emits rustls's
+shape, not Chrome's); the gap will close when uTLS-replay
+lands.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

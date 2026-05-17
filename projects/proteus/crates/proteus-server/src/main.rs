@@ -97,6 +97,24 @@ enum Cmd {
         #[command(subcommand)]
         cmd: PreflightCmd,
     },
+    /// Capture the binary's TLS ClientHello fingerprint (JA4) and
+    /// diff it against the curated browser reference table
+    /// (Chrome / Firefox / Safari / Edge).
+    ///
+    /// Offline command — runs a one-shot loopback handshake, no
+    /// network access, no running server required. Operators use
+    /// this AT DEPLOY TIME to verify the wire fingerprint matches
+    /// expectations BEFORE traffic touches a real censor's DPI.
+    ///
+    /// Output format: human-readable text by default; pass
+    /// `--format json` for JSON Lines suitable for scripted
+    /// deploy gates / CI alerts. Exit 0 on baseline-match, 1 on
+    /// any drift (operator decides whether the drift is wanted).
+    Fingerprint {
+        /// Output format: `text` (default) or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -285,8 +303,135 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )?;
             }
         },
+        Cmd::Fingerprint { format } => {
+            let code = run_fingerprint_cmd(&format).await?;
+            std::process::exit(code);
+        }
     }
     Ok(())
+}
+
+/// Implementation of `proteus-server fingerprint`. Captures the
+/// live ClientHello JA4 via a loopback handshake, diffs it against
+/// the curated browser reference table, prints the result in the
+/// operator-selected format, and returns the exit code.
+async fn run_fingerprint_cmd(format: &str) -> Result<i32, Box<dyn std::error::Error>> {
+    // Mint a fresh throwaway leaf so we don't need the operator's
+    // production cert to run this offline command. JA4 is computed
+    // entirely from the CLIENT side, so the cert is irrelevant
+    // (only used to make the rustls connector accept the
+    // loopback).
+    let mut params = rcgen::CertificateParams::default();
+    params.distinguished_name = rcgen::DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(rcgen::DnType::CommonName, "localhost");
+    params.subject_alt_names = vec![rcgen::SanType::DnsName(
+        rcgen::Ia5String::try_from("localhost").unwrap(),
+    )];
+    let key_pair = rcgen::KeyPair::generate()?;
+    let cert = params.self_signed(&key_pair)?;
+    let leaf = rustls::pki_types::CertificateDer::from(cert.der().to_vec());
+
+    let observed = proteus_server::tls_fingerprint_observer::observe_live_ja4(leaf).await;
+    let live_ja4 = observed.ja4.clone();
+    let matches_baseline = observed.matches_baseline();
+    let closest = proteus_fingerprint::find_closest(&live_ja4);
+
+    match format {
+        "json" => {
+            // JSON Lines — one line per record. Schema is
+            // append-only: kind, live_ja4, expected_baseline,
+            // matches_baseline, closest_{browser,version,ja4,
+            // exact}.
+            use std::fmt::Write as _;
+            let mut s = String::with_capacity(384);
+            let _ = write!(
+                s,
+                r#"{{"kind":"fingerprint","live_ja4":"{}","expected_baseline":"{}","matches_baseline":{}"#,
+                live_ja4, observed.expected_baseline, matches_baseline
+            );
+            if let Some((b, exact)) = closest {
+                let _ = write!(
+                    s,
+                    r#","closest_browser":"{}","closest_version":"{}","closest_platform":"{}","closest_ja4":"{}","closest_exact":{}"#,
+                    b.browser, b.version, b.platform, b.ja4, exact
+                );
+            }
+            s.push('}');
+            s.push('\n');
+            print!("{s}");
+        }
+        _ => {
+            // Text (default) — human-friendly multiline.
+            println!("Proteus α — live TLS ClientHello JA4 fingerprint");
+            println!("=================================================");
+            println!("  Live JA4:  {}", live_ja4);
+            println!("  Baseline:  {}", observed.expected_baseline);
+            println!(
+                "  Match:     {}",
+                if matches_baseline {
+                    "yes (locked baseline)"
+                } else {
+                    "NO — drifted from locked baseline"
+                }
+            );
+            println!();
+            println!("Closest browser in reference table:");
+            if let Some((b, exact)) = closest {
+                println!("  Browser:   {} {}", b.browser, b.version);
+                println!("  Platform:  {}", b.platform);
+                println!("  Their JA4: {}", b.ja4);
+                println!(
+                    "  Identical: {}",
+                    if exact {
+                        "YES — bit-perfect ClientHello match (uTLS-grade)"
+                    } else {
+                        "no — ext_count and/or hashes still differ"
+                    }
+                );
+                if !exact {
+                    let (live_cc, live_ec) = decompose_counts(&live_ja4);
+                    println!(
+                        "  Counts:    ours [cipher={}, ext={}] vs theirs [cipher={}, ext={}]",
+                        live_cc, live_ec, b.cipher_count, b.ext_count
+                    );
+                }
+            } else {
+                println!("  (reference table empty — should never happen; file a bug)");
+            }
+            println!();
+            println!("All reference browsers in table:");
+            for b in proteus_fingerprint::BROWSERS {
+                println!(
+                    "  {:<8} {:<6} {:<32} {}",
+                    b.browser, b.version, b.platform, b.ja4
+                );
+            }
+        }
+    }
+
+    // Exit code: 0 on baseline-match, 1 on drift. Operators
+    // wire this into CI / deploy gates so a quiet rustls bump
+    // that shifts the wire fingerprint fails the pipeline.
+    if matches_baseline {
+        Ok(0)
+    } else {
+        Ok(1)
+    }
+}
+
+/// Pull cipher_count + ext_count from the JA4 prefix block —
+/// fixed-position 2-digit fields. Returns (0, 0) on malformed.
+fn decompose_counts(ja4: &str) -> (u8, u8) {
+    let prefix_end = ja4.find('_').unwrap_or(ja4.len());
+    let prefix = &ja4[..prefix_end];
+    if prefix.len() < 10 {
+        return (0, 0);
+    }
+    let cc = prefix[4..6].parse::<u8>().unwrap_or(0);
+    let ec = prefix[6..8].parse::<u8>().unwrap_or(0);
+    (cc, ec)
 }
 
 async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {

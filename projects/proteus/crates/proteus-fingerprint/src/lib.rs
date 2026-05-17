@@ -41,6 +41,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod browser_reference;
 pub mod ja4;
 
+pub use browser_reference::{find_closest, BrowserFingerprint, BROWSERS};
 pub use ja4::{Ja4, Ja4Error, GREASE_VALUES};
