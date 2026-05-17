@@ -788,6 +788,50 @@ Recommended production values:
 - For low-traffic personal VPNs, `300` (5 min) is fine; the
   staleness window then is 15 min.
 
+### Handshake-latency histogram — catch p99 regressions before users complain
+
+Aggregate counters tell operators *how many* handshakes happened
+but not *how long they took*. A p99 creeping from 50ms to 500ms
+is the leading indicator of nearly every production problem:
+CPU contention from a noisy VPS neighbour, GC / RT pauses, ML-KEM
+keygen regression after a `cargo update`, kernel scheduler issues
+under concurrency, network jitter on the loopback. Without a
+histogram, operators discover latency regressions only via
+user complaints.
+
+Proteus ships a Prometheus-compatible histogram on the
+handshake-complete code path. Both carriers (α-TCP/TLS and
+β-QUIC) measure wall-clock from `accept` to handshake
+completion and feed it into `proteus_handshake_duration_seconds`.
+
+The histogram uses the canonical Prometheus client default
+bucket boundaries (seconds): `[0.005, 0.01, 0.025, 0.05, 0.1,
+0.25, 0.5, 1.0, 2.5, 5.0, 10.0]`. Covers fast-loopback (sub-10ms)
+through degraded-handshake (multi-second) — the operationally
+relevant range.
+
+```promql
+# p99 over the last 5 minutes:
+histogram_quantile(0.99,
+  rate(proteus_handshake_duration_seconds_bucket[5m])
+)
+
+# Alert on p99 > 200ms (operationally degraded):
+histogram_quantile(0.99,
+  rate(proteus_handshake_duration_seconds_bucket[5m])
+) > 0.2
+
+# Average handshake time (sum / count is the canonical mean):
+  rate(proteus_handshake_duration_seconds_sum[5m])
+/ rate(proteus_handshake_duration_seconds_count[5m])
+```
+
+The histogram is hand-rolled (no `prometheus`-crate dep) to
+keep the data-plane lock-free: per-bucket `AtomicU64` counters
++ an atomic microsecond sum. `observe()` is ~12 relaxed atomic
+adds — well below contention thresholds for any production
+handshake rate.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

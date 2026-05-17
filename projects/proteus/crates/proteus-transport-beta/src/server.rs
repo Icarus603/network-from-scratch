@@ -338,10 +338,16 @@ where
 
                     // Run the Proteus handshake, also bounded by the
                     // wall-clock deadline. Same semantics as α.
+                    // Measure handshake wall-clock so the on_session
+                    // handler can feed it into the latency histogram.
+                    let hs_start = std::time::Instant::now();
                     let hs_fut = handshake_over_split_bound(recv, send, &ctx, Some(binding));
                     let session = match tokio::time::timeout(ctx.handshake_deadline(), hs_fut).await
                     {
-                        Ok(Ok(s)) => s.with_peer_addr(remote),
+                        Ok(Ok(s)) => {
+                            let elapsed = hs_start.elapsed();
+                            s.with_peer_addr(remote).with_handshake_duration(elapsed)
+                        }
                         Ok(Err(e)) => {
                             warn!(remote = %remote, error = %e, "β: Proteus handshake failed");
                             record_probe_anomaly(&ctx, &remote);

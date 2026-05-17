@@ -931,6 +931,13 @@ pub struct AlphaSession<
     /// Cover-profile selector the client picked (spec §22.4); same
     /// lifecycle as `shape_seed`.
     pub cover_profile_id: Option<u16>,
+    /// Wall-clock duration of the handshake (from accept to
+    /// completion, as measured by the server-side accept loop).
+    /// `None` on the client side or for legacy in-memory tests
+    /// where no accept loop exists. Operators observe via the
+    /// `proteus_handshake_duration_seconds` histogram fed by the
+    /// session-handler hook in main.rs.
+    pub handshake_duration: Option<std::time::Duration>,
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
@@ -939,6 +946,15 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
     #[must_use]
     pub fn with_user_id(mut self, user_id: [u8; 8]) -> Self {
         self.user_id = Some(user_id);
+        self
+    }
+
+    /// Builder-style setter for the handshake duration. Called
+    /// by the server-side accept loop right after the handshake
+    /// completes and before invoking the user's session handler.
+    #[must_use]
+    pub fn with_handshake_duration(mut self, d: std::time::Duration) -> Self {
+        self.handshake_duration = Some(d);
         self
     }
 
@@ -1037,6 +1053,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
             peer_addr: None,
             shape_seed: None,
             cover_profile_id: None,
+            handshake_duration: None,
         }
     }
 }

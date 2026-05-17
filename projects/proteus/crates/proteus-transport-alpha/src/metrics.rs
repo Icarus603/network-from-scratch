@@ -365,6 +365,17 @@ pub struct ServerMetrics {
     /// Set ONCE at startup by `main.rs::run`; /healthz reads it
     /// to apply the "stale = unhealthy" rule.
     pub periodic_self_test_interval_secs: AtomicU64,
+    /// **Handshake-latency histogram** (seconds). Fed by the
+    /// session-handler hooks in `main.rs` from
+    /// `session.handshake_duration` for every successful
+    /// handshake. Operators dashboard
+    /// `histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m]))`
+    /// to catch p99 regressions BEFORE users complain.
+    ///
+    /// Always present: operators can build histograms even when
+    /// no handshakes have completed yet (PromQL `rate(...)` on
+    /// an all-zero bucket set is a no-op, not an error).
+    pub handshake_duration_seconds: crate::histogram::LatencyHistogram,
     /// Upstream dial requests blocked by the outbound destination
     /// filter. Includes SSRF-style attempts (`169.254.169.254`,
     /// RFC 1918, loopback, IPv6 ULA / mapped-v4 bypass) and
@@ -445,6 +456,10 @@ impl Default for ServerMetrics {
             periodic_self_test_attempts_total: AtomicU64::new(0),
             periodic_self_test_failed_total: AtomicU64::new(0),
             periodic_self_test_interval_secs: AtomicU64::new(0),
+            handshake_duration_seconds: crate::histogram::LatencyHistogram::new(
+                "handshake_duration_seconds",
+                "Wall-clock seconds from accept to handshake completion (cumulative buckets).",
+            ),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             firewall_reload_attempts: AtomicU64::new(0),
@@ -481,7 +496,7 @@ impl ServerMetrics {
     #[must_use]
     pub fn prometheus(&self) -> String {
         let s = |c: &AtomicU64| c.load(Ordering::Relaxed);
-        format!(
+        let counters = format!(
             "# HELP proteus_sessions_accepted_total Number of TCP connections accepted.\n\
              # TYPE proteus_sessions_accepted_total counter\n\
              proteus_sessions_accepted_total {}\n\
@@ -644,7 +659,16 @@ impl ServerMetrics {
             s(&self.user_rate_limit_reload_succeeded),
             s(&self.handshake_budget_reload_attempts),
             s(&self.handshake_budget_reload_succeeded),
-        )
+        );
+        // Append the handshake-latency histogram block. Renders
+        // the canonical Prometheus histogram shape (bucket
+        // lines + _sum + _count). Always present so operators
+        // can dashboard `histogram_quantile(0.99, rate(...))`
+        // from the moment the binary starts.
+        let mut out = String::with_capacity(counters.len() + 512);
+        out.push_str(&counters);
+        out.push_str(&self.handshake_duration_seconds.prometheus());
+        out
     }
 }
 
@@ -706,6 +730,44 @@ mod tests {
                 "missing TYPE row for {name} in:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn server_prometheus_includes_handshake_latency_histogram_block() {
+        let m = ServerMetrics::default();
+        // Observe 3 handshakes spread across buckets to confirm
+        // the histogram renders alongside the counters.
+        m.handshake_duration_seconds
+            .observe(std::time::Duration::from_millis(5));
+        m.handshake_duration_seconds
+            .observe(std::time::Duration::from_millis(80));
+        m.handshake_duration_seconds
+            .observe(std::time::Duration::from_millis(800));
+        let text = m.prometheus();
+        // Histogram block headers (HELP + TYPE) appear.
+        assert!(
+            text.contains("# HELP proteus_handshake_duration_seconds"),
+            "missing histogram HELP: {text}"
+        );
+        assert!(
+            text.contains("# TYPE proteus_handshake_duration_seconds histogram"),
+            "missing histogram TYPE: {text}"
+        );
+        // Bucket le="0.005" must be 1 (only the 5ms observation).
+        assert!(
+            text.contains(r#"proteus_handshake_duration_seconds_bucket{le="0.005"} 1"#),
+            "wrong le=0.005 bucket: {text}"
+        );
+        // Bucket le="1" must be 3 (all observations ≤ 1s).
+        assert!(
+            text.contains(r#"proteus_handshake_duration_seconds_bucket{le="1"} 3"#),
+            "wrong le=1 bucket: {text}"
+        );
+        // _count = 3.
+        assert!(
+            text.contains("proteus_handshake_duration_seconds_count 3"),
+            "wrong count: {text}"
+        );
     }
 
     #[test]

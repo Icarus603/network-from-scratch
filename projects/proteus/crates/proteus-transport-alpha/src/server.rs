@@ -1187,6 +1187,10 @@ where
         tokio::spawn(async move {
             let _permit_held = permit;
             let deadline = ctx.handshake_deadline();
+            // Measure handshake wall-clock time so the
+            // on_session handler can feed it into the latency
+            // histogram. Same shape as the plain-TCP path above.
+            let hs_start = std::time::Instant::now();
             let outcome = tokio::time::timeout(
                 deadline,
                 handshake_over_tls(stream, &current_acceptor, &ctx),
@@ -1194,7 +1198,10 @@ where
             .await;
             match outcome {
                 Ok(Ok(session)) => {
-                    let session = session.with_peer_addr(peer);
+                    let elapsed = hs_start.elapsed();
+                    let session = session
+                        .with_peer_addr(peer)
+                        .with_handshake_duration(elapsed);
                     if user_admission_ok(&ctx, &session) {
                         handle(session).await;
                     }
@@ -1277,10 +1284,18 @@ where
             // single-cover behavior when only `cover_endpoint` is set.
             let cover_target = ctx.cover_endpoint_for(&peer);
             let deadline = ctx.handshake_deadline();
+            // Measure handshake wall-clock time so the on_session
+            // handler can feed it into the latency histogram.
+            // Operators dashboard `histogram_quantile(0.99, ...)`
+            // to catch p99 regressions BEFORE users complain.
+            let hs_start = std::time::Instant::now();
             let result = tokio::time::timeout(deadline, handshake_buffered(stream, &ctx)).await;
             let (replay_buf, raw_stream, timed_out) = match result {
                 Ok(Ok((session, _))) => {
-                    let session = session.with_peer_addr(peer);
+                    let elapsed = hs_start.elapsed();
+                    let session = session
+                        .with_peer_addr(peer)
+                        .with_handshake_duration(elapsed);
                     if user_admission_ok(&ctx, &session) {
                         handle(session).await;
                     }

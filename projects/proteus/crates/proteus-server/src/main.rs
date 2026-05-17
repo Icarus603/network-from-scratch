@@ -1568,6 +1568,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            observe_handshake_latency(&metrics, session.handshake_duration);
                             // Per-user concurrent-session cap. On
                             // reject the session is torn down without
                             // paying the relay cost.
@@ -1650,6 +1651,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 metrics
                     .handshakes_succeeded
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                observe_handshake_latency(&metrics, session.handshake_duration);
                 // Per-user concurrent-session cap.
                 let _conn_guard = match check_per_user_conn_cap(
                     ctx_pu.per_user_conn_limiter().as_ref(),
@@ -1712,6 +1714,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                             metrics
                                 .handshakes_succeeded
                                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            observe_handshake_latency(&metrics, session.handshake_duration);
                             let _conn_guard = match check_per_user_conn_cap(
                                 ctx_pu.per_user_conn_limiter().as_ref(),
                                 session.user_id,
@@ -1995,6 +1998,16 @@ enum ConnCapDecision {
     /// the user authenticated successfully; routing to cover would
     /// mis-leadingly imply auth-fail.
     Reject { user_id: [u8; 8], cap: usize },
+}
+
+/// Observe a handshake's wall-clock duration into the histogram on `ServerMetrics`. No-op when the duration field isn't populated (legacy in-memory test sessions).
+fn observe_handshake_latency(
+    metrics: &proteus_transport_alpha::metrics::ServerMetrics,
+    handshake_duration: Option<std::time::Duration>,
+) {
+    if let Some(d) = handshake_duration {
+        metrics.handshake_duration_seconds.observe(d);
+    }
 }
 
 /// Check the per-user concurrent-session cap. Three-valued return:
