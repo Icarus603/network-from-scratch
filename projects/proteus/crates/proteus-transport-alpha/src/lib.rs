@@ -43,6 +43,7 @@ pub mod outbound_filter;
 pub mod pow;
 pub mod probe_anomaly;
 pub mod process_info;
+pub mod process_resources;
 pub mod rate_limit;
 pub mod server;
 pub mod session;

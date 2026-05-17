@@ -824,6 +824,15 @@ impl ClientStatusSnapshot {
                 s.push('\n');
             }
         }
+        // Process-resource gauges (open FDs + RSS). Same
+        // per-scrape capture pattern + `proteus_client_` prefix
+        // discipline as the rest of the client metrics. Linux-only;
+        // macOS / Windows dev rigs see absent series and PromQL's
+        // `absent()` correctly distinguishes the two.
+        let res = proteus_transport_alpha::process_resources::ProcessResources::capture();
+        if !res.is_empty() {
+            s.push_str(&res.prometheus_with_prefix("proteus_client"));
+        }
         s
     }
 }
@@ -2040,6 +2049,37 @@ mod tests {
             !s.contains("\nproteus_process_start_unix_seconds"),
             "client must not emit the server-prefixed series: {s}"
         );
+    }
+
+    /// Process-resources (FDs + RSS) are captured live per scrape
+    /// and emitted under the same `proteus_client_` prefix. Linux:
+    /// gauges present; macOS / Windows: absent. The series stay
+    /// under the client prefix to avoid label collisions with the
+    /// server's `proteus_process_*` family.
+    #[test]
+    fn prometheus_emits_process_resources_under_client_prefix_on_linux() {
+        let snap = empty_snap();
+        let s = snap.to_prometheus();
+        if cfg!(target_os = "linux") {
+            assert!(
+                s.contains("proteus_client_process_open_fds"),
+                "Linux must emit open_fds gauge: {s}"
+            );
+            assert!(
+                s.contains("proteus_client_process_resident_memory_bytes"),
+                "Linux must emit RSS gauge: {s}"
+            );
+            // Must NOT leak the server's prefix.
+            assert!(
+                !s.contains("\nproteus_process_open_fds"),
+                "should not emit under default prefix: {s}"
+            );
+        } else {
+            assert!(
+                !s.contains("process_open_fds"),
+                "non-Linux must not emit FD gauge: {s}"
+            );
+        }
     }
 
     #[test]

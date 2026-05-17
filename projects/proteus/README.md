@@ -301,6 +301,26 @@ with metadata in labels — same shape as `go_info` etc. `version`,
 `rustc`, and `target` are exposed; absent fields render as `""`
 without breaking parsers.
 
+On Linux deployments, `/metrics` also exposes per-process resource
+gauges captured live per scrape — `proteus_process_open_fds` (count
+of `/proc/self/fd/` entries) and `proteus_process_resident_memory_bytes`
+(parsed from `VmRSS:` in `/proc/self/status`). PromQL for FD-leak
+detection in production:
+
+```promql
+# FD count growing by >10/hour with no corresponding session growth.
+deriv(proteus_process_open_fds[1h]) > 10
+  unless on (instance) deriv(proteus_in_flight_sessions[1h]) > 0
+
+# RSS growing by >10 MiB/hour during steady-state traffic.
+deriv(proteus_process_resident_memory_bytes[1h]) > 10 * 1024 * 1024
+```
+
+Both gauges are Linux-only by design (production deploys are
+Linux; macOS / Windows dev rigs see absent series, which PromQL's
+`absent()` correctly distinguishes from a zero value). Client
+emits the same shape under the `proteus_client_*` prefix.
+
 The client emits a symmetric `proteus_client_process_*` +
 `proteus_client_build_info{…}` triple — same shape, same alert
 queries:

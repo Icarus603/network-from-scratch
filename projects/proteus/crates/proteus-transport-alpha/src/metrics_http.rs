@@ -602,6 +602,16 @@ pub fn render_full_v5(
         }
         if let Some(pi) = process_info {
             body.push_str(&pi.prometheus());
+            // Process-resource gauges (open FDs + RSS) are coupled
+            // to process_info: both convey "this process right now".
+            // Captured live per scrape — operators watching a soak
+            // run see FD growth in real time, and PromQL alerts on
+            // `deriv(proteus_process_open_fds[1h]) > 0` catch leaks
+            // in production. Linux-only; empty on macOS / Windows.
+            let res = crate::process_resources::ProcessResources::capture();
+            if !res.is_empty() {
+                body.push_str(&res.prometheus_with_prefix("proteus"));
+            }
         }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
@@ -1064,6 +1074,74 @@ mod tests {
         );
         // v3-shaped series still there.
         assert!(body.contains("proteus_sessions_accepted_total"));
+    }
+
+    /// v5 + process_info=Some triggers process_resources capture
+    /// in the same render path. On Linux the operator sees
+    /// `proteus_process_open_fds` + `proteus_process_resident_memory_bytes`
+    /// gauges; on macOS / Windows the gauges are absent because
+    /// the capture returned `None`.
+    #[test]
+    fn render_full_v5_emits_process_resources_when_process_info_supplied() {
+        let m = ServerMetrics::default();
+        let pi = crate::process_info::ProcessInfo::capture("0.1.0", "1.85.0", "test-target");
+        let (_s, _c, body) = render_full_v5(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&pi),
+        );
+        // process_info series always present when supplied.
+        assert!(
+            body.contains("proteus_process_start_unix_seconds"),
+            "{body}"
+        );
+        // process_resources: present on Linux, absent on macOS/Windows.
+        if cfg!(target_os = "linux") {
+            assert!(
+                body.contains("proteus_process_open_fds"),
+                "Linux must emit open_fds gauge: {body}"
+            );
+            assert!(
+                body.contains("proteus_process_resident_memory_bytes"),
+                "Linux must emit RSS gauge: {body}"
+            );
+        } else {
+            assert!(
+                !body.contains("proteus_process_open_fds"),
+                "non-Linux must NOT emit open_fds gauge: {body}"
+            );
+        }
+    }
+
+    /// v5 + process_info=None means no process_info block AND no
+    /// process_resources block — they're coupled by design.
+    #[test]
+    fn render_full_v5_omits_process_resources_when_process_info_none() {
+        let m = ServerMetrics::default();
+        let (_s, _c, body) = render_full_v5(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!body.contains("proteus_process_open_fds"), "{body}");
+        assert!(
+            !body.contains("proteus_process_resident_memory_bytes"),
+            "{body}"
+        );
+        assert!(
+            !body.contains("proteus_process_start_unix_seconds"),
+            "{body}"
+        );
     }
 
     /// v4 with `None` config_presence omits the block — back-compat
