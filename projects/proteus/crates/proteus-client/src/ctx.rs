@@ -77,11 +77,20 @@ pub struct ClientCtx {
     /// Whether β is configured (carrier health tracker presence
     /// doesn't tell us — it's always created).
     pub beta_configured: bool,
+    /// Process-lifecycle info — captured once at startup, read at
+    /// scrape time by the admin endpoint for the
+    /// `proteus_client_process_*` Prometheus block + the `/status`
+    /// "Process" section. Always present; `from_parts_for_tests`
+    /// stubs let tests construct deterministic instances.
+    pub process_info: Arc<proteus_transport_alpha::process_info::ProcessInfo>,
 }
 
 impl ClientCtx {
     /// Build from the runtime knobs decided at startup. `pool` is
     /// wrapped in a `ReloadablePool` so SIGHUP can hot-swap it.
+    /// Process-lifecycle info captured here (default fields empty);
+    /// the main binary calls [`Self::with_process_info`] to attach
+    /// the real CARGO_PKG_VERSION / rustc / target metadata.
     #[must_use]
     pub fn new(
         carrier: Arc<CarrierHealth>,
@@ -102,7 +111,29 @@ impl ClientCtx {
             bootstrap_via_pinned_direct_ip: Arc::new(AtomicU64::new(0)),
             bootstrap_via_system_resolver: Arc::new(AtomicU64::new(0)),
             beta_configured,
+            // Default process_info: empty strings + start_unix
+            // captured at construction. Real binary overrides via
+            // `with_process_info` so /metrics reports the actual
+            // CARGO_PKG_VERSION + rustc + target.
+            process_info: Arc::new(proteus_transport_alpha::process_info::ProcessInfo::capture(
+                "", "", "",
+            )),
         }
+    }
+
+    /// Replace the default empty `process_info` with operator-
+    /// supplied build metadata. Used by `main.rs` to bake in
+    /// `env!("CARGO_PKG_VERSION")` etc. Returns a fresh ctx
+    /// (consumes self) so the field is set once-and-final at
+    /// startup. Tests that don't care about process metadata use
+    /// `new` directly.
+    #[must_use]
+    pub fn with_process_info(
+        mut self,
+        pi: Arc<proteus_transport_alpha::process_info::ProcessInfo>,
+    ) -> Self {
+        self.process_info = pi;
+        self
     }
 
     /// Bump the appropriate bootstrap-resolver counter based on the
@@ -367,6 +398,31 @@ mod tests {
         assert_eq!(b.via_pinned_direct_ip, 2);
         assert_eq!(b.via_system_resolver, 1);
         assert_eq!(b.via_ip_literal, 0);
+    }
+
+    #[test]
+    fn process_info_defaults_to_empty_build_metadata() {
+        let ctx = mk_ctx(None, 0);
+        assert!(ctx.process_info.version.is_empty());
+        assert!(ctx.process_info.rustc.is_empty());
+        assert!(ctx.process_info.target.is_empty());
+        // start_unix and uptime are set even with empty metadata.
+        assert!(ctx.process_info.start_unix_seconds() > 0);
+    }
+
+    #[test]
+    fn with_process_info_overrides_default_metadata() {
+        let custom = Arc::new(proteus_transport_alpha::process_info::ProcessInfo::capture(
+            "0.5.0",
+            "1.85.0",
+            "aarch64-unknown-linux-gnu",
+        ));
+        let ctx = mk_ctx(None, 0).with_process_info(Arc::clone(&custom));
+        assert_eq!(&*ctx.process_info.version, "0.5.0");
+        assert_eq!(&*ctx.process_info.rustc, "1.85.0");
+        assert_eq!(&*ctx.process_info.target, "aarch64-unknown-linux-gnu");
+        // The Arc is the SAME instance (shared, not cloned).
+        assert!(Arc::ptr_eq(&ctx.process_info, &custom));
     }
 
     #[test]

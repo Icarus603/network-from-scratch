@@ -126,46 +126,63 @@ impl ProcessInfo {
         self.start_instant.elapsed().as_secs()
     }
 
-    /// Emit the three-metric Prometheus block. Always emits all
-    /// three families — even `proteus_build_info` when fields are
-    /// empty (label values become `""`, valid per Prometheus 0.0.4).
+    /// Emit the three-metric Prometheus block under a custom
+    /// `metric_prefix`. The server uses `"proteus"` (yielding
+    /// `proteus_process_start_unix_seconds` etc.); the client uses
+    /// `"proteus_client"` (yielding `proteus_client_process_*`)
+    /// so a single Prometheus scraping both ends doesn't get
+    /// label collisions.
+    ///
+    /// Same field rendering + escape rules as the unparameterized
+    /// `prometheus()` — that method now forwards here with the
+    /// `"proteus"` prefix for back-compat.
     #[must_use]
-    pub fn prometheus(&self) -> String {
+    pub fn prometheus_with_prefix(&self, metric_prefix: &str) -> String {
         use std::fmt::Write as _;
         let mut s = String::with_capacity(512);
         let _ = writeln!(
             s,
-            "# HELP proteus_process_start_unix_seconds Process start time as Unix seconds."
+            "# HELP {metric_prefix}_process_start_unix_seconds Process start time as Unix seconds."
         );
-        let _ = writeln!(s, "# TYPE proteus_process_start_unix_seconds gauge");
+        let _ = writeln!(s, "# TYPE {metric_prefix}_process_start_unix_seconds gauge");
         let _ = writeln!(
             s,
-            "proteus_process_start_unix_seconds {}",
+            "{metric_prefix}_process_start_unix_seconds {}",
             self.start_unix_seconds
         );
         let _ = writeln!(
             s,
-            "# HELP proteus_process_uptime_seconds Seconds since process start (monotonic)."
+            "# HELP {metric_prefix}_process_uptime_seconds Seconds since process start (monotonic)."
         );
-        let _ = writeln!(s, "# TYPE proteus_process_uptime_seconds gauge");
+        let _ = writeln!(s, "# TYPE {metric_prefix}_process_uptime_seconds gauge");
         let _ = writeln!(
             s,
-            "proteus_process_uptime_seconds {}",
+            "{metric_prefix}_process_uptime_seconds {}",
             self.uptime_seconds()
         );
         let _ = writeln!(
             s,
-            "# HELP proteus_build_info Build metadata (version + rustc + target). Always 1."
+            "# HELP {metric_prefix}_build_info Build metadata (version + rustc + target). Always 1."
         );
-        let _ = writeln!(s, "# TYPE proteus_build_info gauge");
+        let _ = writeln!(s, "# TYPE {metric_prefix}_build_info gauge");
         let _ = writeln!(
             s,
-            r#"proteus_build_info{{version="{}",rustc="{}",target="{}"}} 1"#,
+            r#"{metric_prefix}_build_info{{version="{}",rustc="{}",target="{}"}} 1"#,
             escape_label(&self.version),
             escape_label(&self.rustc),
             escape_label(&self.target),
         );
         s
+    }
+
+    /// Emit the three-metric Prometheus block. Always emits all
+    /// three families — even `proteus_build_info` when fields are
+    /// empty (label values become `""`, valid per Prometheus 0.0.4).
+    /// Equivalent to `prometheus_with_prefix("proteus")` — kept for
+    /// the existing server-side call site without forcing a churn.
+    #[must_use]
+    pub fn prometheus(&self) -> String {
+        self.prometheus_with_prefix("proteus")
     }
 }
 
@@ -298,6 +315,48 @@ mod tests {
         // The two escapes must appear in the labels.
         assert!(s.contains(r#"version="weird\"v""#), "{s}");
         assert!(s.contains(r#"rustc="win\\os""#), "{s}");
+    }
+
+    /// `prometheus_with_prefix("proteus_client")` yields series
+    /// under the client prefix — the path the client admin uses to
+    /// avoid label collisions with the server scrape.
+    #[test]
+    fn prometheus_with_prefix_renders_under_custom_prefix() {
+        let p = sample();
+        let s = p.prometheus_with_prefix("proteus_client");
+        assert!(
+            s.contains("proteus_client_process_start_unix_seconds 1747526400"),
+            "{s}"
+        );
+        assert!(s.contains("proteus_client_process_uptime_seconds "), "{s}");
+        assert!(s.contains("proteus_client_build_info{"), "{s}");
+        // Must NOT leak the default "proteus_" prefix.
+        assert!(
+            !s.contains("\nproteus_process_start_unix_seconds"),
+            "should not double-emit under default prefix: {s}"
+        );
+    }
+
+    /// Default `prometheus()` is exactly equivalent to
+    /// `prometheus_with_prefix("proteus")`. Guarantees no
+    /// behavioral drift between the two emission paths.
+    #[test]
+    fn prometheus_default_equals_prefix_proteus() {
+        // Two snapshots constructed with the same start_unix; uptime
+        // computed at different micro-instants in the test will
+        // differ by at most 1s, so we compare HEAD lines.
+        let a = ProcessInfo::from_parts(123, Instant::now(), "v", "r", "t");
+        let s1 = a.prometheus();
+        let s2 = a.prometheus_with_prefix("proteus");
+        // Strip the uptime line from each (its value can race
+        // between the two calls).
+        let strip_uptime = |s: &str| -> String {
+            s.lines()
+                .filter(|l| !l.starts_with("proteus_process_uptime_seconds "))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(strip_uptime(&s1), strip_uptime(&s2));
     }
 
     #[test]

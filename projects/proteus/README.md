@@ -301,6 +301,18 @@ with metadata in labels — same shape as `go_info` etc. `version`,
 `rustc`, and `target` are exposed; absent fields render as `""`
 without breaking parsers.
 
+The client emits a symmetric `proteus_client_process_*` +
+`proteus_client_build_info{…}` triple — same shape, same alert
+queries:
+
+```promql
+# Client-side fleet straggler detection.
+proteus_client_build_info{version!="0.2.0"} == 1
+
+# Recently-restarted client (likely OOM or systemd flap).
+(time() - proteus_client_process_start_unix_seconds) < 300
+```
+
 ### SIGHUP-driven `server_endpoints` hot-reload
 
 Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,

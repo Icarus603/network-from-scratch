@@ -90,6 +90,26 @@ pub struct ClientStatusSnapshot {
     /// be all-pinned is the silent-misconfig signal (threat-intel
     /// main line 6: DoH identification).
     pub bootstrap: BootstrapCounters,
+    /// Process-lifecycle snapshot — start time, uptime, build
+    /// metadata. Always present; rendered on `/status` text /
+    /// JSON / `/metrics` with the `proteus_client_process_*`
+    /// prefix so a single Prometheus instance can scrape both
+    /// client and server without collisions.
+    pub process: ProcessView,
+}
+
+/// Operator-friendly process view rendered from a
+/// `transport_alpha::process_info::ProcessInfo`. Field-by-field
+/// shadow so `ClientStatusSnapshot` doesn't expose the underlying
+/// Arc — JSON output stays the same shape regardless of how the
+/// upstream type evolves.
+#[derive(Debug, Clone, Default)]
+pub struct ProcessView {
+    pub start_unix_seconds: i64,
+    pub uptime_seconds: u64,
+    pub version: String,
+    pub rustc: String,
+    pub target: String,
 }
 
 /// Snapshot of the ReloadablePool's cumulative reload counters.
@@ -192,6 +212,13 @@ impl ClientStatusSnapshot {
             succeeded: ctx.reloadable_pool.reload_succeeded(),
         };
         snap.bootstrap = ctx.bootstrap_counters();
+        snap.process = ProcessView {
+            start_unix_seconds: ctx.process_info.start_unix_seconds(),
+            uptime_seconds: ctx.process_info.uptime_seconds(),
+            version: ctx.process_info.version.to_string(),
+            rustc: ctx.process_info.rustc.to_string(),
+            target: ctx.process_info.target.to_string(),
+        };
         snap
     }
 
@@ -297,6 +324,7 @@ impl ClientStatusSnapshot {
             dials: DialCounters::default(),
             pool_reload: PoolReloadCounters::default(),
             bootstrap: BootstrapCounters::default(),
+            process: ProcessView::default(),
         }
     }
 
@@ -414,6 +442,21 @@ impl ClientStatusSnapshot {
             self.bootstrap.via_pinned_direct_ip,
             self.bootstrap.via_system_resolver
         );
+
+        // process: start_unix + uptime + build metadata.
+        // Always emitted (start_unix is captured at ctx
+        // construction, never absent).
+        s.push_str(r#","process":{"start_unix_seconds":"#);
+        let _ = write!(s, "{}", self.process.start_unix_seconds);
+        s.push_str(r#","uptime_seconds":"#);
+        let _ = write!(s, "{}", self.process.uptime_seconds);
+        s.push_str(r#","version":""#);
+        push_json_str_inner(&mut s, &self.process.version);
+        s.push_str(r#"","rustc":""#);
+        push_json_str_inner(&mut s, &self.process.rustc);
+        s.push_str(r#"","target":""#);
+        push_json_str_inner(&mut s, &self.process.target);
+        s.push_str(r#""}"#);
 
         s.push_str("}\n");
         s
@@ -744,6 +787,43 @@ impl ClientStatusSnapshot {
                 }
             }
         }
+        // Process-lifecycle block under the `proteus_client` prefix.
+        // We reconstruct a transient ProcessInfo from the snapshot
+        // view so the same rendering helper used by the server is
+        // reused — single source of truth for the wire format.
+        let pi = proteus_transport_alpha::process_info::ProcessInfo::from_parts(
+            self.process.start_unix_seconds,
+            // The reconstructed ProcessInfo's start_instant doesn't
+            // match the original; uptime would drift. We override
+            // by computing uptime ourselves at snapshot time —
+            // the helper's `prometheus_with_prefix` reads
+            // `uptime_seconds()` from its own start_instant. To
+            // get a stable view-time uptime, render to the helper
+            // then patch the uptime line.
+            std::time::Instant::now(),
+            &self.process.version,
+            &self.process.rustc,
+            &self.process.target,
+        );
+        let block = pi.prometheus_with_prefix("proteus_client");
+        // Replace the helper's "fresh-instant" uptime with the
+        // snapshot's recorded uptime. The helper emits the line as
+        // `proteus_client_process_uptime_seconds 0` (because we
+        // just constructed the Instant). The snapshot's
+        // `self.process.uptime_seconds` is the operator-visible
+        // value taken at snapshot time, which is what we want.
+        for line in block.lines() {
+            if let Some(_v) = line.strip_prefix("proteus_client_process_uptime_seconds ") {
+                let _ = writeln!(
+                    s,
+                    "proteus_client_process_uptime_seconds {}",
+                    self.process.uptime_seconds
+                );
+            } else {
+                s.push_str(line);
+                s.push('\n');
+            }
+        }
         s
     }
 }
@@ -874,6 +954,31 @@ impl std::fmt::Display for ClientStatusSnapshot {
             };
             writeln!(f, " Pool reloads (SIGHUP): {label}")?;
         }
+        // Process block — always rendered. Even on a brand-new
+        // process this is useful (operator sees start_unix +
+        // uptime ≈ 0 + version), and the rendering stays compact.
+        let up = self.process.uptime_seconds;
+        let (h, m, sec) = (up / 3600, (up % 3600) / 60, up % 60);
+        let version_label = if self.process.version.is_empty() {
+            "(unset)".to_string()
+        } else {
+            self.process.version.clone()
+        };
+        let rustc_label = if self.process.rustc.is_empty() {
+            "(unset)".to_string()
+        } else {
+            self.process.rustc.clone()
+        };
+        let target_label = if self.process.target.is_empty() {
+            "(unset)".to_string()
+        } else {
+            self.process.target.clone()
+        };
+        writeln!(
+            f,
+            " Process: start_unix={ts}, uptime={up}s ({h}h {m}m {sec}s), version={version_label}, rustc={rustc_label}, target={target_label}",
+            ts = self.process.start_unix_seconds,
+        )?;
         Ok(())
     }
 }
@@ -1897,6 +2002,123 @@ mod tests {
         };
         let (status, _ctype, _body) = route("GET /metrics?debug=1 HTTP/1.1\r\n\r\n", &snap);
         assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    // ----- Process-lifecycle tests (client side) -----
+
+    #[test]
+    fn prometheus_always_emits_process_lifecycle_under_client_prefix() {
+        let snap = ClientStatusSnapshot {
+            process: ProcessView {
+                start_unix_seconds: 1_747_526_400,
+                uptime_seconds: 100,
+                version: "0.1.0".into(),
+                rustc: "1.85.0".into(),
+                target: "aarch64-apple-darwin".into(),
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_process_start_unix_seconds 1747526400\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_process_uptime_seconds 100\n"),
+            "missing uptime line (must reflect snapshot value, not Instant::now): {s}"
+        );
+        assert!(
+            s.contains(
+                r#"proteus_client_build_info{version="0.1.0",rustc="1.85.0",target="aarch64-apple-darwin"} 1"#
+            ),
+            "{s}"
+        );
+        // The default `proteus_*` (no `_client`) prefix MUST NOT
+        // leak — otherwise a shared Prometheus would see duplicate
+        // series from server + client.
+        assert!(
+            !s.contains("\nproteus_process_start_unix_seconds"),
+            "client must not emit the server-prefixed series: {s}"
+        );
+    }
+
+    #[test]
+    fn json_emits_process_object_with_all_fields() {
+        let snap = ClientStatusSnapshot {
+            process: ProcessView {
+                start_unix_seconds: 42,
+                uptime_seconds: 3725,
+                version: "9.9.9".into(),
+                rustc: "".into(),
+                target: "".into(),
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_json();
+        assert!(
+            s.contains(
+                r#""process":{"start_unix_seconds":42,"uptime_seconds":3725,"version":"9.9.9","rustc":"","target":""}"#
+            ),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn json_process_handles_empty_version_safely() {
+        // brand-new ctx with no with_process_info attached: all
+        // strings are "" — JSON must still be parseable.
+        let s = empty_snap().to_json();
+        assert!(s.contains(r#""version":"""#), "{s}");
+        assert!(s.contains(r#""rustc":"""#), "{s}");
+        assert!(s.contains(r#""target":"""#), "{s}");
+    }
+
+    #[test]
+    fn text_renders_process_line_with_unset_placeholders_when_empty() {
+        let s = format!("{}", empty_snap());
+        assert!(s.contains(" Process: start_unix="), "{s}");
+        assert!(s.contains("version=(unset)"), "{s}");
+        assert!(s.contains("rustc=(unset)"), "{s}");
+        assert!(s.contains("target=(unset)"), "{s}");
+    }
+
+    #[test]
+    fn text_renders_process_line_with_humanized_uptime() {
+        let snap = ClientStatusSnapshot {
+            process: ProcessView {
+                start_unix_seconds: 100,
+                uptime_seconds: 3725, // 1h 2m 5s
+                version: "0.2.1".into(),
+                rustc: "1.85.0".into(),
+                target: "x86_64-unknown-linux-gnu".into(),
+            },
+            ..empty_snap()
+        };
+        let s = format!("{snap}");
+        assert!(
+            s.contains("uptime=3725s (1h 2m 5s)"),
+            "expected humanized uptime in: {s}"
+        );
+        assert!(s.contains("version=0.2.1"), "{s}");
+    }
+
+    #[test]
+    fn from_ctx_propagates_process_info_from_ctx() {
+        let custom = Arc::new(proteus_transport_alpha::process_info::ProcessInfo::capture(
+            "ctx-version",
+            "ctx-rustc",
+            "ctx-target",
+        ));
+        let ctx = Arc::new(
+            ClientCtx::new(Arc::new(CarrierHealth::new()), None, None, 0, false)
+                .with_process_info(Arc::clone(&custom)),
+        );
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert_eq!(snap.process.version, "ctx-version");
+        assert_eq!(snap.process.rustc, "ctx-rustc");
+        assert_eq!(snap.process.target, "ctx-target");
+        // start_unix matches what custom captured.
+        assert_eq!(snap.process.start_unix_seconds, custom.start_unix_seconds());
     }
 
     #[test]

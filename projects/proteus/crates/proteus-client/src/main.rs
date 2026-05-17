@@ -260,13 +260,27 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // cap is decided so `max_inflight` is final; built BEFORE the
     // admin endpoint spawn so the admin's first scrape sees the
     // real ctx (not a placeholder).
-    let ctx = Arc::new(ClientCtx::new(
-        Arc::clone(&health),
-        endpoint_pool.clone(),
-        session_slots.clone(),
-        max_inflight,
-        beta_configured,
-    ));
+    // Process-lifecycle info: CARGO_PKG_VERSION baked at compile
+    // time; rustc + target are best-effort (operator can wire a
+    // build script if they want them populated). Same shape as
+    // server-side metric — operators can build a unified Grafana
+    // dashboard with `proteus_*_process_*` queries.
+    let process_info =
+        std::sync::Arc::new(proteus_transport_alpha::process_info::ProcessInfo::capture(
+            env!("CARGO_PKG_VERSION"),
+            option_env!("RUSTC_VERSION").unwrap_or(""),
+            option_env!("TARGET").unwrap_or(""),
+        ));
+    let ctx = Arc::new(
+        ClientCtx::new(
+            Arc::clone(&health),
+            endpoint_pool.clone(),
+            session_slots.clone(),
+            max_inflight,
+            beta_configured,
+        )
+        .with_process_info(process_info),
+    );
 
     // ----- Admin HTTP endpoint -----
     //
