@@ -6,6 +6,7 @@
 //! the entire binary. The binary itself just calls `relay::handle_session`.
 
 pub mod admin;
+pub mod admin_alerts_check;
 pub mod config;
 pub mod host_preflight;
 pub mod ip_reputation;

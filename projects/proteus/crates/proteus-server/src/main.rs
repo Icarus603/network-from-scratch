@@ -285,6 +285,36 @@ enum AdminCmd {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// Evaluate the bundled Prometheus alert rules
+    /// (`deploy/prometheus/proteus-alerts.yaml`) against a one-shot
+    /// `/metrics` scrape and print per-rule verdict.
+    ///
+    /// Designed for the "did my fresh deploy come up clean?" /
+    /// "which documented alert is ACTIVELY firing right now?" /
+    /// "CI smoke-gate the new binary" use cases — without
+    /// standing up a full Prometheus + Alertmanager stack. The
+    /// point-in-time evaluation can't replicate Prometheus's
+    /// `rate(...[5m])` queries; rate-based alerts here are
+    /// approximated by "is the counter currently non-zero".
+    /// For full evaluation, wire the YAML into the operator's
+    /// own Prometheus.
+    ///
+    /// Exit code: 0 on PASS+WARN-only, 1 on any CRIT.
+    AlertsCheck {
+        /// URL of the metrics endpoint.
+        #[arg(long, default_value = "http://127.0.0.1:9090/metrics")]
+        url: String,
+        /// Optional bearer-token file (or PROTEUS_METRICS_TOKEN).
+        #[arg(long)]
+        token_file: Option<PathBuf>,
+        /// Per-step network timeout in seconds. Default 5 s.
+        #[arg(long, default_value_t = 5)]
+        timeout_secs: u64,
+        /// Output format: `text` (default, human-friendly) or
+        /// `json` (one-line JSON for jq / scripted deploy gates).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -408,6 +438,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     std::time::Duration::from_secs(interval_secs),
                     fmt,
                 )?;
+            }
+            AdminCmd::AlertsCheck {
+                url,
+                token_file,
+                timeout_secs,
+                format,
+            } => {
+                let token = match token_file {
+                    Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                };
+                let code = proteus_server::admin_alerts_check::cli_run(
+                    &url,
+                    token.as_deref(),
+                    std::time::Duration::from_secs(timeout_secs),
+                    &format,
+                )?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
             }
         },
         Cmd::Fingerprint { format } => {

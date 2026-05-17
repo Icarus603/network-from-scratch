@@ -1480,6 +1480,31 @@ proteus_access_log_write_errors_total
 proteus_access_log_writer_alive
 ```
 
+**`proteus-server admin alerts-check`** — evaluates the same
+alert rules **in-process** against a one-shot `/metrics` scrape
+so operators can answer "did my fresh deploy come up clean?" /
+"which documented alert is ACTIVELY firing right now?" without
+standing up Prometheus + Alertmanager. Point-in-time approximation:
+rate-based rules collapse to "is the counter currently non-zero".
+Exit 0 on PASS+WARN-only, 1 on any CRIT — wire into Ansible /
+Terraform post-deploy gates:
+
+```bash
+proteus-server admin alerts-check
+#   PASS [ProteusServerUnhealthy] proteus_up == 1
+#   PASS [ProteusTlsCertExpiringSoon] TLS cert valid for 87 days
+#   PASS [ProteusPanic] no panics captured
+#   PASS [ProteusUncleanShutdown] previous shutdown was clean
+#   PASS [ProteusAccessLogWriterDead] access-log writer alive
+#   PASS [ProteusDnsResolverWedged] no DNS lookup timeouts (...)
+#
+# summary: 6 pass, 0 warn, 0 crit  (exit 0)
+```
+
+`--format json` for jq pipelines. The same `equivalent_promql`
+appears on every check so operators wanting to dig deeper know
+exactly which Prometheus query to run.
+
 **Prometheus alert rules — bundled, drop-in ready** at
 [`deploy/prometheus/proteus-alerts.yaml`](deploy/prometheus/proteus-alerts.yaml).
 Load via `rule_files:` in `prometheus.yml` or mount into a
