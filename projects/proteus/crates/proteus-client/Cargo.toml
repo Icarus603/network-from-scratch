@@ -45,6 +45,10 @@ rcgen = "0.13"
 rustls = { workspace = true }
 base64 = "0.22"
 ed25519-dalek.workspace = true
+# Iter-47: trusted_ca expiry tests need to control notAfter
+# directly. rcgen accepts time::OffsetDateTime but doesn't
+# re-export the time crate.
+time = "0.3"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -406,6 +406,48 @@ pub fn leaf_cert_not_after(chain: &[CertificateDer<'_>]) -> Result<i64, TlsError
     Ok(parsed.validity().not_after.timestamp())
 }
 
+/// Iter-47: like [`leaf_cert_not_after`] but inspects EVERY cert in
+/// the supplied set and returns the EARLIEST notAfter across all of
+/// them. Designed for the client-side `tls.trusted_ca` bundle case
+/// where the chain is "the operator's pinned CAs" (could be 1
+/// self-signed pinning anchor, or N intermediates) and ANY
+/// expiring entry breaks every dial.
+///
+/// Returns `Ok(earliest_unix)` when at least one cert parsed;
+/// `Err` only when the input is empty OR every cert failed to
+/// parse. A mixed-success bundle (some parseable, some not) uses
+/// only the parseable ones — the caller's `load_cert_chain` already
+/// gates on at least one valid PEM block.
+pub fn earliest_cert_not_after(chain: &[CertificateDer<'_>]) -> Result<i64, TlsError> {
+    use x509_parser::prelude::*;
+    if chain.is_empty() {
+        return Err(TlsError::NoCert {
+            path: "<in-memory chain>".to_string(),
+        });
+    }
+    let mut earliest: Option<i64> = None;
+    let mut last_err: Option<TlsError> = None;
+    for (i, c) in chain.iter().enumerate() {
+        match X509Certificate::from_der(c.as_ref()) {
+            Ok((_, parsed)) => {
+                let na = parsed.validity().not_after.timestamp();
+                earliest = Some(earliest.map_or(na, |e| e.min(na)));
+            }
+            Err(e) => {
+                last_err = Some(TlsError::BadPem {
+                    path: format!("<cert[{i}]>"),
+                    msg: format!("DER parse: {e}"),
+                });
+            }
+        }
+    }
+    earliest.ok_or_else(|| {
+        last_err.unwrap_or(TlsError::NoCert {
+            path: "<in-memory chain>".to_string(),
+        })
+    })
+}
+
 /// Reloadable wrapper around a [`TlsAcceptor`].
 ///
 /// Production deployments using Let's Encrypt see certificate renewal
@@ -792,6 +834,79 @@ mod tests {
     fn leaf_cert_not_after_rejects_empty_chain() {
         let chain: Vec<CertificateDer<'_>> = vec![];
         assert!(leaf_cert_not_after(&chain).is_err());
+    }
+
+    /// Iter-47: earliest_cert_not_after agrees with leaf on a
+    /// single-cert input (both look at the only cert there is).
+    #[test]
+    fn earliest_cert_not_after_single_matches_leaf() {
+        let (chain, _) = mint_chain_and_acceptor();
+        let leaf_ts = leaf_cert_not_after(&chain).unwrap();
+        let earliest_ts = earliest_cert_not_after(&chain).unwrap();
+        assert_eq!(leaf_ts, earliest_ts);
+    }
+
+    /// Iter-47: with two certs of different notAfter, earliest
+    /// returns the SMALLER timestamp. Two minted chains used —
+    /// rcgen defaults give us deterministic-but-different
+    /// notAfters across separate `mint_chain_and_acceptor`
+    /// invocations only because of clock skew; we sidestep that
+    /// here by minting two certs with rcgen directly + setting
+    /// distinct notAfter values via CertificateParams.
+    #[test]
+    fn earliest_cert_not_after_returns_minimum_of_multi_cert_chain() {
+        let mut early = rcgen::CertificateParams::default();
+        early.distinguished_name = rcgen::DistinguishedName::new();
+        early
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "early");
+        early.not_after = rcgen::date_time_ymd(2030, 1, 1);
+        let early_kp = rcgen::KeyPair::generate().unwrap();
+        let early_cert = early.self_signed(&early_kp).unwrap();
+
+        let mut late = rcgen::CertificateParams::default();
+        late.distinguished_name = rcgen::DistinguishedName::new();
+        late.distinguished_name
+            .push(rcgen::DnType::CommonName, "late");
+        late.not_after = rcgen::date_time_ymd(2040, 1, 1);
+        let late_kp = rcgen::KeyPair::generate().unwrap();
+        let late_cert = late.self_signed(&late_kp).unwrap();
+
+        let chain = vec![
+            CertificateDer::from(late_cert.der().to_vec()),
+            CertificateDer::from(early_cert.der().to_vec()),
+        ];
+        let earliest = earliest_cert_not_after(&chain).unwrap();
+        // 2030-01-01 UTC is the floor; 2040 should not win.
+        let y2035 = 2_051_222_400_i64; // approx 2035-01-01
+        assert!(
+            earliest < y2035,
+            "earliest must be the 2030 cert, not the 2040 cert: {earliest}"
+        );
+    }
+
+    /// Iter-47: empty input → Err. Same convention as the
+    /// single-leaf helper.
+    #[test]
+    fn earliest_cert_not_after_rejects_empty_chain() {
+        let chain: Vec<CertificateDer<'_>> = vec![];
+        assert!(earliest_cert_not_after(&chain).is_err());
+    }
+
+    /// Iter-47: a mixed bundle (one parseable + one garbage) uses
+    /// the parseable one rather than failing entirely. The
+    /// rationale: the operator's bundle may have a stray
+    /// non-cert PEM block; we don't want to disable expiry
+    /// surveillance entirely for the parseable entries.
+    #[test]
+    fn earliest_cert_not_after_skips_garbage_in_mixed_bundle() {
+        let (good_chain, _) = mint_chain_and_acceptor();
+        let mut mixed: Vec<CertificateDer<'_>> = good_chain.clone();
+        mixed.push(CertificateDer::from(vec![0xFFu8; 64]));
+        // Should succeed and return the good cert's notAfter.
+        let earliest = earliest_cert_not_after(&mixed).unwrap();
+        let good_ts = leaf_cert_not_after(&good_chain).unwrap();
+        assert_eq!(earliest, good_ts);
     }
 
     #[test]

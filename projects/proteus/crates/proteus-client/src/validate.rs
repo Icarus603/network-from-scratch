@@ -378,6 +378,20 @@ pub async fn run(path: &Path) -> PreflightReport {
                     Ok(bytes) => {
                         if bytes.windows(11).any(|w| w == b"-----BEGIN ") {
                             r.push_pass(format!("tls.trusted_ca readable: {}", ca.display()));
+                            // Iter-47: client-side cert-expiry check for the
+                            // trusted_ca bundle. Symmetric with the server-
+                            // side iter-46 leaf cert check. A pinned CA
+                            // (private PKI / self-signed CA used as a
+                            // pinning anchor) that expires causes EVERY
+                            // dial to fail — same trap class. The runtime
+                            // would surface no warning because the client
+                            // doesn't emit `proteus_tls_cert_*` series for
+                            // the trusted_ca (those are server-side metrics);
+                            // the only way to catch this is at validate
+                            // time. Inspects every cert in the bundle;
+                            // if ANY entry is expired/near-expiry the
+                            // operator gets one fix-cycle.
+                            check_ca_bundle_expiry(&mut r, &bytes, ca);
                         } else {
                             r.push_fail(format!(
                                 "tls.trusted_ca file does not contain a PEM block: {}",
@@ -535,6 +549,69 @@ pub async fn run(path: &Path) -> PreflightReport {
     }
 
     r
+}
+
+/// Iter-47: inspect a CA bundle PEM file for cert-expiry. The
+/// dispatcher uses this trust anchor on every dial; an expired
+/// CA breaks every connection. Symmetric with the server-side
+/// iter-46 leaf cert check, but for the trust-anchor case the
+/// bundle may contain multiple CAs and ANY expiring entry is
+/// the actionable signal — we report the EARLIEST notAfter
+/// across the bundle.
+///
+/// `pem_bytes` is the file content; `path` is just for the
+/// error/log message. We re-parse from bytes via the
+/// transport-alpha `load_cert_chain` helper (which accepts both
+/// PEM and a `Path`), but PEM parsing from a slice would
+/// duplicate that logic. Instead, write a small wrapper: we use
+/// the in-memory `rustls_pemfile::certs` path via the
+/// transport-alpha module.
+fn check_ca_bundle_expiry(r: &mut PreflightReport, _pem_bytes: &[u8], path: &Path) {
+    let chain = match proteus_transport_alpha::tls::load_cert_chain(path) {
+        Ok(c) => c,
+        Err(e) => {
+            r.push_warn(format!(
+                "tls.trusted_ca: could not parse cert chain for expiry check ({e}). \
+                 PEM-readable but parse failed; expiry surveillance disabled.",
+            ));
+            return;
+        }
+    };
+    match proteus_transport_alpha::tls::earliest_cert_not_after(&chain) {
+        Ok(not_after) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let secs_until = not_after.saturating_sub(now);
+            if secs_until <= 0 {
+                r.push_fail(format!(
+                    "tls.trusted_ca: at least one CA in the bundle is EXPIRED \
+                     ({} second(s) ago) — every dial will fail TLS cert verification. \
+                     Rotate the trust anchor immediately.",
+                    -secs_until,
+                ));
+            } else {
+                let days = secs_until / 86_400;
+                if days < 14 {
+                    r.push_warn(format!(
+                        "tls.trusted_ca: earliest CA notAfter in {days} day(s) — within the \
+                         14-day renewal window. Rotate the trust anchor before it expires; \
+                         operator-managed CAs do NOT auto-renew like Let's Encrypt leafs.",
+                    ));
+                } else {
+                    r.push_pass(format!(
+                        "tls.trusted_ca: earliest CA valid for {days} day(s)"
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            r.push_warn(format!(
+                "tls.trusted_ca: could not extract notAfter ({e}); expiry surveillance disabled",
+            ));
+        }
+    }
 }
 
 /// Helper: read a key file and run a size predicate.
