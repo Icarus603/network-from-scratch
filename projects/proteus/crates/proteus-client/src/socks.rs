@@ -112,7 +112,16 @@ pub async fn handle_socks5_with_ctx(
     ctx: &Arc<crate::ctx::ClientCtx>,
 ) -> Result<(), SocksError> {
     ctx.record_dial_attempt();
-    let res = handle_socks5_with_health_and_pool(sock, cfg, &ctx.carrier, ctx.pool.as_ref()).await;
+    // Snapshot the current pool ONCE at CONNECT entry so the
+    // dispatch path sees a consistent view across all per-entry
+    // tries. A SIGHUP between this line and the dispatch loop's
+    // last iteration still works — the new pool will pick up on
+    // the NEXT CONNECT — but mid-CONNECT consistency means the
+    // dispatch loop doesn't accidentally walk a partially-replaced
+    // entry list.
+    let pool_snapshot = ctx.pool();
+    let res =
+        handle_socks5_with_health_and_pool(sock, cfg, &ctx.carrier, pool_snapshot.as_ref()).await;
     match &res {
         Ok(()) => {
             ctx.record_dial_success();

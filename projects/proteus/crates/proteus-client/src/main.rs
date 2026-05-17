@@ -285,6 +285,70 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         });
     }
 
+    // ----- SIGHUP — hot-reload `server_endpoints:` from disk -----
+    //
+    // Mirrors the server-side SIGHUP-reload pattern (TLS cert,
+    // firewall, rate limits). On SIGHUP:
+    //   1. Re-read the YAML from `config_path`.
+    //   2. Build a fresh EndpointPool from the new `server_endpoints`
+    //      using `new_with_carryover` so unchanged entries keep
+    //      their per-endpoint counters + suppression state.
+    //   3. Atomically swap it into the ReloadablePool — every NEW
+    //      CONNECT after the swap sees the new list; in-flight
+    //      sessions complete on their already-chosen endpoint.
+    //
+    // What this DOESN'T reload (yet — explicit non-goals here):
+    //   - `server_endpoint` (single) — operators using pool mode
+    //     don't need it; operators using single mode restart.
+    //   - `socks_listen` — would require listener re-bind.
+    //   - TLS / bootstrap_dns keys — quinn / rustls don't expose
+    //     a hot-swap API on existing connections.
+    //   - β endpoint perf knobs — same reason.
+    //
+    // Operator workflow: edit client.yaml's `server_endpoints:`
+    // list, then `killall -HUP proteus-client`. Watch
+    // `/status.json` for the new entries + carryover counter
+    // verification.
+    {
+        let config_path = config_path.to_path_buf();
+        let ctx_for_reload = Arc::clone(&ctx);
+        tokio::spawn(async move {
+            let mut sighup = match tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::hangup(),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(error = %e, "install SIGHUP handler failed; pool hot-reload disabled");
+                    return;
+                }
+            };
+            while sighup.recv().await.is_some() {
+                info!("SIGHUP received — reloading server_endpoints from disk");
+                let fresh_cfg = match ClientConfig::load(&config_path).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warn!(error = %e, "SIGHUP: config reload failed; keeping current pool");
+                        continue;
+                    }
+                };
+                let new_endpoints = fresh_cfg.server_endpoints.clone();
+                let (prev, new) = ctx_for_reload
+                    .reloadable_pool
+                    .reload_from_addrs(new_endpoints);
+                let (added, removed) = proteus_client::endpoint_pool::pool_addr_diff(&prev, &new);
+                info!(
+                    prev_count = prev.len(),
+                    new_count = new.len(),
+                    added = ?added,
+                    removed = ?removed,
+                    reload_attempts = ctx_for_reload.reloadable_pool.reload_attempts(),
+                    "endpoint pool reloaded (carryover preserved per-entry counters \
+                     for unchanged addrs)"
+                );
+            }
+        });
+    }
+
     // ----- Graceful shutdown wiring -----
     let drain = Duration::from_secs(cfg.drain_secs.unwrap_or(15));
     let shutdown = async {

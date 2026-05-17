@@ -76,6 +76,22 @@ pub struct ClientStatusSnapshot {
     /// Cumulative dial counters. Always present; zero-valued when
     /// no CONNECTs have been dispatched yet.
     pub dials: DialCounters,
+    /// Reload-attempt / reload-success counters from the
+    /// ReloadablePool — operators verify SIGHUP took effect by
+    /// watching these increment. Always present; zero-valued at
+    /// startup.
+    pub pool_reload: PoolReloadCounters,
+}
+
+/// Snapshot of the ReloadablePool's cumulative reload counters.
+/// `attempts - succeeded` is always zero today (reload doesn't have
+/// a failure case at the swap layer; YAML-load failures are logged
+/// but don't reach the swap), but the shape is kept symmetric with
+/// the server's TLS-reload counters for operator muscle memory.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PoolReloadCounters {
+    pub attempts: u64,
+    pub succeeded: u64,
 }
 
 /// Concurrency view rendered from the slot semaphore + configured
@@ -134,11 +150,16 @@ impl ClientStatusSnapshot {
     /// view and cumulative dial counters.
     #[must_use]
     pub fn from_ctx(alive: bool, ctx: &ClientCtx, now: Instant) -> Self {
+        // Snapshot the pool once so the rest of from_ctx works
+        // against a consistent Arc — a SIGHUP between capture and
+        // any future reads would otherwise risk surfacing
+        // half-replaced state.
+        let pool = ctx.pool();
         let mut snap = Self::capture(
             alive,
             Some(&ctx.carrier),
             ctx.beta_configured,
-            ctx.pool.as_deref(),
+            pool.as_deref(),
             now,
         );
         // If β isn't configured, downgrade the carrier view back to
@@ -157,6 +178,10 @@ impl ClientStatusSnapshot {
             max_inflight: ctx.max_inflight as u64,
         });
         snap.dials = ctx.dial_counters();
+        snap.pool_reload = PoolReloadCounters {
+            attempts: ctx.reloadable_pool.reload_attempts(),
+            succeeded: ctx.reloadable_pool.reload_succeeded(),
+        };
         snap
     }
 
@@ -254,12 +279,13 @@ impl ClientStatusSnapshot {
             alive,
             carrier: carrier_view,
             pool: pool_view,
-            // `capture` is the low-level constructor — concurrency
-            // and dials are populated by `from_ctx` which has access
-            // to the `ClientCtx`. Tests that call `capture` directly
-            // get default-zero values here.
+            // `capture` is the low-level constructor — concurrency,
+            // dials, and pool_reload are populated by `from_ctx`
+            // which has access to the `ClientCtx`. Tests that call
+            // `capture` directly get default-zero values here.
             concurrency: None,
             dials: DialCounters::default(),
+            pool_reload: PoolReloadCounters::default(),
         }
     }
 
@@ -352,6 +378,17 @@ impl ClientStatusSnapshot {
             s,
             r#"{{"attempted":{},"succeeded":{},"failed":{}}}"#,
             self.dials.attempted, self.dials.succeeded, self.dials.failed
+        );
+
+        // pool_reload: SIGHUP reload counters. Always emitted —
+        // operators alert when `attempts > succeeded` (the swap
+        // layer doesn't fail today, but the YAML-load step
+        // upstream of it can — see main.rs SIGHUP handler).
+        s.push_str(r#","pool_reload":"#);
+        let _ = write!(
+            s,
+            r#"{{"attempts":{},"succeeded":{}}}"#,
+            self.pool_reload.attempts, self.pool_reload.succeeded
         );
 
         s.push_str("}\n");
@@ -448,6 +485,38 @@ impl ClientStatusSnapshot {
         );
         let _ = writeln!(s, "# TYPE proteus_client_dials_failed_total counter");
         let _ = writeln!(s, "proteus_client_dials_failed_total {}", self.dials.failed);
+
+        // Pool reload counters — symmetric with the server-side
+        // proteus_tls_reload_attempts_total / _succeeded_total.
+        // Always emitted (zero-valued at startup) so PromQL
+        // `rate(proteus_client_pool_reload_attempts_total[5m])`
+        // doesn't see absent-counter gaps.
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_pool_reload_attempts_total SIGHUP-style endpoint pool reload attempts."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_pool_reload_attempts_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_pool_reload_attempts_total {}",
+            self.pool_reload.attempts
+        );
+        let _ = writeln!(
+            s,
+            "# HELP proteus_client_pool_reload_succeeded_total Reloads that completed the atomic swap."
+        );
+        let _ = writeln!(
+            s,
+            "# TYPE proteus_client_pool_reload_succeeded_total counter"
+        );
+        let _ = writeln!(
+            s,
+            "proteus_client_pool_reload_succeeded_total {}",
+            self.pool_reload.succeeded
+        );
 
         // Concurrency (omit when cap disabled — operator sees the
         // "no series" as "no cap" rather than a confusing zero).
@@ -692,6 +761,27 @@ impl std::fmt::Display for ClientStatusSnapshot {
             succeeded = self.dials.succeeded,
             failed = self.dials.failed,
         )?;
+        // Quiet by default — only render the line once at least one
+        // SIGHUP has happened, so steady-state output stays tight
+        // for operators who don't use the reload surface.
+        if self.pool_reload.attempts > 0 {
+            let failed = self
+                .pool_reload
+                .attempts
+                .saturating_sub(self.pool_reload.succeeded);
+            let label = if failed > 0 {
+                format!(
+                    "{} ({} ok, {} failed — check journalctl for YAML reload errors)",
+                    self.pool_reload.attempts, self.pool_reload.succeeded, failed
+                )
+            } else {
+                format!(
+                    "{} ({} ok)",
+                    self.pool_reload.attempts, self.pool_reload.succeeded
+                )
+            };
+            writeln!(f, " Pool reloads (SIGHUP): {label}")?;
+        }
         Ok(())
     }
 }
@@ -1715,6 +1805,160 @@ mod tests {
         };
         let (status, _ctype, _body) = route("GET /metrics?debug=1 HTTP/1.1\r\n\r\n", &snap);
         assert!(status.starts_with("HTTP/1.1 200"));
+    }
+
+    #[test]
+    fn prometheus_always_emits_pool_reload_counters() {
+        // Always present even at zero — symmetric with server's
+        // tls_reload_*_total. Operators script
+        // `rate(proteus_client_pool_reload_attempts_total[5m])` and
+        // need the series to exist from t=0.
+        let s = empty_snap().to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_pool_reload_attempts_total 0\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_pool_reload_succeeded_total 0\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn prometheus_reflects_pool_reload_counter_values() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool_reload: PoolReloadCounters {
+                attempts: 7,
+                succeeded: 7,
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_prometheus();
+        assert!(
+            s.contains("\nproteus_client_pool_reload_attempts_total 7\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains("\nproteus_client_pool_reload_succeeded_total 7\n"),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn json_always_emits_pool_reload_object() {
+        let s = empty_snap().to_json();
+        assert!(
+            s.contains(r#""pool_reload":{"attempts":0,"succeeded":0}"#),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn json_reflects_pool_reload_values() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool_reload: PoolReloadCounters {
+                attempts: 3,
+                succeeded: 3,
+            },
+            ..empty_snap()
+        };
+        let s = snap.to_json();
+        assert!(
+            s.contains(r#""pool_reload":{"attempts":3,"succeeded":3}"#),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn text_omits_pool_reload_line_when_no_reloads_have_happened() {
+        // Steady-state: operator hasn't SIGHUPed → line stays hidden.
+        let s = format!("{}", empty_snap());
+        assert!(
+            !s.contains("Pool reloads"),
+            "should not show pool-reload line at zero: {s}"
+        );
+    }
+
+    #[test]
+    fn text_renders_pool_reload_line_after_first_sighup() {
+        let snap = ClientStatusSnapshot {
+            alive: true,
+            pool_reload: PoolReloadCounters {
+                attempts: 2,
+                succeeded: 2,
+            },
+            ..empty_snap()
+        };
+        let s = format!("{snap}");
+        assert!(s.contains("Pool reloads (SIGHUP): 2 (2 ok)"), "{s}");
+    }
+
+    #[test]
+    fn from_ctx_pool_reload_counters_reflect_reloadable_pool_state() {
+        // End-to-end: build a ClientCtx, perform 3 reloads on its
+        // pool, capture a snapshot, assert the counters propagated
+        // through ClientCtx → ReloadablePool → snapshot.
+        let ctx = Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            Some(Arc::new(
+                crate::endpoint_pool::EndpointPool::new(vec!["a:1".into()]).unwrap(),
+            )),
+            None,
+            0,
+            true,
+        ));
+        ctx.reloadable_pool
+            .reload_from_addrs(vec!["a:1".into(), "b:2".into()]);
+        ctx.reloadable_pool
+            .reload_from_addrs(vec!["a:1".into(), "b:2".into(), "c:3".into()]);
+        ctx.reloadable_pool.reload_from_addrs(vec![]);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert_eq!(snap.pool_reload.attempts, 3);
+        assert_eq!(snap.pool_reload.succeeded, 3);
+    }
+
+    #[test]
+    fn from_ctx_pool_snapshot_reflects_post_reload_state() {
+        // After a hot-reload, from_ctx should snapshot the NEW pool
+        // (not a stale Arc captured pre-reload).
+        let ctx = Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            Some(Arc::new(
+                crate::endpoint_pool::EndpointPool::new(vec!["old:8443".into()]).unwrap(),
+            )),
+            None,
+            0,
+            true,
+        ));
+        ctx.reloadable_pool
+            .reload_from_addrs(vec!["new1:8443".into(), "new2:8443".into()]);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        let pool = snap.pool.expect("pool should be Some after reload");
+        let addrs: Vec<&str> = pool.entries.iter().map(|e| e.addr.as_str()).collect();
+        assert_eq!(addrs, vec!["new1:8443", "new2:8443"]);
+    }
+
+    #[test]
+    fn from_ctx_pool_snapshot_clears_to_none_after_empty_reload() {
+        // Operator transitions from pool mode → single-endpoint
+        // mode by reloading with an empty list.
+        let ctx = Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            Some(Arc::new(
+                crate::endpoint_pool::EndpointPool::new(vec!["a:1".into()]).unwrap(),
+            )),
+            None,
+            0,
+            true,
+        ));
+        ctx.reloadable_pool.reload_from_addrs(vec![]);
+        let snap = ClientStatusSnapshot::from_ctx(true, &ctx, Instant::now());
+        assert!(
+            snap.pool.is_none(),
+            "pool should be None after empty reload"
+        );
     }
 
     #[test]

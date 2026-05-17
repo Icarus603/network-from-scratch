@@ -78,6 +78,151 @@ pub struct EndpointCounters {
     pub failures: u64,
 }
 
+/// Reloadable wrapper around an `EndpointPool`.
+///
+/// Production clients see the operator edit `server_endpoints:` in
+/// `client.yaml` (e.g. add a new backup VPS, demote a burned one)
+/// and **cannot** afford to restart the binary — every in-flight
+/// SOCKS5 session would tear down. With [`ReloadablePool`] the
+/// operator just SIGHUPs and:
+///
+///   - Every NEW CONNECT after the reload uses the new pool order.
+///   - Existing in-flight sessions keep using their already-chosen
+///     endpoint until they complete naturally.
+///   - Per-endpoint suppression state + cumulative counters are
+///     transplanted for any entry whose address string is identical
+///     across the two pools (see
+///     [`EndpointPool::new_with_carryover`]).
+///
+/// Implementation: a `std::sync::RwLock<Option<Arc<EndpointPool>>>`.
+/// `current()` is the hot path; read-locks for one Arc-clone (one
+/// atomic increment) per CONNECT. `reload()` is rare (operator
+/// SIGHUP) and takes the write lock.
+///
+/// The `Option` lets the operator transition between "single
+/// endpoint" (cfg.server_endpoint only) and "pool" (server_endpoints
+/// list) modes without restart: a reload that supplies an empty
+/// list clears the pool back to `None`, falling back to the legacy
+/// single-endpoint dispatch path.
+#[derive(Clone)]
+pub struct ReloadablePool {
+    inner: Arc<std::sync::RwLock<Option<Arc<EndpointPool>>>>,
+    /// Cumulative reload counters mirror the server's
+    /// `ReloadableAcceptor` counters — operators alert when
+    /// `attempts - succeeded > 0` (someone SIGHUPed but the reload
+    /// path errored).
+    reload_attempts: Arc<std::sync::atomic::AtomicU64>,
+    reload_succeeded: Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl ReloadablePool {
+    /// Wrap an initial pool (or no pool at all — `None` = legacy
+    /// single-endpoint dispatch).
+    #[must_use]
+    pub fn new(initial: Option<Arc<EndpointPool>>) -> Self {
+        Self {
+            inner: Arc::new(std::sync::RwLock::new(initial)),
+            reload_attempts: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            reload_succeeded: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        }
+    }
+
+    /// Clone the current pool handle. Cheap (one Arc clone under a
+    /// read lock); called once per SOCKS5 CONNECT.
+    #[must_use]
+    pub fn current(&self) -> Option<Arc<EndpointPool>> {
+        self.inner
+            .read()
+            .expect("ReloadablePool lock poisoned")
+            .clone()
+    }
+
+    /// Swap in a freshly-built pool. Per-endpoint counter +
+    /// suppression-state carryover is the caller's responsibility —
+    /// build the new pool via [`EndpointPool::new_with_carryover`]
+    /// against the result of [`Self::current`].
+    pub fn reload(&self, new_pool: Option<Arc<EndpointPool>>) {
+        self.reload_attempts
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        {
+            let mut w = self.inner.write().expect("ReloadablePool lock poisoned");
+            *w = new_pool;
+        }
+        self.reload_succeeded
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Build a new pool from `endpoints`, transplanting counters
+    /// from the current pool, then atomically swap it in. Convenience
+    /// wrapper around the [`Self::current`] →
+    /// [`EndpointPool::new_with_carryover`] → [`Self::reload`]
+    /// sequence the SIGHUP handler runs.
+    ///
+    /// Returns `(prev_addrs, new_addrs)` so the caller can log a
+    /// diff (added / removed entries).
+    pub fn reload_from_addrs(&self, endpoints: Vec<String>) -> (Vec<String>, Vec<String>) {
+        let prev = self.current();
+        let prev_addrs: Vec<String> = prev
+            .as_ref()
+            .map(|p| p.addresses().map(str::to_string).collect())
+            .unwrap_or_default();
+        let new_addrs = endpoints.clone();
+        let new_pool = if endpoints.is_empty() {
+            None
+        } else {
+            // Carry over only if we had a prior pool; otherwise
+            // we're entering pool mode for the first time and every
+            // entry is fresh.
+            match prev.as_ref() {
+                Some(p) => EndpointPool::new_with_carryover(endpoints, p).map(Arc::new),
+                None => EndpointPool::new(endpoints).map(Arc::new),
+            }
+        };
+        self.reload(new_pool);
+        (prev_addrs, new_addrs)
+    }
+
+    /// Reload-attempt counter (every reload call, regardless of
+    /// whether the resulting pool was `Some` or `None`).
+    #[must_use]
+    pub fn reload_attempts(&self) -> u64 {
+        self.reload_attempts
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Reload-succeeded counter (every reload that completed the
+    /// swap — today always equal to attempts since we don't have a
+    /// failure case in pool reload, but kept symmetric with the
+    /// server-side ReloadableAcceptor surface for operator muscle
+    /// memory).
+    #[must_use]
+    pub fn reload_succeeded(&self) -> u64 {
+        self.reload_succeeded
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+/// Compute the diff between two address lists for SIGHUP logging.
+/// Returns `(added, removed)` where `added` are addrs in `new` but
+/// not `prev`, and `removed` are addrs in `prev` but not `new`.
+/// Pure utility; tests can call it without spinning up a pool.
+#[must_use]
+pub fn pool_addr_diff(prev: &[String], new: &[String]) -> (Vec<String>, Vec<String>) {
+    let prev_set: std::collections::HashSet<&str> = prev.iter().map(String::as_str).collect();
+    let new_set: std::collections::HashSet<&str> = new.iter().map(String::as_str).collect();
+    let added = new
+        .iter()
+        .filter(|a| !prev_set.contains(a.as_str()))
+        .cloned()
+        .collect();
+    let removed = prev
+        .iter()
+        .filter(|a| !new_set.contains(a.as_str()))
+        .cloned()
+        .collect();
+    (added, removed)
+}
+
 /// One endpoint's health record. Atomic-only; cheap to share across
 /// per-CONNECT spawned tasks via `Arc`.
 ///
@@ -304,6 +449,59 @@ impl EndpointPool {
             .map(|s| (s, Arc::new(EndpointHealth::new())))
             .collect();
         Some(Self { entries })
+    }
+
+    /// Build a new pool from `endpoints`, transplanting the
+    /// `Arc<EndpointHealth>` from `prev` for any entry whose address
+    /// string is identical. This is the SIGHUP hot-reload primitive:
+    /// after the operator edits `server_endpoints:` and SIGHUPs, the
+    /// new pool keeps the suppression state + per-endpoint cumulative
+    /// counters for entries the operator left alone, while freshly
+    /// inserted entries start at zero.
+    ///
+    /// Semantics:
+    ///   - `addr in prev AND addr in endpoints`  → reuse prev's
+    ///     `Arc<EndpointHealth>` (counters + suppression state
+    ///     preserved).
+    ///   - `addr in prev AND NOT in endpoints`   → drop (entry removed
+    ///     from config; its counters are gone, which is what the
+    ///     operator asked for).
+    ///   - `addr in endpoints AND NOT in prev`   → mint a fresh
+    ///     `EndpointHealth` (new entry).
+    ///   - Order is taken from `endpoints` (matches operator's new
+    ///     preference order; old order is irrelevant).
+    ///
+    /// Returns `None` for empty input — same convention as `new`.
+    #[must_use]
+    pub fn new_with_carryover(endpoints: Vec<String>, prev: &Self) -> Option<Self> {
+        if endpoints.is_empty() {
+            return None;
+        }
+        // Build a lookup of prev entries' Arc<EndpointHealth> by addr
+        // so transplant is O(N+M) rather than O(N*M).
+        let prev_lookup: std::collections::HashMap<&str, &Arc<EndpointHealth>> = prev
+            .entries
+            .iter()
+            .map(|(addr, h)| (addr.as_str(), h))
+            .collect();
+        let entries = endpoints
+            .into_iter()
+            .map(|s| {
+                let h = match prev_lookup.get(s.as_str()) {
+                    Some(&existing) => Arc::clone(existing),
+                    None => Arc::new(EndpointHealth::new()),
+                };
+                (s, h)
+            })
+            .collect();
+        Some(Self { entries })
+    }
+
+    /// Iterate the address strings in declaration order. Used by
+    /// `ReloadablePool` diff logging and by tests that want to assert
+    /// "after reload, the pool has these N entries in this order".
+    pub fn addresses(&self) -> impl Iterator<Item = &str> {
+        self.entries.iter().map(|(a, _)| a.as_str())
     }
 
     #[must_use]
@@ -693,5 +891,217 @@ mod tests {
             hit_count >= 1,
             "dispatch never invoked closure; hit_count={hit_count}"
         );
+    }
+
+    // ----- Hot-reload + counter-carryover tests -----
+
+    /// Identical input list → identical Arc<EndpointHealth> shared
+    /// across both pools. The whole point of carryover.
+    #[test]
+    fn carryover_preserves_health_arcs_for_unchanged_entries() {
+        let old = EndpointPool::new(vec!["a:1".into(), "b:2".into(), "c:3".into()]).unwrap();
+        // Bump some counters on old so we have something concrete to
+        // verify the transplant carried.
+        let a_old = old.endpoint_health(0).unwrap();
+        a_old.record_attempt();
+        a_old.record_success();
+        let b_old = old.endpoint_health(1).unwrap();
+        b_old.record_attempt();
+        b_old.record_failure(Instant::now());
+
+        let new =
+            EndpointPool::new_with_carryover(vec!["a:1".into(), "b:2".into(), "c:3".into()], &old)
+                .expect("non-empty");
+        // Every entry's Arc<EndpointHealth> must be ptr_eq with the
+        // old one — the whole point is shared state across reload.
+        for i in 0..3 {
+            let old_h = old.endpoint_health(i).unwrap();
+            let new_h = new.endpoint_health(i).unwrap();
+            assert!(
+                Arc::ptr_eq(&old_h, &new_h),
+                "entry {i}: health Arc must be the SAME instance after carryover"
+            );
+        }
+        // Counter values survived (sanity — implied by ptr_eq but
+        // explicit for documentation).
+        assert_eq!(new.endpoint_health(0).unwrap().counters().successes, 1);
+        assert_eq!(new.endpoint_health(1).unwrap().counters().failures, 1);
+    }
+
+    /// Reorder: counters move with the addr, NOT the position.
+    #[test]
+    fn carryover_follows_addr_not_index_when_reordered() {
+        let old = EndpointPool::new(vec!["a:1".into(), "b:2".into(), "c:3".into()]).unwrap();
+        // Bump a's counter so we can distinguish it.
+        for _ in 0..10 {
+            old.endpoint_health(0).unwrap().record_attempt();
+        }
+        // Reverse the order in the new pool.
+        let new =
+            EndpointPool::new_with_carryover(vec!["c:3".into(), "b:2".into(), "a:1".into()], &old)
+                .unwrap();
+        // a:1 is now at index 2 in new, but its counter MUST still
+        // show 10 attempts — counters follow addr, not position.
+        let a_in_new: Vec<_> = new
+            .entries
+            .iter()
+            .find(|(addr, _)| addr == "a:1")
+            .map(|(_, h)| h.counters().attempts)
+            .into_iter()
+            .collect();
+        assert_eq!(a_in_new, vec![10]);
+    }
+
+    /// Adding a new entry: fresh health, zero counters.
+    #[test]
+    fn carryover_inserts_fresh_health_for_new_addrs() {
+        let old = EndpointPool::new(vec!["a:1".into(), "b:2".into()]).unwrap();
+        old.endpoint_health(0).unwrap().record_attempt();
+        let new = EndpointPool::new_with_carryover(
+            vec!["a:1".into(), "b:2".into(), "c:NEW".into()],
+            &old,
+        )
+        .unwrap();
+        assert_eq!(new.len(), 3);
+        // c:NEW has fresh counters.
+        let c_counters = new
+            .entries
+            .iter()
+            .find(|(a, _)| a == "c:NEW")
+            .map(|(_, h)| h.counters())
+            .unwrap();
+        assert_eq!(c_counters.attempts, 0);
+        assert_eq!(c_counters.successes, 0);
+        assert_eq!(c_counters.failures, 0);
+        // a:1 still has its 1 attempt (carryover worked alongside
+        // the new entry).
+        assert_eq!(new.endpoint_health(0).unwrap().counters().attempts, 1);
+    }
+
+    /// Removing an entry: it just doesn't appear in the new pool;
+    /// its Arc<EndpointHealth> is dropped (or kept alive by other
+    /// holders — caller's concern).
+    #[test]
+    fn carryover_drops_removed_addrs() {
+        let old = EndpointPool::new(vec!["a:1".into(), "b:2".into(), "c:3".into()]).unwrap();
+        let new = EndpointPool::new_with_carryover(vec!["a:1".into(), "c:3".into()], &old).unwrap();
+        assert_eq!(new.len(), 2);
+        let addrs: Vec<&str> = new.addresses().collect();
+        assert_eq!(addrs, vec!["a:1", "c:3"]);
+    }
+
+    /// Empty new list → None (semantically: operator turned the
+    /// pool off entirely, falling back to single-endpoint mode).
+    #[test]
+    fn carryover_empty_list_returns_none() {
+        let old = EndpointPool::new(vec!["a:1".into()]).unwrap();
+        let new = EndpointPool::new_with_carryover(vec![], &old);
+        assert!(new.is_none());
+    }
+
+    /// ReloadablePool: hot-swap a fresh pool, then `current()`
+    /// returns the new one.
+    #[test]
+    fn reloadable_pool_swap_returns_new_pool_to_callers() {
+        let initial = Arc::new(EndpointPool::new(vec!["a:1".into()]).unwrap());
+        let r = ReloadablePool::new(Some(initial));
+        assert_eq!(r.current().unwrap().len(), 1);
+        let new = Arc::new(EndpointPool::new(vec!["x:1".into(), "y:2".into()]).unwrap());
+        r.reload(Some(new));
+        let curr = r.current().unwrap();
+        assert_eq!(curr.len(), 2);
+        let addrs: Vec<&str> = curr.addresses().collect();
+        assert_eq!(addrs, vec!["x:1", "y:2"]);
+    }
+
+    /// ReloadablePool: clearing the pool drops back to None
+    /// (single-endpoint dispatch mode).
+    #[test]
+    fn reloadable_pool_clear_falls_back_to_single_endpoint() {
+        let initial = Arc::new(EndpointPool::new(vec!["a:1".into()]).unwrap());
+        let r = ReloadablePool::new(Some(initial));
+        r.reload(None);
+        assert!(r.current().is_none());
+    }
+
+    /// ReloadablePool: reload counters increment on every call.
+    #[test]
+    fn reloadable_pool_reload_counters_increment() {
+        let r = ReloadablePool::new(None);
+        assert_eq!(r.reload_attempts(), 0);
+        assert_eq!(r.reload_succeeded(), 0);
+        r.reload(Some(Arc::new(
+            EndpointPool::new(vec!["a:1".into()]).unwrap(),
+        )));
+        assert_eq!(r.reload_attempts(), 1);
+        assert_eq!(r.reload_succeeded(), 1);
+        r.reload(None);
+        assert_eq!(r.reload_attempts(), 2);
+        assert_eq!(r.reload_succeeded(), 2);
+    }
+
+    /// reload_from_addrs: end-to-end SIGHUP scenario — operator
+    /// adds a backup VPS, primary's counters are preserved.
+    #[test]
+    fn reload_from_addrs_preserves_primary_counters_when_adding_backup() {
+        let initial = Arc::new(EndpointPool::new(vec!["primary:8443".into()]).unwrap());
+        // Bump primary's counter.
+        for _ in 0..5 {
+            initial.endpoint_health(0).unwrap().record_attempt();
+            initial.endpoint_health(0).unwrap().record_success();
+        }
+        let r = ReloadablePool::new(Some(initial));
+        // Operator adds a backup.
+        let (prev_addrs, new_addrs) =
+            r.reload_from_addrs(vec!["primary:8443".into(), "backup:8443".into()]);
+        assert_eq!(prev_addrs, vec!["primary:8443"]);
+        assert_eq!(new_addrs, vec!["primary:8443", "backup:8443"]);
+        // Primary's counters survived.
+        let curr = r.current().unwrap();
+        assert_eq!(curr.endpoint_health(0).unwrap().counters().attempts, 5);
+        assert_eq!(curr.endpoint_health(0).unwrap().counters().successes, 5);
+        // Backup is fresh.
+        assert_eq!(curr.endpoint_health(1).unwrap().counters().attempts, 0);
+    }
+
+    /// reload_from_addrs: empty list clears the pool.
+    #[test]
+    fn reload_from_addrs_empty_list_clears_pool() {
+        let initial = Arc::new(EndpointPool::new(vec!["a:1".into()]).unwrap());
+        let r = ReloadablePool::new(Some(initial));
+        let (prev_addrs, new_addrs) = r.reload_from_addrs(vec![]);
+        assert_eq!(prev_addrs, vec!["a:1"]);
+        assert!(new_addrs.is_empty());
+        assert!(r.current().is_none());
+    }
+
+    /// pool_addr_diff: standard add/remove case.
+    #[test]
+    fn pool_addr_diff_reports_added_and_removed() {
+        let prev: Vec<String> = vec!["a:1".into(), "b:2".into(), "c:3".into()];
+        let new: Vec<String> = vec!["a:1".into(), "c:3".into(), "d:NEW".into()];
+        let (added, removed) = pool_addr_diff(&prev, &new);
+        assert_eq!(added, vec!["d:NEW".to_string()]);
+        assert_eq!(removed, vec!["b:2".to_string()]);
+    }
+
+    /// pool_addr_diff: no changes → empty diffs.
+    #[test]
+    fn pool_addr_diff_unchanged_returns_empty() {
+        let v: Vec<String> = vec!["a:1".into(), "b:2".into()];
+        let (added, removed) = pool_addr_diff(&v, &v);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
+    }
+
+    /// pool_addr_diff: order changes → empty diffs (we care about
+    /// SET membership for diff purposes, not position).
+    #[test]
+    fn pool_addr_diff_order_only_changes_are_no_diff() {
+        let prev: Vec<String> = vec!["a:1".into(), "b:2".into()];
+        let new: Vec<String> = vec!["b:2".into(), "a:1".into()];
+        let (added, removed) = pool_addr_diff(&prev, &new);
+        assert!(added.is_empty());
+        assert!(removed.is_empty());
     }
 }

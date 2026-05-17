@@ -238,6 +238,27 @@ sum by (addr) (rate(proteus_client_endpoint_successes_total[5m]))
   < 0.8
 ```
 
+### SIGHUP-driven `server_endpoints` hot-reload
+
+Edit `client.yaml`'s `server_endpoints:` list (add a backup VPS,
+demote a burned one, reorder), then `killall -HUP proteus-client`:
+
+- Every new CONNECT after the SIGHUP uses the new pool order.
+- In-flight sessions complete on their already-chosen endpoint.
+- Per-endpoint cumulative counters + suppression state are
+  **carried over** for entries whose address string is unchanged
+  (counters follow the addr, not the index — operator can reorder
+  freely without losing history).
+- Entries newly added start at zero counters; entries removed are
+  dropped.
+- Empty list reload transitions back to single-endpoint dispatch
+  mode (using `server_endpoint`).
+
+Verify reload landed: `curl -s :9091/status` shows a
+`Pool reloads (SIGHUP): N (N ok)` line after the first reload,
+and Prometheus exposes `proteus_client_pool_reload_{attempts,succeeded}_total`
+counters symmetric to the server's TLS-reload counters.
+
 Surfaces:
 
 - **CarrierHealth (β)**: configured? healthy / SUPPRESSED?

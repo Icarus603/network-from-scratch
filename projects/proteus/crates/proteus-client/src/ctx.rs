@@ -24,7 +24,7 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use crate::carrier_health::CarrierHealth;
-use crate::endpoint_pool::EndpointPool;
+use crate::endpoint_pool::{EndpointPool, ReloadablePool};
 
 /// Per-process shared context. Cheap to clone (the inner state is
 /// behind `Arc` / atomics); typical usage is one `Arc<ClientCtx>`
@@ -35,8 +35,14 @@ pub struct ClientCtx {
     /// or not — that's a config concern; the tracker itself always
     /// exists so callers don't need to branch).
     pub carrier: Arc<CarrierHealth>,
-    /// Multi-VPS endpoint pool. `None` for single-endpoint deploys.
-    pub pool: Option<Arc<EndpointPool>>,
+    /// Multi-VPS endpoint pool — reloadable. Dispatch path reads
+    /// the current pool via `reloadable_pool.current()` (one
+    /// Arc-clone under a read-lock); SIGHUP reload swaps the inner
+    /// pool transparently with per-entry counter carryover.
+    /// `current()` returns `None` when no pool is configured
+    /// (single-endpoint deployment); when `Some(_)`, dispatch walks
+    /// the pool.
+    pub reloadable_pool: ReloadablePool,
     /// Concurrency cap on in-flight SOCKS5 sessions. `None` when
     /// `max_inflight_sessions = 0` (cap disabled).
     pub session_slots: Option<Arc<Semaphore>>,
@@ -56,7 +62,8 @@ pub struct ClientCtx {
 }
 
 impl ClientCtx {
-    /// Build from the runtime knobs decided at startup.
+    /// Build from the runtime knobs decided at startup. `pool` is
+    /// wrapped in a `ReloadablePool` so SIGHUP can hot-swap it.
     #[must_use]
     pub fn new(
         carrier: Arc<CarrierHealth>,
@@ -67,7 +74,7 @@ impl ClientCtx {
     ) -> Self {
         Self {
             carrier,
-            pool,
+            reloadable_pool: ReloadablePool::new(pool),
             session_slots,
             max_inflight,
             dials_attempted: Arc::new(AtomicU64::new(0)),
@@ -75,6 +82,15 @@ impl ClientCtx {
             dials_failed: Arc::new(AtomicU64::new(0)),
             beta_configured,
         }
+    }
+
+    /// Current pool handle — cheap snapshot for the dispatch path.
+    /// Equivalent to `self.reloadable_pool.current()`; exposed as a
+    /// method so callers don't have to know about ReloadablePool's
+    /// internals.
+    #[must_use]
+    pub fn pool(&self) -> Option<Arc<EndpointPool>> {
+        self.reloadable_pool.current()
     }
 
     /// Current in-flight session count. Computed as `max_inflight -
