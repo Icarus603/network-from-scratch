@@ -1,0 +1,181 @@
+# Prometheus alert rules for Proteus CLIENT deployments.
+#
+# Symmetric with `proteus-alerts.yaml` (which covers the SERVER
+# `/metrics` surface). Load the same way:
+#   rule_files: ['/etc/prometheus/proteus-client-alerts.yaml']
+# OR mount into a Prometheus Operator `PrometheusRule` resource.
+#
+# Severity grammar matches the server rules:
+#   critical → operator must act now (paging-grade)
+#   warning  → operator should investigate within the hour
+#   info     → trending signal; dashboard panel, not a page
+#
+# Designed for the multi-client deploy scenario (fleet of
+# endpoint laptops or per-container client instances) where each
+# client exposes a loopback `admin_listen` and Prometheus
+# scrapes them as a `proteus-client` job. Single-user personal
+# VPN setups can rely on `proteus-client alerts-check` instead
+# and skip the Prometheus wiring.
+
+groups:
+- name: proteus-client-liveness
+  interval: 30s
+  rules:
+
+  - alert: ProteusClientDown
+    expr: up{job="proteus-client"} == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-client scrape failing"
+      description: |
+        Prometheus could not scrape proteus-client on instance
+        {{ $labels.instance }} for at least 2 minutes. Process
+        likely crashed or the admin endpoint stopped responding.
+        Check `journalctl --user -u proteus-client` (or the
+        system unit if running as root).
+
+  - alert: ProteusClientNotAlive
+    expr: proteus_client_up == 0
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-client reports itself not alive"
+      description: |
+        proteus_client_up == 0 on {{ $labels.instance }} — the
+        SOCKS5 listener is NOT bound. Every upstream CONNECT
+        will fail at the SOCKS5 layer. Investigate immediately
+        (cfg.socks_listen bind error / port conflict).
+
+- name: proteus-client-dispatch
+  interval: 30s
+  rules:
+
+  # Carrier-level (α vs β) suppression. β-only flag — α never
+  # back-offs at this layer.
+  - alert: ProteusClientBetaCarrierSuppressed
+    expr: proteus_client_carrier_suppressed == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-client β carrier is suppressed"
+      description: |
+        proteus_client_carrier_suppressed=1 on {{ $labels.instance }}
+        for 5+ min. β QUIC is backing off; the dispatcher is
+        falling back to α (TCP+TLS). User-visible impact:
+        throughput may be degraded for traffic that prefers β.
+        Investigate β-side connectivity (server's UDP listener,
+        intermediate firewall, GFW UDP throttling).
+
+  # Per-endpoint suppression (when using server_endpoints: pool).
+  - alert: ProteusClientEndpointSuppressed
+    expr: proteus_client_endpoint_suppressed == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-client endpoint suppressed"
+      description: |
+        Endpoint {{ $labels.addr }} on {{ $labels.instance }} is
+        suppressed. The pool dispatcher will skip this entry
+        until the failure-window expires. If this fires for
+        multiple endpoints in the same pool, see
+        ProteusClientAllEndpointsSuppressed.
+
+  # Pool exhaustion — every entry suppressed simultaneously.
+  - alert: ProteusClientAllEndpointsSuppressed
+    expr: |
+      (count by (instance) (proteus_client_endpoint_suppressed))
+        > 0
+      and
+      (count by (instance) (proteus_client_endpoint_suppressed == 1))
+        == count by (instance) (proteus_client_endpoint_suppressed)
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-client pool exhausted (every endpoint suppressed)"
+      description: |
+        EVERY endpoint in the multi-VPS pool on
+        {{ $labels.instance }} is suppressed. The dispatcher
+        will force-probe the primary, but most dials will fail.
+        Investigate upstream: are all VPSes down / network
+        partition / credential rotation gone wrong?
+
+  - alert: ProteusClientNoRecentDialSuccess
+    expr: |
+      (proteus_client_dials_attempted_total > 0)
+      and (proteus_client_last_dial_success_unix_seconds == 0)
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-client has never had a successful dial"
+      description: |
+        proteus-client on {{ $labels.instance }} has attempted
+        dials but ZERO have succeeded since startup. Likely
+        cause: server credentials mismatch, wrong server_endpoint,
+        or upstream completely unreachable. Run
+        `proteus-client connect-test` for a per-stage breakdown.
+
+  - alert: ProteusClientHighDialFailureRate
+    expr: |
+      rate(proteus_client_dials_failed_total[5m])
+      > rate(proteus_client_dials_succeeded_total[5m])
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-client: failed dials exceed successful dials"
+      description: |
+        On {{ $labels.instance }}: failure rate
+        ({{ printf "%.2f" $value }}/sec over 5 min) exceeds
+        success rate for 10+ min. The carrier-health back-off
+        will eventually suppress; investigate before that
+        happens.
+
+- name: proteus-client-bootstrap
+  interval: 30s
+  rules:
+
+  # DoH-leak risk per 2026 GFW threat-intel main line 6.
+  - alert: ProteusClientBootstrapUsesSystemResolver
+    expr: |
+      rate(proteus_client_bootstrap_via_system_resolver_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-client bootstrap is using the OS resolver (DoH-leak risk)"
+      description: |
+        {{ $labels.instance }} has resolved at least one
+        bootstrap endpoint via the OS resolver in the last 5
+        min. The 2026 GFW identifies DoH/DoT by flow pattern;
+        every resolved hostname reveals operator interest BEFORE
+        Proteus's payload-layer defenses engage. Pin
+        `bootstrap_dns: { direct_ip: <ip> }` in client.yaml or
+        use an IP-literal server_endpoint.
+
+- name: proteus-client-pool-reload
+  interval: 1m
+  rules:
+
+  - alert: ProteusClientPoolReloadFailing
+    expr: |
+      (proteus_client_pool_reload_attempts_total
+       - proteus_client_pool_reload_succeeded_total) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-client SIGHUP pool reload silently failing"
+      description: |
+        On {{ $labels.instance }}: attempts_total
+        ({{ printf "%.0f" $value }}) exceeds succeeded_total.
+        At least one SIGHUP reload failed to apply the new
+        server_endpoints list. The running pool is still using
+        the previous config; the operator's edit didn't take
+        effect. Check journalctl for the parse error.

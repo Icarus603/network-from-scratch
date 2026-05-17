@@ -1506,7 +1506,12 @@ appears on every check so operators wanting to dig deeper know
 exactly which Prometheus query to run.
 
 **Prometheus alert rules — bundled, drop-in ready** at
-[`deploy/prometheus/proteus-alerts.yaml`](deploy/prometheus/proteus-alerts.yaml).
+[`deploy/prometheus/proteus-alerts.yaml`](deploy/prometheus/proteus-alerts.yaml)
+(server side) and
+[`deploy/prometheus/proteus-client-alerts.yaml`](deploy/prometheus/proteus-client-alerts.yaml)
+(client side, for fleet deploys with multiple endpoint
+laptops/containers — single-user setups can rely on
+`proteus-client alerts-check` instead).
 Load via `rule_files:` in `prometheus.yml` or mount into a
 Prometheus Operator `PrometheusRule`. Covers every series
 documented in this section: liveness (`up == 0`, `proteus_up
