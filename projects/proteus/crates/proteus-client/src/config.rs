@@ -210,6 +210,47 @@ pub struct ClientConfig {
     /// bytes per minute.
     #[serde(default)]
     pub tcp_keepalive_secs: Option<u64>,
+    /// **α (TCP/TLS) dial timeout (seconds)** — wraps the WHOLE
+    /// α connection-setup flow: `TcpStream::connect` + TLS 1.3
+    /// handshake + Proteus auth-exchange. `None` = 10 seconds.
+    ///
+    /// Iter-15 added this because pre-iter-15 the α path had no
+    /// timeout at all (β had `beta_first_timeout_secs` since
+    /// the dual-stack work, but α was unbounded). A misbehaving
+    /// server — accepts TCP, then sits silent on the TLS
+    /// handshake — would wedge a SOCKS5 CONNECT indefinitely.
+    /// Symptoms: browser tabs hang for 30-60s before the
+    /// browser's own timeout fires; downstream apps see "the
+    /// proxy is broken but isn't returning errors".
+    ///
+    /// 10 s is generous for a normal residential-ISP-to-VPS
+    /// path (~1 RTT for SYN/SYN-ACK + 1 RTT for TLS 1.3 1-RTT +
+    /// 1 RTT for Proteus inner handshake = 3 RTTs, well under
+    /// 1 s even on slow paths). Operators on satellite or
+    /// high-latency links can raise it; operators wanting
+    /// faster failover to β can drop to 5.
+    #[serde(default)]
+    pub alpha_dial_timeout_secs: Option<u64>,
+    /// **SOCKS5 greeting timeout (seconds)** — bounds how long
+    /// the client waits for the downstream app to send the
+    /// SOCKS5 greeting + CONNECT request before tearing down the
+    /// local TCP. `None` = 10 seconds.
+    ///
+    /// Pre-iter-15 the greeting/request reads were unbounded.
+    /// A misbehaving local app (or `nc localhost 1080` left
+    /// orphaned by a crashed parent) could open a SOCKS5 TCP
+    /// connection, never write, and sit holding a
+    /// `max_inflight_sessions` semaphore slot forever — slow-
+    /// loris DoS against the local proxy port. With
+    /// `max_inflight_sessions = 64` (typical default), 64 such
+    /// orphans were enough to make the proxy refuse all new
+    /// CONNECTs until the operator restarted the binary.
+    ///
+    /// 10 s is generous — real apps (browser, curl) send the
+    /// SOCKS5 greeting within microseconds of the TCP connect.
+    /// Anything that takes longer is misbehaving.
+    #[serde(default)]
+    pub socks_request_timeout_secs: Option<u64>,
     /// **Bootstrap DNS policy** — how to resolve the hostname half of
     /// `server_endpoint` / `server_endpoint_beta`. Defaults to
     /// `system`, which goes through the OS resolver (which in 2026

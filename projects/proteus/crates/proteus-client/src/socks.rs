@@ -195,69 +195,96 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
-    // ----- SOCKS5 greeting -----
-    let mut hdr = [0u8; 2];
-    sock.read_exact(&mut hdr).await?;
-    if hdr[0] != 0x05 {
-        return Err(SocksError::Socks("not SOCKS5"));
-    }
-    let nmethods = hdr[1] as usize;
-    let mut methods = vec![0u8; nmethods];
-    sock.read_exact(&mut methods).await?;
-    if !methods.contains(&0x00) {
-        sock.write_all(&[0x05, 0xff]).await?;
-        return Err(SocksError::Socks("no acceptable auth method"));
-    }
-    sock.write_all(&[0x05, 0x00]).await?;
+    // Iter-15: bound the SOCKS5 pre-CONNECT phase (greeting +
+    // method-select + request parse) so a slow-loris local app
+    // cannot occupy a `max_inflight_sessions` slot indefinitely.
+    // Pre-iter-15 each `read_exact` was unbounded; a stalled or
+    // malicious downstream could exhaust the semaphore by
+    // opening N=max_inflight TCP connections and never writing.
+    // 10 s default — real apps send their greeting within µs.
+    let socks_req_timeout =
+        std::time::Duration::from_secs(cfg.socks_request_timeout_secs.unwrap_or(10));
+    let parse_fut = async {
+        // ----- SOCKS5 greeting -----
+        let mut hdr = [0u8; 2];
+        sock.read_exact(&mut hdr).await?;
+        if hdr[0] != 0x05 {
+            return Err(SocksError::Socks("not SOCKS5"));
+        }
+        let nmethods = hdr[1] as usize;
+        let mut methods = vec![0u8; nmethods];
+        sock.read_exact(&mut methods).await?;
+        if !methods.contains(&0x00) {
+            sock.write_all(&[0x05, 0xff]).await?;
+            return Err(SocksError::Socks("no acceptable auth method"));
+        }
+        sock.write_all(&[0x05, 0x00]).await?;
 
-    // ----- SOCKS5 request -----
-    let mut req = [0u8; 4];
-    sock.read_exact(&mut req).await?;
-    if req[0] != 0x05 || req[1] != 0x01 {
-        // CMD must be CONNECT (0x01).
-        sock.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-            .await?;
-        return Err(SocksError::Socks("unsupported SOCKS5 cmd"));
-    }
-    let (host, port) = match req[3] {
-        0x01 => {
-            // IPv4
-            let mut buf = [0u8; 6];
-            sock.read_exact(&mut buf).await?;
-            (
-                format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]),
-                u16::from_be_bytes([buf[4], buf[5]]),
-            )
-        }
-        0x03 => {
-            // domain name
-            let mut len = [0u8; 1];
-            sock.read_exact(&mut len).await?;
-            let mut name = vec![0u8; len[0] as usize];
-            sock.read_exact(&mut name).await?;
-            let mut port_b = [0u8; 2];
-            sock.read_exact(&mut port_b).await?;
-            (
-                std::str::from_utf8(&name)
-                    .map_err(|_| SocksError::Socks("invalid hostname"))?
-                    .to_string(),
-                u16::from_be_bytes(port_b),
-            )
-        }
-        0x04 => {
-            // IPv6
-            let mut buf = [0u8; 18];
-            sock.read_exact(&mut buf).await?;
-            let segs: Vec<String> = buf[..16]
-                .chunks(2)
-                .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
-                .collect();
-            (segs.join(":"), u16::from_be_bytes([buf[16], buf[17]]))
-        }
-        _ => {
-            sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        // ----- SOCKS5 request -----
+        let mut req = [0u8; 4];
+        sock.read_exact(&mut req).await?;
+        if req[0] != 0x05 || req[1] != 0x01 {
+            // CMD must be CONNECT (0x01).
+            sock.write_all(&[0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
                 .await?;
-            return Err(SocksError::Socks("unsupported ATYP"));
+            return Err(SocksError::Socks("unsupported SOCKS5 cmd"));
+        }
+        let (host, port) = match req[3] {
+            0x01 => {
+                // IPv4
+                let mut buf = [0u8; 6];
+                sock.read_exact(&mut buf).await?;
+                (
+                    format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]),
+                    u16::from_be_bytes([buf[4], buf[5]]),
+                )
+            }
+            0x03 => {
+                // domain name
+                let mut len = [0u8; 1];
+                sock.read_exact(&mut len).await?;
+                let mut name = vec![0u8; len[0] as usize];
+                sock.read_exact(&mut name).await?;
+                let mut port_b = [0u8; 2];
+                sock.read_exact(&mut port_b).await?;
+                (
+                    std::str::from_utf8(&name)
+                        .map_err(|_| SocksError::Socks("invalid hostname"))?
+                        .to_string(),
+                    u16::from_be_bytes(port_b),
+                )
+            }
+            0x04 => {
+                // IPv6
+                let mut buf = [0u8; 18];
+                sock.read_exact(&mut buf).await?;
+                let segs: Vec<String> = buf[..16]
+                    .chunks(2)
+                    .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
+                    .collect();
+                (segs.join(":"), u16::from_be_bytes([buf[16], buf[17]]))
+            }
+            _ => {
+                sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                    .await?;
+                return Err(SocksError::Socks("unsupported ATYP"));
+            }
+        };
+        Ok::<_, SocksError>((host, port))
+    };
+    let (host, port) = match tokio::time::timeout(socks_req_timeout, parse_fut).await {
+        Ok(Ok(hp)) => hp,
+        Ok(Err(e)) => return Err(e),
+        Err(_) => {
+            // Slow-loris on the SOCKS5 port. Don't try to write a
+            // SOCKS5 error reply — we don't know how far through
+            // the protocol negotiation the downstream got, so the
+            // safe choice is "close TCP".
+            tracing::warn!(
+                timeout_secs = socks_req_timeout.as_secs(),
+                "SOCKS5 greeting/request timed out — downstream app didn't send anything"
+            );
+            return Err(SocksError::Socks("socks5 greeting/request timeout"));
         }
     };
 
@@ -774,10 +801,22 @@ async fn try_alpha(
                 &owned_connector
             }
         };
+        // Iter-15: bound the entire α dial (TCP connect + TLS
+        // handshake + Proteus auth-exchange) under
+        // `alpha_dial_timeout_secs`. Pre-iter-15 each operation
+        // was unbounded — a misbehaving server that accepted TCP
+        // then sat silent on TLS would wedge the SOCKS5 CONNECT
+        // indefinitely (until the downstream browser/app fired
+        // its own 30-60 s timeout). β had this; α didn't.
+        let alpha_timeout =
+            std::time::Duration::from_secs(cfg.alpha_dial_timeout_secs.unwrap_or(10));
+
         // Dial the IP literal we just resolved. The TLS SNI continues
         // to be `tls_cfg.server_name` (hostname) so cert verification
         // still works against the operator's Let's Encrypt cert.
-        let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+        let tcp = tokio::time::timeout(alpha_timeout, tokio::net::TcpStream::connect(server_addr))
+            .await
+            .map_err(|_| SocksError::Socks("α TCP connect timed out"))??;
         // Iter-14: apply nodelay + TCP keepalive on the outbound
         // socket so long-idle Proteus sessions survive NAT
         // idle-timer reaping and small writes don't wait on
@@ -797,8 +836,16 @@ async fn try_alpha(
                 "client→server TCP keepalive failed (proceeding — session may silently die in NAT idle)"
             );
         }
-        let session =
-            p_client::handshake_over_tls(tcp, connector, &tls_cfg.server_name, &hs_cfg).await?;
+        // Bound the TLS+Proteus handshake under the same outer
+        // budget. A rogue server that accepts but doesn't speak
+        // TLS gets dropped within `alpha_timeout` rather than
+        // hanging the CONNECT.
+        let session = tokio::time::timeout(
+            alpha_timeout,
+            p_client::handshake_over_tls(tcp, connector, &tls_cfg.server_name, &hs_cfg),
+        )
+        .await
+        .map_err(|_| SocksError::Socks("α TLS+Proteus handshake timed out"))??;
         let proteus_transport_alpha::session::AlphaSession {
             mut sender,
             mut receiver,
@@ -818,7 +865,12 @@ async fn try_alpha(
     }
 
     // No TLS configured (test/dev mode). Dial the resolved IP directly.
-    let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+    // Same iter-15 bounded-dial pattern as the TLS branch above —
+    // even dev mode should fast-fail on a broken endpoint.
+    let alpha_timeout = std::time::Duration::from_secs(cfg.alpha_dial_timeout_secs.unwrap_or(10));
+    let tcp = tokio::time::timeout(alpha_timeout, tokio::net::TcpStream::connect(server_addr))
+        .await
+        .map_err(|_| SocksError::Socks("α TCP connect (plaintext) timed out"))??;
     // Same iter-14 socket-opts pattern as the TLS branch above.
     let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
         &tcp,
@@ -833,7 +885,9 @@ async fn try_alpha(
             "client→server (plaintext) TCP keepalive failed (proceeding)"
         );
     }
-    let session = p_client::handshake_over_tcp(tcp, &hs_cfg).await?;
+    let session = tokio::time::timeout(alpha_timeout, p_client::handshake_over_tcp(tcp, &hs_cfg))
+        .await
+        .map_err(|_| SocksError::Socks("α Proteus handshake (plaintext) timed out"))??;
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,
         mut receiver,
