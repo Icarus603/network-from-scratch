@@ -492,61 +492,36 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
-    // 9. Access-log parent dir exists AND is writable.
+    // 9. Writable-file paths: probe each parent dir for write
+    //    permission. Iter-50 introduced the probe for access_log;
+    //    iter-53 extends it to every config-named runtime-written
+    //    file so operators don't ship a config that startup-fails
+    //    on "Permission denied" hours into the deploy.
     //
-    // Iter-50: pre-iter-50 we only checked the parent EXISTS +
-    // is a directory. A common operator trap: `/var/log/proteus`
-    // exists but is owned by root:root mode 0700, while proteus
-    // runs as `proteus:proteus`. The access_log open() fails at
-    // startup with "Permission denied"; the binary exits before
-    // ever writing a line — but `validate` previously said
-    // green. Now we actually test write permission by creating
-    // + immediately removing a uniquely-named probe file in the
-    // parent dir.
+    // Covered paths (each runtime-written; missing-write triggers
+    // a real production failure):
+    //   - access_log                          — log writer, fatal
+    //   - restart_state_file                  — shutdown writer,
+    //                                            non-fatal at start
+    //                                            but unclean-flag
+    //                                            tracking breaks
+    //   - user_quotas.persistence_path        — periodic flush
+    //   - user_quarantine.persistence_path    — auto-quarantine
+    //                                            writer
     if let Some(path) = cfg.access_log.as_ref() {
-        let parent = path.parent().unwrap_or_else(|| Path::new("/"));
-        match parent.metadata() {
-            Ok(md) => {
-                if !md.is_dir() {
-                    r.push_fail(format!("access_log parent {parent:?} is not a directory"));
-                } else {
-                    // Probe write access by attempting to create
-                    // a uniquely-named file then immediately
-                    // remove it. We don't write to the actual
-                    // access_log path because (a) it might
-                    // already exist and we'd clobber it, (b)
-                    // even on success we'd leave residual data.
-                    let probe_name = format!(
-                        ".proteus-validate-probe-{}-{}",
-                        std::process::id(),
-                        std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_nanos())
-                            .unwrap_or(0),
-                    );
-                    let probe_path = parent.join(&probe_name);
-                    match std::fs::File::create(&probe_path) {
-                        Ok(_) => {
-                            // Clean up; ignore unlink errors —
-                            // worst case is operator sees one
-                            // stale probe file.
-                            let _ = std::fs::remove_file(&probe_path);
-                            r.push_pass(format!(
-                                "access_log parent dir exists and is writable ({parent:?})"
-                            ));
-                        }
-                        Err(e) => {
-                            r.push_fail(format!(
-                                "access_log parent {parent:?} exists but is NOT writable as \
-                                 the current user: {e}. The access_log writer task will fail \
-                                 at startup. Check ownership: `sudo chown -R proteus:proteus \
-                                 {parent:?}` (or the user the systemd unit runs as)."
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(e) => r.push_fail(format!("access_log parent {parent:?}: {e}")),
+        check_parent_writable(&mut r, "access_log", path);
+    }
+    if let Some(path) = cfg.restart_state_file.as_ref() {
+        check_parent_writable(&mut r, "restart_state_file", path);
+    }
+    if let Some(uq) = cfg.user_quotas.as_ref() {
+        if let Some(path) = uq.persistence_path.as_ref() {
+            check_parent_writable(&mut r, "user_quotas.persistence_path", path);
+        }
+    }
+    if let Some(uq) = cfg.user_quarantine.as_ref() {
+        if let Some(path) = uq.persistence_path.as_ref() {
+            check_parent_writable(&mut r, "user_quarantine.persistence_path", path);
         }
     }
 
@@ -851,6 +826,56 @@ fn check_secret_file_mode(report: &mut PreflightReport, label: &str, path: &Path
 #[cfg(not(unix))]
 fn check_secret_file_mode(_report: &mut PreflightReport, _label: &str, _path: &Path) {
     // No-op on non-Unix; the world-readable concept doesn't map.
+}
+
+/// Iter-53: probe a runtime-written-file's PARENT directory for
+/// write permission. Originally inlined for `access_log` (iter-50);
+/// extracted so every config-named writable path can share the
+/// same diagnostic.
+///
+/// We probe the parent (not the target file itself) because the
+/// target file:
+///   - may not exist yet (first start with a fresh config)
+///   - may already exist and contain operator data we mustn't clobber
+///
+/// A uniquely-named probe file (PID + nanos) sidesteps races with
+/// other `validate` invocations sharing the same dir.
+fn check_parent_writable(report: &mut PreflightReport, label: &str, path: &Path) {
+    let parent = path.parent().unwrap_or_else(|| Path::new("/"));
+    match parent.metadata() {
+        Ok(md) => {
+            if !md.is_dir() {
+                report.push_fail(format!("{label} parent {parent:?} is not a directory"));
+                return;
+            }
+            let probe_name = format!(
+                ".proteus-validate-probe-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            let probe_path = parent.join(&probe_name);
+            match std::fs::File::create(&probe_path) {
+                Ok(_) => {
+                    let _ = std::fs::remove_file(&probe_path);
+                    report.push_pass(format!(
+                        "{label} parent dir exists and is writable ({parent:?})"
+                    ));
+                }
+                Err(e) => {
+                    report.push_fail(format!(
+                        "{label} parent {parent:?} exists but is NOT writable as the \
+                         current user: {e}. Runtime writes to this path will fail at \
+                         startup. Check ownership: `sudo chown -R proteus:proteus \
+                         {parent:?}` (or the user the systemd unit runs as)."
+                    ));
+                }
+            }
+        }
+        Err(e) => report.push_fail(format!("{label} parent {parent:?}: {e}")),
+    }
 }
 
 fn base64_or_raw_bytes(input: &[u8]) -> Vec<u8> {
@@ -1216,6 +1241,77 @@ mod tests {
             writable_pass,
             "PASS message must call out 'writable' so operator knows the iter-50 check ran: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-53: restart_state_file gets the same write-probe.
+    /// Pre-iter-53 the operator could ship a config where
+    /// `restart_state_file: /var/lib/proteus/restart.json` but
+    /// `/var/lib/proteus` was 0755 root:root — the shutdown
+    /// writer would fail silently, breaking unclean-restart
+    /// tracking, but validate said green.
+    #[test]
+    fn iter53_restart_state_file_writable_parent_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.restart_state_file = Some(dir.join("restart.json"));
+        let report = preflight(&cfg);
+        assert!(!report.has_failures(), "writable parent must PASS: {report}");
+        let writable_pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(m) if m.contains("restart_state_file") && m.contains("writable"))
+        });
+        assert!(
+            writable_pass,
+            "iter-53 must emit PASS row for restart_state_file: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iter53_restart_state_file_nonexistent_parent_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.restart_state_file = Some(PathBuf::from("/does/not/exist/restart.json"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "nonexistent parent must FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-53: user_quotas.persistence_path → same probe.
+    /// We build via YAML round-trip to avoid coupling to the
+    /// struct's exact field layout (defaults handle the rest).
+    #[test]
+    fn iter53_user_quotas_persistence_path_writable_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = format!(
+            "period_secs: 86400\nmax_entries: 1024\npersistence_path: {}\n",
+            dir.join("quotas.jsonl").display()
+        );
+        cfg.user_quotas = Some(serde_yaml::from_str(&yaml).expect("UserQuotasCfg parse"));
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(m) if m.contains("user_quotas.persistence_path") && m.contains("writable"))
+        });
+        assert!(pass, "iter-53 user_quotas check missing: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-53: user_quarantine.persistence_path → same probe.
+    #[test]
+    fn iter53_user_quarantine_persistence_path_writable_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = format!(
+            "ttl_secs: 600\nmax_entries: 1024\npersistence_path: {}\n",
+            dir.join("quarantine.jsonl").display()
+        );
+        cfg.user_quarantine = Some(serde_yaml::from_str(&yaml).expect("UserQuarantineCfg parse"));
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(m) if m.contains("user_quarantine.persistence_path") && m.contains("writable"))
+        });
+        assert!(pass, "iter-53 user_quarantine check missing: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
