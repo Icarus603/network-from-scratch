@@ -211,6 +211,82 @@ fn epoch_to_ymdhms(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
     (year, month, day, hour, minute, second)
 }
 
+/// Process-wide health/throughput counters for an [`AccessLogger`].
+///
+/// Shared between the handle and the writer task so /metrics can
+/// surface the writer's liveness + per-outcome record counts
+/// without the producer (relay code) having to thread an extra
+/// counter through. Cheap: every field is a single atomic load.
+///
+/// Closes a real production gap: the writer task `break`s on the
+/// FIRST write error (disk full, FS read-only-remount, fsync
+/// failure). After that, every `log()` returns false silently —
+/// the operator sees ONE error line then nothing. With these
+/// counters wired into /metrics, dashboards alert on
+/// `proteus_access_log_writer_alive == 0` instantly and the
+/// dropped-records counters distinguish "channel full" (transient
+/// burst) from "writer dead" (operational problem).
+#[derive(Debug, Default)]
+pub struct AccessLoggerStats {
+    /// Cumulative records successfully written to disk
+    /// (including buffered+flushed). Note: a record being in the
+    /// 64 KiB BufWriter counts toward this even if it hasn't hit
+    /// fsync yet — Buffered I/O semantics. The next flush either
+    /// commits it or bumps `write_errors`.
+    pub records_written: std::sync::atomic::AtomicU64,
+    /// Records dropped because the in-process mpsc channel was
+    /// full (writer can't drain at producer rate). Transient
+    /// burst signal — sustained non-zero means the channel
+    /// capacity (1024) is undersized for the deployment.
+    pub records_dropped_full: std::sync::atomic::AtomicU64,
+    /// Records dropped because the writer task has exited (write
+    /// error → `break 'outer` → channel closed → every subsequent
+    /// `try_send` returns Closed). This is the operationally-
+    /// interesting counter: non-zero means the access log has
+    /// STOPPED collecting data and the operator must intervene
+    /// (free disk, fix permissions, etc.).
+    pub records_dropped_writer_dead: std::sync::atomic::AtomicU64,
+    /// Cumulative write-syscall errors observed by the writer
+    /// task. Each error increments BEFORE the writer exits.
+    pub write_errors: std::sync::atomic::AtomicU64,
+    /// `true` iff the writer task is still running. Flipped to
+    /// `false` exactly once when the writer hits an unrecoverable
+    /// error (or when the producer drops every handle and the
+    /// channel closes naturally on shutdown). `/metrics` alerts on
+    /// `proteus_access_log_writer_alive == 0` while
+    /// `process_alive == 1`.
+    pub writer_alive: std::sync::atomic::AtomicBool,
+}
+
+impl AccessLoggerStats {
+    /// Render the Prometheus exposition block. Stable series
+    /// names: `proteus_access_log_records_total{outcome="..."}`
+    /// (3 outcomes) + `proteus_access_log_write_errors_total` +
+    /// `proteus_access_log_writer_alive` gauge.
+    #[must_use]
+    pub fn prometheus(&self) -> String {
+        use std::sync::atomic::Ordering;
+        let written = self.records_written.load(Ordering::Relaxed);
+        let dropped_full = self.records_dropped_full.load(Ordering::Relaxed);
+        let dropped_dead = self.records_dropped_writer_dead.load(Ordering::Relaxed);
+        let errors = self.write_errors.load(Ordering::Relaxed);
+        let alive = u8::from(self.writer_alive.load(Ordering::Relaxed));
+        format!(
+            "# HELP proteus_access_log_records_total Cumulative access-log records partitioned by outcome.\n\
+             # TYPE proteus_access_log_records_total counter\n\
+             proteus_access_log_records_total{{outcome=\"written\"}} {written}\n\
+             proteus_access_log_records_total{{outcome=\"dropped_channel_full\"}} {dropped_full}\n\
+             proteus_access_log_records_total{{outcome=\"dropped_writer_dead\"}} {dropped_dead}\n\
+             # HELP proteus_access_log_write_errors_total Cumulative write-syscall errors hit by the writer task. Each error bumps this BEFORE the writer exits, so a single increment paired with writer_alive=0 narrows the root cause.\n\
+             # TYPE proteus_access_log_write_errors_total counter\n\
+             proteus_access_log_write_errors_total {errors}\n\
+             # HELP proteus_access_log_writer_alive 1 if the access-log writer task is still running, 0 if it exited (disk full / FS unwritable / fsync failure). Alert immediately on transition to 0.\n\
+             # TYPE proteus_access_log_writer_alive gauge\n\
+             proteus_access_log_writer_alive {alive}\n"
+        )
+    }
+}
+
 /// Handle for emitting access-log records. Cheap to clone (one
 /// `Arc<mpsc::Sender>` increment).
 #[derive(Clone)]
@@ -223,6 +299,11 @@ pub struct AccessLogger {
     /// Path the writer reopens on signal. Stored so [`Self::reopen`]
     /// can be called without re-passing the path.
     path: Arc<std::path::PathBuf>,
+    /// Shared health/throughput counters surfaced via /metrics.
+    /// Both the handle (producer side) and the writer task
+    /// (consumer side) hold an `Arc`; every increment is a single
+    /// atomic op.
+    stats: Arc<AccessLoggerStats>,
 }
 
 impl AccessLogger {
@@ -237,6 +318,15 @@ impl AccessLogger {
         let reopen = Arc::new(tokio::sync::Notify::new());
         let reopen_task = Arc::clone(&reopen);
         let path_task = Arc::clone(&path);
+        let stats = Arc::new(AccessLoggerStats::default());
+        // Writer starts as alive — flipped to false in the exit
+        // branch below. Doing this BEFORE spawn so a /metrics
+        // scrape that races startup sees alive=true (not the
+        // default false → would falsely-alarm).
+        stats
+            .writer_alive
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        let stats_task = Arc::clone(&stats);
         tokio::spawn(async move {
             // Coalesce: drain everything available before flushing so
             // a burst of session completions emits one write + one
@@ -244,6 +334,7 @@ impl AccessLogger {
             // still flush promptly (a stalled tail breaks the recv
             // loop, then we flush before exiting).
             let mut buf = tokio::io::BufWriter::with_capacity(64 * 1024, file);
+            use std::sync::atomic::Ordering;
             'outer: loop {
                 tokio::select! {
                     biased;
@@ -253,6 +344,14 @@ impl AccessLogger {
                     // burst.
                     () = reopen_task.notified() => {
                         if let Err(e) = buf.flush().await {
+                            // Reopen-flush failure is NOT a writer-
+                            // killer — we'll try to reopen anyway and
+                            // either the new FD works (success) or the
+                            // reopen itself fails (also non-fatal: we
+                            // keep the old FD). Bump the write_errors
+                            // counter so the operator sees the
+                            // failure but stay in the loop.
+                            stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                             error!(error = %e, "access log flush before reopen failed");
                         }
                         match open_append(&path_task).await {
@@ -272,44 +371,90 @@ impl AccessLogger {
                         };
                         let line = rec.to_json_line();
                         if let Err(e) = buf.write_all(line.as_bytes()).await {
+                            stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                             error!(error = %e, "access log write failed");
                             break 'outer;
                         }
+                        stats_task.records_written.fetch_add(1, Ordering::Relaxed);
                         // Drain the rest of the channel non-blockingly so we
                         // batch bursty arrivals into one flush.
                         while let Ok(rec) = rx.try_recv() {
                             let line = rec.to_json_line();
                             if let Err(e) = buf.write_all(line.as_bytes()).await {
+                                stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                                 error!(error = %e, "access log write failed");
                                 break 'outer;
                             }
+                            stats_task.records_written.fetch_add(1, Ordering::Relaxed);
                         }
                         if let Err(e) = buf.flush().await {
+                            stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                             error!(error = %e, "access log flush failed");
                             break 'outer;
                         }
                     }
                 }
             }
+            // Flip the alive gauge BEFORE the final flush attempt
+            // so a /metrics scrape racing our exit sees alive=0
+            // even if the flush hangs. Producer's `log()` calls
+            // will start returning `Closed` errors immediately
+            // because Tokio's mpsc closes the sender side as
+            // soon as the receiver drops.
+            stats_task.writer_alive.store(false, Ordering::Relaxed);
             if let Err(e) = buf.flush().await {
+                stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                 error!(error = %e, "access log final flush failed");
             }
         });
-        Ok(Self { tx, reopen, path })
+        Ok(Self {
+            tx,
+            reopen,
+            path,
+            stats,
+        })
+    }
+
+    /// Borrow the shared stats counters. The metrics layer holds
+    /// an Arc<AccessLoggerStats> built from this and renders the
+    /// Prometheus block on every scrape via the v12 live_blocks
+    /// vec. Cheap to call (Arc clone).
+    #[must_use]
+    pub fn stats(&self) -> Arc<AccessLoggerStats> {
+        Arc::clone(&self.stats)
     }
 
     /// Best-effort: enqueue a record. Returns `false` if the channel
     /// is full (writer can't keep up) or the writer task has exited.
     /// Caller MUST treat this as advisory — never panic on a failed
     /// log write.
+    ///
+    /// Both failure paths bump the corresponding `AccessLoggerStats`
+    /// counter (full vs writer_dead). The `warn!` on Full is
+    /// rate-limited at the tracing layer — it's not throttled here
+    /// because a Full burst is usually a transient capacity issue
+    /// that warrants visibility per-burst; sustained Full would
+    /// surface via the counter regardless. The Closed path is
+    /// silent at tracing-level (the writer's exit already emitted
+    /// the root-cause error) — it ONLY bumps the counter so the
+    /// gauge captures the dropping-floor for operator-side alerts.
     pub fn log(&self, rec: AccessLogRecord) -> bool {
+        use std::sync::atomic::Ordering;
         match self.tx.try_send(rec) {
             Ok(()) => true,
             Err(mpsc::error::TrySendError::Full(_)) => {
+                self.stats
+                    .records_dropped_full
+                    .fetch_add(1, Ordering::Relaxed);
                 warn!("access log channel full; dropping record");
                 false
             }
-            Err(mpsc::error::TrySendError::Closed(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                self.stats
+                    .records_dropped_writer_dead
+                    .fetch_add(1, Ordering::Relaxed);
+                false
+            }
         }
     }
 

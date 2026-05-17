@@ -1322,6 +1322,22 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         live_blocks.push(std::sync::Arc::new(|| {
             proteus_transport_alpha::server::rejection_log_throttle_prometheus()
         }));
+        // Access-log writer health + throughput — surfaces the
+        // `proteus_access_log_records_total{outcome=...}` +
+        // `proteus_access_log_writer_alive` series. Operators
+        // alert IMMEDIATELY on writer_alive=0 (disk full, FS
+        // unwritable, fsync failure → no audit trail) and on
+        // `outcome="dropped_writer_dead" > 0` for the same
+        // reason from the producer side.
+        //
+        // The closure reads from process_access_log_stats — a
+        // OnceLock that the access_log spawn populates LATER in
+        // main(). When unset (no `access_log:` in config), the
+        // helper returns the empty string so the /metrics body
+        // gains no spurious lines.
+        live_blocks.push(std::sync::Arc::new(|| {
+            proteus_server::process_access_log_stats::prometheus()
+        }));
         tokio::spawn(async move {
             if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v12(
                 &metrics_addr,
@@ -2067,6 +2083,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             info!(path = ?path, "access log enabled (SIGUSR1 triggers reopen)");
             let arc: proteus_transport_alpha::access_log::AccessLogHandle =
                 Arc::new(logger.clone());
+            // Publish the shared stats Arc to the process-global
+            // OnceLock so the /metrics live_blocks closure (set up
+            // earlier in main, before this access_log spawn) can
+            // emit the writer health + records-by-outcome series.
+            proteus_server::process_access_log_stats::set(logger.stats());
             (Some(logger), Some(arc))
         }
         None => (None, None),

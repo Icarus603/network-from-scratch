@@ -1475,7 +1475,24 @@ proteus_previous_run_unclean
 proteus_dns_lookups_total{outcome="ok|failed|timeout"}
 proteus_log_throttle_allowed_total{site="..."}
 proteus_log_throttle_suppressed_total{site="..."}
+proteus_access_log_records_total{outcome="written|dropped_channel_full|dropped_writer_dead"}
+proteus_access_log_write_errors_total
+proteus_access_log_writer_alive
 ```
+
+`proteus_access_log_*` series surface the access-log writer's
+health + throughput. Before this, the writer task `break`'d on the
+first write/flush failure (disk full, FS read-only-remount, fsync
+failure) — operators saw one error line then complete silence,
+no audit trail collection at all, and no metric for "the audit
+log STOPPED". Now the writer flips `writer_alive` to 0 on exit,
+the producer's `log()` calls bump
+`outcome="dropped_writer_dead"` per dropped record, and every
+write error increments `write_errors_total` BEFORE the writer
+exits — a single increment paired with `writer_alive=0` narrows
+the root cause to the precise syscall that died. Alert
+immediately on `proteus_access_log_writer_alive == 0` while
+`proteus_up == 1` (process is alive but losing audit data).
 
 **`/healthz` now fails closed on expired TLS cert.** Without this
 gate, a leaf cert that ran past its `notAfter` (Let's Encrypt
