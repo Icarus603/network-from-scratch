@@ -15,5 +15,6 @@
 #![deny(missing_docs)]
 
 pub mod auth_tag;
+pub mod knock;
 pub mod replay;
 pub mod state;
