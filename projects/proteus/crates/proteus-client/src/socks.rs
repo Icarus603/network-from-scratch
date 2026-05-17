@@ -446,7 +446,16 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
 /// reply because downstream clients (cURL, browsers,
 /// proxychains) at least know "the proxy itself responded; the
 /// upstream dial failed" instead of "the proxy is unreachable".
-fn socks5_error_code_for(e: &SocksError) -> u8 {
+///
+/// Iter-30 widens the mapping: timeout-class `SocksError::Socks`
+/// messages (β / α handshake timed out, α TCP connect timed
+/// out) now map to 0x06 (TTL expired) instead of the
+/// catch-all 0x01. The message strings are `&'static str`
+/// compile-time literals so matching them is reliable; if a
+/// future refactor renames a message, the iter-30 unit tests
+/// catch the regression at compile-time-of-test.
+#[must_use]
+pub(crate) fn socks5_error_code_for(e: &SocksError) -> u8 {
     use std::io::ErrorKind;
     match e {
         SocksError::Io(io) => match io.kind() {
@@ -456,18 +465,37 @@ fn socks5_error_code_for(e: &SocksError) -> u8 {
             ErrorKind::HostUnreachable => 0x04,
             _ => 0x01, // general SOCKS server failure
         },
-        // Socks(timeout) is a slow-loris on greeting; we don't
-        // reach the dispatch path for it (early-return above).
-        // The other Socks(...) cases are pre-dispatch-time
-        // protocol errors that the early-return paths handle
-        // with their own writes. Anything that reaches here is
-        // a generic failure.
-        SocksError::Socks(_) => 0x01,
+        SocksError::Socks(msg) => {
+            // Iter-30: the dispatch path's timeout-class
+            // `&'static str` messages map to 0x06 TTL expired
+            // — that's the RFC 1928 §6 code for "request took
+            // too long." Downstream cURL / browsers surface
+            // this as "the proxy connection timed out" which
+            // is exactly the right user-visible diagnostic.
+            if msg.contains("timed out") || msg.contains("timeout") {
+                0x06
+            } else {
+                // Other Socks(...) cases are pre-dispatch-time
+                // protocol errors (e.g. "no acceptable auth
+                // method", "unsupported SOCKS5 cmd",
+                // "unsupported ATYP") — the early-return paths
+                // handle those with their own writes BEFORE
+                // dispatch starts, so anything that reaches
+                // here is genuinely a generic dispatch-side
+                // failure.
+                0x01
+            }
+        }
         SocksError::Alpha(_) => 0x01,
         SocksError::Config(_) => 0x01,
         SocksError::Bootstrap(_) => 0x03, // network unreachable
     }
 }
+
+// Iter-30 unit tests moved to the END of the file (post-
+// pump-fn definition) so `clippy::items_after_test_module`
+// stays satisfied. See `mod socks5_error_code_tests` at the
+// bottom of this file.
 
 /// Pre-pool single-endpoint dispatcher. Kept as a separate function
 /// so the pool path can reuse it per-entry without code duplication.
@@ -1245,6 +1273,79 @@ async fn pump<R, W>(
         }
         _ = server_to_client => {
             let _ = sock_w.shutdown().await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod socks5_error_code_tests {
+    //! Iter-30: unit tests for the error-class → REP-code
+    //! mapping. Placed at the end of the file so
+    //! `clippy::items_after_test_module` stays satisfied.
+
+    use super::{socks5_error_code_for, SocksError};
+    use std::io::{Error, ErrorKind};
+
+    #[test]
+    fn io_connection_refused_maps_to_0x05() {
+        let e = SocksError::Io(Error::from(ErrorKind::ConnectionRefused));
+        assert_eq!(socks5_error_code_for(&e), 0x05);
+    }
+
+    #[test]
+    fn io_timed_out_maps_to_0x06() {
+        let e = SocksError::Io(Error::from(ErrorKind::TimedOut));
+        assert_eq!(socks5_error_code_for(&e), 0x06);
+    }
+
+    /// Iter-30: the dispatch-path `α TCP connect timed out`
+    /// and `α TLS+Proteus handshake timed out` and `β
+    /// handshake timed out` messages MUST map to 0x06 (TTL
+    /// expired), not the catch-all 0x01. If a future
+    /// refactor renames any of these messages without
+    /// updating the matcher, the user sees a generic
+    /// "SOCKS5 failure" instead of "request timed out" —
+    /// silent diagnostic regression.
+    #[test]
+    fn socks_static_timeout_messages_map_to_0x06() {
+        for msg in [
+            "α TCP connect timed out",
+            "α TCP connect (plaintext) timed out",
+            "α TLS+Proteus handshake timed out",
+            "α Proteus handshake (plaintext) timed out",
+            "β handshake timed out",
+            "socks5 greeting/request timeout",
+        ] {
+            let e = SocksError::Socks(msg);
+            assert_eq!(
+                socks5_error_code_for(&e),
+                0x06,
+                "iter-30 timeout-message mapping regressed for {msg:?}"
+            );
+        }
+    }
+
+    /// Pre-dispatch protocol errors → 0x01. (They're handled
+    /// by the early-return paths in practice, but if any ever
+    /// reach the dispatch wrapper, generic-failure is the
+    /// honest answer.)
+    #[test]
+    fn non_timeout_socks_messages_map_to_0x01() {
+        for msg in [
+            "not SOCKS5",
+            "no acceptable auth method",
+            "unsupported SOCKS5 cmd",
+            "unsupported ATYP",
+            "invalid hostname",
+            "server_endpoint_beta unset",
+            "β requires beta_server_name or tls.server_name",
+        ] {
+            let e = SocksError::Socks(msg);
+            assert_eq!(
+                socks5_error_code_for(&e),
+                0x01,
+                "non-timeout Socks message should map to generic 0x01 for {msg:?}"
+            );
         }
     }
 }
