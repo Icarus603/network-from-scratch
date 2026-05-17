@@ -40,6 +40,7 @@ pub mod cover_pool;
 pub mod error;
 pub mod firewall;
 pub mod histogram;
+pub mod knock_dispatch;
 pub mod knock_gate;
 pub mod log_throttle;
 pub mod metrics;
