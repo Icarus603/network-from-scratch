@@ -39,6 +39,7 @@ pub mod cover_pool;
 pub mod error;
 pub mod firewall;
 pub mod histogram;
+pub mod log_throttle;
 pub mod metrics;
 pub mod metrics_http;
 pub mod outbound_filter;

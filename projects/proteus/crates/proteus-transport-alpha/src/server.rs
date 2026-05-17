@@ -1,7 +1,116 @@
 //! α-profile server driver.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+use crate::log_throttle::{AcquireResult, Throttle};
+
+// ────────────────────────────────────────────────────────────────
+// Per-call-site log throttles for rejection paths in the accept
+// loop. Without these, a scanner / DoS prober hammering at 1000
+// conn/sec floods journald with one warn line each — 3.6M lines/hr
+// is enough to fill `/var/log/journal` on a small VPS, AND once
+// journald's own rate-limit kicks in (SystemMaxFileSize hit) it
+// drops legitimate operational warnings alongside the noise.
+// See `crate::log_throttle` for the design rationale.
+//
+// Configured as 10-burst + 1 line/sec steady-state per site, so:
+//   * a small misconfig spike emits all events cleanly,
+//   * a sustained scanner pays at most 1 line/sec/site,
+//   * the periodic rollup task (in the binary main) emits the
+//     "(suppressed N in last 60s)" line so the suppression count
+//     itself is visible to operators.
+fn firewall_denied_throttle() -> &'static Throttle {
+    static T: OnceLock<Throttle> = OnceLock::new();
+    T.get_or_init(|| Throttle::new(10, 1.0))
+}
+fn handshake_budget_exhausted_throttle() -> &'static Throttle {
+    static T: OnceLock<Throttle> = OnceLock::new();
+    T.get_or_init(|| Throttle::new(10, 1.0))
+}
+fn max_connections_throttle() -> &'static Throttle {
+    static T: OnceLock<Throttle> = OnceLock::new();
+    T.get_or_init(|| Throttle::new(10, 1.0))
+}
+
+/// Snapshot of all per-site rejection-log throttles, for the
+/// metrics endpoint to expose suppression counts. Returns a
+/// vector of `(site_label, total_allowed, total_suppressed)`.
+#[must_use]
+pub fn rejection_log_throttle_snapshot() -> Vec<(&'static str, u64, u64)> {
+    vec![
+        (
+            "firewall_denied",
+            firewall_denied_throttle().total_allowed(),
+            firewall_denied_throttle().total_suppressed(),
+        ),
+        (
+            "handshake_budget_exhausted",
+            handshake_budget_exhausted_throttle().total_allowed(),
+            handshake_budget_exhausted_throttle().total_suppressed(),
+        ),
+        (
+            "max_connections_reached",
+            max_connections_throttle().total_allowed(),
+            max_connections_throttle().total_suppressed(),
+        ),
+    ]
+}
+
+/// Drain every rejection-log throttle's
+/// suppressed-since-last-rollup counter atomically. Returns
+/// `(site_label, suppressed_count)` pairs for any site with
+/// non-zero count. The binary's periodic rollup task calls this
+/// every 60 s and emits one `warn!` per non-zero entry.
+#[must_use]
+pub fn rejection_log_throttle_drain_rollups() -> Vec<(&'static str, u64)> {
+    let mut out = Vec::new();
+    let pairs: &[(&'static str, &dyn Fn() -> &'static Throttle)] = &[
+        ("firewall_denied", &firewall_denied_throttle),
+        (
+            "handshake_budget_exhausted",
+            &handshake_budget_exhausted_throttle,
+        ),
+        ("max_connections_reached", &max_connections_throttle),
+    ];
+    for (label, getter) in pairs {
+        let n = getter().roll_up();
+        if n > 0 {
+            out.push((*label, n));
+        }
+    }
+    out
+}
+
+/// Render the rejection-log-throttle counters as a Prometheus
+/// exposition block. Two labelled series — `proteus_log_throttle_allowed_total{site="..."}`
+/// and `_suppressed_total` — so operators alert on
+/// `rate(proteus_log_throttle_suppressed_total[5m]) > 0` to
+/// detect a sustained scanner / DoS hammer on a hot path.
+#[must_use]
+pub fn rejection_log_throttle_prometheus() -> String {
+    let mut s = String::with_capacity(512);
+    s.push_str(
+        "# HELP proteus_log_throttle_allowed_total Per-call-site count of WARN lines that the per-site throttle admitted to the log. Pairs with proteus_log_throttle_suppressed_total — the ratio reflects how often the site was flooded.\n\
+         # TYPE proteus_log_throttle_allowed_total counter\n",
+    );
+    for (site, allowed, _) in rejection_log_throttle_snapshot() {
+        s.push_str(&format!(
+            "proteus_log_throttle_allowed_total{{site=\"{site}\"}} {allowed}\n"
+        ));
+    }
+    s.push_str(
+        "# HELP proteus_log_throttle_suppressed_total Per-call-site count of WARN lines suppressed by the in-process log throttle (would-have-fired-without-throttle minus admitted). Alert on rate(...[5m]) > 0 to spot scanner / DoS hammers.\n\
+         # TYPE proteus_log_throttle_suppressed_total counter\n",
+    );
+    for (site, _, suppressed) in rejection_log_throttle_snapshot() {
+        s.push_str(&format!(
+            "proteus_log_throttle_suppressed_total{{site=\"{site}\"}} {suppressed}\n"
+        ));
+    }
+    s
+}
 
 use ml_kem::kem::DecapsulationKey;
 use ml_kem::{EncodedSizeUser, MlKem768Params};
@@ -135,7 +244,12 @@ pub fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
     let fw = ctx.firewall();
     let fw_snap = fw.snapshot();
     if fw_snap.is_active() && !fw_snap.admit(peer.ip()) {
-        tracing::warn!(peer = %peer, "firewall denied; routing to cover");
+        if matches!(
+            firewall_denied_throttle().try_acquire(),
+            AcquireResult::Allowed
+        ) {
+            tracing::warn!(peer = %peer, "firewall denied; routing to cover");
+        }
         if let Some(m) = ctx.metrics() {
             m.firewall_denied
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -146,7 +260,15 @@ pub fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
     // hands per second so a botnet that stays under each per-IP
     // ceiling still can't exhaust the ML-KEM-decap CPU budget.
     if !ctx.check_handshake_budget() {
-        tracing::warn!(peer = %peer, "global handshake budget exhausted; routing to cover");
+        if matches!(
+            handshake_budget_exhausted_throttle().try_acquire(),
+            AcquireResult::Allowed
+        ) {
+            tracing::warn!(
+                peer = %peer,
+                "global handshake budget exhausted; routing to cover"
+            );
+        }
         if let Some(m) = ctx.metrics() {
             m.handshake_budget_rejected
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1083,7 +1205,12 @@ where
             ConnGate::Unbounded => None,
             ConnGate::Allowed(p) => Some(p),
             ConnGate::Rejected => {
-                tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS)");
+                if matches!(
+                    max_connections_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS)");
+                }
                 if let Some(m) = ctx.metrics() {
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1172,7 +1299,12 @@ where
             ConnGate::Unbounded => None,
             ConnGate::Allowed(p) => Some(p),
             ConnGate::Rejected => {
-                tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS-reloadable)");
+                if matches!(
+                    max_connections_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(peer = %peer, "max_connections reached; routing to cover (TLS-reloadable)");
+                }
                 if let Some(m) = ctx.metrics() {
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1262,7 +1394,12 @@ where
             ConnGate::Unbounded => None,
             ConnGate::Allowed(p) => Some(p),
             ConnGate::Rejected => {
-                tracing::warn!(peer = %peer, "max_connections reached; routing to cover");
+                if matches!(
+                    max_connections_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(peer = %peer, "max_connections reached; routing to cover");
+                }
                 if let Some(m) = ctx.metrics() {
                     m.conn_limit_rejected
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

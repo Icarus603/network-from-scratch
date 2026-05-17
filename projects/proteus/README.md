@@ -1473,7 +1473,26 @@ proteus_first_start_unix_seconds
 proteus_last_clean_shutdown_unix_seconds
 proteus_previous_run_unclean
 proteus_dns_lookups_total{outcome="ok|failed|timeout"}
+proteus_log_throttle_allowed_total{site="..."}
+proteus_log_throttle_suppressed_total{site="..."}
 ```
+
+`proteus_log_throttle_*` series surface the
+[`log_throttle`](crates/proteus-transport-alpha/src/log_throttle.rs)
+counters for hot rejection paths in the accept loop
+(`firewall_denied`, `handshake_budget_exhausted`,
+`max_connections_reached`). Without throttling, a scanner
+hammering at 1000 conn/sec writes ~3.6M `warn!` lines per hour —
+enough to fill `/var/log/journal` on a small VPS, AND once
+journald's own rate-limit fires it drops legitimate operational
+warnings alongside the noise (`tls_reload FAILED`, etc.). The
+in-process per-call-site token bucket (10-burst + 1 line/sec
+steady-state) admits the first events cleanly, suppresses the
+flood, and a periodic 60s rollup task emits one
+`warn!(suppressed=N, site="..", window_secs=60, ...)` line per
+non-zero bucket. Alert on
+`rate(proteus_log_throttle_suppressed_total[5m]) > 0` to spot a
+sustained scanner / DoS hammer.
 
 `proteus_dns_lookups_total{outcome="timeout"}` is incremented
 whenever an upstream-dial DNS lookup exceeds 5 seconds (the new

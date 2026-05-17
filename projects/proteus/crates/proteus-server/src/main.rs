@@ -1311,6 +1311,17 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             let dns_stats = Arc::clone(&dns_resolver_stats);
             live_blocks.push(std::sync::Arc::new(move || dns_stats.prometheus()));
         }
+        // Rejection-log throttle counters — surfaces the count
+        // of WARN lines that the in-process throttle admitted
+        // vs. suppressed on each hot rejection path
+        // (firewall_denied, handshake_budget_exhausted,
+        // max_connections_reached). Operators alert on
+        // `rate(proteus_log_throttle_suppressed_total[5m]) > 0`
+        // to spot a sustained scanner / DoS hammer that's
+        // generating thousands of rejections per second.
+        live_blocks.push(std::sync::Arc::new(|| {
+            proteus_transport_alpha::server::rejection_log_throttle_prometheus()
+        }));
         tokio::spawn(async move {
             if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v12(
                 &metrics_addr,
@@ -1450,6 +1461,33 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         });
     }
+
+    // Periodic rejection-log throttle rollup. Every 60s, drain
+    // the suppressed-count from each throttled call site and
+    // emit a single `warn!(suppressed=N, site="..")` line for
+    // each non-zero bucket. Without this, the suppression count
+    // sits invisible until an operator scrapes /metrics — with
+    // it, the journal carries the rollup so `journalctl -u
+    // proteus-server` shows a periodic line each window where
+    // throttling fired.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // skip immediate fire
+        loop {
+            tick.tick().await;
+            for (site, suppressed) in
+                proteus_transport_alpha::server::rejection_log_throttle_drain_rollups()
+            {
+                warn!(
+                    site,
+                    suppressed,
+                    window_secs = 60,
+                    "log-throttle: suppressed similar messages in last window"
+                );
+            }
+        }
+    });
 
     // Periodic rate-limit vacuum (every 60 s) so per-IP token-bucket
     // memory stays bounded regardless of traffic patterns.
