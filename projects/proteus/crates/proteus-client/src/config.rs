@@ -11,6 +11,7 @@
 //!   client_ed25519_sk: ./keys/client/client.ed25519.sk
 //! ```
 
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 
 use base64::Engine;
@@ -101,6 +102,82 @@ pub struct ClientConfig {
     /// to flush their last records cleanly. Default: 15 s.
     #[serde(default)]
     pub drain_secs: Option<u64>,
+    /// **Bootstrap DNS policy** — how to resolve the hostname half of
+    /// `server_endpoint` / `server_endpoint_beta`. Defaults to
+    /// `system`, which goes through the OS resolver (which in 2026
+    /// may itself transit a DoH/DoT server that the GFW now
+    /// identifies — see threat-intel main line 6).
+    ///
+    /// Production-anti-censorship recommended: `direct_ip: <literal
+    /// IPv4 or IPv6>`. The TLS SNI continues to use the hostname from
+    /// `tls.server_name` / `beta_server_name`, so cert verification
+    /// works normally; only the network-layer resolution is skipped.
+    /// This eliminates the entire bootstrap-DNS attack surface for
+    /// the operator who controls a clean VPS with a known IP.
+    ///
+    /// Equivalent: write the IP literal directly into `server_endpoint`
+    /// (e.g. `"198.51.100.42:8443"`). The `direct_ip` knob exists for
+    /// operators who prefer to keep the hostname visible in the
+    /// `server_endpoint` field (for SNI-matching readability) while
+    /// still pinning resolution.
+    ///
+    /// YAML examples:
+    /// ```yaml
+    /// bootstrap_dns: system            # default (vulnerable to DoH ID + DNS hijack)
+    /// bootstrap_dns:
+    ///   direct_ip: 198.51.100.42       # IPv4 pin
+    /// bootstrap_dns:
+    ///   direct_ip: "2001:db8::1"       # IPv6 pin
+    /// ```
+    #[serde(default)]
+    pub bootstrap_dns: Option<BootstrapDnsCfg>,
+}
+
+/// Bootstrap DNS resolution policy. See [`ClientConfig::bootstrap_dns`].
+///
+/// Untagged so YAML can use either the bare token `system` (string
+/// shorthand) or a `direct_ip: <addr>` mapping. The string-vs-mapping
+/// disambiguation is done by serde based on YAML node shape.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged, rename_all = "snake_case")]
+pub enum BootstrapDnsCfg {
+    /// String variant: `bootstrap_dns: system` or
+    /// `bootstrap_dns: "system"`. Must be exactly the literal "system".
+    System(SystemKind),
+    /// Mapping variant: `bootstrap_dns: { direct_ip: 198.51.100.42 }`.
+    DirectIp {
+        /// The literal IP to use when the hostname in
+        /// `server_endpoint` / `server_endpoint_beta` would otherwise
+        /// require DNS resolution. SNI / cert verification continue
+        /// to use the hostname; only the L3 lookup is bypassed.
+        direct_ip: IpAddr,
+    },
+}
+
+/// Internal enum for the string-only "system" variant — keeps the
+/// untagged-deserialize behavior unambiguous.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemKind {
+    /// `bootstrap_dns: system`.
+    System,
+}
+
+impl BootstrapDnsCfg {
+    /// True iff this policy forces a literal IP and skips DNS.
+    #[must_use]
+    pub fn is_direct_ip(&self) -> bool {
+        matches!(self, BootstrapDnsCfg::DirectIp { .. })
+    }
+
+    /// Extract the pinned IP, if any.
+    #[must_use]
+    pub fn pinned_ip(&self) -> Option<IpAddr> {
+        match self {
+            BootstrapDnsCfg::DirectIp { direct_ip } => Some(*direct_ip),
+            BootstrapDnsCfg::System(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]

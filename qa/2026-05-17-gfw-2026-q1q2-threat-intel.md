@@ -203,13 +203,18 @@ GFW 已能「精確識別」境外 DoH 伺服器連線（[Q2 2026 GFW Update](ht
 如果 Proteus 客戶端用 DoH 解析 server_endpoint，DoH 被識別 → 客戶端啟動就失敗。這影響 **bootstrap 過程**，不是 in-session 流量。
 
 **Proteus 當前覆蓋**：
-- ❌ 沒有對 DNS bootstrap 的明確規範
-- ❌ `proteus-client run` 直接交給作業系統的 DNS resolver
+- ✅ **NEW (本次 iteration)**：`bootstrap_dns: { direct_ip: <ip> }` 配置選項 + `endpoint_is_ip_literal()` 路徑判別 + `proteus-client validate` deploy-time WARN
+- ✅ `server_endpoint: "198.51.100.42:8443"`（直接寫 IP literal）已天然跳過 DNS，validate 給 PASS
+- ✅ 兩條路徑（hostname+pin / IP literal）等價，TLS SNI 仍走 `tls.server_name`，cert verification 不受影響
+- ✅ α + β 兩個 carrier 都覆蓋（validate 對它們分別 audit）
+- ⚠️ 仍未做：DoH 形式（`bootstrap_dns: { doh: <url> }`）——目前只支持 system / direct_ip 兩種。DoH 在 2026 已被識別所以加入意義不大，但加 ECH-protected DoH 形式（M3）可考慮
 
-**TODO**：
-1. **配置選項 `bootstrap_dns:`**：支援 `system` / `doh: <url>` / `dot: <addr>` / `direct_ip: 198.51.100.42`（推薦：用 IP 直連跳過 DNS）。
-2. **文檔強烈推薦 direct_ip 模式**：把 VPS IP 直接寫進 client.yaml，不靠 DNS。
-3. **`proteus-client validate` 檢查**：警告使用了 DoH/DoT 的配置「可能被 GFW 識別」。
+**完成情況**：3 個 TODO → 2 個 done + 1 個 deferred（DoH 形式無加入價值）。整個 main line 6 P0 攻擊面已關閉。
+
+詳見：
+- 實作：`crates/proteus-client/src/bootstrap.rs`（8 unit tests）
+- `validate` warning：`crates/proteus-client/src/validate.rs` Bootstrap-DNS section（4 new validate_cli tests）
+- 文檔：`deploy/client.example.yaml` 已更新
 
 ---
 
@@ -264,7 +269,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | IP 範圍預封 | ❌ | TODO: preflight tool + 文檔警告 |
 | UDP/QUIC throttling | ⚠️ α 可用，β 沒 fallback | TODO: carrier auto-switch (M3) |
 | γ profile (MASQUE) | ❌ | M3+ (spec §10.3) |
-| DoH/DoT 識別（bootstrap）| ❌ | TODO: `bootstrap_dns:` 配置 |
+| DoH/DoT 識別（bootstrap）| ✅ `bootstrap_dns: { direct_ip: <ip> }` + validate WARN | — |
 | 全加密啟發式（規則 1: 不可印 70%）| ⚠️ β prefix-noise 風險 | TODO: 調整 prefix-noise 前 6 字節 |
 | 全加密啟發式（規則 2: TLS/HTTP/SSH 前綴）| ✅ α 自然滿足 | — |
 | Post-quantum store-now-decrypt-later | ✅ ML-KEM-768 hybrid | — |
@@ -276,9 +281,9 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 
 1. **ECH 集成**（主線 3） —— 沒有 ECH 等於 SNI 公開，所有 wire-level trick 都治標
 2. **`proteus-server preflight --check-ip-reputation`**（主線 1 + 4）—— 不檢查就讓 operator 拿被封 IP 上線等於送死
-3. **`bootstrap_dns: direct_ip`**（主線 6） —— DoH 識別讓客戶端 bootstrap 失敗
-4. **β prefix-noise 調整前 6 字節為可印**（主線 7） —— 避免 USENIX 23 規則 1 觸發
-5. **`deploy/README.md` topology 警告**（主線 2）—— operator 教育 + 反中轉模型
+3. ~~**`bootstrap_dns: direct_ip`**（主線 6）~~ ✅ **DONE 2026-05-17** —— bootstrap.rs + validate WARN + client.example.yaml 全部就位
+4. ~~**β prefix-noise 調整前 6 字節為可印**（主線 7）~~ ✅ **DONE 2026-05-17 (commit a187ea4)**
+5. **`deploy/README.md` topology 警告**（主線 2）—— operator 教育 + 反中轉模型（使用者本次澄清：是個人乾淨 VPS 直連節點，*非*中轉，所以這一條對使用者場景已天然滿足。但 README 仍應寫清楚，避免後續 operator 走錯架構。）
 
 **P1（M3 前需完成）**：
 

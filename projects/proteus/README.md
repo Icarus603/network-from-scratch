@@ -111,12 +111,12 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 | 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ❌ cover-endpoint pool + probe-anomaly detector |
 | 5 | UDP / QUIC throttling (Hy2 / TUIC visibly degrades 2026 Q1+) | nationally deployed | ⚠ α survives, β no auto-fallback; TODO: carrier auto-switch + γ profile (MASQUE) |
-| 6 | DoH / DoT identification (bootstrap-layer attack on the client itself) | rolling out 2026 Q2 | ❌ `bootstrap_dns:` config + `direct_ip` recommendation needed |
+| 6 | DoH / DoT identification (bootstrap-layer attack on the client itself) | rolling out 2026 Q2 | ✅ `bootstrap_dns: { direct_ip: <ip> }` config + IP-literal endpoint passthrough + `proteus-client validate` WARN on unpinned hostnames |
 | 7 | Fully-encrypted-traffic heuristics (USENIX Sec '23, 5 rules — still active) | stable | ✅ α satisfies rule 2 naturally; ⚠ β prefix-noise needs printable-byte tweak to satisfy rule 1 |
 
 **Roadmap priorities driven by this threat intel**:
 
-- **P0** (must precede any "production-ready" claim): ECH integration, IP reputation preflight tool, `bootstrap_dns: direct_ip`, β prefix-noise printable-byte tweak, `deploy/README.md` anti-relay topology warning.
+- **P0** (must precede any "production-ready" claim): ECH integration, IP reputation preflight tool, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, `deploy/README.md` anti-relay topology warning.
 - **P1** (M3): uTLS bit-perfect ClientHello, cover-endpoint pool, carrier auto-switch, multi-VPS HA client.
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 

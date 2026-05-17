@@ -9,6 +9,7 @@ use proteus_transport_alpha::client as p_client;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::bootstrap::{resolve_for_client, BootstrapError, Resolved, ResolvedVia};
 use crate::config::ClientConfig;
 
 #[derive(thiserror::Error, Debug)]
@@ -24,6 +25,51 @@ pub enum SocksError {
 
     #[error("socks5: {0}")]
     Socks(&'static str),
+
+    #[error("bootstrap-dns: {0}")]
+    Bootstrap(#[from] BootstrapError),
+}
+
+/// Log the bootstrap-DNS resolution path taken for an endpoint dial.
+///
+/// Levels:
+/// - `IpLiteralInEndpoint` / `PinnedDirectIp` → `debug` (the
+///   anti-censorship path; quiet when working)
+/// - `SystemResolver` → `info` (deserves operator attention because
+///   it's the path that's vulnerable to the 2026 GFW DoH
+///   identification; logging it makes the misconfiguration
+///   visible without spamming the log when the operator picked
+///   the safe path)
+fn log_bootstrap_route(
+    carrier: &str,
+    endpoint: &str,
+    addr: std::net::SocketAddr,
+    via: ResolvedVia,
+) {
+    match via {
+        ResolvedVia::IpLiteralInEndpoint => tracing::debug!(
+            carrier = carrier,
+            endpoint = endpoint,
+            addr = %addr,
+            via = "ip-literal",
+            "bootstrap: endpoint is already an IP literal — DNS skipped"
+        ),
+        ResolvedVia::PinnedDirectIp => tracing::debug!(
+            carrier = carrier,
+            endpoint = endpoint,
+            addr = %addr,
+            via = "pinned-direct-ip",
+            "bootstrap: using bootstrap_dns.direct_ip — DNS skipped"
+        ),
+        ResolvedVia::SystemResolver => tracing::info!(
+            carrier = carrier,
+            endpoint = endpoint,
+            addr = %addr,
+            via = "system-resolver",
+            "bootstrap: resolved via OS resolver (consider setting `bootstrap_dns: \
+             direct_ip: <ip>` to defeat 2026 GFW DoH identification)"
+        ),
+    }
 }
 
 pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Result<(), SocksError> {
@@ -147,12 +193,16 @@ async fn try_beta(
         ))?;
     let timeout = std::time::Duration::from_secs(cfg.beta_first_timeout_secs.unwrap_or(3));
 
-    // Resolve `host:port` to a concrete SocketAddr. quinn::connect
-    // needs an IP literal, not a hostname.
-    let server_addr = tokio::net::lookup_host(beta_endpoint.as_str())
-        .await?
-        .next()
-        .ok_or(SocksError::Socks("server_endpoint_beta did not resolve"))?;
+    // Resolve `host:port` to a concrete SocketAddr under the
+    // configured bootstrap-DNS policy. See `bootstrap.rs` —
+    // operators can pin a literal IP (production anti-censorship
+    // recommendation) to skip the OS resolver entirely and defeat
+    // the 2026 GFW DoH-identification + DNS-hijack attack surface.
+    let Resolved {
+        addr: server_addr,
+        via,
+    } = resolve_for_client(beta_endpoint.as_str(), cfg).await?;
+    log_bootstrap_route("β", beta_endpoint.as_str(), server_addr, via);
 
     // Build a β-flavored ClientConfig (profile_hint = Beta).
     let mut hs_cfg = cfg.build_handshake_config()?;
@@ -236,6 +286,16 @@ async fn try_alpha(
 ) -> Result<(), SocksError> {
     let hs_cfg = cfg.build_handshake_config()?;
 
+    // Resolve under the configured bootstrap-DNS policy (same path
+    // as β — see `bootstrap.rs`). The same `Resolved` discriminator
+    // gets logged so operators can audit "am I actually skipping DNS?"
+    // by tailing the client logs.
+    let Resolved {
+        addr: server_addr,
+        via,
+    } = resolve_for_client(cfg.server_endpoint.as_str(), cfg).await?;
+    log_bootstrap_route("α", cfg.server_endpoint.as_str(), server_addr, via);
+
     if let Some(tls_cfg) = cfg.tls.as_ref() {
         let connector = match tls_cfg.trusted_ca.as_ref() {
             Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
@@ -243,7 +303,10 @@ async fn try_alpha(
             None => proteus_transport_alpha::tls::build_connector_webpki_roots()
                 .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
         };
-        let tcp = tokio::net::TcpStream::connect(&cfg.server_endpoint).await?;
+        // Dial the IP literal we just resolved. The TLS SNI continues
+        // to be `tls_cfg.server_name` (hostname) so cert verification
+        // still works against the operator's Let's Encrypt cert.
+        let tcp = tokio::net::TcpStream::connect(server_addr).await?;
         let session =
             p_client::handshake_over_tls(tcp, &connector, &tls_cfg.server_name, &hs_cfg).await?;
         let proteus_transport_alpha::session::AlphaSession {
@@ -264,7 +327,9 @@ async fn try_alpha(
         return Ok(());
     }
 
-    let session = p_client::connect(&cfg.server_endpoint, &hs_cfg).await?;
+    // No TLS configured (test/dev mode). Dial the resolved IP directly.
+    let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+    let session = p_client::handshake_over_tcp(tcp, &hs_cfg).await?;
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,
         mut receiver,

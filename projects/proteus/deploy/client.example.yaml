@@ -9,7 +9,41 @@
 
 # Remote Proteus server `host:port` for the α (TCP+TLS) carrier.
 # REQUIRED — this is the always-available fallback path.
+#
+# ## Bootstrap-DNS posture (2026 GFW P0)
+#
+# `server_endpoint` can be either:
+#   (a) a hostname:port — `"vps.example.com:8443"` — system resolver
+#       used at every dial. In 2026 the GFW identifies DoH/DoT by flow
+#       pattern; if your OS resolver hops through a DoH server the
+#       bootstrap can be flagged BEFORE any Proteus payload is sent.
+#       See qa/2026-05-17-gfw-2026-q1q2-threat-intel.md main line 6.
+#   (b) an IP literal:port — `"198.51.100.42:8443"` — recommended for
+#       production anti-censorship deploys. The TLS SNI continues to
+#       use the hostname from `tls.server_name` below (cert
+#       verification works normally); only the L3 lookup is skipped.
+#   (c) hostname:port + `bootstrap_dns: { direct_ip: <vps-ip> }`
+#       below — equivalent to (b), keeps the hostname visible for
+#       readability while still pinning resolution.
+#
+# `proteus-client validate` warns when you leave a hostname here
+# without `bootstrap_dns: direct_ip`.
 server_endpoint: "vps.example.com:8443"
+
+# Optional bootstrap-DNS policy. See the discussion above
+# `server_endpoint`. Pick ONE form:
+#
+#   bootstrap_dns: system           # default (vulnerable to DoH ID + DNS hijack)
+#   bootstrap_dns:
+#     direct_ip: 198.51.100.42      # IPv4 pin (production-recommended)
+#   bootstrap_dns:
+#     direct_ip: "2001:db8::1"      # IPv6 pin
+#
+# A direct_ip pin is harmless when `server_endpoint` is already
+# an IP literal — the literal wins, the pin is unused (validate
+# tells you so).
+# bootstrap_dns:
+#   direct_ip: 198.51.100.42
 
 # Optional β (QUIC over UDP) endpoint on the same server. When set,
 # the client tries β first; on any β failure (timeout, UDP blocked,

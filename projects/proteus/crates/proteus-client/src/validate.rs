@@ -44,6 +44,21 @@
 //!   - `pow_difficulty` > 24 — likely a typo; sustained 24-bit
 //!     PoW costs ~1 s on a laptop, anything higher is operator-
 //!     hostile.
+//!
+//! Bootstrap-DNS posture (Warn, not Fail — production decision is
+//! the operator's, but the default is dangerous in 2026):
+//!   - `server_endpoint` is a hostname AND `bootstrap_dns` is unset
+//!     or set to `system` → WARN. The 2026 GFW identifies DoH/DoT
+//!     by flow pattern (threat-intel main line 6); a hostname
+//!     resolved through the OS resolver may transit DoH and be
+//!     identified before any Proteus payload is sent. Production
+//!     anti-censorship deploys MUST either embed an IP literal in
+//!     `server_endpoint` or set `bootstrap_dns: { direct_ip: ... }`.
+//!   - `server_endpoint_beta` hostname under system bootstrap_dns →
+//!     same warning, for the β carrier.
+//!   - All-IP-literal deploy + still set `bootstrap_dns: direct_ip` →
+//!     informational PASS (the direct_ip is ignored — harmless but
+//!     the operator should know).
 
 use std::fmt;
 use std::io::Write;
@@ -266,6 +281,62 @@ pub async fn run(path: &Path) -> PreflightReport {
                 r.push_fail(format!(
                     "beta_initial_mtu = {mtu} is out of sane range [1200, 1500]"
                 ));
+            }
+        }
+    }
+
+    // ----- Bootstrap-DNS posture -----
+    //
+    // Walk both `server_endpoint` and (when set) `server_endpoint_beta`.
+    // For each: classify as ip-literal / pinned-direct-ip / system-resolver.
+    // Surface a WARN when the operator is still on the system-resolver
+    // path — that's the route the 2026 GFW DoH-ID attack rides on.
+    // See qa/2026-05-17-gfw-2026-q1q2-threat-intel.md main line 6.
+    {
+        use crate::bootstrap::endpoint_is_ip_literal;
+        let mut audit_endpoint = |label: &str, endpoint: &str| {
+            let is_literal = endpoint_is_ip_literal(endpoint);
+            match (&cfg.bootstrap_dns, is_literal) {
+                (_, true) => r.push_pass(format!(
+                    "bootstrap: {label} = {endpoint} is an IP literal — DNS skipped"
+                )),
+                (Some(b), false) if b.is_direct_ip() => {
+                    let ip = b.pinned_ip().expect("is_direct_ip implies pinned_ip");
+                    r.push_pass(format!(
+                        "bootstrap: {label} hostname is pinned via bootstrap_dns.direct_ip = {ip}"
+                    ));
+                }
+                (_, false) => r.push_warn(format!(
+                    "bootstrap: {label} = {endpoint} resolves via OS resolver — \
+                     production deploys SHOULD either use an IP literal in {label} \
+                     or set `bootstrap_dns: {{ direct_ip: <vps-ip> }}` to defeat \
+                     the 2026 GFW DoH/DoT identification attack"
+                )),
+            }
+        };
+        audit_endpoint("server_endpoint", &cfg.server_endpoint);
+        if let Some(beta) = &cfg.server_endpoint_beta {
+            audit_endpoint("server_endpoint_beta", beta);
+        }
+
+        // If the operator pinned a direct_ip but BOTH endpoints are
+        // already IP literals, the pin is harmless but dead-letter —
+        // surface as info so the operator can clean up the config.
+        if let Some(b) = &cfg.bootstrap_dns {
+            if b.is_direct_ip() {
+                let ep_literal = endpoint_is_ip_literal(&cfg.server_endpoint);
+                let beta_literal = cfg
+                    .server_endpoint_beta
+                    .as_ref()
+                    .map(|s| endpoint_is_ip_literal(s))
+                    .unwrap_or(true);
+                if ep_literal && beta_literal {
+                    r.push_pass(
+                        "bootstrap: bootstrap_dns.direct_ip is set but all endpoints \
+                         are already IP literals — the direct_ip pin is unused (harmless; \
+                         remove it for clarity if desired)",
+                    );
+                }
             }
         }
     }
