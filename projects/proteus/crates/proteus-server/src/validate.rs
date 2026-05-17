@@ -782,7 +782,15 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
             // only. Cert/PEM files are skipped (their parse path
             // already gates content, and a "keys" label is the
             // signal we're looking at raw key material).
-            let is_key_file = label.starts_with("keys.");
+            //
+            // Iter-55: extend to `client_allowlist[*].ed25519_pk`.
+            // An all-zero pubkey in the allowlist means the
+            // operator copy-pasted a placeholder OR a keygen
+            // script crashed; any client presenting the zero key
+            // (trivial to forge) would be auth'd, which is the
+            // worst-case-equivalent to no allowlist at all.
+            let is_key_file = label.starts_with("keys.")
+                || label.starts_with("client_allowlist[");
             if is_key_file && !bytes.is_empty() {
                 // Decode base64 if it looks like base64 to catch the
                 // case where the operator stored keys in armored form
@@ -790,11 +798,13 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
                 let decoded = base64_or_raw_bytes(&bytes);
                 if !decoded.is_empty() && decoded.iter().all(|&b| b == 0) {
                     report.push_fail(format!(
-                        "{label} {path:?}: ALL-ZERO contents ({} bytes) — this is either \
-                         a placeholder the operator forgot to replace OR a key-rotation \
-                         script crashed mid-write. For secret keys this is a catastrophic \
-                         security failure (trivially-forgeable server identity). Run \
-                         `proteus-server keygen` to generate a real key.",
+                        "{label} {path:?}: ALL-ZERO contents ({} bytes) — placeholder \
+                         the operator forgot to replace OR a key-rotation script crashed \
+                         mid-write. Catastrophic security failure: secret keys become \
+                         trivially-forgeable identities; allowlist pubkeys auth-pass \
+                         any client presenting the zero key. Run `proteus-server \
+                         keygen` (or copy a real allowlist pubkey from the issuing \
+                         operator).",
                         decoded.len(),
                     ));
                     return;
@@ -1465,6 +1475,40 @@ mod tests {
         });
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-55: all-zero allowlist pubkey → FAIL (catastrophic
+    /// auth-passes-trivially case). Pre-iter-55 the check only
+    /// applied to `keys.*` labels; the allowlist's
+    /// `client_allowlist[<user>].ed25519_pk` was silently
+    /// accepted.
+    #[test]
+    fn iter55_all_zero_allowlist_pubkey_fails() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        // Plant an all-zero 32-byte pubkey.
+        std::fs::write(&pk, [0u8; 32]).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "all-zero allowlist pubkey MUST FAIL: {report}"
+        );
+        let zero_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("client_allowlist[alice].ed25519_pk") && s.contains("ALL-ZERO")
+            }
+            _ => false,
+        });
+        assert!(
+            zero_fail,
+            "FAIL must call out the allowlist entry + ALL-ZERO: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
