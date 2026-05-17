@@ -1137,12 +1137,36 @@ pub async fn serve_with_ctx_v2(
     } else {
         info!(addr = %local, "client admin endpoint bound (loopback)");
     }
+    // Iter-21: distinguish transient kernel errors from fatal
+    // listener-fd-dead errors on the client admin endpoint.
+    // Pre-iter-21 the loop caught EVERY error with `continue`,
+    // including the EBADF/ENETDOWN class — a permanently broken
+    // listener would spin-loop forever logging the same error,
+    // with healthchecks passing and operator unable to diagnose.
+    // Same fix shape as the iter-19 client SOCKS5 accept loop.
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(x) => x,
             Err(e) => {
-                warn!(error = %e, "client admin accept failed");
-                continue;
+                if proteus_transport_alpha::socket_opts::is_transient_accept_error(e.raw_os_error())
+                {
+                    warn!(
+                        error = %e,
+                        raw_os_error = ?e.raw_os_error(),
+                        "client admin accept hit transient FD/memory exhaustion; \
+                         backing off 100ms"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                } else {
+                    tracing::error!(
+                        error = %e,
+                        raw_os_error = ?e.raw_os_error(),
+                        "client admin accept hit non-transient error; \
+                         stopping admin listener — supervisor should restart us"
+                    );
+                    break;
+                }
             }
         };
         let alive = Arc::clone(&alive);
@@ -1154,6 +1178,7 @@ pub async fn serve_with_ctx_v2(
             }
         });
     }
+    Ok(())
 }
 
 async fn handle_connection_ctx(

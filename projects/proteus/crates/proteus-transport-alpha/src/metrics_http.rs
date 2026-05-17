@@ -541,7 +541,32 @@ pub async fn serve_with_auth_full_v12(
         "metrics endpoint bound",
     );
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        // Iter-21: same EMFILE-survival pattern as iter-18's
+        // server accept loops. If the metrics endpoint dies on
+        // transient FD exhaustion, the operator's Prometheus
+        // scraper starts seeing connection refused — the very
+        // signal they need to diagnose the FD pressure becomes
+        // unavailable. Worst case: cascade where the operator
+        // can't even tell their proxy is under pressure.
+        let (stream, _peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                if crate::socket_opts::is_transient_accept_error(e.raw_os_error()) {
+                    tracing::warn!(
+                        error = %e,
+                        raw_os_error = ?e.raw_os_error(),
+                        "metrics-http accept hit transient FD/memory exhaustion; \
+                         backing off 100ms"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                } else {
+                    // Fatal: listener fd dead. Propagate so the
+                    // operator's process supervisor restarts us.
+                    return Err(e);
+                }
+            }
+        };
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
@@ -713,7 +738,26 @@ pub async fn serve_on_listener_full_v6(
     per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
 ) -> std::io::Result<()> {
     loop {
-        let (stream, _peer) = listener.accept().await?;
+        // Iter-21: same EMFILE-survival pattern as the v12
+        // metrics-server loop above. See that block's comment
+        // for the rationale.
+        let (stream, _peer) = match listener.accept().await {
+            Ok(p) => p,
+            Err(e) => {
+                if crate::socket_opts::is_transient_accept_error(e.raw_os_error()) {
+                    tracing::warn!(
+                        error = %e,
+                        raw_os_error = ?e.raw_os_error(),
+                        "metrics-http (legacy) accept hit transient FD/memory exhaustion; \
+                         backing off 100ms"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    continue;
+                } else {
+                    return Err(e);
+                }
+            }
+        };
         let metrics = Arc::clone(&metrics);
         let auth = auth.clone();
         let probe_anomaly = probe_anomaly.clone();
