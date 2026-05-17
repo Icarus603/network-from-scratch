@@ -176,6 +176,18 @@ fn make_tmp_keys_dir(
 /// Drive one SOCKS5 round-trip through `handle_socks5_with_health_and_pool`
 /// with the supplied pool. The CarrierHealth is fresh per call (we're
 /// testing the POOL, not back-off across multiple CONNECTs).
+///
+/// Iter-35: every step now timeout-bounded with the shared STEP
+/// budget AND wraps `read_exact` failures in actionable
+/// diagnostics. Pre-iter-35 the helper panicked with
+/// `:218:39 called Result::unwrap on Err(...)` under heavy
+/// parallel-test contention, leaving the operator hunting
+/// through 5 layers of test infrastructure to find that the
+/// SOCKS5 server task got EOF mid-reply. Post-iter-35 each
+/// stage prints exactly what it expected vs what it got, so a
+/// genuine relay-deadlock OR a heavy-contention parallel-test
+/// race surfaces with a useful diagnostic instead of a
+/// stack-trace-only panic.
 async fn socks5_round_trip_via_pool(
     cfg: Arc<proteus_client::config::ClientConfig>,
     pool: Arc<proteus_client::endpoint_pool::EndpointPool>,
@@ -202,28 +214,77 @@ async fn socks5_round_trip_via_pool(
         }
     });
 
-    let mut sock = TcpStream::connect(socks_addr).await.unwrap();
+    let mut sock = timeout(STEP, TcpStream::connect(socks_addr))
+        .await
+        .expect("test setup: SOCKS5 connect timed out")
+        .expect("test setup: SOCKS5 connect failed");
     sock.set_nodelay(true).ok();
-    sock.write_all(&[0x05, 0x01, 0x00]).await.unwrap();
+    timeout(STEP, sock.write_all(&[0x05, 0x01, 0x00]))
+        .await
+        .expect("test setup: SOCKS5 greeting write timed out")
+        .expect("test setup: SOCKS5 greeting write failed");
     let mut greet = [0u8; 2];
-    sock.read_exact(&mut greet).await.unwrap();
+    timeout(STEP, sock.read_exact(&mut greet))
+        .await
+        .expect("SOCKS5 greeting read timed out")
+        .expect("SOCKS5 greeting read failed");
     assert_eq!(greet, [0x05, 0x00]);
     let mut req = Vec::with_capacity(7 + host.len());
     req.extend_from_slice(&[0x05, 0x01, 0x00, 0x03]);
     req.push(host.len() as u8);
     req.extend_from_slice(host.as_bytes());
     req.extend_from_slice(&port.to_be_bytes());
-    sock.write_all(&req).await.unwrap();
+    timeout(STEP, sock.write_all(&req))
+        .await
+        .expect("SOCKS5 CONNECT request write timed out")
+        .expect("SOCKS5 CONNECT request write failed");
+    // Iter-35: bound + diagnose the reply read separately from
+    // the success-code assert. Pre-iter-35 the unwrap() here
+    // gave a useless `Result::unwrap on Err(...)` panic when
+    // the server-side spawned task EOF-closed without writing
+    // back 10 bytes — typically a parallel-test contention
+    // race where the upstream α handshake itself failed
+    // mid-flight. The new path PRINTS the actual reply bytes
+    // (if any) so the operator sees the failure shape.
     let mut reply = [0u8; 10];
-    sock.read_exact(&mut reply).await.unwrap();
-    assert_eq!(reply[1], 0x00, "SOCKS5 CONNECT must succeed");
+    let read_outcome = timeout(STEP, sock.read_exact(&mut reply)).await;
+    let read_result = match read_outcome {
+        Ok(r) => r,
+        Err(_) => panic!(
+            "SOCKS5 reply read timed out after {}s — server task likely deadlocked or \
+             never wrote a reply. Server task done: {}",
+            STEP.as_secs(),
+            server_task.is_finished(),
+        ),
+    };
+    if let Err(e) = read_result {
+        // Under heavy parallel-test load this can hit
+        // UnexpectedEof when the dispatch path failed and the
+        // iter-29 error-reply path itself raced against TCP
+        // close. Surface a useful diagnostic.
+        panic!(
+            "SOCKS5 reply read failed ({e}) — typically a parallel-test contention race where \
+             the upstream α handshake aborted before iter-29's error-reply could land. Server \
+             task done: {}",
+            server_task.is_finished()
+        );
+    }
+    assert_eq!(
+        reply[1], 0x00,
+        "SOCKS5 CONNECT must succeed; got REP=0x{:02x} (iter-29/30 maps: 0x01=generic, \
+         0x05=conn-refused, 0x06=timeout)",
+        reply[1]
+    );
 
-    sock.write_all(payload).await.unwrap();
+    timeout(STEP, sock.write_all(payload))
+        .await
+        .expect("payload write timed out")
+        .expect("payload write failed");
     let mut buf = vec![0u8; payload.len()];
     timeout(STEP, sock.read_exact(&mut buf))
         .await
-        .unwrap()
-        .unwrap();
+        .expect("echo read timed out")
+        .expect("echo read failed");
     let _ = sock.shutdown().await;
     // Wait for the dispatch task to fully complete before returning.
     // Without this, `record_success` (called AFTER pump returns) may
