@@ -160,6 +160,16 @@ fn escape(s: &str) -> String {
 /// Drive a single connect-test cycle. Loads the config, resolves
 /// the endpoint, opens TCP, runs the Proteus α handshake, drops
 /// the session.
+///
+/// Iter-42: now a thin wrapper around [`run_against_endpoint`],
+/// which targets `cfg.server_endpoint` by default. The pool-
+/// dispatch variant `run_against_all_endpoints` was added so
+/// operators with `server_endpoints: [primary, backup1, backup2]`
+/// can verify EACH entry independently before relying on the
+/// pool dispatcher's failover logic — pre-iter-42 they could only
+/// test the primary `server_endpoint` field, leaving backup
+/// entries unverified until first failover (i.e. exactly when
+/// they DIDN'T want surprises).
 pub async fn run(
     config_path: &Path,
     connect_timeout: Duration,
@@ -169,11 +179,62 @@ pub async fn run(
         .build_handshake_config()
         .map_err(|e| ConnectTestError::Config(format!("build_handshake_config: {e}")))?;
     let endpoint = cfg.server_endpoint.clone();
+    run_against_endpoint(&cfg, &hs_cfg, endpoint, connect_timeout).await
+}
+
+/// Drive a connect-test against every entry in
+/// `cfg.server_endpoints` (the pool). Returns one
+/// [`ConnectTestReport`] per entry, in declaration order. If the
+/// pool is empty (operator hasn't migrated to multi-VPS), falls
+/// back to a single-entry run against `cfg.server_endpoint`.
+///
+/// Per-entry semantics:
+///   - Each entry is tested with a fresh DNS resolution + TCP
+///     connect + handshake. Cached handshake state is NOT shared
+///     between entries (we're verifying each one ABSOLUTELY, not
+///     re-using state that might mask a per-entry failure).
+///   - One entry failing doesn't abort the remaining tests; the
+///     operator gets the complete picture in one invocation.
+///   - Exit code at the top level is 0 IFF every entry's exit
+///     code is 0. One bad entry → exit 1.
+pub async fn run_against_all_endpoints(
+    config_path: &Path,
+    connect_timeout: Duration,
+) -> Result<Vec<ConnectTestReport>, ConnectTestError> {
+    let cfg = Arc::new(ClientConfig::load(config_path).await?);
+    let hs_cfg = cfg
+        .build_handshake_config()
+        .map_err(|e| ConnectTestError::Config(format!("build_handshake_config: {e}")))?;
+    let endpoints: Vec<String> = if cfg.server_endpoints.is_empty() {
+        vec![cfg.server_endpoint.clone()]
+    } else {
+        cfg.server_endpoints.clone()
+    };
+    let mut reports = Vec::with_capacity(endpoints.len());
+    for ep in endpoints {
+        let r = run_against_endpoint(&cfg, &hs_cfg, ep, connect_timeout).await?;
+        reports.push(r);
+    }
+    Ok(reports)
+}
+
+/// Pure per-endpoint runner: given an already-loaded
+/// `ClientConfig` + pre-built handshake config + an explicit
+/// endpoint string, run one full DNS → TCP → handshake cycle.
+/// Factored out of [`run`] so [`run_against_all_endpoints`] can
+/// reuse it without re-parsing the config or rebuilding the
+/// handshake state once per pool entry.
+async fn run_against_endpoint(
+    cfg: &Arc<ClientConfig>,
+    hs_cfg: &proteus_transport_alpha::client::ClientConfig,
+    endpoint: String,
+    connect_timeout: Duration,
+) -> Result<ConnectTestReport, ConnectTestError> {
     let started = Instant::now();
 
     // ---- DNS ----
     let dns_t0 = Instant::now();
-    let Resolved { addr, via } = match resolve_for_client(&endpoint, &cfg).await {
+    let Resolved { addr, via } = match resolve_for_client(&endpoint, cfg).await {
         Ok(r) => r,
         Err(e) => {
             return Ok(failed_report(
@@ -238,7 +299,7 @@ pub async fn run(
                 tcp,
                 &connector,
                 &tls_cfg.server_name,
-                &hs_cfg,
+                hs_cfg,
             ),
         )
         .await;
@@ -259,7 +320,7 @@ pub async fn run(
     } else {
         let h = tokio::time::timeout(
             connect_timeout,
-            proteus_transport_alpha::client::handshake_over_tcp(tcp, &hs_cfg),
+            proteus_transport_alpha::client::handshake_over_tcp(tcp, hs_cfg),
         )
         .await;
         match h {
@@ -365,6 +426,75 @@ pub async fn cli_run(
         }
     }
     Ok(report.exit_code())
+}
+
+/// Iter-42: CLI entry for `connect-test --all-endpoints`.
+/// Tests every `server_endpoints:` entry independently and
+/// prints one report per entry. Exit code is 0 IFF every entry
+/// succeeded; ANY single failure → exit 1.
+///
+/// JSON output emits a top-level object with a `reports:` array
+/// (NOT NDJSON / line-delimited), so scripted callers can
+/// `jq '.reports[] | select(.outcome=="failed")'` without
+/// having to parse multiple objects.
+pub async fn cli_run_all_endpoints(
+    config_path: &Path,
+    connect_timeout_secs: u64,
+    format: &str,
+) -> std::io::Result<i32> {
+    let connect_timeout = Duration::from_secs(connect_timeout_secs);
+    let reports = match run_against_all_endpoints(config_path, connect_timeout).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("connect-test --all-endpoints setup failed: {e}");
+            return Ok(2);
+        }
+    };
+    let exit = if reports.iter().all(|r| r.exit_code() == 0) {
+        0
+    } else {
+        1
+    };
+    match format {
+        "json" => {
+            use std::fmt::Write as _;
+            let mut s = String::with_capacity(384 * reports.len() + 64);
+            s.push_str(r#"{"kind":"connect_test_all_endpoints","reports":["#);
+            for (i, r) in reports.iter().enumerate() {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&r.render_json());
+            }
+            let total = reports.len();
+            let oks = reports.iter().filter(|r| r.exit_code() == 0).count();
+            let fails = total - oks;
+            let _ = write!(
+                s,
+                r#"],"total":{total},"ok":{oks},"failed":{fails},"exit_code":{exit}}}"#
+            );
+            println!("{s}");
+        }
+        _ => {
+            // Text mode: one report per entry, blank-line separated
+            // + a final summary line.
+            let total = reports.len();
+            let oks = reports.iter().filter(|r| r.exit_code() == 0).count();
+            let fails = total - oks;
+            for (i, r) in reports.iter().enumerate() {
+                if i > 0 {
+                    println!();
+                }
+                print!("{}", r.render_text());
+            }
+            println!();
+            println!("---");
+            println!(
+                "Summary: {total} endpoint(s) tested, {oks} ok, {fails} failed  (exit {exit})"
+            );
+        }
+    }
+    Ok(exit)
 }
 
 #[cfg(test)]
@@ -477,6 +607,200 @@ mod tests {
         assert!(j.contains(r#""outcome":"failed""#));
         assert!(j.contains(r#""error":"tcp_connect: refused""#));
         assert!(j.contains(r#""exit_code":1"#));
+    }
+
+    // ──── Iter-42 multi-endpoint output formatting tests ────
+    //
+    // The pool-aware runner emits a single JSON object with a
+    // `reports:` array (not NDJSON) and a text-mode summary line.
+    // These tests pin the exact shape so the output schema is
+    // stable for scripted (jq) consumers.
+
+    /// Helper that builds a pair of synthetic reports for the
+    /// output-formatting unit tests.
+    fn synthetic_reports() -> Vec<ConnectTestReport> {
+        vec![
+            ConnectTestReport {
+                endpoint: "primary.example.com:8443".to_string(),
+                resolved_addr: "198.51.100.10:8443".parse().unwrap(),
+                resolved_via: ResolvedVia::IpLiteralInEndpoint,
+                dns_duration: Duration::from_micros(80),
+                tcp_connect_duration: Duration::from_millis(40),
+                handshake_duration: Duration::from_millis(160),
+                total_duration: Duration::from_millis(200),
+                outcome: ConnectTestOutcome::Ok,
+            },
+            ConnectTestReport {
+                endpoint: "backup.example.com:8443".to_string(),
+                resolved_addr: "198.51.100.11:8443".parse().unwrap(),
+                resolved_via: ResolvedVia::SystemResolver,
+                dns_duration: Duration::from_millis(5),
+                tcp_connect_duration: Duration::from_millis(50),
+                handshake_duration: Duration::ZERO,
+                total_duration: Duration::from_millis(55),
+                outcome: ConnectTestOutcome::Failed("handshake: timeout".to_string()),
+            },
+        ]
+    }
+
+    /// Reusable text-render helper mirroring cli_run_all_endpoints
+    /// text mode without the std::io / std::process boundary.
+    fn render_text_all(reports: &[ConnectTestReport], exit: i32) -> String {
+        use std::fmt::Write as _;
+        let mut buf = String::new();
+        let total = reports.len();
+        let oks = reports.iter().filter(|r| r.exit_code() == 0).count();
+        let fails = total - oks;
+        for (i, r) in reports.iter().enumerate() {
+            if i > 0 {
+                let _ = writeln!(buf);
+            }
+            buf.push_str(&r.render_text());
+        }
+        let _ = writeln!(buf);
+        let _ = writeln!(buf, "---");
+        let _ = writeln!(
+            buf,
+            "Summary: {total} endpoint(s) tested, {oks} ok, {fails} failed  (exit {exit})"
+        );
+        buf
+    }
+
+    /// Reusable JSON-render helper mirroring cli_run_all_endpoints
+    /// json mode.
+    fn render_json_all(reports: &[ConnectTestReport], exit: i32) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        s.push_str(r#"{"kind":"connect_test_all_endpoints","reports":["#);
+        for (i, r) in reports.iter().enumerate() {
+            if i > 0 {
+                s.push(',');
+            }
+            s.push_str(&r.render_json());
+        }
+        let total = reports.len();
+        let oks = reports.iter().filter(|r| r.exit_code() == 0).count();
+        let fails = total - oks;
+        let _ = write!(
+            s,
+            r#"],"total":{total},"ok":{oks},"failed":{fails},"exit_code":{exit}}}"#
+        );
+        s
+    }
+
+    #[test]
+    fn iter42_text_render_includes_every_endpoint_and_summary() {
+        let reports = synthetic_reports();
+        let exit = 1; // one OK + one failed
+        let s = render_text_all(&reports, exit);
+        // Each endpoint name appears.
+        assert!(s.contains("primary.example.com:8443"), "{s}");
+        assert!(s.contains("backup.example.com:8443"), "{s}");
+        // Per-entry outcomes appear.
+        assert!(s.contains("Outcome: OK"), "{s}");
+        assert!(s.contains("Outcome: FAILED"), "{s}");
+        // Summary line is present.
+        assert!(
+            s.contains("Summary: 2 endpoint(s) tested, 1 ok, 1 failed"),
+            "{s}"
+        );
+        assert!(s.contains("exit 1"), "{s}");
+    }
+
+    #[test]
+    fn iter42_json_render_emits_single_object_with_reports_array() {
+        let reports = synthetic_reports();
+        let exit = 1;
+        let s = render_json_all(&reports, exit);
+        // Schema sanity (string match — fast, no serde dep at runtime).
+        assert!(s.starts_with(r#"{"kind":"connect_test_all_endpoints""#), "{s}");
+        assert!(s.contains(r#""reports":["#), "{s}");
+        assert!(s.contains(r#""endpoint":"primary.example.com:8443""#), "{s}");
+        assert!(s.contains(r#""endpoint":"backup.example.com:8443""#), "{s}");
+        assert!(s.contains(r#""total":2"#), "{s}");
+        assert!(s.contains(r#""ok":1"#), "{s}");
+        assert!(s.contains(r#""failed":1"#), "{s}");
+        assert!(s.contains(r#""exit_code":1"#), "{s}");
+        assert!(s.ends_with('}'), "{s}");
+        // Counting `{` vs `}` is a quick balance sanity-check —
+        // proteus-client doesn't depend on serde_json so we
+        // string-match the schema rather than parse.
+        let opens = s.matches('{').count();
+        let closes = s.matches('}').count();
+        assert_eq!(
+            opens, closes,
+            "balanced braces required for well-formed JSON; got {opens} open vs {closes} close in:\n{s}"
+        );
+    }
+
+    #[test]
+    fn iter42_json_render_with_single_entry_is_still_array() {
+        // Even with 1 entry, `reports` must be an array. Operators
+        // jq'ing scripts can rely on `reports | length`.
+        let reports = vec![ConnectTestReport {
+            endpoint: "only.example.com:8443".to_string(),
+            resolved_addr: "198.51.100.1:8443".parse().unwrap(),
+            resolved_via: ResolvedVia::IpLiteralInEndpoint,
+            dns_duration: Duration::ZERO,
+            tcp_connect_duration: Duration::from_millis(30),
+            handshake_duration: Duration::from_millis(150),
+            total_duration: Duration::from_millis(180),
+            outcome: ConnectTestOutcome::Ok,
+        }];
+        let s = render_json_all(&reports, 0);
+        assert!(s.contains(r#""reports":["#), "{s}");
+        assert!(s.contains(r#""endpoint":"only.example.com:8443""#), "{s}");
+        assert!(s.contains(r#""total":1"#), "{s}");
+        assert!(s.contains(r#""ok":1"#), "{s}");
+        assert!(s.contains(r#""failed":0"#), "{s}");
+        assert!(s.contains(r#""exit_code":0"#), "{s}");
+    }
+
+    #[test]
+    fn iter42_exit_code_rule_one_failure_fails_overall() {
+        // Mirror the cli_run_all_endpoints exit-code policy:
+        // ANY single failure → overall exit 1. Pin this so a
+        // future "be lenient on partial pools" change has to
+        // think hard about breaking the test.
+        let reports = synthetic_reports();
+        let exit = if reports.iter().all(|r| r.exit_code() == 0) {
+            0
+        } else {
+            1
+        };
+        assert_eq!(exit, 1, "one of two synthetic reports is FAILED");
+    }
+
+    #[test]
+    fn iter42_exit_code_rule_all_ok_passes_overall() {
+        let reports = [
+            ConnectTestReport {
+                endpoint: "a.example.com:8443".to_string(),
+                resolved_addr: "198.51.100.1:8443".parse().unwrap(),
+                resolved_via: ResolvedVia::IpLiteralInEndpoint,
+                dns_duration: Duration::ZERO,
+                tcp_connect_duration: Duration::ZERO,
+                handshake_duration: Duration::ZERO,
+                total_duration: Duration::ZERO,
+                outcome: ConnectTestOutcome::Ok,
+            },
+            ConnectTestReport {
+                endpoint: "b.example.com:8443".to_string(),
+                resolved_addr: "198.51.100.2:8443".parse().unwrap(),
+                resolved_via: ResolvedVia::IpLiteralInEndpoint,
+                dns_duration: Duration::ZERO,
+                tcp_connect_duration: Duration::ZERO,
+                handshake_duration: Duration::ZERO,
+                total_duration: Duration::ZERO,
+                outcome: ConnectTestOutcome::Ok,
+            },
+        ];
+        let exit = if reports.iter().all(|r| r.exit_code() == 0) {
+            0
+        } else {
+            1
+        };
+        assert_eq!(exit, 0, "all-ok must exit 0");
     }
 
     #[test]

@@ -152,6 +152,24 @@ enum Cmd {
         /// document for CI / scripted gates).
         #[arg(long, default_value = "text")]
         format: String,
+        /// Iter-42: test EVERY entry in `server_endpoints:`
+        /// (the multi-VPS pool) instead of only the primary
+        /// `server_endpoint`. Each entry gets its own DNS + TCP
+        /// plus handshake cycle; one entry failing does NOT
+        /// abort the remaining tests. Exit code is 0 IFF every
+        /// entry succeeded; ANY single failure -> exit 1.
+        ///
+        /// Useful before relying on pool failover: pre-iter-42
+        /// operators could only test the primary; backup entries
+        /// were unverified until first failover (i.e. precisely
+        /// when surprises hurt). With this flag set the operator
+        /// proves every backup also works at deploy time.
+        ///
+        /// If `server_endpoints:` is empty (legacy single-entry
+        /// deploy), behaves identically to the no-flag default
+        /// (one test against `server_endpoint`).
+        #[arg(long, default_value_t = false)]
+        all_endpoints: bool,
     },
     /// One-shot in-process evaluation of client-side production
     /// alert rules against a running client's `/metrics`
@@ -230,10 +248,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config,
             connect_timeout_secs,
             format,
+            all_endpoints,
         } => {
-            let code =
-                proteus_client::connect_test::cli_run(&config, connect_timeout_secs, &format)
-                    .await?;
+            let code = if all_endpoints {
+                proteus_client::connect_test::cli_run_all_endpoints(
+                    &config,
+                    connect_timeout_secs,
+                    &format,
+                )
+                .await?
+            } else {
+                proteus_client::connect_test::cli_run(
+                    &config,
+                    connect_timeout_secs,
+                    &format,
+                )
+                .await?
+            };
             std::process::exit(code);
         }
         Cmd::AlertsCheck {
