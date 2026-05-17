@@ -359,6 +359,7 @@ mod tests {
             per_user_conn_limit: None,
             user_quarantine: None,
             user_quotas: None,
+            startup_self_test_timeout_secs: None,
             outbound_filter: None,
         }
     }

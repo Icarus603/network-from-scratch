@@ -327,6 +327,14 @@ pub struct ServerMetrics {
     /// this to spot "alice is going to keep hitting this until
     /// either I reset her bucket or the period rolls over".
     pub user_quota_admission_rejected: AtomicU64,
+    /// **Startup self-test status** — 0 if the loopback handshake
+    /// failed (or wasn't run), 1 if it passed at startup. Always
+    /// emitted as a gauge so operators can alert on
+    /// `proteus_startup_self_test_passed == 0` to spot deploys
+    /// where the binary started but couldn't prove its own crypto
+    /// path works. Set ONCE at startup; the gauge reports the
+    /// LAST self-test outcome for the lifetime of the process.
+    pub startup_self_test_passed: AtomicBool,
     /// Upstream dial requests blocked by the outbound destination
     /// filter. Includes SSRF-style attempts (`169.254.169.254`,
     /// RFC 1918, loopback, IPv6 ULA / mapped-v4 bypass) and
@@ -397,6 +405,7 @@ impl Default for ServerMetrics {
             abuse_alerts_per_user_bandwidth: AtomicU64::new(0),
             user_quarantine_rejected: AtomicU64::new(0),
             user_quota_admission_rejected: AtomicU64::new(0),
+            startup_self_test_passed: AtomicBool::new(false),
             outbound_blocked: AtomicU64::new(0),
             in_flight_sessions: AtomicU64::new(0),
             firewall_reload_attempts: AtomicU64::new(0),
@@ -500,6 +509,9 @@ impl ServerMetrics {
              # HELP proteus_user_quota_admission_rejected_total Handshakes rejected because the user_id has consumed its full period quota.\n\
              # TYPE proteus_user_quota_admission_rejected_total counter\n\
              proteus_user_quota_admission_rejected_total {}\n\
+             # HELP proteus_startup_self_test_passed 1 if the loopback self-handshake passed at startup, 0 otherwise.\n\
+             # TYPE proteus_startup_self_test_passed gauge\n\
+             proteus_startup_self_test_passed {}\n\
              # HELP proteus_outbound_blocked_total Upstream dials blocked by the outbound destination filter.\n\
              # TYPE proteus_outbound_blocked_total counter\n\
              proteus_outbound_blocked_total {}\n\
@@ -558,6 +570,7 @@ impl ServerMetrics {
             s(&self.abuse_alerts_per_user_bandwidth),
             s(&self.user_quarantine_rejected),
             s(&self.user_quota_admission_rejected),
+            u64::from(self.startup_self_test_passed.load(Ordering::Relaxed)),
             s(&self.outbound_blocked),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),
@@ -632,6 +645,28 @@ mod tests {
                 "missing TYPE row for {name} in:\n{text}"
             );
         }
+    }
+
+    #[test]
+    fn server_prometheus_emits_startup_self_test_gauge_zero_by_default() {
+        let m = ServerMetrics::default();
+        let text = m.prometheus();
+        assert!(
+            text.contains("proteus_startup_self_test_passed 0"),
+            "fresh ServerMetrics must report self-test as not-yet-passed: {text}"
+        );
+        assert!(text.contains("# TYPE proteus_startup_self_test_passed gauge"));
+    }
+
+    #[test]
+    fn server_prometheus_reflects_startup_self_test_passed_flip() {
+        let m = ServerMetrics::default();
+        m.startup_self_test_passed.store(true, Ordering::Relaxed);
+        let text = m.prometheus();
+        assert!(
+            text.contains("proteus_startup_self_test_passed 1"),
+            "flipping the gauge to true must reflect in /metrics: {text}"
+        );
     }
 
     /// Bumping the reload counters reflects in the Prometheus output.

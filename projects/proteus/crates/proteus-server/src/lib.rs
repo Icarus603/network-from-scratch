@@ -11,6 +11,7 @@ pub mod ip_reputation;
 pub mod preflight;
 pub mod relay;
 pub mod startup;
+pub mod startup_self_test;
 pub mod validate;
 
 /// Return true if `addr` parses as a loopback `host:port` (127/8 or

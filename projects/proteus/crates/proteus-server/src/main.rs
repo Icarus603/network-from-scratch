@@ -297,6 +297,51 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         "proteus-server starting"
     );
 
+    // Startup self-test: run a full loopback handshake against the
+    // operator's REAL keys BEFORE binding the public listener.
+    // Catches mismatched mlkem_pk/sk, broken dep regressions, RNG
+    // starvation — failures the operator would otherwise only
+    // learn about when real users start failing handshakes.
+    //
+    // The self-test consumes ServerKeys (moves into the throwaway
+    // ctx), so we load the keys twice: once for the test, once for
+    // the production ctx. This is cheap (file I/O + a few ML-KEM
+    // operations) and the deliberate redundancy ALSO tests the
+    // load_server_keys path under load.
+    //
+    // Set `startup_self_test_timeout_secs: 0` in YAML to skip
+    // (NOT recommended for production).
+    let self_test_secs = cfg.startup_self_test_timeout_secs.unwrap_or(10);
+    let self_test_passed = if self_test_secs > 0 {
+        let test_keys = load_server_keys(&cfg)?;
+        let t = std::time::Duration::from_secs(self_test_secs);
+        match proteus_server::startup_self_test::run_self_test(test_keys, t).await {
+            Ok(outcome) => {
+                info!(
+                    total_ms = outcome.total.as_millis() as u64,
+                    handshake_ms = outcome.handshake.as_millis() as u64,
+                    roundtrip_ms = outcome.roundtrip.as_millis() as u64,
+                    "startup self-test PASSED — crypto stack is healthy, proceeding to bind listener"
+                );
+                true
+            }
+            Err(e) => {
+                error!(
+                    error = %e,
+                    "startup self-test FAILED — refusing to bind public listener with broken crypto stack"
+                );
+                return Err(format!("startup self-test failed: {e}").into());
+            }
+        }
+    } else {
+        warn!(
+            "startup_self_test_timeout_secs=0 — startup self-test DISABLED. \
+             Operator gives up the deploy-time trip-wire for mismatched keys, \
+             broken dep regressions, RNG starvation. Re-enable for production."
+        );
+        false
+    };
+
     let keys = load_server_keys(&cfg)?;
     let mut ctx = ServerCtx::new(keys);
     // Cover-endpoint wiring with precedence:
@@ -467,6 +512,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // Server-aggregated metrics — wire into ctx so the hot-path
     // increments the right counters.
     let metrics = Arc::new(proteus_transport_alpha::metrics::ServerMetrics::default());
+    // Propagate the self-test outcome to the operator-visible
+    // gauge BEFORE the metrics endpoint binds — operators
+    // alert on `proteus_startup_self_test_passed == 0` to spot
+    // deploys where the binary started but couldn't prove its
+    // own crypto path works.
+    metrics
+        .startup_self_test_passed
+        .store(self_test_passed, std::sync::atomic::Ordering::Relaxed);
     ctx = ctx.with_metrics(Arc::clone(&metrics));
 
     // Rate-limit abuse detector — lives on ServerCtx because the

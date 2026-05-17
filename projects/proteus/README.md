@@ -687,6 +687,54 @@ proteus_user_quota_admission_rejected_total        # counter — admission gate 
 `/diagnose` adds a USER QUOTA table sorted heaviest-first so
 operators see who's about to hit their cap at the top.
 
+### Startup self-test — catch broken crypto BEFORE the listener binds
+
+Every defense above assumes the binary's crypto stack actually
+works. But a typo in `mlkem_sk` path, a YAML edit that swapped
+just one of the X25519/ML-KEM keys, a `cargo update` that broke
+`ring`/`chacha20poly1305`/`ml-kem` — any of these silently fails
+at production time. Operators only learn about it when real
+users start failing handshakes (= fresh outage during every
+restart).
+
+Proteus runs a **full loopback handshake against the operator's
+real keys BEFORE binding the public listener**. The flow:
+
+1. Bind `127.0.0.1:0` (in-process).
+2. Spawn a one-shot server using the real `ServerKeys`.
+3. Mint an ephemeral client identity + run the production
+   `client::handshake_over_tcp`.
+4. Roundtrip a probe record; verify the AEAD path in both
+   directions.
+5. Report per-phase timings (handshake ms, roundtrip ms, total).
+
+```yaml
+# server.yaml
+startup_self_test_timeout_secs: 10   # default; 0 = disable (NOT for production)
+```
+
+Failure aborts the binary with `exit code != 0` — systemd sees
+the failure, the operator's deploy gate (Ansible / Terraform /
+CI) catches it. Healthy binary logs:
+
+```text
+INFO startup self-test PASSED — crypto stack is healthy, proceeding to bind listener
+  total_ms=1 handshake_ms=1 roundtrip_ms=0
+```
+
+Operator-visible Prometheus surface:
+
+- `proteus_startup_self_test_passed` (gauge, always emitted —
+  `0` until startup completes, `1` once the self-test passed).
+  Alert on `== 0` to spot deploys where the binary started
+  without proving its crypto path works.
+
+The self-test ALSO catches per-phase regressions: a `cargo
+update` that makes ML-KEM keygen 10x slower is visible in the
+startup log as a `handshake_ms` jump even when the handshake
+still succeeds. Operators paying attention to startup timings
+notice these BEFORE they impact real users.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

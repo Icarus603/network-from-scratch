@@ -359,6 +359,21 @@ pub struct ServerConfig {
     #[serde(default)]
     pub user_quotas: Option<UserQuotasCfg>,
 
+    /// Startup self-test deadline in seconds. The binary runs a
+    /// full loopback handshake against the operator's real keys
+    /// BEFORE binding the public listener. Catches mismatched
+    /// mlkem_pk/sk, broken dep regressions, RNG starvation —
+    /// failures the operator would otherwise only learn about
+    /// when real users start failing handshakes.
+    ///
+    /// 0 = self-test disabled (NOT recommended for production —
+    /// you give up the deploy-time trip-wire). Default 10s when
+    /// unset. Reasonable production value: 10-30 seconds; the
+    /// self-test typically takes <1ms on modern hardware, so a
+    /// generous deadline costs nothing.
+    #[serde(default)]
+    pub startup_self_test_timeout_secs: Option<u64>,
+
     /// Optional cap on total bytes (tx + rx plaintext) per session.
     /// When the cumulative byte count crosses this threshold the
     /// session is torn down with close_reason = "byte_budget_exhausted".
@@ -1170,6 +1185,51 @@ user_quotas:\n  \
         assert!(p
             .prometheus()
             .contains(r#"proteus_config_section_active{section="user_quotas"} 1"#));
+    }
+
+    #[test]
+    fn startup_self_test_timeout_parses_when_supplied() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+startup_self_test_timeout_secs: 30\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.startup_self_test_timeout_secs, Some(30));
+    }
+
+    #[test]
+    fn startup_self_test_timeout_zero_means_disabled() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+startup_self_test_timeout_secs: 0\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        assert_eq!(cfg.startup_self_test_timeout_secs, Some(0));
+    }
+
+    #[test]
+    fn startup_self_test_timeout_defaults_to_none_when_omitted() {
+        let yaml = "\
+listen_alpha: \"127.0.0.1:0\"\n\
+keys:\n  \
+  mlkem_pk: /tmp/x\n  \
+  mlkem_sk: /tmp/x\n  \
+  x25519_pk: /tmp/x\n  \
+  x25519_sk: /tmp/x\n\
+";
+        let cfg: ServerConfig = serde_yaml::from_str(yaml).expect("parse");
+        // None = use default (10s in main.rs).
+        assert_eq!(cfg.startup_self_test_timeout_secs, None);
     }
 
     #[test]
