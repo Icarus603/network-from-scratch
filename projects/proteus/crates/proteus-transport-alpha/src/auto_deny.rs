@@ -159,10 +159,19 @@ impl AutoDenyList {
         }
         let key = Self::prefix_key(peer_ip);
         self.maybe_vacuum(now);
-        let entries = self
-            .entries
-            .lock()
-            .expect("AutoDenyList entries lock poisoned");
+        // Iter-25: poisoned-lock recovery on the hot deny-check
+        // path. Under iter-24's `panic = unwind` profile, a
+        // panic in a writer task could poison this mutex; if
+        // we `.expect`d here every subsequent inbound TCP
+        // would die at the firewall stage. Recover by reading
+        // the inner value despite poison — the entries HashMap
+        // is structurally valid (the writer either completed
+        // the insert before panicking or didn't), and the
+        // worst-case outcome is one stale TTL window.
+        let entries = match self.entries.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         match entries.get(&key) {
             Some(&(deadline, _family)) => now < deadline,
             None => false,
@@ -181,10 +190,11 @@ impl AutoDenyList {
             IpAddr::V4(_) => IpFamily::V4,
             IpAddr::V6(_) => IpFamily::V6,
         };
-        let mut entries = self
-            .entries
-            .lock()
-            .expect("AutoDenyList entries lock poisoned");
+        // Iter-25: same poisoned-lock recovery as `is_denied`.
+        let mut entries = match self.entries.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         // Capture the pre-match length so we can decide the cap
         // BEFORE taking the mut borrow via Entry. Using the Entry
         // API afterwards collapses lookup + insert into one hash

@@ -137,20 +137,14 @@ impl PerUserBandwidth {
     /// quota bucket; the actual admission-gate check lives in
     /// `user_admission_ok`.
     pub fn set_quota(&self, tracker: Option<Arc<crate::user_quota::PerUserQuotaTracker>>) {
-        let mut g = self
-            .quota
-            .lock()
-            .expect("PerUserBandwidth quota lock poisoned");
+        let mut g = self.quota.lock().unwrap_or_else(|p| p.into_inner());
         *g = tracker;
     }
 
     /// Read the quota tracker handle.
     #[must_use]
     pub fn quota(&self) -> Option<Arc<crate::user_quota::PerUserQuotaTracker>> {
-        self.quota
-            .lock()
-            .expect("PerUserBandwidth quota lock poisoned")
-            .clone()
+        self.quota.lock().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Attach an auto-quarantine list + opt-in flag. When `opt_in
@@ -164,10 +158,7 @@ impl PerUserBandwidth {
         list: Option<Arc<crate::user_quarantine::UserQuarantineList>>,
         opt_in: bool,
     ) {
-        let mut g = self
-            .quarantine
-            .lock()
-            .expect("PerUserBandwidth quarantine lock poisoned");
+        let mut g = self.quarantine.lock().unwrap_or_else(|p| p.into_inner());
         *g = list;
         self.quarantine_on_fire
             .store(opt_in, std::sync::atomic::Ordering::Relaxed);
@@ -178,7 +169,7 @@ impl PerUserBandwidth {
     pub fn quarantine(&self) -> Option<Arc<crate::user_quarantine::UserQuarantineList>> {
         self.quarantine
             .lock()
-            .expect("PerUserBandwidth quarantine lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
 
@@ -188,10 +179,7 @@ impl PerUserBandwidth {
     /// bytes/sec). Hot-swappable via `Mutex<Option<...>>` so the
     /// binary can swap on SIGHUP without rebuilding the accumulator.
     pub fn set_abuse_fires(&self, buf: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>) {
-        let mut g = self
-            .abuse_fires
-            .lock()
-            .expect("PerUserBandwidth abuse_fires lock poisoned");
+        let mut g = self.abuse_fires.lock().unwrap_or_else(|p| p.into_inner());
         *g = buf;
     }
 
@@ -200,7 +188,7 @@ impl PerUserBandwidth {
     pub fn abuse_fires(&self) -> Option<Arc<crate::abuse_fires::AbuseFireBuffer>> {
         self.abuse_fires
             .lock()
-            .expect("PerUserBandwidth abuse_fires lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
 
@@ -214,10 +202,7 @@ impl PerUserBandwidth {
     /// `record_with_rate_check` path takes the lock once per session
     /// completion (low rate — not on the data-plane hot path).
     pub fn set_rate_detector(&self, detector: Option<Arc<PerUserBandwidthRateDetector>>) {
-        let mut g = self
-            .rate_detector
-            .lock()
-            .expect("PerUserBandwidth rate_detector lock poisoned");
+        let mut g = self.rate_detector.lock().unwrap_or_else(|p| p.into_inner());
         *g = detector;
     }
 
@@ -227,7 +212,7 @@ impl PerUserBandwidth {
     pub fn rate_detector(&self) -> Option<Arc<PerUserBandwidthRateDetector>> {
         self.rate_detector
             .lock()
-            .expect("PerUserBandwidth rate_detector lock poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clone()
     }
 
@@ -257,7 +242,7 @@ impl PerUserBandwidth {
         // (mutex is fine because once an entry exists we only
         // touch the atomics; the mutex is dropped immediately).
         let bucket = {
-            let mut g = self.inner.lock().expect("PerUserBandwidth lock poisoned");
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(entry) = g.get(&user_id) {
                 Arc::clone(entry)
             } else if g.len() >= self.max_users {
@@ -350,7 +335,7 @@ impl PerUserBandwidth {
     /// scrapes).
     #[must_use]
     pub fn snapshot(&self) -> Vec<([u8; 8], UserBytesSnapshot)> {
-        let g = self.inner.lock().expect("PerUserBandwidth lock poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<_> = g
             .iter()
             .map(|(uid, b)| {
@@ -383,10 +368,7 @@ impl PerUserBandwidth {
     /// they're approaching the cap.
     #[must_use]
     pub fn tracked_users(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("PerUserBandwidth lock poisoned")
-            .len()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Operator-supplied cap.

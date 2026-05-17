@@ -230,37 +230,48 @@ impl ReloadableFirewall {
     /// Snapshot the current rules. Hot-path call; cheap clone.
     #[must_use]
     pub fn snapshot(&self) -> Firewall {
-        self.inner
-            .read()
-            .expect("ReloadableFirewall lock poisoned")
-            .clone()
+        // Iter-25: poisoned-lock recovery. Pre-iter-24
+        // (`panic = abort`) a writer panic killed the
+        // process so the `.expect` was unreachable. Post-iter-24
+        // (`panic = unwind`) a poisoned lock would cascade
+        // here on EVERY inbound TCP — every connection
+        // would die at the firewall check. Recover by
+        // reading the inner value despite the poison: the
+        // `Firewall` struct is a list of CIDR rules; a
+        // partial write that poisoned the lock still leaves
+        // a complete prior or new value in the slot.
+        match self.inner.read() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
     }
 
     /// Apply the policy against `peer` using the current snapshot.
     /// Avoids the clone on the common-case "no rules" path.
     #[must_use]
     pub fn admit(&self, peer: IpAddr) -> bool {
-        self.inner
-            .read()
-            .expect("ReloadableFirewall lock poisoned")
-            .admit(peer)
+        match self.inner.read() {
+            Ok(g) => g.admit(peer),
+            Err(p) => p.into_inner().admit(peer),
+        }
     }
 
     /// True if the current snapshot has at least one rule.
     #[must_use]
     pub fn is_active(&self) -> bool {
-        self.inner
-            .read()
-            .expect("ReloadableFirewall lock poisoned")
-            .is_active()
+        match self.inner.read() {
+            Ok(g) => g.is_active(),
+            Err(p) => p.into_inner().is_active(),
+        }
     }
 
     /// Atomically replace the rule set with `new_rules`.
     pub fn reload(&self, new_rules: Firewall) {
-        *self
-            .inner
-            .write()
-            .expect("ReloadableFirewall lock poisoned") = new_rules;
+        let mut g = match self.inner.write() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        *g = new_rules;
     }
 }
 

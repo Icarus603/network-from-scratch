@@ -209,10 +209,18 @@ impl ProbeAnomalyDetector {
     /// alerted in this burst).
     pub fn record_at(&self, ip: IpAddr, now: Instant) -> Option<PrefixKey> {
         let key = Self::prefix_key(ip);
-        let mut events = self
-            .events
-            .lock()
-            .expect("ProbeAnomalyDetector mutex poisoned");
+        // Iter-25: poisoned-lock recovery on this hot per-
+        // inbound-TCP path (called from `route_to_cover_or_drop`
+        // on every cover-routed connection). Under iter-24's
+        // `panic = unwind`, a panic anywhere in this module
+        // could poison the mutex; if `.expect`d here every
+        // subsequent cover-routed connection would die. The
+        // detector's `events` HashMap is structurally valid
+        // even after a partial-write poison.
+        let mut events = match self.events.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
 
         // Periodic vacuum — drop fully-expired prefix state. Cheap
         // amortized; the hot path is the VecDeque drain below.
@@ -284,10 +292,11 @@ impl ProbeAnomalyDetector {
     /// Append `fire` to the ring buffer, evicting the oldest entry
     /// when the cap is reached.
     fn push_recent_fire(&self, fire: RecentFire) {
-        let mut ring = self
-            .recent_fires
-            .lock()
-            .expect("ProbeAnomalyDetector recent_fires mutex poisoned");
+        // Iter-25: poisoned-lock recovery (see record_at).
+        let mut ring = match self.recent_fires.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
         if ring.len() >= self.recent_fires_cap {
             ring.pop_front();
         }

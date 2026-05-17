@@ -132,8 +132,14 @@ impl CertFileWatcher {
     pub fn changed(&self) -> bool {
         let cert_now = file_mtime_unix(&self.cert_path).unwrap_or(i64::MIN);
         let key_now = file_mtime_unix(&self.key_path).unwrap_or(i64::MIN);
-        let last_cert = *self.cert_mtime.lock().expect("cert_mtime poisoned");
-        let last_key = *self.key_mtime.lock().expect("key_mtime poisoned");
+        // Iter-25: poisoned-lock recovery. Background task —
+        // not a per-connection hot path — but consistency
+        // with the iter-25 sweep keeps the cert-reload watcher
+        // alive even if a prior reload panicked. Mtimes are
+        // single i64 values; partial-write poison can't leave
+        // them in a malformed state.
+        let last_cert = *self.cert_mtime.lock().unwrap_or_else(|p| p.into_inner());
+        let last_key = *self.key_mtime.lock().unwrap_or_else(|p| p.into_inner());
         cert_now != last_cert || key_now != last_key
     }
 
@@ -149,8 +155,9 @@ impl CertFileWatcher {
     pub fn check_and_record(&self) -> Option<(i64, i64)> {
         let cert_now = file_mtime_unix(&self.cert_path).unwrap_or(i64::MIN);
         let key_now = file_mtime_unix(&self.key_path).unwrap_or(i64::MIN);
-        let mut last_cert = self.cert_mtime.lock().expect("cert_mtime poisoned");
-        let mut last_key = self.key_mtime.lock().expect("key_mtime poisoned");
+        // Iter-25: same poisoned-lock recovery as `changed`.
+        let mut last_cert = self.cert_mtime.lock().unwrap_or_else(|p| p.into_inner());
+        let mut last_key = self.key_mtime.lock().unwrap_or_else(|p| p.into_inner());
         if cert_now == *last_cert && key_now == *last_key {
             return None;
         }

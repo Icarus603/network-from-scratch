@@ -170,7 +170,7 @@ impl AbuseFireBuffer {
         if self.capacity == 0 {
             return;
         }
-        let mut g = self.inner.lock().expect("AbuseFireBuffer mutex poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if g.len() >= self.capacity {
             g.pop_front();
         }
@@ -186,17 +186,14 @@ impl AbuseFireBuffer {
     /// each fire is a POD copy.
     #[must_use]
     pub fn snapshot(&self) -> Vec<AbuseFire> {
-        let g = self.inner.lock().expect("AbuseFireBuffer mutex poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.iter().copied().collect()
     }
 
     /// Count of fires currently in the buffer (≤ capacity).
     #[must_use]
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("AbuseFireBuffer mutex poisoned")
-            .len()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// True when the buffer holds zero fires.

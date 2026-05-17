@@ -131,10 +131,7 @@ impl ReloadablePool {
     /// read lock); called once per SOCKS5 CONNECT.
     #[must_use]
     pub fn current(&self) -> Option<Arc<EndpointPool>> {
-        self.inner
-            .read()
-            .expect("ReloadablePool lock poisoned")
-            .clone()
+        self.inner.read().unwrap_or_else(|p| p.into_inner()).clone()
     }
 
     /// Swap in a freshly-built pool. Per-endpoint counter +
@@ -145,7 +142,7 @@ impl ReloadablePool {
         self.reload_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         {
-            let mut w = self.inner.write().expect("ReloadablePool lock poisoned");
+            let mut w = self.inner.write().unwrap_or_else(|p| p.into_inner());
             *w = new_pool;
         }
         self.reload_succeeded

@@ -152,7 +152,7 @@ impl PerUserQuotaTracker {
         *self
             .persistence_path
             .lock()
-            .expect("persistence_path poisoned") = Some(path);
+            .unwrap_or_else(|p| p.into_inner()) = Some(path);
         self
     }
 
@@ -161,7 +161,7 @@ impl PerUserQuotaTracker {
     /// unlimited" (overrides the operator's default). Used by the
     /// startup wiring to apply YAML-supplied `overrides:`.
     pub fn set_user_cap(&self, user_id: [u8; 8], cap_bytes: u64) {
-        let mut g = self.inner.lock().expect("inner lock poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let bucket = g.entry(user_id).or_insert_with(|| UserBucket {
             used_bytes: 0,
             period_started_at: Instant::now(),
@@ -194,7 +194,7 @@ impl PerUserQuotaTracker {
         let mut new_used = bucket.used_bytes.saturating_add(bytes);
         // Apply changes under the lock.
         let used_after = {
-            let mut g = self.inner.lock().expect("inner lock poisoned");
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             // Re-fetch under the lock — record_at can race with
             // another record_at on the same user, but additions
             // are commutative so we just take whichever current
@@ -207,7 +207,7 @@ impl PerUserQuotaTracker {
             } else {
                 // Lost the race AND we just dropped past cap;
                 // route through overflow.
-                let mut og = self.overflow.lock().expect("overflow lock poisoned");
+                let mut og = self.overflow.lock().unwrap_or_else(|p| p.into_inner());
                 self.maybe_roll_period(&mut og, now);
                 og.used_bytes = og.used_bytes.saturating_add(bytes);
                 og.used_bytes
@@ -243,13 +243,13 @@ impl PerUserQuotaTracker {
     }
 
     fn acquire_bucket(&self, user_id: [u8; 8], now: Instant) -> UserBucket {
-        let mut g = self.inner.lock().expect("inner lock poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(b) = g.get_mut(&user_id) {
             self.maybe_roll_period(b, now);
             return *b;
         }
         if g.len() >= self.max_entries {
-            let mut og = self.overflow.lock().expect("overflow lock poisoned");
+            let mut og = self.overflow.lock().unwrap_or_else(|p| p.into_inner());
             self.maybe_roll_period(&mut og, now);
             return *og;
         }
@@ -277,7 +277,7 @@ impl PerUserQuotaTracker {
     }
 
     fn peek_state(&self, user_id: &[u8; 8]) -> (u64, u64) {
-        let g = self.inner.lock().expect("inner lock poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         match g.get(user_id) {
             Some(b) => (
                 b.used_bytes,
@@ -296,7 +296,7 @@ impl PerUserQuotaTracker {
 
     /// Test-friendly variant with explicit `now`.
     pub fn is_over_quota_at(&self, user_id: &[u8; 8], now: Instant) -> bool {
-        let g = self.inner.lock().expect("inner lock poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let Some(b) = g.get(user_id) else {
             return false;
         };
@@ -325,7 +325,7 @@ impl PerUserQuotaTracker {
     pub fn reset_user(&self, user_id: &[u8; 8]) -> bool {
         let now = Instant::now();
         let reset = {
-            let mut g = self.inner.lock().expect("inner lock poisoned");
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             if let Some(b) = g.get_mut(user_id) {
                 b.used_bytes = 0;
                 b.period_started_at = now;
@@ -356,7 +356,7 @@ impl PerUserQuotaTracker {
     /// Test-friendly snapshot.
     #[must_use]
     pub fn active_snapshot_at(&self, limit: usize, now: Instant) -> Vec<ActiveQuota> {
-        let g = self.inner.lock().expect("inner lock poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<ActiveQuota> = g
             .iter()
             .map(|(uid, b)| {
@@ -423,7 +423,7 @@ impl PerUserQuotaTracker {
     /// Distinct users currently being tracked.
     #[must_use]
     pub fn tracked_users(&self) -> usize {
-        self.inner.lock().expect("inner lock poisoned").len()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Configured period length.
@@ -480,7 +480,7 @@ impl PerUserQuotaTracker {
             let g = self
                 .persistence_path
                 .lock()
-                .expect("persistence_path poisoned");
+                .unwrap_or_else(|p| p.into_inner());
             match g.as_ref() {
                 Some(p) => p.clone(),
                 None => return Ok(()),
@@ -492,7 +492,7 @@ impl PerUserQuotaTracker {
             .unwrap_or(Duration::ZERO)
             .as_secs();
         let entries: Vec<(String, u64, Option<u64>, u64)> = {
-            let g = self.inner.lock().expect("inner lock poisoned");
+            let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.iter()
                 .map(|(uid, b)| {
                     // Convert period_started_at (Instant) to a
@@ -580,7 +580,7 @@ impl PerUserQuotaTracker {
             .duration_since(UNIX_EPOCH)
             .unwrap_or(Duration::ZERO)
             .as_secs();
-        let mut g = tracker.inner.lock().expect("inner lock poisoned");
+        let mut g = tracker.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut loaded = 0u64;
         for (lineno, line) in raw.lines().enumerate() {
             let line = line.trim();
@@ -650,7 +650,7 @@ impl PerUserQuotaTracker {
             let g = self
                 .persistence_path
                 .lock()
-                .expect("persistence_path poisoned");
+                .unwrap_or_else(|p| p.into_inner());
             match g.as_ref() {
                 Some(p) => p.clone(),
                 None => return Ok(0),
@@ -673,7 +673,7 @@ impl PerUserQuotaTracker {
             .unwrap_or(Duration::ZERO)
             .as_secs();
         let mut updates = 0u64;
-        let mut g = self.inner.lock().expect("inner lock poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         for line in raw.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {

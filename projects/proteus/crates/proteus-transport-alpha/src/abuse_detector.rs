@@ -73,7 +73,7 @@ impl AbuseDetector {
     ///
     /// Pure-CPU; no I/O. Safe to call from any context.
     pub fn record_at(&self, user_id: [u8; 8], now: Instant) -> bool {
-        let mut events = self.events.lock().expect("AbuseDetector mutex poisoned");
+        let mut events = self.events.lock().unwrap_or_else(|p| p.into_inner());
 
         // Periodic vacuum: drop fully-expired user state. O(N) on
         // the map but only runs amortized — the hot path is the
@@ -137,17 +137,14 @@ impl AbuseDetector {
     /// tests.
     #[must_use]
     pub fn tracked_users(&self) -> usize {
-        self.events
-            .lock()
-            .expect("AbuseDetector mutex poisoned")
-            .len()
+        self.events.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Force-drop all per-user state. Used by tests / SIGHUP.
     pub fn clear(&self) {
         self.events
             .lock()
-            .expect("AbuseDetector mutex poisoned")
+            .unwrap_or_else(|p| p.into_inner())
             .clear();
     }
 }

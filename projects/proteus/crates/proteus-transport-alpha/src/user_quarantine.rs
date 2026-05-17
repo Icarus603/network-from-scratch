@@ -277,7 +277,7 @@ impl UserQuarantineList {
             let mut g = self
                 .persistence_path
                 .lock()
-                .expect("persistence_path poisoned");
+                .unwrap_or_else(|p| p.into_inner());
             *g = Some(path);
         }
         self
@@ -348,7 +348,7 @@ impl UserQuarantineList {
             .as_secs();
         let mut loaded = 0u64;
         let mut skipped_expired = 0u64;
-        let mut g = list.inner.lock().expect("inner lock poisoned during load");
+        let mut g = list.inner.lock().unwrap_or_else(|p| p.into_inner());
         for (lineno, line) in raw.lines().enumerate() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
@@ -416,7 +416,7 @@ impl UserQuarantineList {
             let g = self
                 .persistence_path
                 .lock()
-                .expect("persistence_path poisoned");
+                .unwrap_or_else(|p| p.into_inner());
             match g.as_ref() {
                 Some(p) => p.clone(),
                 None => return Ok(()), // no-op when persistence not wired
@@ -430,7 +430,7 @@ impl UserQuarantineList {
             .unwrap_or(Duration::ZERO)
             .as_secs();
         let entries: Vec<(String, u64, &'static str)> = {
-            let g = self.inner.lock().expect("inner lock poisoned");
+            let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.iter()
                 .filter_map(|(uid, e)| {
                     if e.expires_at <= now_instant {
@@ -518,7 +518,7 @@ impl UserQuarantineList {
         let mut g = self
             .session_notifiers
             .lock()
-            .expect("UserQuarantineList session_notifiers poisoned");
+            .unwrap_or_else(|p| p.into_inner());
         let entry = g.entry(user_id).or_default();
         // Vacuum dead weaks for this user_id while we hold the
         // lock — keeps the per-user Vec bounded by the actual
@@ -541,7 +541,7 @@ impl UserQuarantineList {
         let mut g = self
             .session_notifiers
             .lock()
-            .expect("UserQuarantineList session_notifiers poisoned");
+            .unwrap_or_else(|p| p.into_inner());
         let Some(entry) = g.get_mut(user_id) else {
             return 0;
         };
@@ -591,7 +591,7 @@ impl UserQuarantineList {
     /// not new unbans.
     pub fn unquarantine(&self, user_id: &[u8; 8]) -> bool {
         let removed = {
-            let mut g = self.inner.lock().expect("inner lock poisoned");
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             g.remove(user_id).is_some()
         };
         if removed {
@@ -667,7 +667,7 @@ impl UserQuarantineList {
             let g = self
                 .persistence_path
                 .lock()
-                .expect("persistence_path poisoned");
+                .unwrap_or_else(|p| p.into_inner());
             match g.as_ref() {
                 Some(p) => p.clone(),
                 None => return Ok(ReloadOutcome::default()),
@@ -687,7 +687,7 @@ impl UserQuarantineList {
                 // every in-memory entry. Operator deleted the
                 // file to lift all bans.
                 let removed = {
-                    let mut g = self.inner.lock().expect("inner lock poisoned");
+                    let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
                     let n = g.len() as u64;
                     g.clear();
                     n
@@ -741,7 +741,7 @@ impl UserQuarantineList {
             }
         }
         let (added, removed, refreshed, to_tear_down) = {
-            let mut g = self.inner.lock().expect("inner lock poisoned");
+            let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
             let mut added = 0u64;
             let mut refreshed = 0u64;
             let mut to_tear_down: Vec<[u8; 8]> = Vec::new();
@@ -864,7 +864,7 @@ impl UserQuarantineList {
             return false;
         }
         let expires_at = now + self.ttl;
-        let mut g = self.inner.lock().expect("UserQuarantineList poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if g.contains_key(&user_id) {
             // Refresh: bump the deadline and update the trigger so
             // the most recent detector kind is what's surfaced.
@@ -935,7 +935,7 @@ impl UserQuarantineList {
             return None;
         }
         self.maybe_vacuum(now);
-        let g = self.inner.lock().expect("UserQuarantineList poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let entry = g.get(user_id)?;
         if entry.expires_at <= now {
             // Entry expired but the vacuum hasn't run yet OR our
@@ -950,16 +950,13 @@ impl UserQuarantineList {
     }
 
     fn maybe_vacuum(&self, now: Instant) {
-        let mut last = self
-            .last_vacuum
-            .lock()
-            .expect("UserQuarantineList last_vacuum poisoned");
+        let mut last = self.last_vacuum.lock().unwrap_or_else(|p| p.into_inner());
         if now.duration_since(*last) < VACUUM_INTERVAL {
             return;
         }
         *last = now;
         drop(last); // release before taking inner lock
-        let mut g = self.inner.lock().expect("UserQuarantineList poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.retain(|_, entry| entry.expires_at > now);
     }
 
@@ -975,7 +972,7 @@ impl UserQuarantineList {
     /// Test-friendly snapshot variant taking explicit `now`.
     #[must_use]
     pub fn active_snapshot_at(&self, limit: usize, now: Instant) -> Vec<ActiveQuarantine> {
-        let g = self.inner.lock().expect("UserQuarantineList poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let mut out: Vec<ActiveQuarantine> = g
             .iter()
             .filter_map(|(uid, entry)| {
@@ -1004,7 +1001,7 @@ impl UserQuarantineList {
     /// Test-friendly count taking explicit `now`.
     #[must_use]
     pub fn active_count_at(&self, now: Instant) -> usize {
-        let g = self.inner.lock().expect("UserQuarantineList poisoned");
+        let g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         g.values().filter(|e| e.expires_at > now).count()
     }
 

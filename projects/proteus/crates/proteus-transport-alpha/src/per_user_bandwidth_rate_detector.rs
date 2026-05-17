@@ -167,10 +167,7 @@ impl PerUserBandwidthRateDetector {
     /// dropped-on-cap overflow). Used for telemetry + tests.
     #[must_use]
     pub fn tracked_users(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("rate detector mutex poisoned")
-            .len()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Operator-set threshold (bytes/sec). Surfaced in the
@@ -200,7 +197,7 @@ impl PerUserBandwidthRateDetector {
             // handshakes don't take the mutex.
             return RateAlertOutcome::Quiet;
         }
-        let mut g = self.inner.lock().expect("rate detector mutex poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         // Cap enforcement: new users beyond the cap drop their sample
         // silently. Existing users keep being tracked.
         if !g.contains_key(&user_id) && g.len() >= self.max_users {
@@ -257,10 +254,7 @@ impl PerUserBandwidthRateDetector {
     /// Reset all per-user state. Used by tests; production has no
     /// reason to call this (the vacuum keeps memory bounded).
     pub fn clear(&self) {
-        self.inner
-            .lock()
-            .expect("rate detector mutex poisoned")
-            .clear();
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).clear();
     }
 
     /// Emit the Prometheus gauges for the detector's configured

@@ -147,10 +147,7 @@ impl PerUserConnLimiter {
     /// logs.
     #[must_use]
     pub fn active_users(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("per-user conn limiter poisoned")
-            .len()
+        self.inner.lock().unwrap_or_else(|p| p.into_inner()).len()
     }
 
     /// Try to acquire a slot for `user_id`. Increments the per-user
@@ -168,7 +165,7 @@ impl PerUserConnLimiter {
                 user_id,
             });
         }
-        let mut g = self.inner.lock().expect("per-user conn limiter poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let count = g.entry(user_id).or_insert(0);
         if *count >= self.max_per_user {
             // Roll back the entry's existence if we just inserted it
@@ -203,7 +200,7 @@ impl PerUserConnLimiter {
             // Disabled mode: nothing to release.
             return;
         }
-        let mut g = self.inner.lock().expect("per-user conn limiter poisoned");
+        let mut g = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(count) = g.get_mut(&user_id) {
             if *count > 0 {
                 *count -= 1;

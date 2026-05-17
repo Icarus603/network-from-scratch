@@ -485,13 +485,34 @@ impl ReloadableAcceptor {
     /// Clone the current acceptor. Hot-path call — cheap.
     #[must_use]
     pub fn current(&self) -> TlsAcceptor {
-        // `expect` is safe: the only way the lock gets poisoned is if
-        // a writer panics while holding the write lock, which would
-        // mean the server is in an unrecoverable state anyway.
-        self.inner
-            .read()
-            .expect("ReloadableAcceptor lock poisoned")
-            .clone()
+        // Iter-25: recover from a poisoned lock rather than
+        // re-panicking. Pre-iter-24 (`panic = abort`) a writer
+        // panic killed the whole process so this `.expect`
+        // was unreachable; post-iter-24 (`panic = unwind`) a
+        // panic in any task that touches this lock poisons
+        // it, and EVERY subsequent accept would die on the
+        // `.expect` — cascading into a slow-but-total accept
+        // failure across the server. The `TlsAcceptor` inside
+        // is a `Clone` reference into rustls's config Arc; a
+        // partial write that triggered the poison still leaves
+        // a complete value in the slot. Reading it after
+        // recovery is safe.
+        match self.inner.read() {
+            Ok(g) => g.clone(),
+            Err(poisoned) => {
+                // Best-effort observability — counts as one
+                // failed reload-attempt so operators see the
+                // anomaly via `proteus_tls_reload_attempts -
+                // proteus_tls_reload_succeeded`.
+                self.reload_attempts
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                tracing::warn!(
+                    "ReloadableAcceptor RwLock was poisoned by a prior panic — \
+                     recovering and continuing to serve the last-known-good acceptor"
+                );
+                poisoned.into_inner().clone()
+            }
+        }
     }
 
     /// Swap in a new acceptor. Any future accept will use the new
@@ -505,10 +526,22 @@ impl ReloadableAcceptor {
     pub fn reload(&self, new_acceptor: TlsAcceptor) {
         self.reload_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        *self
-            .inner
-            .write()
-            .expect("ReloadableAcceptor lock poisoned") = new_acceptor;
+        // Iter-25: poisoned-lock recovery (see `current()` for
+        // the rationale). Writing a fresh acceptor over a
+        // poisoned slot is safe — it replaces whatever was
+        // there, and the new operator-supplied acceptor is by
+        // construction valid.
+        let mut g = match self.inner.write() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "ReloadableAcceptor RwLock was poisoned during reload — \
+                     recovering and installing the new acceptor anyway"
+                );
+                poisoned.into_inner()
+            }
+        };
+        *g = new_acceptor;
     }
 
     /// Swap in a new acceptor AND refresh the cert-expiry gauge from
@@ -530,10 +563,18 @@ impl ReloadableAcceptor {
         self.reload_attempts
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let parse_result = leaf_cert_not_after(chain);
-        *self
-            .inner
-            .write()
-            .expect("ReloadableAcceptor lock poisoned") = new_acceptor;
+        // Iter-25: same poisoned-lock recovery as `reload`.
+        let mut g = match self.inner.write() {
+            Ok(g) => g,
+            Err(poisoned) => {
+                tracing::warn!(
+                    "ReloadableAcceptor RwLock was poisoned during reload_with_expiry — \
+                     recovering and installing the new acceptor anyway"
+                );
+                poisoned.into_inner()
+            }
+        };
+        *g = new_acceptor;
         match parse_result {
             Ok(ts) => {
                 self.leaf_not_after
