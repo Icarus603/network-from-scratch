@@ -85,6 +85,40 @@ enum Cmd {
         #[arg(long, default_value = "http://127.0.0.1:9091")]
         url: String,
     },
+    /// Offline host-posture preflight (mirror of the server-side
+    /// `proteus-server preflight check-host`). Audits the
+    /// client-specific footgun class: `client_ed25519_sk` mode
+    /// (long-term identity exposure), server endpoint DNS
+    /// resolvability (catches typos before first SOCKS connect),
+    /// bootstrap_dns consistency (DoH-leak surface vs. dead-code
+    /// direct_ip), trusted_ca PEM readability (silent rustls
+    /// fallback to webpki-roots), /dev/urandom availability, and
+    /// clock sync (broken NTP rejects every handshake as 'replay').
+    ///
+    /// Read-only — no chmod, no network handshake, no probes.
+    /// DNS lookup is the only potential network access; gate with
+    /// `--skip-dns-resolution` for air-gapped CI.
+    ///
+    /// Exit code 0 on PASS+WARN-only, 1 on any FAIL. Wire into
+    /// CI / Ansible / Terraform deploy gates.
+    CheckHost {
+        /// Path to client YAML config. Optional: when absent, the
+        /// config-derived checks (key file mode, DNS, bootstrap
+        /// consistency, trusted_ca) are skipped; urandom + clock
+        /// still run unconditionally.
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Skip the DNS-resolution check (no network). Use in
+        /// air-gapped CI environments where DNS will always
+        /// time out.
+        #[arg(long, default_value_t = false)]
+        skip_dns_resolution: bool,
+        /// Output format: `text` (default, human-friendly) or
+        /// `json` (one-line append-only document for scripted
+        /// deploy gates).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -105,6 +139,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::Status { url, format } => status_cmd(&url, &format).await?,
         Cmd::Diagnose { url } => diagnose_cmd(&url).await?,
+        Cmd::CheckHost {
+            config,
+            skip_dns_resolution,
+            format,
+        } => {
+            let input = proteus_client::host_preflight::HostPreflightInput {
+                config_path: config,
+                skip_dns_resolution,
+            };
+            let code = proteus_client::host_preflight::cli_run(input, &format).await?;
+            std::process::exit(code);
+        }
     }
     Ok(())
 }

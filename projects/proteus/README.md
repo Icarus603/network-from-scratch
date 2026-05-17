@@ -199,6 +199,23 @@ proteus-client keygen --out ./keys/client
 # Send keys/client/client.ed25519.pk to your server admin.
 cp deploy/client.example.yaml ~/.proteus.yaml
 $EDITOR ~/.proteus.yaml
+
+# Host-posture preflight before launch: mirrors `proteus-server
+# preflight check-host`. Audits client-side footguns the binary
+# wouldn't catch at load: client_ed25519_sk mode (long-term identity
+# SK exposure on shared/multi-user hosts), server endpoint DNS
+# resolvability (typo'd hostname surfaces here, not as opaque
+# CONNECT failures), bootstrap_dns consistency (DoH-leak surface
+# per 2026 GFW threat-intel main line 6), trusted_ca PEM
+# readability (silent rustls fallback to webpki-roots), and the
+# basic urandom + clock-sync checks (broken NTP = server rejects
+# every handshake as 'replay'). Read-only — only network access
+# is a DNS lookup, gated by --skip-dns-resolution for air-gapped CI.
+proteus-client check-host --config ~/.proteus.yaml
+# Exit 0 on PASS+WARN-only, 1 on any FAIL. --format json for
+# scripted deploy gates (Ansible/Terraform). Symmetric exit-code
+# semantics with the server side's `preflight all`.
+
 proteus-client run --config ~/.proteus.yaml
 curl --socks5 127.0.0.1:1080 https://www.example.com/
 ```

@@ -12,5 +12,6 @@ pub mod carrier_health;
 pub mod config;
 pub mod ctx;
 pub mod endpoint_pool;
+pub mod host_preflight;
 pub mod socks;
 pub mod validate;
