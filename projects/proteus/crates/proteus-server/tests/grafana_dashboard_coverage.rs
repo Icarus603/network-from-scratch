@@ -76,6 +76,12 @@ fn known_metric_names() -> HashSet<&'static str> {
         // Rate limiting / rejections
         "proteus_rate_limited_total",
         "proteus_cover_forwards_total",
+        // Iter-20 introduced the rejection counter; iter-26
+        // alerted on it; iter-33 surfaces it on the bundled
+        // Grafana dashboard. Without this entry, the dashboard
+        // coverage test would reject the new panel as
+        // "metric not in known set."
+        "proteus_cover_forwards_rejected_total",
         "proteus_aead_drops_total",
         "proteus_ratchets_total",
         // TLS

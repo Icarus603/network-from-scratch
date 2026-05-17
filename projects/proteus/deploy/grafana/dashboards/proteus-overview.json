@@ -407,6 +407,59 @@
           }
         }
       }
+    },
+    {
+      "id": 32,
+      "type": "timeseries",
+      "title": "Cover-forward rate (server)",
+      "description": "rate(proteus_cover_forwards_total) — sustained >100/sec for 10+ min fires ProteusCoverForwardStorm. Cross-reference with proteus_probe_anomalies_fired_total for per-/24 source attribution. Iter-20 added the metric; iter-33 surfaces it here.",
+      "gridPos": {"x": 0, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_cover_forwards_total[5m])",
+          "refId": "forwards",
+          "legendFormat": "forwards/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 50},
+              {"color": "red", "value": 100}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 33,
+      "type": "timeseries",
+      "title": "Cover-forward REJECTIONS (server)",
+      "description": "rate(proteus_cover_forwards_rejected_total) — iter-20's cover-forward semaphore dropping requests. Sustained >0 fires ProteusCoverForwardRejecting (warning). Causes: (a) max_cover_forwards cap too low for current probe load, (b) cover endpoint slow/unhealthy so cover tasks don't exit → semaphore drained. Operator action: bump max_cover_forwards OR check cover endpoint latency.",
+      "gridPos": {"x": 12, "y": 44, "w": 12, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_cover_forwards_rejected_total[5m])",
+          "refId": "rejected",
+          "legendFormat": "rejections/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "red", "value": 0.001}
+            ]
+          }
+        }
+      }
     }
   ]
 }
