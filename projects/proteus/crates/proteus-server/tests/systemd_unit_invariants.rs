@@ -256,6 +256,67 @@ fn client_unit_keeps_hardening_directives_symmetric_with_server() {
     }
 }
 
+/// Iter-31: both unit files MUST document the iter-24
+/// `RUST_PANIC_ABORT` opt-in escape hatch in a comment so
+/// operators who want fail-fast semantics know where to
+/// look. The default is panic = "unwind" (per-task panic
+/// isolation), but operators running fuzz harnesses or
+/// strict-policy production deployments may want to flip to
+/// fail-fast — the comment documents how.
+///
+/// We assert the unit FILE (not the parsed sections) contains
+/// the substring, since the comment is by design commented
+/// out and parse_unit strips comments.
+#[test]
+fn both_units_document_rust_panic_abort_opt_in() {
+    use std::path::Path;
+    let server_body = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("deploy/systemd/proteus-server.service"),
+    )
+    .expect("read server unit");
+    let client_body = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("deploy/systemd/proteus-client.service"),
+    )
+    .expect("read client unit");
+    assert!(
+        server_body.contains("RUST_PANIC_ABORT"),
+        "server unit must document the iter-24 RUST_PANIC_ABORT opt-in for operators"
+    );
+    assert!(
+        client_body.contains("RUST_PANIC_ABORT"),
+        "client unit must document the iter-24 RUST_PANIC_ABORT opt-in for operators"
+    );
+    // Sanity: it MUST be commented-out (operator opts in
+    // explicitly; we don't ship fail-fast as the default).
+    for (label, body) in [("server", &server_body), ("client", &client_body)] {
+        let panic_line = body
+            .lines()
+            .find(|line| line.contains("RUST_PANIC_ABORT"))
+            .unwrap_or_else(|| panic!("{label}: no RUST_PANIC_ABORT line"));
+        let last_line = body
+            .lines()
+            .find(|line| line.contains("RUST_PANIC_ABORT") && !line.trim_start().starts_with('#'));
+        // Find a line that has the env var AND is NOT a comment
+        // — that would be a live Environment= directive, which
+        // we don't want.
+        assert!(
+            last_line.is_none(),
+            "{label}: RUST_PANIC_ABORT must be commented-out in the shipped unit (operator opt-in only). \
+             Active line found: {last_line:?} (panic_line: {panic_line:?})"
+        );
+    }
+}
+
 // ────────────────────────────────────────────────────────────
 // parse_unit unit tests (the parser itself)
 // ────────────────────────────────────────────────────────────

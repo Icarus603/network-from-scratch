@@ -135,6 +135,28 @@ OOMScoreAdjust=-100
 
 # Logging.
 Environment=RUST_LOG=proteus_server=info,proteus_transport_alpha=info
+
+# Iter-24 + iter-31: panic-handling policy.
+#
+# Default (no env var, what ships): panic = "unwind" in the
+# release profile (see workspace Cargo.toml). tokio::spawn's
+# task wrapper catches per-task panics; other tasks continue
+# serving traffic; `proteus_panic_hook` increments the
+# `proteus_panics_total` counter + emits a structured WARN
+# log with file:line:col. Operators alert on
+# `rate(proteus_panics_total[5m]) > 0` (the ProteusPanic
+# alert in deploy/prometheus/proteus-alerts.yaml).
+#
+# OPT-IN to fail-fast: uncomment the line below to make
+# panic_hook re-abort AFTER counting + logging. Use cases:
+#   - Fuzzing harness — every panic should crash so AFL/
+#     libFuzzer captures the input as a crash signal.
+#   - Strict production policy where any panic is operator-
+#     paging-grade and you'd rather restart-via-systemd
+#     than serve one more request through a possibly-
+#     poisoned-state process.
+# Environment=RUST_PANIC_ABORT=1
+
 StandardOutput=journal
 StandardError=journal
 

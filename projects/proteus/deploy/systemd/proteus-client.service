@@ -103,6 +103,16 @@ OOMScoreAdjust=-100
 
 # Logging.
 Environment=RUST_LOG=proteus_client=info,proteus_transport_alpha=info
+
+# Iter-24 + iter-31: panic-handling policy. Default is
+# panic = "unwind" (per-task panics caught by tokio; counter
+# bumped; other tasks unaffected). OPT-IN to fail-fast via
+# `Environment=RUST_PANIC_ABORT=1` if your operational
+# policy treats any panic as paging-grade. See
+# deploy/systemd/proteus-server.service for the full
+# rationale.
+# Environment=RUST_PANIC_ABORT=1
+
 StandardOutput=journal
 StandardError=journal
 
