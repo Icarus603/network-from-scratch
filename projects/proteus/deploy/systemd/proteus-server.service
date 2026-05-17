@@ -32,6 +32,13 @@ Group=proteus
 
 # Read keys + config from /etc/proteus.
 ExecStart=/usr/local/bin/proteus-server run --config /etc/proteus/server.yaml
+# `systemctl reload proteus-server` → SIGHUP → in-process reload
+# of TLS cert + firewall rules + rate-limit values +
+# user_quarantine state. The binary sends RELOADING=1 at SIGHUP
+# entry and READY=1 + a fresh STATUS line at exit, so the
+# reload outcome surfaces in `systemctl status` without
+# scraping journalctl.
+ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=2s
 # TimeoutStopSec must be >= server.yaml `drain_secs` + a small

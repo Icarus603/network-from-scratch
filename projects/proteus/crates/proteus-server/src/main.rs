@@ -1401,6 +1401,56 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         None
     };
 
+    // Periodic sd_notify STATUS refresher (every 60s when systemd
+    // is present). Without this, `systemctl status proteus-server`
+    // shows the STATUS line frozen at startup ("ready on
+    // 0.0.0.0:8443") forever — useless for triaging a live
+    // deployment. With it, operators see a fresh snapshot of
+    // in-flight sessions + cumulative handshakes per minute.
+    //
+    // No-ops when $NOTIFY_SOCKET is unset, so dev launches don't
+    // pay for the task. Cheap: an atomic load + format!() + a
+    // single sendto on a unix-dgram socket.
+    {
+        let metrics_for_status = Arc::clone(&metrics);
+        let cancel_for_status = std::sync::Arc::clone(&watchdog_cancel);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Skip the immediate-fire so the first STATUS refresh
+            // happens 60s after startup — startup already wrote
+            // a fresh STATUS line.
+            tick.tick().await;
+            loop {
+                tokio::select! {
+                    _ = tick.tick() => {
+                        use std::sync::atomic::Ordering as O;
+                        let in_flight = metrics_for_status
+                            .in_flight_sessions
+                            .load(O::Relaxed);
+                        let handshakes_ok = metrics_for_status
+                            .handshakes_succeeded
+                            .load(O::Relaxed);
+                        let handshakes_failed = metrics_for_status
+                            .handshakes_failed
+                            .load(O::Relaxed);
+                        let _ = proteus_sd_notify::notify_status(&format!(
+                            "in_flight={in_flight} handshakes_ok={handshakes_ok} \
+                             handshakes_failed={handshakes_failed}"
+                        )).await;
+                    }
+                    () = cancel_for_status.notified() => {
+                        // Same cancel notify the watchdog uses —
+                        // drain begins, we stop posting STATUS so
+                        // the drain handler's STATUS line is the
+                        // last thing systemctl shows.
+                        return;
+                    }
+                }
+            }
+        });
+    }
+
     // Periodic rate-limit vacuum (every 60 s) so per-IP token-bucket
     // memory stays bounded regardless of traffic patterns.
     {
@@ -1709,6 +1759,19 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                      rate limits, and user_quarantine state"
                 );
 
+                // sd_notify(RELOADING=1) — tells systemd we're in
+                // the middle of a reload cycle. `systemctl status`
+                // now shows "reloading" instead of "active
+                // (running)" while we work, and any service
+                // ordered `After=proteus-server.service` that
+                // happens to be probing knows to wait. The READY=1
+                // at the bottom of this loop body flips us back to
+                // "active". MUST be paired — leaving RELOADING=1
+                // hanging would pin the unit in the reloading
+                // state until the next restart.
+                let _ = proteus_sd_notify::notify_reloading().await;
+                let _ = proteus_sd_notify::notify_status("reloading config (SIGHUP)").await;
+
                 // ----- 1. TLS cert reload (if configured) -----
                 if let (Some(tls_cfg), Some(reloadable)) =
                     (tls_cfg_path.as_ref(), reloadable_acceptor.as_ref())
@@ -1919,6 +1982,33 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         }
                     }
                 }
+
+                // sd_notify(READY=1) — flip systemd back to
+                // "active". Surface a STATUS line summarizing the
+                // outcome so `systemctl status` reflects the
+                // reload result without needing to grep journalctl.
+                // The summary reads the metric counters that the
+                // section handlers above bumped.
+                let m = &metrics_for_reload;
+                use std::sync::atomic::Ordering as O;
+                let fw_at = m.firewall_reload_attempts.load(O::Relaxed);
+                let fw_ok = m.firewall_reload_succeeded.load(O::Relaxed);
+                let rl_at = m.rate_limit_reload_attempts.load(O::Relaxed);
+                let rl_ok = m.rate_limit_reload_succeeded.load(O::Relaxed);
+                let any_fail = fw_at > fw_ok || rl_at > rl_ok;
+                let summary = if any_fail {
+                    format!(
+                        "SIGHUP reload completed with FAILURES (firewall {fw_ok}/{fw_at}, \
+                         rate_limit {rl_ok}/{rl_at}) — see journalctl for details"
+                    )
+                } else {
+                    format!(
+                        "ready (last SIGHUP succeeded: firewall {fw_ok}/{fw_at}, \
+                         rate_limit {rl_ok}/{rl_at})"
+                    )
+                };
+                let _ = proteus_sd_notify::notify_ready().await;
+                let _ = proteus_sd_notify::notify_status(&summary).await;
             }
         });
     }

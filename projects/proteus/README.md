@@ -1519,6 +1519,18 @@ The binary uses [`proteus-sd-notify`](crates/proteus-sd-notify/)
   * `STOPPING=1` + `STATUS=draining N session(s)` on SIGTERM so
     `TimeoutStopSec=` accounting starts immediately and
     `systemctl status` shows the drain in progress.
+  * `RELOADING=1` + `STATUS=reloading config (SIGHUP)` at the
+    top of the SIGHUP handler, `READY=1` + a fresh STATUS line
+    summarizing reload outcome (`firewall N/M, rate_limit N/M`)
+    at the bottom. The systemd unit now exposes
+    `ExecReload=/bin/kill -HUP $MAINPID` so operators run
+    `systemctl reload proteus-server` and see the result in
+    `systemctl status` without scraping journalctl.
+  * **Periodic STATUS refresh every 60 s** — fresh
+    `in_flight=N handshakes_ok=N handshakes_failed=N` snapshot.
+    Without this, `systemctl status` shows the startup STATUS
+    line frozen forever; with it, the line tracks the live
+    deployment.
 
 The protocol is a one-line datagram send (`sendto(unix-sock,
 "KEY=value\n")`); the crate implements it natively rather than
