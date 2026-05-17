@@ -575,6 +575,28 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         );
     }
 
+    // Recent-abuse-fires ring buffer. Default capacity 64 — covers
+    // ~last hour for any sane deployment. Filled by all three
+    // detector fire sites (byte_budget in relay.rs, rate_limit in
+    // server.rs, per_user_bandwidth_rate via PerUserBandwidth's
+    // record_with_rate_check). Operators query the contents via
+    // `/diagnose`, `admin abuse-fires`, or the count gauge on
+    // `/metrics`.
+    //
+    // The buffer is ALWAYS wired (no YAML opt-in needed) because
+    // the memory footprint is bounded (64 fires × 24 bytes ≈ 1.5KB)
+    // and the operational value is high — "WHO fired" is the
+    // question every abuse alert immediately raises.
+    let abuse_fires_buffer = Arc::new(proteus_transport_alpha::abuse_fires::AbuseFireBuffer::new(
+        64,
+    ));
+    ctx = ctx.with_abuse_fires(Arc::clone(&abuse_fires_buffer));
+    per_user_bandwidth.set_abuse_fires(Some(Arc::clone(&abuse_fires_buffer)));
+    info!(
+        capacity = 64,
+        "recent-abuse-fires ring buffer wired (query via /diagnose or `admin abuse-fires`)"
+    );
+
     let ctx = Arc::new(ctx);
 
     // Build the TLS 1.3 outer wrapper FIRST (before the metrics
@@ -703,8 +725,9 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         ));
         let per_user_for_metrics = Some(Arc::clone(&per_user_bandwidth));
         let per_user_conn_limiter_for_metrics = per_user_conn_limiter.as_ref().map(Arc::clone);
+        let abuse_fires_for_metrics = Some(Arc::clone(&abuse_fires_buffer));
         tokio::spawn(async move {
-            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v7(
+            if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v8(
                 &metrics_addr,
                 metrics,
                 auth,
@@ -715,6 +738,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 process_info,
                 per_user_for_metrics,
                 per_user_conn_limiter_for_metrics,
+                abuse_fires_for_metrics,
             )
             .await
             {
@@ -1075,6 +1099,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         access_log: access_log_handle,
         max_session_bytes: cfg.max_session_bytes,
         abuse_detector_byte_budget,
+        abuse_fires: Some(Arc::clone(&abuse_fires_buffer)),
         outbound_filter: outbound_filter.clone(),
         pad_quantum: cfg.pad_quantum,
     };

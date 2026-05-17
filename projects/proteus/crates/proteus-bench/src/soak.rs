@@ -877,6 +877,61 @@ mod tests {
         );
     }
 
+    /// Recent-abuse-fires ring buffer e2e: wire a low-threshold
+    /// rate detector + an abuse-fires buffer to the per-user
+    /// bandwidth accumulator, run a single-user soak, and verify
+    /// the buffer captured the fire with the right user_id +
+    /// kind + non-zero context_value (the computed rate).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn abuse_fires_buffer_captures_per_user_bandwidth_fires() {
+        use proteus_transport_alpha::abuse_fires::{AbuseFireBuffer, AbuseFireKind};
+        use proteus_transport_alpha::per_user_bandwidth::PerUserBandwidth;
+        use proteus_transport_alpha::per_user_bandwidth_rate_detector::PerUserBandwidthRateDetector;
+
+        let per_user = Arc::new(PerUserBandwidth::new(4096));
+        let detector = Arc::new(PerUserBandwidthRateDetector::new(
+            Duration::from_secs(10),
+            1024, // 1 KiB/s — trivially exceeded by any session
+            4096,
+        ));
+        let fires = Arc::new(AbuseFireBuffer::new(64));
+        per_user.set_rate_detector(Some(Arc::clone(&detector)));
+        per_user.set_abuse_fires(Some(Arc::clone(&fires)));
+
+        let _summary = run_soak_with_per_user_observation(
+            SoakConfig {
+                clients: 2,
+                duration: Duration::from_secs(2),
+                per_session_kib: 16,
+                report_interval: Duration::from_millis(500),
+                max_concurrent_dials: None,
+                users: 1,
+            },
+            PerfProfile::default(),
+            |_| {},
+            Some(Arc::clone(&per_user)),
+        )
+        .await
+        .expect("abuse-fires soak");
+
+        // The buffer must have caught at least one fire from the
+        // production-shaped wire-up — proves
+        // PerUserBandwidth::record_with_rate_check → detector
+        // Fired → buffer.push.
+        let snap = fires.snapshot();
+        assert!(
+            !snap.is_empty(),
+            "expected ≥1 fire in the ring buffer; got 0 (wire-up broken?)"
+        );
+        let first = &snap[0];
+        assert_eq!(first.kind, AbuseFireKind::PerUserBandwidthRate);
+        assert_eq!(first.user_id, *b"user0000");
+        assert!(
+            first.context_value > 0,
+            "fire context must carry the computed rate; got 0"
+        );
+    }
+
     /// Per-user concurrent-session cap e2e: 8 clients all sharing
     /// `user0000` with cap=2 → only 2 sessions for user0000 may
     /// be in flight at once; the other 6 clients' attempts get

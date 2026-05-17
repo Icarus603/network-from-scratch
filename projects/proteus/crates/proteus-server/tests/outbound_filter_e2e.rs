@@ -90,6 +90,7 @@ async fn outbound_filter_blocks_aws_metadata_ip() {
         access_log: None,
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: Some(Arc::new(OutboundPolicy::default())),
         pad_quantum: None,
     };
@@ -145,6 +146,7 @@ async fn outbound_filter_blocks_disallowed_port() {
         access_log: None,
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: Some(Arc::new(policy)),
         pad_quantum: None,
     };
@@ -195,6 +197,7 @@ async fn outbound_filter_blocks_hostname_not_on_allowlist() {
         access_log: None,
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: Some(Arc::new(policy)),
         pad_quantum: None,
     };
@@ -250,6 +253,7 @@ async fn outbound_filter_blocks_hostname_on_denylist() {
         access_log: None,
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: Some(Arc::new(policy)),
         pad_quantum: None,
     };
@@ -302,6 +306,7 @@ async fn outbound_filter_allows_explicitly_permitted_destination() {
         access_log: None,
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: Some(Arc::new(policy)),
         pad_quantum: None,
     };

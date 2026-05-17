@@ -448,6 +448,50 @@ The cap is per-user *across* the three carriers (β-QUIC, α-TCP,
 opening 3 QUIC sessions + 3 TCP sessions hits the cap of 6 across
 the union.
 
+### Recent abuse fires — answering "WHICH user_id?" without journald
+
+Aggregate abuse counters (`proteus_abuse_alerts_*_total`) tell
+operators THAT abuse happened; the actionable question is WHICH
+`user_id` to rotate the credential for. Grepping `journalctl -u
+proteus-server | grep abuse` works but is slow, requires journald
+access, and is hard to script.
+
+Proteus ships a bounded **ring buffer of the last N abuse fires**
+(default capacity 64 — covers "last hour" for any sane deployment,
+~1.5KB memory). All three detectors push into it:
+
+| Detector | `kind` label | `context_value` |
+|---|---|---|
+| `abuse_detector.byte_budget` | `byte_budget` | `0` |
+| `abuse_detector.rate_limit` | `rate_limit` | `0` |
+| `per_user_bandwidth_rate_detector` | `per_user_bandwidth_rate` | computed rate (bytes/sec) |
+
+Operator surfaces:
+
+- **`/metrics`** — two gauges, always emitted:
+  `proteus_abuse_recent_fires_capacity` and
+  `proteus_abuse_recent_fires_count`. Alert on
+  `count == capacity` (buffer rotating ⇒ abuse so frequent
+  operators must investigate immediately). The buffer's CONTENTS
+  are NOT exposed on `/metrics` to avoid label-cardinality
+  explosion across user_id × kind × scrape.
+- **`/diagnose`** — human-readable table prepended to the existing
+  diagnose body. Columns: `secs_ago`, `kind`, `user_id`,
+  `context_value`. Sorted oldest-first to match WARN log
+  chronology. Operators run:
+  ```bash
+  curl -s -H "Authorization: Bearer $METRICS_TOKEN" \
+       http://127.0.0.1:9090/diagnose
+  ```
+  and see exactly which user_ids fired what.
+- **JSON Lines** rendering also available on the buffer for
+  scripted consumers (Telegram bots, oncall pagers); schema is
+  append-only.
+
+The buffer is wired **automatically** in the binary — no YAML opt-
+in. The memory footprint is fixed and the operational value is
+high enough that every deployment gets it.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit

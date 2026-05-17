@@ -87,6 +87,15 @@ pub struct PerUserBandwidth {
     /// binary's session-close hook) emits a structured WARN log
     /// and bumps `proteus_abuse_alerts_per_user_bandwidth_total`.
     rate_detector: Mutex<Option<Arc<PerUserBandwidthRateDetector>>>,
+    /// Optional recent-abuse-fires ring buffer. When BOTH this AND
+    /// the rate detector are wired, a `Fired` outcome from the
+    /// detector ALSO pushes a record into the buffer — so operators
+    /// see the user_id + computed rate in `/diagnose` and `admin
+    /// abuse-fires`. Stored on the accumulator (not the detector)
+    /// because the accumulator already holds the `user_id` at
+    /// record time; threading it to the detector would require
+    /// changing its API for one consumer.
+    abuse_fires: Mutex<Option<Arc<crate::abuse_fires::AbuseFireBuffer>>>,
 }
 
 impl PerUserBandwidth {
@@ -101,7 +110,30 @@ impl PerUserBandwidth {
             max_users,
             overflow: Arc::new(UserBytes::default()),
             rate_detector: Mutex::new(None),
+            abuse_fires: Mutex::new(None),
         }
+    }
+
+    /// Attach a recent-abuse-fires ring buffer. When wired, every
+    /// `Fired` outcome from the rate detector ALSO pushes a record
+    /// into the buffer (kind=PerUserBandwidthRate, context=rate
+    /// bytes/sec). Hot-swappable via `Mutex<Option<...>>` so the
+    /// binary can swap on SIGHUP without rebuilding the accumulator.
+    pub fn set_abuse_fires(&self, buf: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>) {
+        let mut g = self
+            .abuse_fires
+            .lock()
+            .expect("PerUserBandwidth abuse_fires lock poisoned");
+        *g = buf;
+    }
+
+    /// Read-only accessor for the current abuse-fires buffer.
+    #[must_use]
+    pub fn abuse_fires(&self) -> Option<Arc<crate::abuse_fires::AbuseFireBuffer>> {
+        self.abuse_fires
+            .lock()
+            .expect("PerUserBandwidth abuse_fires lock poisoned")
+            .clone()
     }
 
     /// Builder: attach a bandwidth-rate abuse detector. The detector
@@ -185,7 +217,21 @@ impl PerUserBandwidth {
         // exfiltration regardless of direction.
         if let Some(det) = self.rate_detector() {
             let bytes_total = tx.saturating_add(rx);
-            return det.record(user_id, bytes_total);
+            let outcome = det.record(user_id, bytes_total);
+            // On Fired, also push into the recent-abuse-fires ring
+            // buffer (when wired). Context_value carries the
+            // computed rate so the `/diagnose` table / CLI shows
+            // the magnitude of the burst.
+            if let RateAlertOutcome::Fired { bytes_per_sec } = outcome {
+                if let Some(buf) = self.abuse_fires() {
+                    buf.push(
+                        crate::abuse_fires::AbuseFireKind::PerUserBandwidthRate,
+                        user_id,
+                        bytes_per_sec,
+                    );
+                }
+            }
+            return outcome;
         }
         RateAlertOutcome::Quiet
     }

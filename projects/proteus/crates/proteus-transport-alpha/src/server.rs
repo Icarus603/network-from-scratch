@@ -207,6 +207,12 @@ where
                 m.abuse_alerts_rate_limit
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
+            // Push a record into the recent-fires ring buffer so
+            // operators can ask "which user_id?" without grepping
+            // journald.
+            if let Some(buf) = ctx.abuse_fires() {
+                buf.push(crate::abuse_fires::AbuseFireKind::RateLimit, uid, 0);
+            }
         }
     }
     false
@@ -371,6 +377,14 @@ pub struct ServerCtx {
     /// bumped. Mirrors the commercial-VPN "N devices per account"
     /// model that VLESS / Hy2 / TUIC5 lack at the protocol level.
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    /// Optional ring buffer of recent abuse-alert fires (across all
+    /// three detectors: byte_budget, rate_limit,
+    /// per_user_bandwidth_rate). Filled at each fire site so
+    /// operators can answer "WHICH user_id fired alerts in the last
+    /// 5 minutes" without grepping journald. Surfaced via
+    /// `/metrics` (capacity + count gauges), `/diagnose` (table),
+    /// and `admin abuse-fires` (CLI text/JSON).
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
 }
 
 impl ServerCtx {
@@ -395,7 +409,29 @@ impl ServerCtx {
             abuse_detector_rate_limit: None,
             per_user_bandwidth: None,
             per_user_conn_limiter: None,
+            abuse_fires: None,
         }
+    }
+
+    /// Install a recent-abuse-fires ring buffer. When wired, the
+    /// three detector call sites (byte_budget, rate_limit,
+    /// per_user_bandwidth_rate) push a record on every fire. The
+    /// buffer is bounded by its capacity — operators query it via
+    /// `/diagnose` or `admin abuse-fires` for the WHO of every
+    /// alert, not just the THAT.
+    #[must_use]
+    pub fn with_abuse_fires(mut self, buf: Arc<crate::abuse_fires::AbuseFireBuffer>) -> Self {
+        self.abuse_fires = Some(buf);
+        self
+    }
+
+    /// Read the abuse-fires ring buffer handle. Returns the cloneable
+    /// Arc so consumers (relay, post-handshake rate gate, the
+    /// per-user bandwidth accumulator's drop hook) can push without
+    /// holding a borrow on the ctx.
+    #[must_use]
+    pub fn abuse_fires(&self) -> Option<Arc<crate::abuse_fires::AbuseFireBuffer>> {
+        self.abuse_fires.clone()
     }
 
     /// Install a per-user concurrent-session limiter. Once set, every

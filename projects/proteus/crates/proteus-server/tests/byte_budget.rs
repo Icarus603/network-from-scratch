@@ -68,6 +68,7 @@ async fn byte_budget_tears_down_session_when_cap_hit() {
         access_log: None,
         max_session_bytes: Some(32 * 1024),
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: None,
         pad_quantum: None,
     };

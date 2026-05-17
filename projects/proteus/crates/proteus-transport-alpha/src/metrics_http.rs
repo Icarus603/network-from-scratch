@@ -283,6 +283,8 @@ pub async fn serve_with_auth_full_v6(
 /// `proteus_per_user_conn_limit_{max_per_user,active_users,rejected_total}`
 /// series. Operators alert on `rate(proteus_per_user_conn_limit_rejected_total[5m]) > 0`
 /// to catch credential abuse via parallel-session amplification.
+///
+/// Back-compat shim — forwards to v8 with `abuse_fires = None`.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve_with_auth_full_v7(
     addr: &str,
@@ -296,6 +298,43 @@ pub async fn serve_with_auth_full_v7(
     per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
 ) -> std::io::Result<()> {
+    serve_with_auth_full_v8(
+        addr,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        None,
+    )
+    .await
+}
+
+/// v8 of [`serve_with_auth_full`] — adds an optional
+/// `AbuseFireBuffer`. When supplied, the `/metrics` exposition
+/// includes the
+/// `proteus_abuse_recent_fires_{capacity,count}` gauges AND
+/// the `/diagnose` body adds the recent-abuse-fires table.
+/// Operators use this to answer "WHICH user_id fired alerts?"
+/// without grepping journald.
+#[allow(clippy::too_many_arguments)]
+pub async fn serve_with_auth_full_v8(
+    addr: &str,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+) -> std::io::Result<()> {
     let listener = TcpListener::bind(addr).await?;
     let auth_enabled = auth.is_some();
     let probe_anomaly_enabled = probe_anomaly.is_some();
@@ -305,6 +344,7 @@ pub async fn serve_with_auth_full_v7(
     let process_info_enabled = process_info.is_some();
     let per_user_enabled = per_user.is_some();
     let per_user_conn_limit_enabled = per_user_conn_limiter.is_some();
+    let abuse_fires_enabled = abuse_fires.is_some();
     info!(
         addr = %listener.local_addr()?,
         auth = auth_enabled,
@@ -315,6 +355,7 @@ pub async fn serve_with_auth_full_v7(
         process_info = process_info_enabled,
         per_user_bandwidth = per_user_enabled,
         per_user_conn_limit = per_user_conn_limit_enabled,
+        abuse_fires = abuse_fires_enabled,
         "metrics endpoint bound",
     );
     loop {
@@ -328,7 +369,8 @@ pub async fn serve_with_auth_full_v7(
         let process_info = process_info.clone();
         let per_user = per_user.clone();
         let per_user_conn_limiter = per_user_conn_limiter.clone();
-        tokio::spawn(handle_connection_v7(
+        let abuse_fires = abuse_fires.clone();
+        tokio::spawn(handle_connection_v8(
             stream,
             metrics,
             auth,
@@ -339,6 +381,7 @@ pub async fn serve_with_auth_full_v7(
             process_info,
             per_user,
             per_user_conn_limiter,
+            abuse_fires,
         ));
     }
 }
@@ -533,7 +576,7 @@ async fn handle_connection(
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_connection_v7(
-    mut stream: tokio::net::TcpStream,
+    stream: tokio::net::TcpStream,
     metrics: Arc<ServerMetrics>,
     auth: Option<MetricsAuth>,
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
@@ -544,13 +587,43 @@ async fn handle_connection_v7(
     per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
     per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
 ) {
+    handle_connection_v8(
+        stream,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_connection_v8(
+    mut stream: tokio::net::TcpStream,
+    metrics: Arc<ServerMetrics>,
+    auth: Option<MetricsAuth>,
+    probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
+    tls_acceptor: Option<crate::tls::ReloadableAcceptor>,
+    config_presence: Option<Arc<String>>,
+    process_info: Option<Arc<crate::process_info::ProcessInfo>>,
+    per_user: Option<Arc<crate::per_user_bandwidth::PerUserBandwidth>>,
+    per_user_conn_limiter: Option<Arc<crate::per_user_conn_limit::PerUserConnLimiter>>,
+    abuse_fires: Option<Arc<crate::abuse_fires::AbuseFireBuffer>>,
+) {
     let mut req = [0u8; 2048];
     let _ = match stream.read(&mut req).await {
         Ok(n) => n,
         Err(_) => return,
     };
     let head = std::str::from_utf8(&req).unwrap_or("");
-    let (status_line, content_type, body) = render_full_v7(
+    let (status_line, content_type, body) = render_full_v8(
         head,
         &metrics,
         auth.as_ref(),
@@ -561,6 +634,7 @@ async fn handle_connection_v7(
         process_info.as_deref(),
         per_user.as_deref(),
         per_user_conn_limiter.as_deref(),
+        abuse_fires.as_deref(),
     );
     let response = format!(
         "{status_line}\
@@ -647,6 +721,32 @@ pub fn render_diagnose(
     config_presence: Option<&str>,
     process_info: Option<&crate::process_info::ProcessInfo>,
 ) -> String {
+    // Back-compat shim — forwards to v2 with no abuse_fires.
+    render_diagnose_v2(
+        metrics,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        None,
+    )
+}
+
+/// v2 of [`render_diagnose`] — adds the recent-abuse-fires table
+/// when an `AbuseFireBuffer` is supplied. The table renders BEFORE
+/// the METRICS dump so operators reading top-down see the
+/// actionable abuse data first.
+#[must_use]
+pub fn render_diagnose_v2(
+    metrics: &ServerMetrics,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
+) -> String {
     let findings = run_diagnose_rules(metrics, tls_acceptor, process_info);
     let mut s = String::with_capacity(4096);
     s.push_str("Proteus diagnose — operator self-check + metrics dump\n");
@@ -670,6 +770,19 @@ pub fn render_diagnose(
     }
     s.push('\n');
 
+    // Recent abuse fires — only when wired. Operators see WHO
+    // fired (user_id + kind + seconds_ago + magnitude) without
+    // grepping journald, which is the actionable signal the
+    // aggregate counters don't give.
+    if let Some(af) = abuse_fires {
+        let now_epoch = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        s.push_str(&af.diagnose_table(now_epoch));
+        s.push('\n');
+    }
+
     s.push_str("METRICS (text/plain; version=0.0.4)\n");
     s.push_str("-----------------------------------\n");
     let now = std::time::Instant::now();
@@ -692,6 +805,9 @@ pub fn render_diagnose(
         if !res.is_empty() {
             s.push_str(&res.prometheus_with_prefix("proteus"));
         }
+    }
+    if let Some(af) = abuse_fires {
+        s.push_str(&af.prometheus());
     }
     s
 }
@@ -1032,9 +1148,8 @@ pub fn render_full_v6(
 }
 
 /// v7 of [`render_full`] — adds optional per-user
-/// concurrent-session limiter. When supplied, the `/metrics` body
-/// includes the `proteus_per_user_conn_limit_*` series. See
-/// [`serve_with_auth_full_v7`] for the operator rationale.
+/// concurrent-session limiter. Back-compat shim — forwards to v8
+/// with `abuse_fires = None`.
 #[allow(clippy::too_many_arguments)]
 #[must_use]
 pub fn render_full_v7(
@@ -1048,6 +1163,40 @@ pub fn render_full_v7(
     process_info: Option<&crate::process_info::ProcessInfo>,
     per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
     per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
+) -> (&'static str, &'static str, String) {
+    render_full_v8(
+        request_head,
+        metrics,
+        auth,
+        probe_anomaly,
+        auto_deny,
+        tls_acceptor,
+        config_presence,
+        process_info,
+        per_user,
+        per_user_conn_limiter,
+        None,
+    )
+}
+
+/// v8 of [`render_full`] — adds optional recent-abuse-fires ring
+/// buffer. When supplied, the `/metrics` body includes the
+/// `proteus_abuse_recent_fires_{capacity,count}` gauges, and the
+/// `/diagnose` body adds a "RECENT ABUSE FIRES" table.
+#[allow(clippy::too_many_arguments)]
+#[must_use]
+pub fn render_full_v8(
+    request_head: &str,
+    metrics: &ServerMetrics,
+    auth: Option<&MetricsAuth>,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+    per_user: Option<&crate::per_user_bandwidth::PerUserBandwidth>,
+    per_user_conn_limiter: Option<&crate::per_user_conn_limit::PerUserConnLimiter>,
+    abuse_fires: Option<&crate::abuse_fires::AbuseFireBuffer>,
 ) -> (&'static str, &'static str, String) {
     if matches_path(request_head, "/metrics") {
         // Bearer-token gate when configured.
@@ -1095,6 +1244,9 @@ pub fn render_full_v7(
         if let Some(cl) = per_user_conn_limiter {
             body.push_str(&cl.prometheus());
         }
+        if let Some(af) = abuse_fires {
+            body.push_str(&af.prometheus());
+        }
         ("HTTP/1.1 200 OK\r\n", "text/plain; version=0.0.4", body)
     } else if matches_path(request_head, "/healthz") {
         if metrics.alive.load(Ordering::Relaxed) {
@@ -1121,13 +1273,14 @@ pub fn render_full_v7(
                 );
             }
         }
-        let body = render_diagnose(
+        let body = render_diagnose_v2(
             metrics,
             probe_anomaly,
             auto_deny,
             tls_acceptor,
             config_presence,
             process_info,
+            abuse_fires,
         );
         ("HTTP/1.1 200 OK\r\n", "text/plain; charset=utf-8", body)
     } else if matches_path(request_head, "/readyz") {
@@ -1616,6 +1769,113 @@ mod tests {
             "{body}"
         );
         assert!(body.contains("proteus_per_user_bandwidth_tracked_users 2"));
+    }
+
+    /// v8 with abuse_fires supplied emits the buffer's two gauges
+    /// AND inserts the recent-fires table into `/diagnose`. Proves
+    /// the wire-up is end-to-end through the HTTP layer.
+    #[test]
+    fn render_full_v8_emits_abuse_fires_metrics_and_diagnose_table() {
+        use crate::abuse_fires::{AbuseFireBuffer, AbuseFireKind};
+        let m = ServerMetrics::default();
+        let fires = AbuseFireBuffer::new(64);
+        // Push two fires so the table has content + capacity/count
+        // gauges have non-trivial values.
+        fires.push(AbuseFireKind::ByteBudget, *b"alice001", 0);
+        fires.push(
+            AbuseFireKind::PerUserBandwidthRate,
+            *b"bob00002",
+            104_857_600,
+        );
+
+        // /metrics body has the two gauges.
+        let (_s1, _c1, metrics_body) = render_full_v8(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&fires),
+        );
+        assert!(
+            metrics_body.contains("proteus_abuse_recent_fires_capacity 64"),
+            "{metrics_body}"
+        );
+        assert!(
+            metrics_body.contains("proteus_abuse_recent_fires_count 2"),
+            "{metrics_body}"
+        );
+
+        // /diagnose body has the human-readable table.
+        let (_s2, _c2, diag_body) = render_full_v8(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(&fires),
+        );
+        assert!(
+            diag_body.contains("RECENT ABUSE FIRES"),
+            "diagnose missing table header: {diag_body}"
+        );
+        assert!(
+            diag_body.contains("alice001"),
+            "diagnose missing alice fire: {diag_body}"
+        );
+        assert!(
+            diag_body.contains("per_user_bandwidth_rate"),
+            "diagnose missing bandwidth-rate kind: {diag_body}"
+        );
+        assert!(
+            diag_body.contains("104857600"),
+            "diagnose missing bandwidth context: {diag_body}"
+        );
+    }
+
+    /// v8 with no abuse_fires omits the recent-fires block both on
+    /// /metrics (no gauges) and /diagnose (no table).
+    #[test]
+    fn render_full_v8_omits_abuse_fires_when_buffer_none() {
+        let m = ServerMetrics::default();
+        let (_s, _c, metrics_body) = render_full_v8(
+            "GET /metrics HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!metrics_body.contains("proteus_abuse_recent_fires_capacity"));
+        let (_s, _c, diag_body) = render_full_v8(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(!diag_body.contains("RECENT ABUSE FIRES"));
     }
 
     /// v7 with per_user_conn_limiter supplied emits the limiter's

@@ -78,6 +78,7 @@ async fn access_log_emits_one_record_per_session() {
         access_log: Some(Arc::new(logger)),
         max_session_bytes: None,
         abuse_detector_byte_budget: None,
+        abuse_fires: None,
         outbound_filter: None,
         pad_quantum: None,
     };

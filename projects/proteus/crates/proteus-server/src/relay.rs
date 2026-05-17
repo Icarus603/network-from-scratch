@@ -69,6 +69,12 @@ pub struct RelayConfig {
     /// `OutboundPolicy::default()` (ports 80/443 only, all
     /// SSRF-relevant CIDRs blocked).
     pub outbound_filter: Option<Arc<OutboundPolicy>>,
+    /// Optional recent-abuse-fires ring buffer. When the byte-budget
+    /// detector fires (above), a record is also pushed here so
+    /// operators see WHICH user_id fired in `/diagnose` and
+    /// `admin abuse-fires` — not just the aggregate counter. Mirrors
+    /// the per-user bandwidth-rate path's automatic ring push.
+    pub abuse_fires: Option<Arc<proteus_transport_alpha::abuse_fires::AbuseFireBuffer>>,
     /// Data-plane padding quantum for the server→client direction.
     /// When non-zero, every outgoing AEAD record's plaintext is
     /// length-prefixed and zero-padded to a multiple of this value
@@ -95,6 +101,7 @@ impl std::fmt::Debug for RelayConfig {
                 &self.abuse_detector_byte_budget.is_some(),
             )
             .field("outbound_filter", &self.outbound_filter.is_some())
+            .field("abuse_fires", &self.abuse_fires.is_some())
             .field("pad_quantum", &self.pad_quantum)
             .finish()
     }
@@ -118,6 +125,7 @@ where
     let access_log = cfg.access_log.clone();
     let metrics_for_alerts = cfg.metrics.clone();
     let abuse_detector = cfg.abuse_detector_byte_budget.clone();
+    let abuse_fires = cfg.abuse_fires.clone();
     let started = Instant::now();
 
     let outcome = handle_session_inner(session, cfg).await;
@@ -143,6 +151,17 @@ where
                 if let Some(m) = metrics_for_alerts.as_ref() {
                     m.abuse_alerts_byte_budget
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                // Recent-fires ring: WHO fired, not just THAT
+                // someone fired. Operators query via `/diagnose` /
+                // `admin abuse-fires` to find the offending user_id
+                // without grepping journald.
+                if let Some(buf) = abuse_fires.as_ref() {
+                    buf.push(
+                        proteus_transport_alpha::abuse_fires::AbuseFireKind::ByteBudget,
+                        uid,
+                        0,
+                    );
                 }
             }
         }
