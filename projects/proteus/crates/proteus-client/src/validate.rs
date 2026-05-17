@@ -631,19 +631,42 @@ fn check_key_file(
     };
     // Decode base64 if it looks like base64, else use raw.
     let decoded = base64_or_raw(&bytes);
-    if size_ok(decoded.len()) {
-        r.push_pass(format!(
-            "keys.{label} OK ({} bytes, {})",
-            decoded.len(),
-            expected
-        ));
-    } else {
+    if !size_ok(decoded.len()) {
         r.push_fail(format!(
             "keys.{label}: wrong size — got {} bytes after base64 decode, want {}",
             decoded.len(),
             expected
         ));
+        return;
     }
+    // Iter-48: all-zeros sentinel check. A genuinely-random key has
+    // a chance of 2^-(8*N) of being uniformly zero — for N=32 that's
+    // ~10^-77. In practice, all-zero key files come from:
+    //   - a key-rotation script crashed mid-write
+    //   - the operator hand-edited the file and saved an empty one
+    //     that got padded by tooling
+    //   - the operator used `dd if=/dev/zero` as a placeholder and
+    //     forgot to replace it
+    // Any of those produces a catastrophic security failure if the
+    // file is a SECRET key (server's worst case: trivially-forgeable
+    // identity), and a useless config if it's a PUBLIC key (every
+    // handshake will fail verify-against-zero with no obvious
+    // operator-facing diagnostic).
+    if decoded.iter().all(|&b| b == 0) {
+        r.push_fail(format!(
+            "keys.{label}: ALL-ZERO contents ({} bytes) — this is either a placeholder \
+             the operator forgot to replace OR a key-rotation script crashed mid-write. \
+             For secret keys, this is a catastrophic security failure (trivially-forgeable \
+             identity). Run `proteus-client keygen` to generate a real key.",
+            decoded.len(),
+        ));
+        return;
+    }
+    r.push_pass(format!(
+        "keys.{label} OK ({} bytes, {})",
+        decoded.len(),
+        expected
+    ));
 }
 
 fn base64_or_raw(input: &[u8]) -> Vec<u8> {

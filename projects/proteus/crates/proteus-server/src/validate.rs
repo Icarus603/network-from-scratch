@@ -676,10 +676,47 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
 /// Helper: assert a file exists and is readable by the current
 /// process. Records [`Check::Fail`] otherwise.
 fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
-    match std::fs::File::open(path) {
-        Ok(_) => report.push_pass(format!("{label} exists and readable ({path:?})")),
+    match std::fs::read(path) {
+        Ok(bytes) => {
+            // Iter-48: all-zeros sentinel check applies to KEY files
+            // only. Cert/PEM files are skipped (their parse path
+            // already gates content, and a "keys" label is the
+            // signal we're looking at raw key material).
+            let is_key_file = label.starts_with("keys.");
+            if is_key_file && !bytes.is_empty() {
+                // Decode base64 if it looks like base64 to catch the
+                // case where the operator stored keys in armored form
+                // (the keygen tool's default output).
+                let decoded = base64_or_raw_bytes(&bytes);
+                if !decoded.is_empty() && decoded.iter().all(|&b| b == 0) {
+                    report.push_fail(format!(
+                        "{label} {path:?}: ALL-ZERO contents ({} bytes) — this is either \
+                         a placeholder the operator forgot to replace OR a key-rotation \
+                         script crashed mid-write. For secret keys this is a catastrophic \
+                         security failure (trivially-forgeable server identity). Run \
+                         `proteus-server keygen` to generate a real key.",
+                        decoded.len(),
+                    ));
+                    return;
+                }
+            }
+            report.push_pass(format!("{label} exists and readable ({path:?})"));
+        }
         Err(e) => report.push_fail(format!("{label} {path:?}: {e}")),
     }
+}
+
+fn base64_or_raw_bytes(input: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+    let trimmed: Vec<u8> = input
+        .iter()
+        .copied()
+        .filter(|b| !b.is_ascii_whitespace())
+        .collect();
+    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
+        return decoded;
+    }
+    input.to_vec()
 }
 
 /// Top-level driver for the `validate` subcommand. Loads the YAML

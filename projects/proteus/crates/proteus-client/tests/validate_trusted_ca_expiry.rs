@@ -65,11 +65,23 @@ fn mint_ca(not_after: time::OffsetDateTime) -> String {
 
 fn write_keys(dir: &std::path::Path) -> (PathBuf, PathBuf, PathBuf, PathBuf) {
     use base64::Engine;
+    use rand_core::RngCore;
     let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
-    let mlkem = touch(dir, "mlkem.pk", format!("{}\n", b64(&vec![0u8; 1184])).as_bytes());
-    let x = touch(dir, "x25519.pk", format!("{}\n", b64(&[0u8; 32])).as_bytes());
-    let fp = touch(dir, "fp", format!("{}\n", b64(&[0u8; 32])).as_bytes());
-    let sk = touch(dir, "sk", format!("{}\n", b64(&[0u8; 32])).as_bytes());
+    let mut rng = rand_core::OsRng;
+    let mut mlkem_buf = vec![0u8; 1184];
+    rng.fill_bytes(&mut mlkem_buf);
+    let mut x_buf = [0u8; 32];
+    rng.fill_bytes(&mut x_buf);
+    let mut fp_buf = [0u8; 32];
+    rng.fill_bytes(&mut fp_buf);
+    let mut sk_buf = [0u8; 32];
+    rng.fill_bytes(&mut sk_buf);
+    // Iter-48: random non-zero bytes so the new all-zeros validate
+    // check doesn't false-FAIL the iter-47 trusted_ca tests.
+    let mlkem = touch(dir, "mlkem.pk", format!("{}\n", b64(&mlkem_buf)).as_bytes());
+    let x = touch(dir, "x25519.pk", format!("{}\n", b64(&x_buf)).as_bytes());
+    let fp = touch(dir, "fp", format!("{}\n", b64(&fp_buf)).as_bytes());
+    let sk = touch(dir, "sk", format!("{}\n", b64(&sk_buf)).as_bytes());
     (mlkem, x, fp, sk)
 }
 

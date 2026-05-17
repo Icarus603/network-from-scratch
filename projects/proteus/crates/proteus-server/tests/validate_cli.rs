@@ -110,6 +110,62 @@ keys:
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Iter-48: server-side all-zero key file is a catastrophic
+/// security failure (trivially-forgeable server identity). Must
+/// FAIL validate even though the file is present + readable +
+/// the right size.
+#[test]
+fn iter48_validate_fails_on_all_zero_server_key_file() {
+    let dir = tmpdir("zero-keys");
+    let mlkem_pk = dir.join("mlkem.pk");
+    let mlkem_sk = dir.join("mlkem.sk");
+    let x25519_pk = dir.join("x25519.pk");
+    let x25519_sk = dir.join("x25519.sk");
+    // Plant an all-zero secret key — the catastrophic case.
+    std::fs::write(&mlkem_pk, b"placeholder-content").unwrap();
+    std::fs::write(&mlkem_sk, [0u8; 256]).unwrap(); // all zeros
+    std::fs::write(&x25519_pk, b"placeholder-content").unwrap();
+    std::fs::write(&x25519_sk, b"placeholder-content").unwrap();
+
+    let yaml = dir.join("server.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            r#"listen_alpha: "0.0.0.0:8443"
+keys:
+  mlkem_pk: {}
+  mlkem_sk: {}
+  x25519_pk: {}
+  x25519_sk: {}
+"#,
+            mlkem_pk.display(),
+            mlkem_sk.display(),
+            x25519_pk.display(),
+            x25519_sk.display(),
+        ),
+    )
+    .unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_proteus-server");
+    let output = Command::new(bin)
+        .args(["validate", "--config"])
+        .arg(&yaml)
+        .output()
+        .expect("spawn proteus-server validate");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    eprintln!("all-zero-sk stdout:\n{stdout}");
+    assert!(
+        !output.status.success(),
+        "all-zero secret key MUST cause exit 1, got success.\nstdout:\n{stdout}"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stdout.contains("ALL-ZERO"),
+        "FAIL message must explicitly mention ALL-ZERO so the operator knows what to fix:\n{stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn validate_fails_on_malformed_yaml() {
     let dir = tmpdir("malformed");

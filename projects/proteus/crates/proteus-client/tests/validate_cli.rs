@@ -28,15 +28,27 @@ fn tempdir(suffix: &str) -> PathBuf {
 }
 
 fn write_32b_key(dir: &std::path::Path, name: &str) -> PathBuf {
+    // Iter-48: random non-zero bytes. The validate-time all-zeros
+    // sentinel check (FAIL on uniformly-zero keys) means we can no
+    // longer use [0u8; 32] as a test fixture — every operator who
+    // hand-wrote a placeholder would also trip it, but in fixtures
+    // we want validate to pass.
+    use rand_core::RngCore;
+    let mut buf = [0u8; 32];
+    rand_core::OsRng.fill_bytes(&mut buf);
     let p = dir.join(name);
-    std::fs::write(&p, [0u8; 32]).unwrap();
+    std::fs::write(&p, buf).unwrap();
     p
 }
 
 fn write_mlkem_pk(dir: &std::path::Path, name: &str) -> PathBuf {
     // ML-KEM-768 EK is 1184 bytes — well above the ≥32 sanity threshold.
+    // Iter-48: random non-zero bytes (see write_32b_key rationale).
+    use rand_core::RngCore;
+    let mut buf = vec![0u8; 1184];
+    rand_core::OsRng.fill_bytes(&mut buf);
     let p = dir.join(name);
-    std::fs::write(&p, vec![0u8; 1184]).unwrap();
+    std::fs::write(&p, buf).unwrap();
     p
 }
 
@@ -672,6 +684,148 @@ async fn iter43_server_endpoints_case_insensitive_hostname_no_warn() {
     assert!(
         !sni_warn,
         "case-insensitive hostname match must NOT trigger SNI warn: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- iter-48: all-zero key sentinel check ----------
+
+/// Helper: write an all-zero key file (placeholder / corrupted /
+/// dd-from-/dev/zero scenario).
+fn write_32b_zero_key(dir: &std::path::Path, name: &str) -> PathBuf {
+    let p = dir.join(name);
+    std::fs::write(&p, [0u8; 32]).unwrap();
+    p
+}
+
+/// An all-zero secret key is a catastrophic security failure
+/// (trivially-forgeable identity). Validate MUST FAIL.
+#[tokio::test]
+async fn iter48_all_zero_client_sk_fails_validate() {
+    let dir = tempdir("zero-sk");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    // The secret key is all zeros — placeholder forgotten / script crashed.
+    let ed_sk = write_32b_zero_key(&dir, "client.ed25519.sk");
+
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("all-zero-sk report:\n{report}");
+    assert!(
+        report.has_failures(),
+        "all-zero secret key MUST FAIL validate: {report}"
+    );
+    let zero_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("client_ed25519_sk") && s.contains("ALL-ZERO")
+        }
+        _ => false,
+    });
+    assert!(
+        zero_fail,
+        "FAIL row must specifically call out ALL-ZERO + the affected key: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// All-zero PUBLIC keys are also FAIL — every handshake would
+/// verify against an attacker-controlled trivial key.
+#[tokio::test]
+async fn iter48_all_zero_server_x25519_pk_fails_validate() {
+    let dir = tempdir("zero-x25519");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_zero_key(&dir, "server.x25519.pk"); // zero
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("zero-x25519 report:\n{report}");
+    assert!(report.has_failures(), "{report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Base64-encoded all-zero key is ALSO detected (the validator
+/// decodes base64 before the zero check). Pre-iter-48 this would
+/// have slipped through either way; post-iter-48 both forms are
+/// caught.
+#[tokio::test]
+async fn iter48_base64_encoded_all_zero_key_fails_validate() {
+    use base64::Engine;
+    let dir = tempdir("zero-base64");
+    let zeros = [0u8; 32];
+    let b64 = base64::engine::general_purpose::STANDARD.encode(zeros);
+    let sk_path = dir.join("client.ed25519.sk");
+    std::fs::write(&sk_path, format!("{b64}\n")).unwrap();
+
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            sk_path.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("base64-zero report:\n{report}");
+    let zero_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("ALL-ZERO"),
+        _ => false,
+    });
+    assert!(
+        zero_fail,
+        "base64-encoded all-zero key MUST be detected after decode: {report}"
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
