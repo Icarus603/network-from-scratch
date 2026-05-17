@@ -797,6 +797,27 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
                 ));
             }
         }
+        // Iter-60: within-list duplicates. Operator copy-pastes a
+        // CIDR twice into firewall.allow / firewall.deny and the
+        // runtime treats them as one rule (the parser dedupes
+        // internally) — but the operator now thinks "I have N
+        // rules" when they have N-K. Surface so the per-list
+        // counts in the config match the operator's intent.
+        for (list_name, list) in [("firewall.allow", &fw.allow), ("firewall.deny", &fw.deny)] {
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(list.len());
+            let mut dupes: Vec<&str> = Vec::new();
+            for cidr in list {
+                if !seen.insert(cidr.as_str()) && !dupes.contains(&cidr.as_str()) {
+                    dupes.push(cidr.as_str());
+                }
+            }
+            if !dupes.is_empty() {
+                r.push_warn(format!(
+                    "{list_name} contains duplicate entries: {dupes:?}. Runtime dedupes them; \
+                     the per-list count operators see in their config is misleading.",
+                ));
+            }
+        }
     }
 
     // 18a. max_session_bytes must be at least 1 MiB.
@@ -1163,6 +1184,46 @@ mod tests {
         cfg.cover_endpoint = Some("not a host:port at all".to_string());
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-60: duplicate CIDRs within firewall.allow → WARN.
+    /// Same shape for firewall.deny.
+    #[test]
+    fn iter60_duplicate_firewall_allow_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.firewall = Some(FirewallCfg {
+            allow: vec![
+                "10.0.0.0/8".to_string(),
+                "192.0.2.0/24".to_string(),
+                "10.0.0.0/8".to_string(),
+            ],
+            deny: vec![],
+        });
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("firewall.allow") && s.contains("duplicate"),
+            _ => false,
+        });
+        assert!(warn, "duplicate firewall.allow MUST WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn iter60_duplicate_firewall_deny_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.firewall = Some(FirewallCfg {
+            allow: vec![],
+            deny: vec!["198.51.100.0/24".to_string(), "198.51.100.0/24".to_string()],
+        });
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("firewall.deny") && s.contains("duplicate"),
+            _ => false,
+        });
+        assert!(warn, "duplicate firewall.deny MUST WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
