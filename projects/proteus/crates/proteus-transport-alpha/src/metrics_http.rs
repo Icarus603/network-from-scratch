@@ -446,6 +446,276 @@ fn matches_path(request_head: &str, path: &str) -> bool {
     request_head.starts_with(&with_space) || request_head.starts_with(&with_query)
 }
 
+/// Severity classification for a [`DiagnoseFinding`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnoseSeverity {
+    /// Sanity check passed; included so operators see the green
+    /// signals alongside the warnings.
+    Info,
+    /// Probably operator-actionable but not currently breaking
+    /// traffic (e.g. "cert renews in 8 days — within
+    /// auto-renew window").
+    Warn,
+    /// Currently degrading or about to break traffic. Operator
+    /// should act now (e.g. cert expired, SIGHUP partially
+    /// failed, system-resolver bootstrap used in a deployment
+    /// that should be all-pinned).
+    Critical,
+}
+
+impl DiagnoseSeverity {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Info => "INFO",
+            Self::Warn => "WARN",
+            Self::Critical => "CRIT",
+        }
+    }
+}
+
+/// One self-check result emitted by [`render_diagnose`].
+/// Operator-readable; the renderer prints them at the top of
+/// `/diagnose` output as a quick triage section.
+#[derive(Debug, Clone)]
+pub struct DiagnoseFinding {
+    pub severity: DiagnoseSeverity,
+    pub rule: &'static str,
+    pub message: String,
+}
+
+/// Render the `/diagnose` body. Combines:
+///   1. A `FINDINGS` section at the top — rule-based self-check
+///      that surfaces the operator-actionable issues (cert near
+///      expiry, silent SIGHUP failures, etc.).
+///   2. The full `/metrics` body so a single curl-paste-share
+///      gives the recipient everything they need without asking
+///      the operator to run a second command.
+///
+/// Operator workflow:
+///   curl -s :9090/diagnose > diagnose.txt
+///   # check the FINDINGS section, share the file if filing a bug
+///
+/// `auth` is enforced by the caller (we don't see it here); the
+/// caller already gated the request.
+#[must_use]
+pub fn render_diagnose(
+    metrics: &ServerMetrics,
+    probe_anomaly: Option<&crate::probe_anomaly::ProbeAnomalyDetector>,
+    auto_deny: Option<&crate::auto_deny::AutoDenyList>,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    config_presence: Option<&str>,
+    process_info: Option<&crate::process_info::ProcessInfo>,
+) -> String {
+    let findings = run_diagnose_rules(metrics, tls_acceptor, process_info);
+    let mut s = String::with_capacity(4096);
+    s.push_str("Proteus diagnose — operator self-check + metrics dump\n");
+    s.push_str("=====================================================\n\n");
+
+    s.push_str("FINDINGS\n");
+    s.push_str("--------\n");
+    if findings.is_empty() {
+        s.push_str("  (no rules tripped)\n");
+    } else {
+        for f in &findings {
+            // Format: `[CRIT] cert_expiry: cert expires in 3 days`
+            s.push_str("  [");
+            s.push_str(f.severity.label());
+            s.push_str("] ");
+            s.push_str(f.rule);
+            s.push_str(": ");
+            s.push_str(&f.message);
+            s.push('\n');
+        }
+    }
+    s.push('\n');
+
+    s.push_str("METRICS (text/plain; version=0.0.4)\n");
+    s.push_str("-----------------------------------\n");
+    let now = std::time::Instant::now();
+    s.push_str(&metrics.prometheus());
+    if let Some(det) = probe_anomaly {
+        s.push_str(&det.prometheus_extension(now));
+    }
+    if let Some(ad) = auto_deny {
+        s.push_str(&ad.prometheus_extension(now));
+    }
+    if let Some(ra) = tls_acceptor {
+        s.push_str(&ra.prometheus_extension());
+    }
+    if let Some(cp) = config_presence {
+        s.push_str(cp);
+    }
+    if let Some(pi) = process_info {
+        s.push_str(&pi.prometheus());
+        let res = crate::process_resources::ProcessResources::capture();
+        if !res.is_empty() {
+            s.push_str(&res.prometheus_with_prefix("proteus"));
+        }
+    }
+    s
+}
+
+/// Pure rule evaluator — separated from the renderer so tests
+/// can exercise individual rules without parsing rendered text.
+///
+/// Current rules (severity ordering is reported, not enforced):
+///   - Cert TTL: CRIT if < 1d, WARN if < 14d, INFO if > 14d.
+///   - TLS reload: CRIT if `attempts > succeeded` (silent SIGHUP
+///     failure on the cert path — operator's certbot deploy hook
+///     fired but Proteus didn't pick it up).
+///   - Process up: INFO when alive=true; CRIT when alive=false.
+///   - SOCKS5 readiness: INFO when ready=true; WARN when
+///     ready=false (draining or warming up).
+///
+/// More rules land as production deployments surface specific
+/// failure modes — the harness is the pattern, not the rule
+/// list.
+#[must_use]
+pub fn run_diagnose_rules(
+    metrics: &ServerMetrics,
+    tls_acceptor: Option<&crate::tls::ReloadableAcceptor>,
+    _process_info: Option<&crate::process_info::ProcessInfo>,
+) -> Vec<DiagnoseFinding> {
+    let mut out = Vec::new();
+
+    // Process up / readiness — every diagnose run reports these
+    // even when fine, so the operator sees green signals.
+    let alive = metrics.alive.load(Ordering::Relaxed);
+    out.push(DiagnoseFinding {
+        severity: if alive {
+            DiagnoseSeverity::Info
+        } else {
+            DiagnoseSeverity::Critical
+        },
+        rule: "process_alive",
+        message: if alive {
+            "process alive".to_string()
+        } else {
+            "process NOT alive — accept loop has not bound the listener yet".to_string()
+        },
+    });
+    let ready = metrics.ready.load(Ordering::Relaxed);
+    out.push(DiagnoseFinding {
+        severity: if ready {
+            DiagnoseSeverity::Info
+        } else {
+            DiagnoseSeverity::Warn
+        },
+        rule: "process_ready",
+        message: if ready {
+            "process ready — accepting new traffic".to_string()
+        } else {
+            "process NOT ready — either still warming up OR draining for SIGTERM".to_string()
+        },
+    });
+
+    // TLS cert TTL + reload silent-failure.
+    if let Some(ra) = tls_acceptor {
+        if let Some(not_after) = ra.leaf_not_after() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let secs_until = not_after - now;
+            let days = secs_until / 86_400;
+            let severity = if days < 1 {
+                // `days < 1` covers both `secs_until <= 0`
+                // (already expired) AND `0 < secs_until < 24h`
+                // (about to expire) — collapsed because they're
+                // both Critical with different render strings.
+                DiagnoseSeverity::Critical
+            } else if days < 14 {
+                DiagnoseSeverity::Warn
+            } else {
+                DiagnoseSeverity::Info
+            };
+            let msg = if secs_until <= 0 {
+                format!("cert EXPIRED {} days ago", -days)
+            } else if days < 1 {
+                "cert expires in < 24 hours — RENEW NOW".to_string()
+            } else {
+                format!("cert expires in {days} days")
+            };
+            out.push(DiagnoseFinding {
+                severity,
+                rule: "tls_cert_ttl",
+                message: msg,
+            });
+        }
+        let attempts = ra.reload_attempts();
+        let succeeded = ra.reload_succeeded();
+        if attempts > 0 {
+            let missing = attempts.saturating_sub(succeeded);
+            let severity = if missing == 0 {
+                DiagnoseSeverity::Info
+            } else {
+                DiagnoseSeverity::Critical
+            };
+            let msg = if missing == 0 {
+                format!("TLS reload: {attempts} attempts, all succeeded")
+            } else {
+                format!(
+                    "TLS reload: {attempts} attempts, {succeeded} succeeded, {missing} silent failures — check journalctl"
+                )
+            };
+            out.push(DiagnoseFinding {
+                severity,
+                rule: "tls_reload_silent_failure",
+                message: msg,
+            });
+        }
+    }
+
+    // Reload counters for the 4 non-TLS sections — same
+    // silent-failure rule but on the ServerMetrics atomics.
+    for (rule_name, att, suc) in [
+        (
+            "firewall_reload_silent_failure",
+            metrics.firewall_reload_attempts.load(Ordering::Relaxed),
+            metrics.firewall_reload_succeeded.load(Ordering::Relaxed),
+        ),
+        (
+            "rate_limit_reload_silent_failure",
+            metrics.rate_limit_reload_attempts.load(Ordering::Relaxed),
+            metrics.rate_limit_reload_succeeded.load(Ordering::Relaxed),
+        ),
+        (
+            "user_rate_limit_reload_silent_failure",
+            metrics
+                .user_rate_limit_reload_attempts
+                .load(Ordering::Relaxed),
+            metrics
+                .user_rate_limit_reload_succeeded
+                .load(Ordering::Relaxed),
+        ),
+        (
+            "handshake_budget_reload_silent_failure",
+            metrics
+                .handshake_budget_reload_attempts
+                .load(Ordering::Relaxed),
+            metrics
+                .handshake_budget_reload_succeeded
+                .load(Ordering::Relaxed),
+        ),
+    ] {
+        if att == 0 {
+            continue;
+        }
+        let missing = att.saturating_sub(suc);
+        if missing > 0 {
+            out.push(DiagnoseFinding {
+                severity: DiagnoseSeverity::Warn,
+                rule: rule_name,
+                message: format!(
+                    "{att} reload attempts, {suc} succeeded, {missing} missing — section may not be installed in config OR no limiter was installed at startup"
+                ),
+            });
+        }
+    }
+
+    out
+}
+
 /// Extract the value of an `Authorization:` header from a raw HTTP
 /// request head. Returns `None` if no such header exists. Case-
 /// insensitive on the header name (HTTP/1.1 § 3.2 says field names
@@ -624,6 +894,30 @@ pub fn render_full_v5(
                 "dead\n".to_string(),
             )
         }
+    } else if matches_path(request_head, "/diagnose") {
+        // Bearer-token gate (same rule as /metrics — /diagnose
+        // exposes operator-sensitive info like prefix lists and
+        // cert TTLs).
+        if let Some(expected) = auth {
+            let presented = extract_authorization(request_head);
+            let ok = presented.is_some_and(|p| expected.matches(p));
+            if !ok {
+                return (
+                    "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Bearer realm=\"proteus-metrics\"\r\n",
+                    "text/plain",
+                    "unauthorized\n".to_string(),
+                );
+            }
+        }
+        let body = render_diagnose(
+            metrics,
+            probe_anomaly,
+            auto_deny,
+            tls_acceptor,
+            config_presence,
+            process_info,
+        );
+        ("HTTP/1.1 200 OK\r\n", "text/plain; charset=utf-8", body)
     } else if matches_path(request_head, "/readyz") {
         if metrics.ready.load(Ordering::Relaxed) {
             ("HTTP/1.1 200 OK\r\n", "text/plain", "ready\n".to_string())
@@ -1142,6 +1436,192 @@ mod tests {
             !body.contains("proteus_process_start_unix_seconds"),
             "{body}"
         );
+    }
+
+    // ----- /diagnose route + rule tests -----
+
+    #[test]
+    fn diagnose_minimal_alive_ready_emits_two_info_findings() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.ready.store(true, Ordering::Relaxed);
+        let findings = run_diagnose_rules(&m, None, None);
+        // Exactly two findings (alive + ready), both Info.
+        assert_eq!(findings.len(), 2, "{findings:#?}");
+        assert_eq!(findings[0].rule, "process_alive");
+        assert_eq!(findings[0].severity, DiagnoseSeverity::Info);
+        assert_eq!(findings[1].rule, "process_ready");
+        assert_eq!(findings[1].severity, DiagnoseSeverity::Info);
+    }
+
+    #[test]
+    fn diagnose_dead_process_emits_critical() {
+        let m = ServerMetrics::default();
+        // alive=false (default); ready=false (default).
+        let findings = run_diagnose_rules(&m, None, None);
+        let alive = &findings[0];
+        assert_eq!(alive.rule, "process_alive");
+        assert_eq!(alive.severity, DiagnoseSeverity::Critical);
+        assert!(
+            alive.message.contains("NOT alive"),
+            "msg: {}",
+            alive.message
+        );
+    }
+
+    #[test]
+    fn diagnose_draining_emits_warn_not_critical() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        // ready stays false → "draining or warming"
+        let findings = run_diagnose_rules(&m, None, None);
+        let ready = findings.iter().find(|f| f.rule == "process_ready").unwrap();
+        assert_eq!(
+            ready.severity,
+            DiagnoseSeverity::Warn,
+            "draining should be Warn not Critical: {ready:?}"
+        );
+    }
+
+    /// Reload-counter rule: when attempts > succeeded (silent
+    /// SIGHUP failure) the rule fires with a Critical for TLS and
+    /// Warn for the four section reloads.
+    #[test]
+    fn diagnose_reload_silent_failure_fires_per_section() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.ready.store(true, Ordering::Relaxed);
+        m.firewall_reload_attempts.store(3, Ordering::Relaxed);
+        m.firewall_reload_succeeded.store(2, Ordering::Relaxed);
+        m.rate_limit_reload_attempts.store(3, Ordering::Relaxed);
+        m.rate_limit_reload_succeeded.store(3, Ordering::Relaxed);
+        let findings = run_diagnose_rules(&m, None, None);
+        // Firewall has a silent failure; rate_limit doesn't.
+        let fw = findings
+            .iter()
+            .find(|f| f.rule == "firewall_reload_silent_failure")
+            .expect("expected firewall finding");
+        assert_eq!(fw.severity, DiagnoseSeverity::Warn);
+        assert!(fw.message.contains("1 missing"), "msg: {}", fw.message);
+        assert!(
+            !findings
+                .iter()
+                .any(|f| f.rule == "rate_limit_reload_silent_failure"),
+            "rate_limit_reload should NOT fire when all succeeded"
+        );
+    }
+
+    /// /diagnose route returns 200 + a body that contains both
+    /// the FINDINGS section AND the metrics dump.
+    #[test]
+    fn render_full_v5_diagnose_route_serves_full_body() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.ready.store(true, Ordering::Relaxed);
+        m.sessions_accepted.fetch_add(42, Ordering::Relaxed);
+        let (status, ctype, body) = render_full_v5(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 200"));
+        assert!(ctype.contains("text/plain"));
+        assert!(body.contains("FINDINGS"), "{body}");
+        assert!(
+            body.contains("[INFO] process_alive: process alive"),
+            "{body}"
+        );
+        assert!(body.contains("METRICS"), "{body}");
+        // The full metrics dump goes after FINDINGS.
+        assert!(
+            body.contains("proteus_sessions_accepted_total 42"),
+            "{body}"
+        );
+    }
+
+    /// /diagnose requires bearer-token auth when configured, same
+    /// rule as /metrics.
+    #[test]
+    fn diagnose_route_requires_bearer_auth_when_configured() {
+        let m = ServerMetrics::default();
+        let auth = MetricsAuth::new("secret123secret123secret123").unwrap();
+        let (status, _ctype, body) = render_full_v5(
+            "GET /diagnose HTTP/1.1\r\n\r\n",
+            &m,
+            Some(&auth),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 401"));
+        assert!(body.contains("unauthorized"));
+    }
+
+    #[test]
+    fn diagnose_route_accepts_correct_bearer_token() {
+        let m = ServerMetrics::default();
+        m.alive.store(true, Ordering::Relaxed);
+        m.ready.store(true, Ordering::Relaxed);
+        let auth = MetricsAuth::new("secret123secret123secret123").unwrap();
+        let (status, _ctype, body) = render_full_v5(
+            "GET /diagnose HTTP/1.1\r\nAuthorization: Bearer secret123secret123secret123\r\n\r\n",
+            &m,
+            Some(&auth),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 200"), "got {status}");
+        assert!(body.contains("FINDINGS"));
+    }
+
+    /// /diagnose with a wrong bearer token returns 401, NOT 200
+    /// with a body that leaks operator-sensitive state.
+    #[test]
+    fn diagnose_route_rejects_wrong_bearer_token() {
+        let m = ServerMetrics::default();
+        let auth = MetricsAuth::new("secret123secret123secret123").unwrap();
+        let (status, _c, body) = render_full_v5(
+            "GET /diagnose HTTP/1.1\r\nAuthorization: Bearer wrong123wrong123wrong123wrong\r\n\r\n",
+            &m,
+            Some(&auth),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 401"));
+        assert!(
+            !body.contains("FINDINGS"),
+            "must not leak body on auth fail: {body}"
+        );
+    }
+
+    /// /diagnose substring rejection (consistent with /metrics).
+    #[test]
+    fn diagnose_substring_path_returns_404() {
+        let m = ServerMetrics::default();
+        let (status, _c, _b) = render_full_v5(
+            "GET /diagnoseleak HTTP/1.1\r\n\r\n",
+            &m,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert!(status.starts_with("HTTP/1.1 404"));
     }
 
     /// v4 with `None` config_presence omits the block — back-compat

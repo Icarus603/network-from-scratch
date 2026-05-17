@@ -321,6 +321,34 @@ Linux; macOS / Windows dev rigs see absent series, which PromQL's
 `absent()` correctly distinguishes from a zero value). Client
 emits the same shape under the `proteus_client_*` prefix.
 
+### `GET /diagnose` — one-shot self-check
+
+Operators debugging a production issue (or filing a bug) hit
+this single endpoint to get the curl-paste-share report:
+
+```bash
+curl -s -H "Authorization: Bearer $METRICS_TOKEN" \
+     http://127.0.0.1:9090/diagnose
+```
+
+The body has two sections:
+
+1. **`FINDINGS`** — rule-based self-check with severity tags
+   (`[INFO]` / `[WARN]` / `[CRIT]`). Rules currently shipped:
+   - `process_alive` / `process_ready` — the basic liveness pair
+   - `tls_cert_ttl` — CRIT if < 1 day, WARN if < 14 days
+   - `tls_reload_silent_failure` — CRIT if SIGHUP attempts >
+     succeeded on the cert path
+   - `firewall_reload_silent_failure` / `rate_limit_*` /
+     `user_rate_limit_*` / `handshake_budget_*` — WARN per
+     section when reload attempts > succeeded
+2. **`METRICS`** — the full `/metrics` body verbatim, so the
+   recipient has everything without asking for a second command.
+
+Auth is bearer-token enforced (same gate as `/metrics`) because
+the body includes cert TTLs and operator-sensitive counter
+state.
+
 The client emits a symmetric `proteus_client_process_*` +
 `proteus_client_build_info{…}` triple — same shape, same alert
 queries:
