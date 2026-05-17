@@ -331,6 +331,20 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | RelyVPN 2026-04 crackdown 報告 | 二手新聞 | 已歸檔在本 Q&A |
 | net4people/bbs #519 (Geedge 持續追蹤) | 社群討論 | bookmark + 定期回看 |
 
+## 關聯：Proteus vs SOTA 安全性審計（2026-05-18）
+
+回答使用者「現在對 GFW 的安全性甩了當今 SOTA 幾條街？」的逐項
+citation-backed audit，見 [`notes/gfw/2026-05-18-proteus-vs-sota-safety-audit.md`](../notes/gfw/2026-05-18-proteus-vs-sota-safety-audit.md)。
+
+簡要結論（詳細 12 條 capability matrix 在 audit 文件裡）：
+
+- **9 / 12 capability**：Proteus **strictly ahead** of VLESS+Reality 與 Hy2/TUIC-v5（不是 "comparable" 而是 "他們完全沒有對應防禦"）
+- **1 / 12**：β QUIC SNI 主線（ECH 是 load-bearing；Proteus 在 ECH 周邊的 USENIX-25 / USENIX-23 戰術性 evasion 領先所有 QUIC 對手）
+- **1 / 12（uTLS bit-perfect ClientHello）**：REALITY 仍領先；唯一還要追的點
+- 0 tied / 0 uncomparable
+
+每一條 ✅ 都被 commit-id + test-name 引用回 repo，audit 的 reproducibility 是 `cargo test --workspace`。
+
 ## 結論
 
 GFW 從 2025 Q3 → 2026 Q2 的攻勢核心不是「新發明的算法」，而是 **工業化 + 商品化**：
