@@ -1664,6 +1664,21 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         metrics
             .periodic_self_test_interval_secs
             .store(periodic_interval_secs, std::sync::atomic::Ordering::Relaxed);
+        // Publish the hysteresis threshold (default 2). /healthz
+        // reads `consecutive_periodic_self_test_failures >=
+        // failure_threshold` to decide whether to flip to 503;
+        // operators wanting legacy single-failure-drain set
+        // this to 1.
+        let failure_threshold = cfg.periodic_self_test_failure_threshold.unwrap_or(2);
+        metrics
+            .periodic_self_test_failure_threshold
+            .store(failure_threshold, std::sync::atomic::Ordering::Relaxed);
+        info!(
+            failure_threshold,
+            "periodic self-test hysteresis: /healthz flips to 503 only after \
+             this many consecutive failures (set periodic_self_test_failure_threshold=1 \
+             for legacy single-failure-drain)"
+        );
         // Deadline for each cycle = the interval itself (max
         // bound; a cycle that takes longer than the interval is
         // operationally a hang). Cap at 30s for sanity so an
@@ -1681,85 +1696,112 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             let mut interval =
                 tokio::time::interval(std::time::Duration::from_secs(periodic_interval_secs));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            // Hysteresis helper: every failure path calls this. It
+            // bumps the failed-total + streak counters, and flips
+            // /healthz=503 ONLY when the streak crosses the
+            // configured threshold. Threshold=0 or 1 = legacy
+            // single-failure-drain (no hysteresis). Returns the
+            // post-bump streak so the caller can format the log
+            // line with "1/2", "2/2", etc.
+            let bump_failure = |reason: &str, err_msg: String| -> u64 {
+                use std::sync::atomic::Ordering;
+                metrics_for_test
+                    .periodic_self_test_failed_total
+                    .fetch_add(1, Ordering::Relaxed);
+                let streak = metrics_for_test
+                    .consecutive_periodic_self_test_failures
+                    .fetch_add(1, Ordering::Relaxed)
+                    + 1;
+                let threshold = metrics_for_test
+                    .periodic_self_test_failure_threshold
+                    .load(Ordering::Relaxed)
+                    .max(1);
+                if streak >= threshold {
+                    // Threshold crossed — flip /healthz=503.
+                    metrics_for_test
+                        .last_periodic_self_test_passed
+                        .store(false, Ordering::Relaxed);
+                    error!(
+                        reason,
+                        error = %err_msg,
+                        streak,
+                        threshold,
+                        "periodic self-test: consecutive-failure streak hit threshold — \
+                         /healthz now returning 503"
+                    );
+                } else {
+                    // Under the threshold — log a warn so
+                    // operators see the deteriorating signal,
+                    // but DON'T drop /healthz. The next pass
+                    // resets the streak.
+                    warn!(
+                        reason,
+                        error = %err_msg,
+                        streak,
+                        threshold,
+                        "periodic self-test failed but within hysteresis window — \
+                         /healthz still 200 (one more failure drains)"
+                    );
+                }
+                streak
+            };
+            // Success path: reset the streak, mark passed=true.
+            let mark_success = |outcome: &proteus_server::startup_self_test::SelfTestOutcome| {
+                use std::sync::atomic::Ordering;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let prev_streak = metrics_for_test
+                    .consecutive_periodic_self_test_failures
+                    .swap(0, Ordering::Relaxed);
+                metrics_for_test
+                    .last_periodic_self_test_passed
+                    .store(true, Ordering::Relaxed);
+                metrics_for_test
+                    .last_periodic_self_test_unix_seconds
+                    .store(now, Ordering::Relaxed);
+                if prev_streak > 0 {
+                    info!(
+                        previous_streak = prev_streak,
+                        "periodic self-test recovered — streak reset, /healthz remains 200"
+                    );
+                }
+                // Only INFO-log on unusual durations; otherwise
+                // the loop is too chatty for journald.
+                if outcome.total > std::time::Duration::from_millis(100) {
+                    info!(
+                        total_ms = outcome.total.as_millis() as u64,
+                        handshake_ms = outcome.handshake.as_millis() as u64,
+                        roundtrip_ms = outcome.roundtrip.as_millis() as u64,
+                        "periodic self-test passed (note: > 100ms — investigate)"
+                    );
+                }
+            };
             loop {
                 interval.tick().await;
                 metrics_for_test
                     .periodic_self_test_attempts_total
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                // Re-load the YAML + keys each cycle. Operators
-                // who hot-edit keys + SIGHUP get the freshest
-                // state; operators who don't pay the disk-I/O
-                // cost (microseconds) every cycle.
                 let fresh_keys = match ServerConfig::load(&config_path).await {
                     Ok(c) => match load_server_keys(&c) {
                         Ok(k) => k,
                         Err(e) => {
-                            warn!(
-                                error = %e,
-                                "periodic self-test: key reload FAILED — \
-                                 flipping /healthz to 503"
-                            );
-                            metrics_for_test
-                                .last_periodic_self_test_passed
-                                .store(false, std::sync::atomic::Ordering::Relaxed);
-                            metrics_for_test
-                                .periodic_self_test_failed_total
-                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            bump_failure("key_reload", e.to_string());
                             continue;
                         }
                     },
                     Err(e) => {
-                        warn!(
-                            error = %e,
-                            "periodic self-test: config reload FAILED — \
-                             flipping /healthz to 503"
-                        );
-                        metrics_for_test
-                            .last_periodic_self_test_passed
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        metrics_for_test
-                            .periodic_self_test_failed_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        bump_failure("config_reload", e.to_string());
                         continue;
                     }
                 };
                 match proteus_server::startup_self_test::run_self_test(fresh_keys, cycle_deadline)
                     .await
                 {
-                    Ok(outcome) => {
-                        let now = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_secs())
-                            .unwrap_or(0);
-                        metrics_for_test
-                            .last_periodic_self_test_passed
-                            .store(true, std::sync::atomic::Ordering::Relaxed);
-                        metrics_for_test
-                            .last_periodic_self_test_unix_seconds
-                            .store(now, std::sync::atomic::Ordering::Relaxed);
-                        // Only INFO-log on transitions or
-                        // unusual durations; otherwise the loop
-                        // is too chatty for journald.
-                        if outcome.total > std::time::Duration::from_millis(100) {
-                            info!(
-                                total_ms = outcome.total.as_millis() as u64,
-                                handshake_ms = outcome.handshake.as_millis() as u64,
-                                roundtrip_ms = outcome.roundtrip.as_millis() as u64,
-                                "periodic self-test passed (note: > 100ms — investigate)"
-                            );
-                        }
-                    }
+                    Ok(outcome) => mark_success(&outcome),
                     Err(e) => {
-                        metrics_for_test
-                            .last_periodic_self_test_passed
-                            .store(false, std::sync::atomic::Ordering::Relaxed);
-                        metrics_for_test
-                            .periodic_self_test_failed_total
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        error!(
-                            error = %e,
-                            "periodic self-test FAILED — /healthz now returning 503"
-                        );
+                        bump_failure("self_test", e.to_string());
                     }
                 }
             }

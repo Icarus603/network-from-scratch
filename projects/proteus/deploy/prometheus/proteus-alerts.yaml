@@ -161,6 +161,33 @@ groups:
         ended the previous run. Cross-reference the previous
         run's journal for the root cause.
 
+- name: proteus-self-test
+  interval: 30s
+  rules:
+
+  # Early-warning: streak at threshold-minus-one. One more
+  # failure drains the box. Doesn't page (still healthy) but
+  # alerts an operator that the box is one blip from draining
+  # — useful for catching a developing degradation before LB
+  # rotation kicks in.
+  - alert: ProteusSelfTestStreakNearThreshold
+    expr: |
+      (proteus_consecutive_periodic_self_test_failures > 0)
+      and (proteus_periodic_self_test_failure_threshold > 1)
+      and ((proteus_consecutive_periodic_self_test_failures + 1)
+            >= proteus_periodic_self_test_failure_threshold)
+    for: 1m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus self-test failure streak one away from healthz drain"
+      description: |
+        consecutive_periodic_self_test_failures =
+        {{ printf "%.0f" $value }} on {{ $labels.instance }},
+        threshold = {{ printf "%.0f" $value }}. One more failure
+        flips /healthz to 503 and drops this box from LB
+        rotation. Investigate now.
+
 - name: proteus-network
   interval: 30s
   rules:

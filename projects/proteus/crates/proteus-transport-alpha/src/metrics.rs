@@ -359,6 +359,32 @@ pub struct ServerMetrics {
     /// Operators alert on `failed > 0` for the strongest "crypto
     /// stack went bad mid-flight" signal.
     pub periodic_self_test_failed_total: AtomicU64,
+    /// **Consecutive failures** of the periodic self-test since
+    /// the last success. Counts UP on every back-to-back failure
+    /// and RESETS to 0 on the next success. Hysteresis lives on
+    /// top of this counter: /healthz only flips to 503 when
+    /// `consecutive_failures >= failure_threshold` (default 2).
+    ///
+    /// Why hysteresis matters: without it, a single transient
+    /// blip (RNG starvation under momentary CPU pressure, tokio
+    /// scheduling hiccup, etc.) drops the box out of load-
+    /// balancer rotation immediately — costing minutes of
+    /// re-add latency for a problem that fixed itself in
+    /// milliseconds. With the threshold, only sustained
+    /// degradation kicks the LB drain.
+    ///
+    /// Surfaced as the
+    /// `proteus_consecutive_periodic_self_test_failures` gauge
+    /// so operators can see "we're at 1/2, one more blip
+    /// drains us" on dashboards.
+    pub consecutive_periodic_self_test_failures: AtomicU64,
+    /// Failure-streak threshold at which /healthz flips to 503.
+    /// `0` and `1` both mean "no hysteresis" — the first failure
+    /// drains immediately (the pre-hysteresis behavior). `2`+
+    /// requires that many consecutive failures before the
+    /// gauge flips. Set ONCE at startup from
+    /// `cfg.periodic_self_test_failure_threshold` (default 2).
+    pub periodic_self_test_failure_threshold: AtomicU64,
     /// Configured periodic self-test interval (seconds). 0 = no
     /// periodic test wired (the `last_periodic_*` gauges stay at
     /// their init values; /healthz ignores the staleness rule).
@@ -455,6 +481,15 @@ impl Default for ServerMetrics {
             last_periodic_self_test_unix_seconds: AtomicU64::new(0),
             periodic_self_test_attempts_total: AtomicU64::new(0),
             periodic_self_test_failed_total: AtomicU64::new(0),
+            // Streak starts at 0 — no failures observed yet.
+            consecutive_periodic_self_test_failures: AtomicU64::new(0),
+            // 0 = unset; main.rs::run overwrites with the
+            // operator-configured threshold (default 2) before
+            // the periodic task spawns. /healthz treats `0` as
+            // "no hysteresis" so legacy operators (no upgrade)
+            // see the pre-iteration "single failure drains"
+            // behavior.
+            periodic_self_test_failure_threshold: AtomicU64::new(0),
             periodic_self_test_interval_secs: AtomicU64::new(0),
             handshake_duration_seconds: crate::histogram::LatencyHistogram::new(
                 "handshake_duration_seconds",
@@ -578,6 +613,12 @@ impl ServerMetrics {
              # HELP proteus_periodic_self_test_failed_total Cumulative periodic self-test cycles that returned Err — alert on rate(...) > 0 to spot live crypto-stack degradation.\n\
              # TYPE proteus_periodic_self_test_failed_total counter\n\
              proteus_periodic_self_test_failed_total {}\n\
+             # HELP proteus_consecutive_periodic_self_test_failures Current consecutive-failure streak for the periodic self-test. Counts up on every back-to-back failure, resets to 0 on the next pass. /healthz only flips to 503 when this hits the configured failure_threshold (default 2) — so a single transient blip doesn't drain the box.\n\
+             # TYPE proteus_consecutive_periodic_self_test_failures gauge\n\
+             proteus_consecutive_periodic_self_test_failures {}\n\
+             # HELP proteus_periodic_self_test_failure_threshold Hysteresis threshold: /healthz flips to 503 only after this many consecutive failures. 0/1 = no hysteresis (legacy behavior).\n\
+             # TYPE proteus_periodic_self_test_failure_threshold gauge\n\
+             proteus_periodic_self_test_failure_threshold {}\n\
              # HELP proteus_outbound_blocked_total Upstream dials blocked by the outbound destination filter.\n\
              # TYPE proteus_outbound_blocked_total counter\n\
              proteus_outbound_blocked_total {}\n\
@@ -647,6 +688,8 @@ impl ServerMetrics {
                 .load(Ordering::Relaxed),
             self.periodic_self_test_failed_total
                 .load(Ordering::Relaxed),
+            s(&self.consecutive_periodic_self_test_failures),
+            s(&self.periodic_self_test_failure_threshold),
             s(&self.outbound_blocked),
             s(&self.in_flight_sessions),
             u64::from(self.alive.load(Ordering::Relaxed)),

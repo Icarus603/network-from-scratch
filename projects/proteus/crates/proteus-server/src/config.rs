@@ -416,6 +416,32 @@ pub struct ServerConfig {
     #[serde(default)]
     pub periodic_self_test_interval_secs: Option<u64>,
 
+    /// **Hysteresis threshold** on top of the periodic self-test:
+    /// `/healthz` only flips to 503 after this many CONSECUTIVE
+    /// failures. Default `2`.
+    ///
+    /// Without hysteresis (`0` or `1`), a single transient blip —
+    /// RNG starvation under momentary CPU pressure, tokio
+    /// scheduling hiccup during a GC pause, kernel-side packet
+    /// drop — drops the box out of load-balancer rotation
+    /// immediately. The re-add latency (next LB scrape interval +
+    /// hold-down) often dwarfs the original blip duration, so
+    /// the symptom is much worse than the cause.
+    ///
+    /// Default `2` requires two BACK-TO-BACK failures (one
+    /// passing self-test resets the streak) before draining,
+    /// which absorbs the single-blip case while still draining
+    /// genuinely-broken nodes within `2 × interval` seconds.
+    /// Operators wanting the legacy single-failure-drain
+    /// behavior set this to `1`.
+    ///
+    /// Surfaced as `proteus_periodic_self_test_failure_threshold` +
+    /// `proteus_consecutive_periodic_self_test_failures` so
+    /// dashboards can show "we're at 1/2, one more blip drains
+    /// us" as an early-warning panel.
+    #[serde(default)]
+    pub periodic_self_test_failure_threshold: Option<u64>,
+
     /// TLS cert file mtime-watch interval in seconds.
     ///
     /// When set (and a `tls:` block is configured), Proteus polls
