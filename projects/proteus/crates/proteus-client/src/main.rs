@@ -153,6 +153,36 @@ enum Cmd {
         #[arg(long, default_value = "text")]
         format: String,
     },
+    /// One-shot in-process evaluation of client-side production
+    /// alert rules against a running client's `/metrics`
+    /// endpoint. Symmetric with `proteus-server admin alerts-check`
+    /// — operators get a per-rule verdict in 50-200 ms without
+    /// standing up Prometheus.
+    ///
+    /// Rules evaluated:
+    ///   ProteusClientNotAlive                — SOCKS5 not bound
+    ///   ProteusClientBetaCarrierSuppressed   — β backing off
+    ///   ProteusClientAllEndpointsSuppressed  — pool exhausted
+    ///   ProteusClientNoRecentDialSuccess     — never dialed OK
+    ///   ProteusClientHighDialFailureRatio    — more fail than ok
+    ///   ProteusClientBootstrapViaSystemResolver — DoH-leak risk
+    ///
+    /// Exit code: 0 on PASS+WARN-only, 1 on any CRIT. Wire into
+    /// Ansible/Terraform deploy gates for fresh-client smoke
+    /// checks.
+    AlertsCheck {
+        /// URL of the admin endpoint. Default points at the
+        /// recommended loopback bind. The endpoint is
+        /// loopback-only by convention; no token gate.
+        #[arg(long, default_value = "http://127.0.0.1:9091")]
+        url: String,
+        /// Per-step network timeout in seconds.
+        #[arg(long, default_value_t = 5)]
+        timeout_secs: u64,
+        /// Output format: `text` (default) or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[tokio::main]
@@ -204,6 +234,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let code =
                 proteus_client::connect_test::cli_run(&config, connect_timeout_secs, &format)
                     .await?;
+            std::process::exit(code);
+        }
+        Cmd::AlertsCheck {
+            url,
+            timeout_secs,
+            format,
+        } => {
+            let code = proteus_client::admin_alerts_check::cli_run(
+                &url,
+                std::time::Duration::from_secs(timeout_secs),
+                &format,
+            )
+            .await?;
             std::process::exit(code);
         }
     }
