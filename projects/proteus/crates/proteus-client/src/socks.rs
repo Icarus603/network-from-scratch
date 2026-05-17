@@ -377,8 +377,18 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     // entries in operator order using each entry's EndpointHealth
     // to skip recently-failed endpoints. Within each chosen entry,
     // the existing CarrierHealth still decides β-vs-α.
-    if let Some(p) = pool {
-        return dispatch_via_pool(
+    //
+    // Iter-29: capture the dispatch result rather than returning it
+    // directly so we can emit a proper SOCKS5 error reply on
+    // failure. Pre-iter-29 we just dropped TCP, which made every
+    // upstream-dial failure look like "could not connect to proxy"
+    // to the downstream browser/cURL — wrong diagnostic. With the
+    // mapping, the downstream sees the correct SOCKS5 reply code
+    // (0x03 network unreachable / 0x04 host unreachable / 0x05
+    // connection refused / 0x06 TTL expired / 0x01 generic) and
+    // surfaces an actionable error to the user.
+    let dispatch_result = if let Some(p) = pool {
+        dispatch_via_pool(
             cfg,
             health,
             p,
@@ -389,22 +399,74 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             hs_source.as_ref(),
             beta_crypto.as_ref(),
         )
-        .await;
-    }
+        .await
+    } else {
+        // Single-endpoint path (legacy / pool not configured).
+        // Behavior is identical to the pre-pool dispatcher.
+        single_endpoint_dispatch(
+            cfg,
+            health,
+            &target_bytes,
+            &mut sock,
+            bootstrap.as_ref(),
+            connector.as_ref(),
+            hs_source.as_ref(),
+            beta_crypto.as_ref(),
+        )
+        .await
+    };
 
-    // Single-endpoint path (legacy / pool not configured). Behavior
-    // is identical to the pre-pool dispatcher.
-    single_endpoint_dispatch(
-        cfg,
-        health,
-        &target_bytes,
-        &mut sock,
-        bootstrap.as_ref(),
-        connector.as_ref(),
-        hs_source.as_ref(),
-        beta_crypto.as_ref(),
-    )
-    .await
+    // Iter-29: best-effort SOCKS5 error reply on dispatch failure.
+    // The successful dispatch paths (single_endpoint_dispatch /
+    // dispatch_via_pool → try_alpha → ... → pump) already wrote
+    // the `0x05 0x00` success reply BEFORE entering the pump
+    // loop. If we got Err here, that means NO reply was sent and
+    // the downstream is waiting on a SOCKS5 reply that will never
+    // come — so we send one with the right code.
+    if let Err(e) = &dispatch_result {
+        let code = socks5_error_code_for(e);
+        // 10-byte SOCKS5 reply: VER=5, REP=<code>, RSV=0, ATYP=1
+        // (IPv4), BND.ADDR=0.0.0.0, BND.PORT=0. The BND fields
+        // are operator-irrelevant on error replies (RFC 1928
+        // §6); zero them.
+        let reply = [0x05, code, 0x00, 0x01, 0, 0, 0, 0, 0, 0];
+        let _ = sock.write_all(&reply).await;
+        // Best-effort flush before drop — downstream cURL needs
+        // the reply BEFORE the TCP close to surface the right
+        // diagnostic.
+        let _ = sock.flush().await;
+    }
+    dispatch_result
+}
+
+/// Iter-29: map a [`SocksError`] to the matching SOCKS5 REP
+/// code (RFC 1928 §6). Returns the catch-all 0x01 "general
+/// SOCKS server failure" for cases we don't have a specific
+/// code for — that's still better than dropping TCP without a
+/// reply because downstream clients (cURL, browsers,
+/// proxychains) at least know "the proxy itself responded; the
+/// upstream dial failed" instead of "the proxy is unreachable".
+fn socks5_error_code_for(e: &SocksError) -> u8 {
+    use std::io::ErrorKind;
+    match e {
+        SocksError::Io(io) => match io.kind() {
+            ErrorKind::ConnectionRefused => 0x05, // refused
+            ErrorKind::TimedOut => 0x06,          // TTL expired
+            ErrorKind::NetworkUnreachable => 0x03,
+            ErrorKind::HostUnreachable => 0x04,
+            _ => 0x01, // general SOCKS server failure
+        },
+        // Socks(timeout) is a slow-loris on greeting; we don't
+        // reach the dispatch path for it (early-return above).
+        // The other Socks(...) cases are pre-dispatch-time
+        // protocol errors that the early-return paths handle
+        // with their own writes. Anything that reaches here is
+        // a generic failure.
+        SocksError::Socks(_) => 0x01,
+        SocksError::Alpha(_) => 0x01,
+        SocksError::Config(_) => 0x01,
+        SocksError::Bootstrap(_) => 0x03, // network unreachable
+    }
 }
 
 /// Pre-pool single-endpoint dispatcher. Kept as a separate function
