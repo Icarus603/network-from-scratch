@@ -166,7 +166,9 @@ Proteus 的 active-probing 防禦是「byte-verbatim cover-server splice」（au
 
 **TODO**：
 1. ~~**Cover-endpoint pool 輪換**~~ ✅ **DONE 2026-05-18** —— `cover_endpoints: [...]` YAML 知識點 + `CoverEndpointPool` 含 per-source-IP /24（v4）/ /48（v6）一致性 affinity。**比 round-robin 強的點**：同一 observer 從同一 src IP 看到的 cover URL 跨任意多輪探測都一致（看起來像正常 cover server，沒有 rotation 信號），而 round-robin 會讓每輪換 URL —— 那本身就是 fingerprint。8 unit tests + 4 integration tests。`crates/proteus-transport-alpha/src/cover_pool.rs`。
-2. ~~**Probe-anomaly detector**~~ ✅ **DONE 2026-05-18** —— `ProbeAnomalyDetector` 同樣用 per-/24（v4）/ /48（v6）prefix 鍵，sliding window（預設 300s）+ threshold（預設 8）。Fire-once-per-burst：同一 /24 在 window 內第一次過閾值即 emit 一次 WARN log + bump `proteus_probe_anomalies_fired_total` Prometheus counter，後續同 burst 沉默直到 window 清空。Memory cap 16 KiB prefixes（~1 MiB bookkeeping）。**不直接封 IP** —— 把 enforcement 留給現有 rate-limiter，detector 只負責「讓 operator 看到 signal」。8 unit tests + 3 e2e tests，`crates/proteus-transport-alpha/src/probe_anomaly.rs`。
+2. ~~**Probe-anomaly detector**~~ ✅ **DONE 2026-05-18** —— `ProbeAnomalyDetector` 同樣用 per-/24（v4）/ /48（v6）prefix 鍵，sliding window（預設 300s）+ threshold（預設 8）。Fire-once-per-burst：同一 /24 在 window 內第一次過閾值即 emit 一次 WARN log + bump `proteus_probe_anomalies_fired_total` Prometheus counter，後續同 burst 沉默直到 window 清空。Memory cap 16 KiB prefixes（~1 MiB bookkeeping）。**不直接封 IP** —— 把 enforcement 留給現有 rate-limiter，detector 只負責「讓 operator 看到 signal」。
+   - 8 unit tests + 3 α e2e tests `crates/proteus-transport-alpha/src/probe_anomaly.rs`
+   - **NEW 2026-05-18 同日 follow-up**：β carrier 的 6 個 close-sites（`admission_ok` reject / `max_connections` reject / ALPN mismatch / bi-stream timeout / no exporter / Proteus handshake fail+timeout）全部 instrumented。沒有這層 wiring 的話一個只 probe β carrier 的對手就能繞過 anomaly counter。+2 β e2e tests `crates/proteus-transport-beta/tests/probe_anomaly_e2e.rs` lock 住 wire→β-failure→detector→metric 的整條鏈。
 3. **β profile 同樣納入 cover 機制**：目前 β 沒有 cover-forward path（README 已標）。研究在 QUIC 失敗握手後 fallback 到一個真實的 H3 cover server 是否可行。
 
 ---

@@ -12,6 +12,42 @@ use proteus_transport_alpha::server::{
     admission_ok, handshake_over_split_bound, user_admission_ok, ConnGate, ServerCtx,
 };
 use proteus_transport_alpha::session::AlphaSession;
+
+/// Record one β-profile "would have cover-forwarded" event in the
+/// probe-anomaly detector (if installed). The β carrier has no raw
+/// cover-forward stream (QUIC handshake already completed by the
+/// time we discover the auth failure — there's no plaintext TCP
+/// byte stream below it to splice), so the "close + drop" branches
+/// are the β-side equivalent of α's cover-forward triggers. From
+/// the operator's POV the operational signal is the same: this
+/// /24 keeps hitting the failure path, ALERT.
+///
+/// On the call that crosses the per-/24 threshold, emits a
+/// structured WARN log + bumps `probe_anomalies_fired`. Pure CPU.
+fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &SocketAddr) {
+    let Some(detector) = ctx.probe_anomaly() else {
+        return;
+    };
+    if detector
+        .record_at(peer.ip(), std::time::Instant::now())
+        .is_some()
+    {
+        tracing::warn!(
+            peer = %peer,
+            carrier = "β",
+            prefix = match peer.ip() {
+                std::net::IpAddr::V4(_) => "/24",
+                std::net::IpAddr::V6(_) => "/48",
+            },
+            "probe-anomaly: source-IP prefix repeatedly tripping β failure path — \
+             likely active probing (threat-intel main line 4)"
+        );
+        if let Some(m) = ctx.metrics() {
+            m.probe_anomalies_fired
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+}
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
@@ -149,6 +185,7 @@ where
                     // operator's tracing logs + Prometheus metrics —
                     // never on the wire.
                     if !admission_ok(&ctx, &remote) {
+                        record_probe_anomaly(&ctx, &remote);
                         conn.close(0u32.into(), b"");
                         return;
                     }
@@ -166,6 +203,7 @@ where
                                 m.firewall_denied
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
+                            record_probe_anomaly(&ctx, &remote);
                             conn.close(0u32.into(), b"");
                             return;
                         }
@@ -180,6 +218,7 @@ where
                     }) {
                         if p != ALPN {
                             warn!(alpn = ?p, "β: unexpected ALPN; closing");
+                            record_probe_anomaly(&ctx, &remote);
                             conn.close(0u32.into(), b"");
                             return;
                         }
@@ -207,6 +246,7 @@ where
                                     m.handshake_timeouts
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
+                                record_probe_anomaly(&ctx, &remote);
                                 // Indistinguishability: NO_ERROR + empty
                                 // reason. Same discipline as the
                                 // admission/cap branches above. Reason
@@ -239,6 +279,7 @@ where
                             remote = %remote,
                             "β: TLS exporter unavailable post-handshake; closing"
                         );
+                        record_probe_anomaly(&ctx, &remote);
                         // Indistinguishability: NO_ERROR + empty
                         // reason. Diagnostic stays in the tracing log
                         // above.
@@ -254,6 +295,7 @@ where
                         Ok(Ok(s)) => s.with_peer_addr(remote),
                         Ok(Err(e)) => {
                             warn!(remote = %remote, error = %e, "β: Proteus handshake failed");
+                            record_probe_anomaly(&ctx, &remote);
                             return;
                         }
                         Err(_) => {
@@ -265,6 +307,7 @@ where
                                 m.handshake_timeouts
                                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
+                            record_probe_anomaly(&ctx, &remote);
                             return;
                         }
                     };
