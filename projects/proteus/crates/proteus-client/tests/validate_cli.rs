@@ -957,6 +957,59 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-59: duplicate-pool-entry detection ----------
+
+/// Operator-trap: `server_endpoints: [primary, primary, backup]`
+/// looks like 3-way HA but the duplicated primary doesn't add
+/// resilience — when primary dies, BOTH slots suppress, and only
+/// backup remains. Surface as WARN with the duplicate list.
+#[tokio::test]
+async fn iter59_duplicate_server_endpoints_warns() {
+    let dir = tempdir("dupe-endpoints");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"backup.vps.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("dupe-endpoints report:\n{report}");
+    let dup_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("server_endpoints") && s.contains("duplicate") && s.contains("vps.example.com:8443")
+        }
+        _ => false,
+    });
+    assert!(
+        dup_warn,
+        "duplicate pool entries MUST WARN with the duplicate list: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// All distinct entries → no dupe warn.
+#[tokio::test]
+async fn iter59_distinct_server_endpoints_no_dupe_warn() {
+    let dir = tempdir("distinct-endpoints");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"198.51.100.10:8443\"\n  \
+             - \"198.51.100.20:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    let dup_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("server_endpoints") && s.contains("duplicate"),
+        _ => false,
+    });
+    assert!(!dup_warn, "distinct entries must NOT trigger dupe warn: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Bad host:port in pool → FAIL.
 #[tokio::test]
 async fn server_endpoints_bad_entry_fails() {

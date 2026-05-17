@@ -388,6 +388,34 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                  time-series active probing (threat-intel main line 4)",
             );
         }
+        // Iter-59: duplicate cover_endpoints reduce the effective
+        // pool size and break per-/24 source-IP affinity routing.
+        // Affinity is `hash(src_ip /24) % pool.len()`. If two
+        // entries are identical, the affinity slot points at the
+        // same destination twice — effective diversity drops by
+        // 1, and an active prober can compare two "different"
+        // entries' upstream behavior and prove they're the same
+        // host (defeating the threat-intel main line 4 defense
+        // the pool was added for). Surface as WARN with the
+        // duplicate list so the operator gets one fix-cycle.
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(cfg.cover_endpoints.len());
+        let mut dupes: Vec<&str> = Vec::new();
+        for raw in &cfg.cover_endpoints {
+            if !seen.insert(raw.as_str()) && !dupes.contains(&raw.as_str()) {
+                dupes.push(raw.as_str());
+            }
+        }
+        if !dupes.is_empty() {
+            r.push_warn(format!(
+                "cover_endpoints contains duplicate entries: {dupes:?}. Per-/24 source-IP \
+                 affinity routing puts traffic on the same upstream twice, reducing \
+                 effective pool diversity. An active prober can correlate two 'different' \
+                 entries' upstream behavior to prove they're the same host (defeats the \
+                 threat-intel main line 4 defense the pool was added for). Replace \
+                 duplicates with distinct cover destinations.",
+            ));
+        }
         if cfg.cover_endpoint.is_some() {
             r.push_warn(
                 "both cover_endpoint AND cover_endpoints are set — cover_endpoint will be \
@@ -1135,6 +1163,52 @@ mod tests {
         cfg.cover_endpoint = Some("not a host:port at all".to_string());
         let report = preflight(&cfg);
         assert!(report.has_failures(), "expected fail: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-59: duplicate cover_endpoints reduce effective
+    /// diversity AND defeat the threat-intel main-line-4
+    /// active-probing defense the pool was added for. WARN with
+    /// the duplicate list.
+    #[test]
+    fn iter59_duplicate_cover_endpoints_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https://a.example.com:443/".to_string(),
+            "https://b.example.com:443/".to_string(),
+            "https://a.example.com:443/".to_string(), // duplicate of first
+        ];
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => {
+                s.contains("cover_endpoints") && s.contains("duplicate") && s.contains("a.example.com")
+            }
+            _ => false,
+        });
+        assert!(
+            warn,
+            "duplicate cover_endpoints MUST WARN: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-59: distinct cover_endpoints → no dupe warn.
+    #[test]
+    fn iter59_distinct_cover_endpoints_no_dupe_warn() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https://a.example.com:443/".to_string(),
+            "https://b.example.com:443/".to_string(),
+            "https://c.example.com:443/".to_string(),
+        ];
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("cover_endpoints") && s.contains("duplicate"),
+            _ => false,
+        });
+        assert!(!warn, "distinct cover_endpoints must NOT trigger dupe warn: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -201,6 +201,31 @@ pub async fn run(path: &Path) -> PreflightReport {
                  field entirely to silence this warning)",
             );
         }
+        // Iter-59: duplicate pool entries reduce effective HA
+        // breadth. EndpointPool dispatches in declaration order,
+        // recording per-entry health. Two identical entries
+        // would mark both as suppressed when the underlying VPS
+        // dies (correct), but they ALSO occupy two of the N pool
+        // slots — the operator who set `[primary, primary, backup]`
+        // thinking they had 3-way HA actually has 2-way (primary
+        // doubled doesn't add resilience; the backup is still
+        // the only true failover). Surface as WARN.
+        let mut seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(cfg.server_endpoints.len());
+        let mut dupes: Vec<&str> = Vec::new();
+        for raw in &cfg.server_endpoints {
+            if !seen.insert(raw.as_str()) && !dupes.contains(&raw.as_str()) {
+                dupes.push(raw.as_str());
+            }
+        }
+        if !dupes.is_empty() {
+            r.push_warn(format!(
+                "server_endpoints contains duplicate entries: {dupes:?}. Duplicate \
+                 entries do NOT add HA — they occupy pool slots but suppress together \
+                 when the underlying VPS dies. Replace duplicates with distinct backup \
+                 destinations.",
+            ));
+        }
         // Coherence warn: if server_endpoint is NOT present in the
         // pool, the operator has set up a strange config where the
         // primary they configured isn't in the failover list. Likely
