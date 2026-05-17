@@ -831,13 +831,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // `proteus_tls_cert_not_after_unix_seconds` landed — operators
     // want the cert ticking down to be visible from t=0, not from the
     // first SIGHUP.
-    let (reloadable_acceptor, tls_cert_watcher) = match cfg.tls.as_ref() {
+    let (reloadable_acceptor, tls_cert_watcher, tls_leaf_for_ja4) = match cfg.tls.as_ref() {
         Some(tls_cfg) => {
             info!(cert = ?tls_cfg.cert_chain, "loading TLS cert chain");
             let chain = proteus_transport_alpha::tls::load_cert_chain(&tls_cfg.cert_chain)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let key = proteus_transport_alpha::tls::load_private_key(&tls_cfg.private_key)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+            let leaf_for_ja4 = chain.first().cloned();
             let acceptor = proteus_transport_alpha::tls::build_acceptor(chain.clone(), key)
                 .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
             let reloadable =
@@ -862,15 +863,44 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 tls_cfg.cert_chain.clone(),
                 tls_cfg.private_key.clone(),
             ));
-            (Some(reloadable), Some(watcher))
+            (Some(reloadable), Some(watcher), leaf_for_ja4)
         }
         None => {
             warn!(
                 "no `tls:` block in config — server will run plain TCP. \
                  This is INSECURE in production; passive DPI will identify the protocol."
             );
-            (None, None)
+            (None, None, None)
         }
+    };
+
+    // Live JA4 capture — runs once at startup after the TLS
+    // cert is loaded. Surfaces the binary's actual on-wire
+    // ClientHello fingerprint via /metrics so operators can
+    // verify what JA4 their deploy emits without running tshark.
+    // Skipped when TLS isn't configured (no leaf to drive the
+    // loopback handshake against).
+    let live_ja4_block: Option<Arc<String>> = if let Some(leaf) = tls_leaf_for_ja4 {
+        let observed = proteus_server::tls_fingerprint_observer::observe_live_ja4(leaf).await;
+        if observed.matches_baseline() {
+            info!(
+                ja4 = %observed.ja4,
+                "live TLS ClientHello JA4 captured (matches locked baseline)"
+            );
+        } else {
+            warn!(
+                live_ja4 = %observed.ja4,
+                expected_baseline = %observed.expected_baseline,
+                "live TLS ClientHello JA4 does NOT match the locked baseline — \
+                 either a dep drift (rustls upgrade) regressed the fingerprint OR \
+                 uTLS-replay work landed (update EXPECTED_BASELINE in BOTH \
+                 tls_fingerprint_observer.rs AND the proteus-fingerprint \
+                 baseline test, then rebuild)."
+            );
+        }
+        Some(Arc::new(observed.prometheus()))
+    } else {
+        None
     };
 
     if let Some(metrics_addr) = cfg.metrics_listen.clone() {
@@ -942,7 +972,16 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // semantics). Re-rendering on SIGHUP would change the
         // gauge in cases where the underlying runtime didn't change,
         // which is confusing rather than helpful.
-        let config_presence_block = Some(std::sync::Arc::new(cfg.presence().prometheus()));
+        // Pre-render the operator-visibility blocks (config
+        // presence + live JA4) as a single Arc<String> so the
+        // metrics endpoint emits them on every scrape without
+        // re-computing. Both are set ONCE at startup; the JA4
+        // observer doesn't re-run unless the binary restarts.
+        let mut presence_text = cfg.presence().prometheus();
+        if let Some(ja4) = &live_ja4_block {
+            presence_text.push_str(ja4);
+        }
+        let config_presence_block = Some(std::sync::Arc::new(presence_text));
         // Process-lifecycle metrics — start time captured here so
         // the gauge reflects "when the metrics endpoint came up"
         // (≈ process start, within a few ms of binary main()). The

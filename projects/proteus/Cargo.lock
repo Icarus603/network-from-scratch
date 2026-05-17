@@ -1117,6 +1117,7 @@ dependencies = [
  "libc",
  "ml-kem",
  "proteus-crypto",
+ "proteus-fingerprint",
  "proteus-handshake",
  "proteus-spec",
  "proteus-transport-alpha",

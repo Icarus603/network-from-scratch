@@ -18,6 +18,7 @@ proteus-crypto = { path = "../proteus-crypto" }
 proteus-handshake = { path = "../proteus-handshake" }
 proteus-transport-alpha = { path = "../proteus-transport-alpha" }
 proteus-transport-beta = { path = "../proteus-transport-beta" }
+proteus-fingerprint = { path = "../proteus-fingerprint" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 
 ml-kem.workspace = true
@@ -28,6 +29,7 @@ zeroize.workspace = true
 thiserror.workspace = true
 
 tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "signal", "fs"] }
+rustls = { workspace = true }
 
 serde = { version = "1", features = ["derive"] }
 serde_yaml = "0.9"

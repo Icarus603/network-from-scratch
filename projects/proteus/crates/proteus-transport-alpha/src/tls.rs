@@ -275,6 +275,23 @@ fn build_chrome_shaped_client_config(roots: RootCertStore) -> Result<ClientConfi
         .with_root_certificates(roots)
         .with_no_client_auth();
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+    // Chrome 124 advertises the `early_data` (0x002a) extension on
+    // every ClientHello, regardless of whether the session can
+    // actually send 0-RTT. Setting this to `true` tells rustls to
+    // include the extension in the ClientHello (the extension's
+    // payload is empty when no PSK is offered, so we don't actually
+    // open a 0-RTT attack surface — we just paint one more
+    // Chrome-shaped extension byte onto the wire). Closes one
+    // ext_count gap toward Chrome and SHIFTS the JA4 ext_hash;
+    // operators see the new baseline in the JA4 regression test.
+    //
+    // This is a wire-fingerprint-only change. We do NOT actually
+    // attempt 0-RTT in production (no `prepare_resumption_data`
+    // path, no exposed API for callers to pre-stuff data). rustls'
+    // own session cache is in-process per the existing default and
+    // we don't reuse sessions across connections in the Proteus
+    // dispatcher today.
+    config.enable_early_data = true;
     Ok(config)
 }
 

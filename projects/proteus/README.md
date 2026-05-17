@@ -932,6 +932,40 @@ Recommended for production: 120 seconds (2 min). Catches a
 wedged upstream within ~2 min so downstream apps fall back
 fast without thrashing on transient blips.
 
+### Live TLS ClientHello JA4 fingerprint — operator-visible
+
+The `proteus-fingerprint` crate ships a JA4 regression test
+that LOCKS the exact JA4 string Proteus α emits today
+(`t13d0911h2_f91f431d341e_165ef185bad8`). The test catches
+fingerprint drift at CI time — but only if the operator's
+release pipeline ran it.
+
+For deployments built outside the canonical release flow
+(operator built from main, custom fork, etc.), the live JA4
+gauge surfaces the wire fingerprint in real time:
+
+```
+proteus_tls_clienthello_ja4{value="t13d0911h2_f91f431d341e_165ef185bad8"} 1
+proteus_tls_clienthello_ja4_expected{value="t13d0911h2_f91f431d341e_165ef185bad8"} 1
+proteus_tls_clienthello_ja4_baseline_match 1
+```
+
+Operators alert on `proteus_tls_clienthello_ja4_baseline_match
+== 0` to spot any wire-fingerprint drift:
+
+- Regression (rustls upgrade silently changed cipher order, GREASE injection, ext list) → investigate before deploying further.
+- uTLS-replay milestone landed → expected, update `EXPECTED_BASELINE` in BOTH `tls_fingerprint_observer.rs` AND the `proteus-fingerprint` baseline test.
+
+The observer runs ONCE at startup against a loopback TLS
+handshake using the operator's actual server cert. Capture
+cost is microseconds; happens before the public listener
+binds.
+
+A unit test in `tls_fingerprint_observer.rs` keeps the two
+`EXPECTED_BASELINE` literals (server-side observer + fingerprint
+crate's CI test) in sync — drift in one without the other
+fails the build.
+
 ### `GET /diagnose` — one-shot self-check
 
 Operators debugging a production issue (or filing a bug) hit
