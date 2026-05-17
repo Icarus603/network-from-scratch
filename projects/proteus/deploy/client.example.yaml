@@ -64,6 +64,24 @@ server_endpoint: "vps.example.com:8443"
 # Per-connection timeout (seconds) for the β-first dial attempt
 # before falling back to α. Default 3s. Tune up for high-RTT paths
 # (transcontinental: 5s), down for LAN-only deployments (1s).
+#
+# ## Carrier-health back-off (built-in, no config)
+#
+# The client tracks β's recent success/failure pattern in a
+# per-process `CarrierHealth` state. After 3 consecutive β
+# failures (the kind of pattern UDP throttling / blocked UDP
+# egress / sustained GFW interference produces), β attempts are
+# SUPPRESSED for 15s; subsequent failures double the suppression
+# window (15s → 30s → 60s → 120s → 240s → 300s cap). During
+# suppression, every 32nd CONNECT probes β anyway — a single
+# success clears suppression so transient UDP outages recover
+# automatically.
+#
+# Without back-off, every CONNECT would pay `beta_first_timeout_secs`
+# of pointless waiting on a UDP-blocked network. With it, only the
+# first 3 CONNECTs of a failure burst pay the cost; subsequent
+# CONNECTs skip straight to α.
+#
 # beta_first_timeout_secs: 3
 #
 # β QUIC performance / traffic-analysis tunables. Defaults:

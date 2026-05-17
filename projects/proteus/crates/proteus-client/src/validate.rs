@@ -368,7 +368,15 @@ pub async fn run(path: &Path) -> PreflightReport {
             r.push_fail("beta_first_timeout_secs = 0 means β dial returns instantly");
         } else if t > 30 {
             r.push_warn(format!(
-                "beta_first_timeout_secs = {t} is high; dual-stack fallback to α will be slow"
+                "beta_first_timeout_secs = {t} is high; dual-stack fallback to α will be slow. \
+                 The carrier-health back-off (CarrierHealth) caps the cost AFTER \
+                 DEFAULT_FAILURE_THRESHOLD = 3 consecutive failures, but each of those \
+                 first 3 CONNECTs pays the full timeout"
+            ));
+        } else {
+            r.push_pass(format!(
+                "beta_first_timeout_secs = {t}s (CarrierHealth limits the impact to the \
+                 first ≤ 3 CONNECTs of any burst before β suppression engages)"
             ));
         }
     }

@@ -7,6 +7,7 @@
 //! instances thanks to Cargo's bin+lib coexistence.
 
 pub mod bootstrap;
+pub mod carrier_health;
 pub mod config;
 pub mod socks;
 pub mod validate;

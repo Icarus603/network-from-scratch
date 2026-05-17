@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::bootstrap::{resolve_for_client, BootstrapError, Resolved, ResolvedVia};
+use crate::carrier_health::{BetaDecision, CarrierHealth};
 use crate::config::ClientConfig;
 
 #[derive(thiserror::Error, Debug)]
@@ -72,7 +73,26 @@ fn log_bootstrap_route(
     }
 }
 
-pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Result<(), SocksError> {
+pub async fn handle_socks5(sock: TcpStream, cfg: &Arc<ClientConfig>) -> Result<(), SocksError> {
+    // Back-compat shim: when the caller didn't supply a CarrierHealth
+    // (legacy call sites + many integration tests), give them a
+    // fresh per-call tracker — same behavior as the pre-back-off
+    // dispatcher (try β always, fall back to α on per-CONNECT
+    // failure with no memory). New code should call
+    // `handle_socks5_with_health` so the back-off / probe logic
+    // actually has somewhere to accumulate state.
+    let health = Arc::new(CarrierHealth::new());
+    handle_socks5_with_health(sock, cfg, &health).await
+}
+
+/// Health-aware dispatch — the entry point the production binary
+/// uses so the back-off + recovery-probe state survives across
+/// CONNECTs from the same client.
+pub async fn handle_socks5_with_health(
+    mut sock: TcpStream,
+    cfg: &Arc<ClientConfig>,
+    health: &Arc<CarrierHealth>,
+) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
     // ----- SOCKS5 greeting -----
@@ -150,22 +170,45 @@ pub async fn handle_socks5(mut sock: TcpStream, cfg: &Arc<ClientConfig>) -> Resu
         v
     };
 
-    // Try β first when configured. Falls back to α on any failure
-    // (timeout, UDP blocked, peer doesn't support DATAGRAM, TLS
-    // cert mismatch). The fall-back path is the proven α route, so
-    // the worst-case latency penalty is `beta_first_timeout_secs`
-    // + the α handshake time — bounded.
-    if cfg.server_endpoint_beta.is_some() {
+    // Consult the carrier-health tracker: under sustained β
+    // failures (e.g. UDP egress blocked by the network or
+    // throttled by the GFW per threat-intel main line 5), we
+    // suppress β attempts for a back-off window so each CONNECT
+    // doesn't pay `beta_first_timeout_secs` of pointless waiting.
+    // Suppression auto-recovers via periodic probes — see
+    // `carrier_health.rs` for the policy.
+    let beta_decision = health.decide_beta(
+        cfg.server_endpoint_beta.is_some(),
+        std::time::Instant::now(),
+    );
+    let try_beta_now = matches!(beta_decision, BetaDecision::TryBeta | BetaDecision::Probe);
+    if try_beta_now {
+        if matches!(beta_decision, BetaDecision::Probe) {
+            tracing::debug!(
+                "β suppressed; running recovery probe (streak={})",
+                health.failure_streak(),
+            );
+        }
         match try_beta(cfg, &target_bytes, &mut sock).await {
-            Ok(()) => return Ok(()),
+            Ok(()) => {
+                health.record_beta_success();
+                return Ok(());
+            }
             Err(e) => {
+                health.record_beta_failure(std::time::Instant::now());
                 tracing::warn!(
                     error = %e,
+                    streak = health.failure_streak(),
                     "β dial failed — falling back to α (TCP/TLS)"
                 );
                 // Fall through to α path below.
             }
         }
+    } else if matches!(beta_decision, BetaDecision::SkipSuppressed) {
+        tracing::debug!(
+            streak = health.failure_streak(),
+            "β suppressed; skipping straight to α"
+        );
     }
 
     try_alpha(cfg, &target_bytes, &mut sock).await

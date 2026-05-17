@@ -22,6 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 mod keygen;
 
+use proteus_client::carrier_health::CarrierHealth;
 use proteus_client::config::ClientConfig;
 use proteus_client::socks;
 
@@ -85,6 +86,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
 
     let listener = TcpListener::bind(&cfg.socks_listen).await?;
     info!(addr = %listener.local_addr()?, "SOCKS5 inbound bound");
+
+    // Single per-process carrier-health tracker for the β path.
+    // Lives across CONNECTs so back-off survives the SOCKS5
+    // request boundary — see `carrier_health.rs` for the policy.
+    let health = Arc::new(CarrierHealth::new());
 
     // ----- Concurrency cap -----
     //
@@ -160,9 +166,12 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // notice this immediately.
                         let _ = stream.set_nodelay(true);
                         let cfg = Arc::clone(&cfg);
+                        let health = Arc::clone(&health);
                         tokio::spawn(async move {
                             let _permit = permit; // drop on task exit
-                            if let Err(e) = socks::handle_socks5(stream, &cfg).await {
+                            if let Err(e) =
+                                socks::handle_socks5_with_health(stream, &cfg, &health).await
+                            {
                                 warn!(peer = %peer, error = %e, "socks5 session ended");
                             }
                         });

@@ -113,14 +113,14 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 | 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; ✅ `deploy/README.md` "Deployment topology" section + security-checklist topology items; ❌ multi-VPS HA still M3 |
 | 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ✅ **cover-endpoint pool with per-src-IP /24 affinity** (2026-05-18, no rotation signal to single observer); ✅ **server-side probe-anomaly detector wired across both α and β** (2026-05-18, sliding-window per-/24 counter + Prometheus alert; β failure-close-sites all instrumented, so QUIC-only probers can't bypass the alarm) |
-| 5 | UDP / QUIC throttling (Hy2 / TUIC visibly degrades 2026 Q1+) | nationally deployed | ⚠ α survives, β no auto-fallback; TODO: carrier auto-switch + γ profile (MASQUE) |
+| 5 | UDP / QUIC throttling (Hy2 / TUIC visibly degrades 2026 Q1+) | nationally deployed | ✅ α survives; ✅ **`CarrierHealth` automatic α↔β fallback** (2026-05-18, streak-based β suppression with capped exponential back-off + periodic recovery probe — single auto-clear on next β success); ❌ γ profile (MASQUE) still M3+ |
 | 6 | DoH / DoT identification (bootstrap-layer attack on the client itself) | rolling out 2026 Q2 | ✅ `bootstrap_dns: { direct_ip: <ip> }` config + IP-literal endpoint passthrough + `proteus-client validate` WARN on unpinned hostnames |
 | 7 | Fully-encrypted-traffic heuristics (USENIX Sec '23, 5 rules — still active) | stable | ✅ α satisfies rule 2 naturally; ⚠ β prefix-noise needs printable-byte tweak to satisfy rule 1 |
 
 **Roadmap priorities driven by this threat intel**:
 
 - **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, ~~`deploy/README.md` anti-relay topology warning~~ ✅ **done 2026-05-18**. **4 of 5 P0 done**; only ECH (multi-week, rustls-fork) remains.
-- **P1** (M3): uTLS bit-perfect ClientHello, cover-endpoint pool, carrier auto-switch, multi-VPS HA client.
+- **P1** (M3): uTLS bit-perfect ClientHello, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), multi-VPS HA client.
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
 The single most important update is conceptual: the adversary is no longer

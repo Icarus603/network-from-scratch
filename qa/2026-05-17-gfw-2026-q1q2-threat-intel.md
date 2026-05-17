@@ -188,13 +188,13 @@ GFW 開始對所有 UDP 流量（不限 SNI）做頻寬整形（traffic shaping�
 **Proteus 當前覆蓋**：
 - ✅ α profile（TCP+TLS 1.3）作為第二碳水化合物 carrier
 - ✅ BBR 擁塞控制（β）在輕中度丟包下仍維持
-- ❌ 沒有 **carrier 自動切換**：α 慢就切 β，β 被節流就切回 α
+- ✅ **NEW 2026-05-18**：`CarrierHealth` 自動 carrier 切換 —— 連續 3 次 β 失敗即進入 suppression（15s → 30s → 60s → ... → 300s 上限），suppression 期間每 32 個 CONNECT 自動探測 β 一次以偵測恢復，一次成功即清除 suppression。完全自動，無需 operator 配置。`crates/proteus-client/src/carrier_health.rs` + 9 unit tests + 5 integration tests。
 - ❌ 沒有 γ profile（MASQUE / H3-over-QUIC tunneling）—— spec §10 列為 M3+
 
 **TODO**：
-1. **Carrier 自動 fallback**（M3）：客戶端維護 α + β 雙 carrier，週期測 throughput，自動選快的。配置：`carrier: auto` vs `carrier: alpha-only` / `carrier: beta-only`。
+1. ~~**Carrier 自動 fallback**~~ ✅ **DONE 2026-05-18** —— `CarrierHealth` 提供 streak-based suppression + periodic recovery probe；比原 TODO 描述的「週期測 throughput」更貼近實際 GFW 攻擊模式（UDP 整段失效，不是慢慢降速）。
 2. **γ profile (MASQUE)**（M3+，spec §10.3）：H3-tunneled，UDP 被節流時看起來是合法的 H3 流量。
-3. **Throughput probe-and-adapt**：客戶端每 N 秒測一次當前 carrier 的有效頻寬，drop 超 50% 即觸發 carrier switch。
+3. **Throughput probe-and-adapt**：客戶端每 N 秒測一次當前 carrier 的有效頻寬，drop 超 50% 即觸發 carrier switch。（這個和上面的 CarrierHealth 是互補的：CarrierHealth 處理「β 完全失敗」，throughput-adapt 處理「β 還活著但慢了」。）
 
 ---
 
@@ -275,7 +275,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | CONNECTION_CLOSE 信號 | ✅ NO_ERROR/empty (本 commit 已 lock-in) | — |
 | 應用層 probe（cover URL 反覆探測）| ✅ `cover_endpoints:` pool 配置 + per-src-IP /24 affinity（同一觀察者多輪 probe 看到一致的 cover URL，跨不同 src IP 分流；2026-05-18 done）| — |
 | IP 範圍預封 | ✅ preflight 對 90+ 條 commercial-cloud CIDR 直接 WARN（外加 operator watchlist 覆蓋自家燒過的範圍）| — |
-| UDP/QUIC throttling | ⚠️ α 可用，β 沒 fallback | TODO: carrier auto-switch (M3) |
+| UDP/QUIC throttling | ✅ α + `CarrierHealth` 自動 carrier 切換 + suppression 時段定期 probe 恢復（2026-05-18 done）| ❌ throughput-adapt（β 慢但活著的情況）still TODO |
 | γ profile (MASQUE) | ❌ | M3+ (spec §10.3) |
 | DoH/DoT 識別（bootstrap）| ✅ `bootstrap_dns: { direct_ip: <ip> }` + validate WARN | — |
 | 全加密啟發式（規則 1: 不可印 70%）| ⚠️ β prefix-noise 風險 | TODO: 調整 prefix-noise 前 6 字節 |
@@ -299,7 +299,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 
 6. **uTLS bit-perfect ClientHello**（主線 1） —— 唯一還比 Reality 弱的點
 7. **Cover-endpoint pool 輪換**（主線 4） —— 對抗時序型主動探測
-8. **Carrier auto-switch (α↔β)**（主線 5） —— UDP throttling fallback
+8. ~~**Carrier auto-switch (α↔β)**（主線 5）~~ ✅ **DONE 2026-05-18** —— `CarrierHealth` streak-based suppression + periodic recovery probe
 9. **Multi-VPS HA 客戶端**（主線 2） —— 單點故障消除
 
 **P2（M3+，長期）**：
