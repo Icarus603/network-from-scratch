@@ -99,6 +99,32 @@ pub fn encode_record(record_type: u8, ciphertext: &[u8]) -> Vec<u8> {
     out
 }
 
+/// Write the record header (type byte + varint length) for `body_len`
+/// bytes of body to `out`, without copying the body. Used by the
+/// no-alloc α data path: caller writes the header to `out`, then
+/// appends ciphertext (or has already AEAD-sealed the body into a
+/// separate buffer and writes both buffers with a single vectored
+/// syscall).
+///
+/// Why this exists: the old `encode_record(type, &ct)` path
+/// allocates a fresh `Vec` per record to concatenate header + body.
+/// The α hot loop processes one record per cell; at quantum = 1280
+/// on a 16 MiB record that's ~13 000 records per logical send, each
+/// paying for a heap allocation purely to glue 1 type byte + a
+/// 2-byte varint onto a freshly-AEAD-sealed buffer. With this
+/// helper, the sender writes the 3-ish byte header into a reused
+/// scratch buffer first, then has the cipher in-place into a second
+/// reused buffer — two stable allocations for the lifetime of the
+/// session.
+///
+/// The header is bounded to 9 bytes (1 type + up to 8 byte varint
+/// for body_len, though α records cap body_len well under 2^14 so
+/// the varint is usually 1-2 bytes).
+pub fn write_record_header_to(out: &mut Vec<u8>, record_type: u8, body_len: usize) {
+    out.push(record_type);
+    varint::encode(body_len as u64, out);
+}
+
 /// A decoded α-profile frame (handshake or post-handshake), with the
 /// type byte and the body slice.
 #[derive(Debug, Clone)]
@@ -156,6 +182,39 @@ mod tests {
         assert_eq!(consumed, wire.len());
         assert_eq!(frame.kind, RECORD_DATA);
         assert_eq!(frame.body, ct.as_slice());
+    }
+
+    /// `write_record_header_to(&mut hdr, type, ct.len())` followed by
+    /// `out.extend(hdr); out.extend(ct)` MUST produce the same wire
+    /// bytes as `encode_record(type, &ct)`. If this diverges, the
+    /// new no-alloc α data path becomes wire-incompatible with peers
+    /// using the old encoder.
+    #[test]
+    fn write_record_header_to_matches_encode_record() {
+        for body_len in [0usize, 1, 16, 127, 128, 1280, 16 * 1024, 65_531] {
+            let ct = vec![0xA5u8; body_len];
+            let legacy = encode_record(RECORD_DATA_PADDED, &ct);
+
+            let mut split: Vec<u8> = Vec::new();
+            write_record_header_to(&mut split, RECORD_DATA_PADDED, body_len);
+            split.extend_from_slice(&ct);
+
+            assert_eq!(split, legacy, "wire mismatch at body_len={body_len}");
+        }
+    }
+
+    /// The header writer MUST be no-alloc when the caller pre-reserves
+    /// enough capacity. We can't directly assert "no alloc" without
+    /// allocator hooks, but we can assert capacity behavior: writing
+    /// the header into a sufficiently-large pre-allocated buffer
+    /// must not grow capacity.
+    #[test]
+    fn write_record_header_to_does_not_grow_pre_reserved_buffer() {
+        let mut buf: Vec<u8> = Vec::with_capacity(16);
+        let cap_before = buf.capacity();
+        write_record_header_to(&mut buf, RECORD_DATA_PADDED, 1280);
+        assert!(buf.len() <= 16);
+        assert_eq!(buf.capacity(), cap_before, "header writer grew the buffer");
     }
 
     #[test]

@@ -20,6 +20,20 @@ pub struct DirectionKeys {
     pub iv: Zeroizing<[u8; 12]>,
 }
 
+impl DirectionKeys {
+    /// Construct a cached `AeadKey` (cipher state pre-built once)
+    /// from this direction's key + iv. Used by the α data path to
+    /// avoid re-running the ChaCha20 key schedule on every record.
+    ///
+    /// Called once per epoch (at session start and after every
+    /// ratchet), so the cost of building the cipher amortizes over
+    /// thousands of records.
+    #[must_use]
+    pub fn aead_key(&self) -> crate::aead::AeadKey {
+        crate::aead::AeadKey::new(&self.key, &self.iv)
+    }
+}
+
 /// All secrets derived from the handshake. Owns its key material with
 /// zeroize-on-drop semantics.
 pub struct HandshakeSecrets {

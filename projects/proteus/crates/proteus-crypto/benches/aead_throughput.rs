@@ -67,5 +67,79 @@ fn bench_open(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_seal, bench_open);
+/// `AeadKey::seal_into` is the cached-cipher hot path used by the α
+/// data plane (iteration 10). This bench measures the per-record
+/// AEAD cost when the ChaCha20-Poly1305 cipher is built ONCE and
+/// reused — head-to-head with `bench_seal` above which rebuilds
+/// the cipher every call. The delta is the per-record key-schedule
+/// cost we eliminated.
+fn bench_seal_cached(c: &mut Criterion) {
+    let key = [0x42u8; aead::KEY_LEN];
+    let iv = [0x11u8; aead::NONCE_LEN];
+    let aad = [0u8; 8];
+    let ak = aead::AeadKey::new(&key, &iv);
+
+    let mut group = c.benchmark_group("aead_seal_cached");
+    for &size in &[1024usize, 4096, 16 * 1024, 64 * 1024] {
+        let payload = vec![0u8; size];
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &payload, |b, payload| {
+            let mut counter = 0u64;
+            // Reused buffer mirrors α sender's `tx_aead_scratch`:
+            // capacity sticks across iterations, no allocation in
+            // the loop.
+            let mut buf: Vec<u8> = Vec::with_capacity(size + 16);
+            b.iter(|| {
+                counter = counter.wrapping_add(1);
+                buf.clear();
+                buf.extend_from_slice(payload);
+                ak.seal_into(black_box(counter), black_box(&aad), black_box(&mut buf))
+                    .expect("seal_into");
+                black_box(&buf);
+            });
+        });
+    }
+    group.finish();
+}
+
+/// Mirror of `bench_seal_cached` for the open direction. Used to
+/// quantify the recv-side AEAD speedup on the α data plane.
+fn bench_open_cached(c: &mut Criterion) {
+    let key = [0x42u8; aead::KEY_LEN];
+    let iv = [0x11u8; aead::NONCE_LEN];
+    let aad = [0u8; 8];
+    let ak = aead::AeadKey::new(&key, &iv);
+
+    let mut group = c.benchmark_group("aead_open_cached");
+    for &size in &[1024usize, 4096, 16 * 1024, 64 * 1024] {
+        let payload = vec![0u8; size];
+        let mut sealed: Vec<u8> = payload.clone();
+        ak.seal_into(1, &aad, &mut sealed).expect("seal for setup");
+
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(size),
+            &sealed,
+            |b, sealed_template| {
+                let mut buf: Vec<u8> = Vec::with_capacity(size + 16);
+                b.iter(|| {
+                    buf.clear();
+                    buf.extend_from_slice(sealed_template);
+                    ak.open_in_place(black_box(1), black_box(&aad), black_box(&mut buf))
+                        .expect("open_in_place");
+                    black_box(&buf);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_seal,
+    bench_open,
+    bench_seal_cached,
+    bench_open_cached
+);
 criterion_main!(benches);

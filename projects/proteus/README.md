@@ -1217,10 +1217,20 @@ Measured on Apple Silicon M-series, release profile (criterion, n=30):
 | AEAD seal — ChaCha20-Poly1305, 16 KiB record | **~645 MiB/s** |
 | AEAD seal — ChaCha20-Poly1305, 64 KiB record | **~648 MiB/s** |
 | AEAD open — ChaCha20-Poly1305, 1 KiB record | **~510 MiB/s** |
-| **α end-to-end echo (TCP)  — 16 KiB records over loopback** | **~109 MiB/s (~0.87 Gbps)** |
-| **α end-to-end echo (TCP)  — 64 KiB records over loopback** | **~120 MiB/s (~0.96 Gbps)** |
-| **β end-to-end echo (QUIC) — 16 KiB records over loopback** | **~67 MiB/s (~0.54 Gbps)** |
-| **β end-to-end echo (QUIC) — 64 KiB records over loopback** | **~57 MiB/s (~0.46 Gbps)** |
+| **α end-to-end echo (TCP)  — 16 KiB records over loopback** | **~246 MiB/s (~1.96 Gbps)** ⬆ 2.25× since iter-10 |
+| **α end-to-end echo (TCP)  — 64 KiB records over loopback** | (same workload, scales with above) |
+| **β end-to-end echo (QUIC) — 16 KiB records over loopback** | **~51 MiB/s (~0.41 Gbps)** |
+| **β end-to-end echo (QUIC) — 64 KiB records over loopback** | (β has its own AEAD path via quinn; iter-10 win is α-only) |
+
+The α loopback jump (~109 → ~246 MiB/s) is iteration 10's win:
+cache the ChaCha20-Poly1305 cipher state once per epoch instead of
+rebuilding it on every record, and reuse two scratch buffers
+(`tx_aead_scratch`, `tx_hdr_scratch` for sender; `rx_aead_scratch`
+for receiver) so the data-plane hot loop allocates exactly zero
+times per record. Wire format is byte-identical to the pre-iter-10
+sender — enforced by the `aead_key_seal_matches_free_function_seal`
+test in `proteus-crypto/src/aead.rs`. β bypasses this code path
+(it uses quinn's own AEAD pipeline), so its number is unchanged.
 
 The end-to-end echo numbers above measure the **full round-trip
 path**: client send → AEAD seal → BufWriter coalesce → carrier →

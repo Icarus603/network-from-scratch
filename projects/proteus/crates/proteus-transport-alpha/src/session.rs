@@ -169,6 +169,21 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     write: BufWriter<W>,
     /// Current epoch's AEAD key + iv.
     keys: DirectionKeys,
+    /// Cached ChaCha20-Poly1305 cipher built from `keys.key` once per
+    /// epoch (rebuilt on every ratchet). Avoids paying the per-record
+    /// `ChaCha20Poly1305::new(&key)` cost in the hot data path. See
+    /// `proteus_crypto::aead::AeadKey` for the rationale.
+    cipher: proteus_crypto::aead::AeadKey,
+    /// Reusable scratch buffer for in-place AEAD seal in the cell-
+    /// padded path. Holds the cell plaintext on entry and
+    /// `ciphertext || tag` on exit. Capacity sticks across calls
+    /// so the hot loop allocates exactly zero times.
+    tx_aead_scratch: Vec<u8>,
+    /// Reusable scratch buffer for the per-record wire header
+    /// (type byte + varint length). 16 bytes is generous (worst-case
+    /// varint is 8 bytes; α records cap well below 2^14 so it's
+    /// typically 1-2). Capacity sticks across calls.
+    tx_hdr_scratch: Vec<u8>,
     /// Current traffic secret (used to derive the next epoch's keys).
     secret: Zeroizing<[u8; 32]>,
     /// 24-bit epoch counter (within u32 for arithmetic ergonomics).
@@ -220,9 +235,16 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         secret: Zeroizing<[u8; 32]>,
         metrics: std::sync::Arc<SessionMetrics>,
     ) -> Self {
+        let cipher = keys.aead_key();
         Self {
             write: BufWriter::with_capacity(TX_BUF_CAPACITY, write),
             keys,
+            cipher,
+            // 2 KiB covers any quantum we ship today (max 1280 + tag).
+            // Capacity sticks across calls so the loop is alloc-free.
+            tx_aead_scratch: Vec::with_capacity(2 * 1024),
+            // 16 bytes covers the worst-case header.
+            tx_hdr_scratch: Vec::with_capacity(16),
             secret,
             epoch: 0,
             seqnum: 0,
@@ -325,12 +347,31 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     pub async fn send_record(&mut self, payload: &[u8]) -> AlphaResult<u64> {
         if self.pad_quantum == 0 {
             // ---- Legacy unpadded path (RECORD_DATA) ----
+            // Hot path: cached cipher + reused scratch buffers, zero
+            // allocations per record.
             self.ensure_ratchet().await?;
             let combined = self.combined();
             let aad = combined.to_be_bytes();
-            let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, payload)?;
-            let frame = alpha::encode_record(alpha::RECORD_DATA, &ct);
-            self.write.write_all(&frame).await?;
+
+            // Seal plaintext into the reused scratch buffer.
+            self.tx_aead_scratch.clear();
+            self.tx_aead_scratch.extend_from_slice(payload);
+            self.cipher
+                .seal_into(combined, &aad, &mut self.tx_aead_scratch)?;
+
+            // Emit header (type + varint len) into the reused
+            // header scratch, then write header + ciphertext to
+            // the BufWriter (two write_all calls; the BufWriter
+            // coalesces them under the 64 KiB TX_BUF_CAPACITY).
+            self.tx_hdr_scratch.clear();
+            alpha::write_record_header_to(
+                &mut self.tx_hdr_scratch,
+                alpha::RECORD_DATA,
+                self.tx_aead_scratch.len(),
+            );
+            self.write.write_all(&self.tx_hdr_scratch).await?;
+            self.write.write_all(&self.tx_aead_scratch).await?;
+
             let used = self.seqnum;
             self.seqnum = self.seqnum.saturating_add(1);
             self.bytes_in_epoch = self.bytes_in_epoch.saturating_add(payload.len() as u64);
@@ -360,20 +401,32 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
             } else {
                 &payload[offset..offset + chunk_max]
             };
-            // Build the cell plaintext: [len_prefix | chunk | zero-pad].
-            let mut pt_buf = vec![0u8; quantum];
+            // Build the cell plaintext into the reused scratch buffer:
+            // [len_prefix | chunk | zero-pad]. Reset to `quantum`
+            // zeros (resize is no-alloc when capacity ≥ quantum,
+            // which we hold via 2 KiB tx_aead_scratch capacity).
+            self.tx_aead_scratch.clear();
+            self.tx_aead_scratch.resize(quantum, 0);
             if is_last {
-                pt_buf[..4].copy_from_slice(&(chunk.len() as u32).to_be_bytes());
+                self.tx_aead_scratch[..4].copy_from_slice(&(chunk.len() as u32).to_be_bytes());
             } else {
-                pt_buf[..4].copy_from_slice(&CONTINUATION_SENTINEL.to_be_bytes());
+                self.tx_aead_scratch[..4].copy_from_slice(&CONTINUATION_SENTINEL.to_be_bytes());
             }
-            pt_buf[4..4 + chunk.len()].copy_from_slice(chunk);
+            self.tx_aead_scratch[4..4 + chunk.len()].copy_from_slice(chunk);
 
             let combined = self.combined();
             let aad = combined.to_be_bytes();
-            let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
-            let frame = alpha::encode_record(alpha::RECORD_DATA_PADDED, &ct);
-            self.write.write_all(&frame).await?;
+            self.cipher
+                .seal_into(combined, &aad, &mut self.tx_aead_scratch)?;
+
+            self.tx_hdr_scratch.clear();
+            alpha::write_record_header_to(
+                &mut self.tx_hdr_scratch,
+                alpha::RECORD_DATA_PADDED,
+                self.tx_aead_scratch.len(),
+            );
+            self.write.write_all(&self.tx_hdr_scratch).await?;
+            self.write.write_all(&self.tx_aead_scratch).await?;
 
             self.seqnum = self.seqnum.saturating_add(1);
             self.records_in_epoch = self.records_in_epoch.saturating_add(1);
@@ -473,14 +526,20 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         let new_keys = direction_keys_from_secret(&new_secret)?;
 
         // Emit RATCHET frame under the OLD key + sentinel seqnum.
+        // Low-frequency path (one per ratchet), so we keep the
+        // free-function `aead::seal` + `encode_record` form for
+        // readability — no measurable perf cost at sub-Hz rates.
         let sentinel = (u64::from(self.epoch) << 40) | SEQNUM_MAX;
         let aad = sentinel.to_be_bytes();
         let ct = aead::seal(&self.keys.key, &self.keys.iv, sentinel, &aad, &body_payload)?;
         let frame = alpha::encode_record(alpha::RECORD_RATCHET, &ct);
         self.write.write_all(&frame).await?;
 
-        // Install the new state.
+        // Install the new state — and refresh the cached cipher so
+        // subsequent records on this epoch encrypt under the new
+        // key, not the old one.
         self.keys = new_keys;
+        self.cipher = self.keys.aead_key();
         self.secret = new_secret;
         self.epoch = new_epoch;
         self.seqnum = 0;
@@ -516,17 +575,27 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         self.ensure_ratchet().await?;
 
         let quantum = self.pad_quantum as usize;
-        let mut pt_buf = vec![0u8; quantum];
-        pt_buf[..4].copy_from_slice(&HEARTBEAT_SENTINEL.to_be_bytes());
+        // Use the reused scratch buffer (cached cipher path) so
+        // periodic heartbeats don't trickle into the heap.
+        self.tx_aead_scratch.clear();
+        self.tx_aead_scratch.resize(quantum, 0);
+        self.tx_aead_scratch[..4].copy_from_slice(&HEARTBEAT_SENTINEL.to_be_bytes());
         // The rest is zero-pad (same shape as a terminal cell with
         // real_len=0, but the sentinel tells the receiver to drop it
         // silently instead of returning Ok(Some(empty))).
 
         let combined = self.combined();
         let aad = combined.to_be_bytes();
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt_buf)?;
-        let frame = alpha::encode_record(alpha::RECORD_DATA_PADDED, &ct);
-        self.write.write_all(&frame).await?;
+        self.cipher
+            .seal_into(combined, &aad, &mut self.tx_aead_scratch)?;
+        self.tx_hdr_scratch.clear();
+        alpha::write_record_header_to(
+            &mut self.tx_hdr_scratch,
+            alpha::RECORD_DATA_PADDED,
+            self.tx_aead_scratch.len(),
+        );
+        self.write.write_all(&self.tx_hdr_scratch).await?;
+        self.write.write_all(&self.tx_aead_scratch).await?;
         // Don't flush here — the caller drives flush cadence
         // independently. A heartbeat task that flushes every cell would
         // emit smaller TCP segments than a real bulk sender, which
@@ -578,6 +647,14 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
 pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> {
     read: R,
     keys: DirectionKeys,
+    /// Cached ChaCha20-Poly1305 cipher built from `keys.key` once per
+    /// epoch (rebuilt on every ratchet). Mirror of `AlphaSender::cipher`
+    /// — eliminates the per-record key-schedule cost on the recv side.
+    cipher: proteus_crypto::aead::AeadKey,
+    /// Reusable scratch buffer for in-place AEAD open. Populated from
+    /// the inbound record body, then decrypted in-place. Capacity
+    /// sticks across calls.
+    rx_aead_scratch: Vec<u8>,
     secret: Zeroizing<[u8; 32]>,
     epoch: u32,
     next_seqnum: u64,
@@ -630,9 +707,12 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         metrics: std::sync::Arc<SessionMetrics>,
         prefix: Vec<u8>,
     ) -> Self {
+        let cipher = keys.aead_key();
         Self {
             read,
             keys,
+            cipher,
+            rx_aead_scratch: Vec::with_capacity(2 * 1024),
             secret,
             epoch: 0,
             next_seqnum: 0,
@@ -660,16 +740,33 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             match alpha::decode_frame(&self.rx_buf) {
                 Ok((frame, consumed)) => {
                     let kind = frame.kind;
-                    let body = frame.body.to_vec();
+                    // Copy the frame body into our reusable scratch
+                    // so the AEAD can decrypt in place. Using
+                    // rx_aead_scratch instead of `frame.body.to_vec()`
+                    // means the inner Vec<u8> capacity sticks across
+                    // records, eliminating the per-record allocation
+                    // on the recv hot path.
+                    self.rx_aead_scratch.clear();
+                    self.rx_aead_scratch.extend_from_slice(frame.body);
                     self.rx_buf.drain(..consumed);
                     match kind {
                         alpha::RECORD_DATA => {
                             let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
                             let aad = combined.to_be_bytes();
-                            match aead::open(&self.keys.key, &self.keys.iv, combined, &aad, &body) {
-                                Ok(pt) => {
+                            match self.cipher.open_in_place(
+                                combined,
+                                &aad,
+                                &mut self.rx_aead_scratch,
+                            ) {
+                                Ok(()) => {
                                     self.next_seqnum = self.next_seqnum.saturating_add(1);
-                                    let bytes = pt.as_slice().to_vec();
+                                    // Hand the decrypted plaintext to
+                                    // the caller. The clone is one
+                                    // allocation per logical record —
+                                    // matches the legacy behavior and
+                                    // can't be avoided without changing
+                                    // the recv_record return signature.
+                                    let bytes = self.rx_aead_scratch.clone();
                                     self.metrics.record_rx(bytes.len() as u64);
                                     return Ok(Some(bytes));
                                 }
@@ -683,9 +780,13 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                         alpha::RECORD_DATA_PADDED => {
                             let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
                             let aad = combined.to_be_bytes();
-                            match aead::open(&self.keys.key, &self.keys.iv, combined, &aad, &body) {
-                                Ok(pt) => {
-                                    let raw = pt.as_slice();
+                            match self.cipher.open_in_place(
+                                combined,
+                                &aad,
+                                &mut self.rx_aead_scratch,
+                            ) {
+                                Ok(()) => {
+                                    let raw = self.rx_aead_scratch.as_slice();
                                     if raw.len() < 4 {
                                         self.metrics.record_aead_drop();
                                         continue;
@@ -748,14 +849,22 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                             }
                         }
                         alpha::RECORD_RATCHET => {
+                            // Low-frequency path — keep using the
+                            // free-function aead::open. rx_aead_scratch
+                            // still holds the (untouched) body bytes
+                            // since the hot data branches above only
+                            // mutate it under their own match arms.
+                            let body = self.rx_aead_scratch.clone();
                             self.apply_ratchet(&body)?;
                             continue;
                         }
                         alpha::RECORD_CLOSE => {
                             let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
                             let aad = combined.to_be_bytes();
+                            // Same low-frequency note as RATCHET above.
+                            let body = &self.rx_aead_scratch;
                             if let Ok(pt) =
-                                aead::open(&self.keys.key, &self.keys.iv, combined, &aad, &body)
+                                aead::open(&self.keys.key, &self.keys.iv, combined, &aad, body)
                             {
                                 let pt = pt.as_slice();
                                 if pt.len() >= 2 {
@@ -861,6 +970,9 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
 
         let new_keys = direction_keys_from_secret(&new_secret)?;
         self.keys = new_keys;
+        // Refresh cached cipher so subsequent records on this epoch
+        // decrypt under the new key (mirror of AlphaSender::send_ratchet_frame).
+        self.cipher = self.keys.aead_key();
         self.secret = new_secret;
         self.epoch = new_epoch;
         self.next_seqnum = 0;
