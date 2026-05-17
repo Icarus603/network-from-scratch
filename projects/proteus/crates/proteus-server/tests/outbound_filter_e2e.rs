@@ -94,6 +94,7 @@ async fn outbound_filter_blocks_aws_metadata_ip() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: Some(Arc::new(OutboundPolicy::default())),
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -152,6 +153,7 @@ async fn outbound_filter_blocks_disallowed_port() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: Some(Arc::new(policy)),
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -205,6 +207,7 @@ async fn outbound_filter_blocks_hostname_not_on_allowlist() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: Some(Arc::new(policy)),
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -263,6 +266,7 @@ async fn outbound_filter_blocks_hostname_on_denylist() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: Some(Arc::new(policy)),
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -318,6 +322,7 @@ async fn outbound_filter_allows_explicitly_permitted_destination() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: Some(Arc::new(policy)),
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

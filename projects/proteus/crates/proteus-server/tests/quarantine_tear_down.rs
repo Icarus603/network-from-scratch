@@ -74,6 +74,7 @@ async fn in_flight_session_torn_down_when_user_quarantined() {
         user_quarantine: Some(Arc::clone(&qlist)),
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
@@ -183,6 +184,7 @@ async fn quarantine_does_not_tear_down_sessions_for_other_users() {
         user_quarantine: Some(Arc::clone(&qlist)),
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {

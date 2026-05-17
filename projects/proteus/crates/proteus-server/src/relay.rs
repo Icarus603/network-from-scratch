@@ -69,6 +69,14 @@ pub struct RelayConfig {
     /// `OutboundPolicy::default()` (ports 80/443 only, all
     /// SSRF-relevant CIDRs blocked).
     pub outbound_filter: Option<Arc<OutboundPolicy>>,
+    /// Optional DNS resolver stats sink. When set, every
+    /// upstream-dial DNS lookup (via the outbound_filter path)
+    /// bumps the appropriate counter (`ok` / `failed` / `timeout`).
+    /// Surfaced via /metrics as
+    /// `proteus_dns_lookups_total{outcome="..."}` so operators can
+    /// spot a wedged recursive resolver: alert on
+    /// `rate(proteus_dns_lookups_total{outcome="timeout"}[5m]) > 0`.
+    pub dns_resolver_stats: Option<Arc<proteus_transport_alpha::outbound_filter::DnsResolverStats>>,
     /// Optional recent-abuse-fires ring buffer. When the byte-budget
     /// detector fires (above), a record is also pushed here so
     /// operators see WHICH user_id fired in `/diagnose` and
@@ -287,9 +295,25 @@ where
     // so a malicious resolver can't swap it for an internal IP
     // between our policy check and the dial.
     let dial_addr: std::net::SocketAddr = if let Some(filter) = cfg.outbound_filter.as_ref() {
-        let resolved =
+        // Resolve via the bounded helper so a wedged recursive
+        // resolver can't pin this relay task. The stats counter
+        // is opt-in (only set when the metrics layer wired one
+        // in); when None we still get the timeout but the counter
+        // increments are silent.
+        let resolved = if let Some(stats) = cfg.dns_resolver_stats.as_ref() {
+            proteus_transport_alpha::outbound_filter::resolve_host_with_timeout(
+                target.0.as_str(),
+                target.1,
+                std::time::Duration::from_secs(
+                    proteus_transport_alpha::outbound_filter::DEFAULT_DNS_LOOKUP_TIMEOUT_SECS,
+                ),
+                stats,
+            )
+            .await
+        } else {
             proteus_transport_alpha::outbound_filter::resolve_host(target.0.as_str(), target.1)
-                .await;
+                .await
+        };
         match filter.check(target.0.as_str(), target.1, &resolved) {
             Decision::Allow(ip) => std::net::SocketAddr::new(ip, target.1),
             other => {
@@ -311,18 +335,45 @@ where
     } else {
         // No filter configured — fall back to the legacy "let the
         // OS resolver pick" behavior. ONLY safe for trusted-LAN /
-        // testing deployments.
-        match tokio::net::lookup_host((target.0.as_str(), target.1))
-            .await
-            .ok()
-            .and_then(|mut a| a.next())
+        // testing deployments. Bounded by the same default 5s
+        // timeout the outbound_filter path uses, so a wedged
+        // recursive resolver can't pin the relay task here either.
+        // The legacy path doesn't carry a DnsResolverStats counter
+        // (the operator didn't opt into outbound_filter so they
+        // implicitly didn't ask for SSRF-grade observability)
+        // but we still emit a warn-level tracing event on timeout.
+        let lookup_fut = tokio::net::lookup_host((target.0.as_str(), target.1));
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(
+                proteus_transport_alpha::outbound_filter::DEFAULT_DNS_LOOKUP_TIMEOUT_SECS,
+            ),
+            lookup_fut,
+        )
+        .await
         {
-            Some(sa) => sa,
-            None => {
-                warn!(host = %target.0, "upstream lookup_host returned no addrs");
+            Ok(Ok(mut addrs)) => match addrs.next() {
+                Some(sa) => sa,
+                None => {
+                    warn!(host = %target.0, "upstream lookup_host returned no addrs");
+                    let _ = sender.send_record(&[]).await;
+                    let _ = sender.flush().await;
+                    return Ok("upstream_dial_fail");
+                }
+            },
+            Ok(Err(e)) => {
+                warn!(host = %target.0, error = %e, "upstream lookup_host failed");
                 let _ = sender.send_record(&[]).await;
                 let _ = sender.flush().await;
                 return Ok("upstream_dial_fail");
+            }
+            Err(_) => {
+                warn!(
+                    host = %target.0,
+                    "upstream lookup_host timed out — recursive resolver may be wedged"
+                );
+                let _ = sender.send_record(&[]).await;
+                let _ = sender.flush().await;
+                return Ok("upstream_dial_timeout");
             }
         }
     };

@@ -43,6 +43,7 @@ async fn handshake_latency_histogram_records_a_real_handshake() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let metrics_for_handler = Arc::clone(&server_metrics);

@@ -411,19 +411,131 @@ pub fn default_ssrf_blocklist() -> Vec<CidrRule> {
     .collect()
 }
 
+/// Default DNS lookup timeout — chosen to be long enough for a
+/// healthy recursive resolver across a 200ms RTT path with one
+/// retry, but short enough that a poisoned / wedged resolver
+/// can't pin a relay task indefinitely. Standard resolv.conf
+/// uses 5s × 2 attempts; we cap at the first attempt.
+pub const DEFAULT_DNS_LOOKUP_TIMEOUT_SECS: u64 = 5;
+
+/// Counter pair tracking DNS-resolution health. Operators read
+/// `proteus_dns_lookup_timeouts_total` to spot a wedged
+/// resolver — without this, a hanging recursive nameserver
+/// silently pegs every active relay task on `lookup_host(2)`
+/// and the only signal is upstream-dial-timeout cascades.
+///
+/// `Default` initializes both counters to zero; clone the
+/// `Arc` into the relay/dispatch path that calls `resolve_host*`.
+#[derive(Debug, Default)]
+pub struct DnsResolverStats {
+    /// Cumulative successful lookups (including the IP-literal
+    /// fast path which doesn't go to the resolver).
+    pub lookups_succeeded: std::sync::atomic::AtomicU64,
+    /// Cumulative resolver errors (NXDOMAIN, SERVFAIL, network
+    /// errors short of timeout).
+    pub lookups_failed: std::sync::atomic::AtomicU64,
+    /// Cumulative lookups that exceeded the configured timeout.
+    /// Alert on `rate(proteus_dns_lookup_timeouts_total[5m]) > 0`
+    /// — non-zero means the resolver is misbehaving and relay
+    /// tasks are paying the timeout window each.
+    pub lookups_timed_out: std::sync::atomic::AtomicU64,
+}
+
+impl DnsResolverStats {
+    /// Render the Prometheus exposition block. Series names are
+    /// stable: `proteus_dns_lookups_total{outcome="ok|failed|timeout"}`.
+    /// Three counters folded into one labelled series so dashboards
+    /// can compute ratios cheaply via `... / sum(...)`.
+    #[must_use]
+    pub fn prometheus(&self) -> String {
+        use std::sync::atomic::Ordering;
+        let ok = self.lookups_succeeded.load(Ordering::Relaxed);
+        let failed = self.lookups_failed.load(Ordering::Relaxed);
+        let timed_out = self.lookups_timed_out.load(Ordering::Relaxed);
+        format!(
+            "# HELP proteus_dns_lookups_total Cumulative upstream-dial DNS lookups, partitioned by outcome.\n\
+             # TYPE proteus_dns_lookups_total counter\n\
+             proteus_dns_lookups_total{{outcome=\"ok\"}} {ok}\n\
+             proteus_dns_lookups_total{{outcome=\"failed\"}} {failed}\n\
+             proteus_dns_lookups_total{{outcome=\"timeout\"}} {timed_out}\n"
+        )
+    }
+}
+
 /// Resolve `host:port` to a list of IPs via `tokio::net::lookup_host`.
-/// Returns an empty Vec on lookup failure (caller decides whether
-/// that's fail-open or fail-closed via [`OutboundPolicy::check`]).
+/// Returns an empty Vec on lookup failure or timeout (caller decides
+/// whether that's fail-open or fail-closed via [`OutboundPolicy::check`]).
+///
+/// **DEPRECATED for new call sites** — use
+/// [`resolve_host_with_timeout`] so a wedged resolver can't pin the
+/// caller's task indefinitely. This shim wraps the new path with the
+/// default timeout + a dummy stats counter so existing tests + the
+/// outbound_filter unit tests don't need to thread a counter
+/// through.
 pub async fn resolve_host(host: &str, port: u16) -> Vec<IpAddr> {
-    // Fast path: host is already a literal IP. Skip the resolver to
-    // avoid a meaningless syscall (and to ensure a literal-form
-    // CONNECT goes through the same policy gate as a name-form one).
+    let stats = DnsResolverStats::default();
+    resolve_host_with_timeout(
+        host,
+        port,
+        std::time::Duration::from_secs(DEFAULT_DNS_LOOKUP_TIMEOUT_SECS),
+        &stats,
+    )
+    .await
+}
+
+/// Bounded variant of [`resolve_host`]. Caller supplies the timeout
+/// + a stats counter for /metrics observability.
+///
+/// IP-literal hosts bypass the resolver entirely and bump
+/// `lookups_succeeded` (so the counter remains a meaningful
+/// "fraction of fast-path vs slow-path" signal).
+///
+/// Returns:
+///   * `Ok(addrs)` → non-empty Vec on healthy lookup
+///   * `Vec::new()` → resolver error OR timeout (caller can't tell
+///     the difference from the return value alone; check the stats
+///     counter if you need to distinguish for alerting).
+pub async fn resolve_host_with_timeout(
+    host: &str,
+    port: u16,
+    timeout: std::time::Duration,
+    stats: &DnsResolverStats,
+) -> Vec<IpAddr> {
+    use std::sync::atomic::Ordering;
+    // Fast path: host is already a literal IP. Skip the resolver
+    // to avoid a meaningless syscall + counts toward the "ok"
+    // bucket so dashboards see fast-path-ratio cleanly.
     if let Ok(ip) = host.parse::<IpAddr>() {
+        stats.lookups_succeeded.fetch_add(1, Ordering::Relaxed);
         return vec![ip];
     }
-    match tokio::net::lookup_host((host, port)).await {
-        Ok(addrs) => addrs.map(|sa| sa.ip()).collect(),
-        Err(_) => Vec::new(),
+    let lookup = tokio::time::timeout(timeout, tokio::net::lookup_host((host, port)));
+    match lookup.await {
+        Ok(Ok(addrs)) => {
+            stats.lookups_succeeded.fetch_add(1, Ordering::Relaxed);
+            addrs.map(|sa| sa.ip()).collect()
+        }
+        Ok(Err(_)) => {
+            stats.lookups_failed.fetch_add(1, Ordering::Relaxed);
+            Vec::new()
+        }
+        Err(_) => {
+            // Timeout. Distinct counter so operators can
+            // distinguish "resolver said NXDOMAIN" from
+            // "resolver never answered" — the latter is the
+            // signal that a recursive nameserver is wedged
+            // and the deployment is paying timeout-windows
+            // per relay task.
+            stats.lookups_timed_out.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                target: "proteus_transport_alpha::outbound_filter",
+                host = %host,
+                port,
+                timeout_secs = timeout.as_secs(),
+                "DNS lookup timed out — recursive resolver may be wedged"
+            );
+            Vec::new()
+        }
     }
 }
 
@@ -640,6 +752,87 @@ mod tests {
     async fn resolve_host_fast_path_for_literal_ipv6() {
         let v = resolve_host("::1", 80).await;
         assert_eq!(v, vec![ip("::1")]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_host_with_timeout_bumps_ok_counter_on_literal() {
+        // IP-literal fast path counts toward the ok bucket so the
+        // counter remains a meaningful fast-path/slow-path ratio.
+        let stats = DnsResolverStats::default();
+        let v = resolve_host_with_timeout("1.1.1.1", 80, std::time::Duration::from_secs(1), &stats)
+            .await;
+        assert_eq!(v, vec![ip("1.1.1.1")]);
+        assert_eq!(
+            stats
+                .lookups_succeeded
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            stats
+                .lookups_timed_out
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resolve_host_with_timeout_bumps_timeout_or_failed_on_wedged_resolver() {
+        // We can't easily simulate a wedged recursive resolver in
+        // unit tests without dependency injection of the lookup
+        // future. Use an absurdly-short timeout (1 microsecond)
+        // against a guaranteed-not-to-exist host: either the
+        // timeout fires (most common) or the resolver immediately
+        // returns NXDOMAIN. The test just asserts that exactly one
+        // non-OK counter incremented.
+        let stats = DnsResolverStats::default();
+        let _ = resolve_host_with_timeout(
+            "definitely-not-a-real-host.invalid",
+            80,
+            std::time::Duration::from_micros(1),
+            &stats,
+        )
+        .await;
+        let timed_out = stats
+            .lookups_timed_out
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let failed = stats
+            .lookups_failed
+            .load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            timed_out + failed,
+            1,
+            "expected exactly one (timeout|failed) counter increment; got timeout={timed_out}, failed={failed}"
+        );
+        assert_eq!(
+            stats
+                .lookups_succeeded
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "non-resolving host must not bump ok counter"
+        );
+    }
+
+    #[test]
+    fn dns_resolver_stats_prometheus_emits_three_outcome_lines() {
+        let s = DnsResolverStats::default();
+        s.lookups_succeeded
+            .store(42, std::sync::atomic::Ordering::Relaxed);
+        s.lookups_failed
+            .store(3, std::sync::atomic::Ordering::Relaxed);
+        s.lookups_timed_out
+            .store(1, std::sync::atomic::Ordering::Relaxed);
+        let body = s.prometheus();
+        for needle in [
+            "proteus_dns_lookups_total",
+            r#"outcome="ok""#,
+            r#"outcome="failed""#,
+            r#"outcome="timeout""#,
+            "42",
+            "# TYPE proteus_dns_lookups_total counter",
+        ] {
+            assert!(body.contains(needle), "missing {needle:?} in:\n{body}");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

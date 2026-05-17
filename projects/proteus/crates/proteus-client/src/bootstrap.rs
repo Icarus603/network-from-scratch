@@ -92,9 +92,25 @@ pub enum BootstrapError {
     BadIpLiteral(String),
     #[error("system resolver returned no addresses for {0:?}")]
     NoSystemAddresses(String),
+    /// System resolver did not answer within
+    /// [`SYSTEM_RESOLVER_TIMEOUT_SECS`]. Likely cause: poisoned /
+    /// wedged recursive nameserver. Surfaces as a distinct
+    /// error variant so callers can present a clear diagnostic
+    /// instead of a generic Io / timeout.
+    #[error("system resolver timed out after {0}s on {1:?} — recursive nameserver may be wedged; set bootstrap_dns.direct_ip in client.yaml to bypass")]
+    SystemResolverTimeout(u64, String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
+
+/// Hard ceiling on the system-resolver lookup in the bootstrap
+/// path. Matches the server-side
+/// [`proteus_transport_alpha::outbound_filter::DEFAULT_DNS_LOOKUP_TIMEOUT_SECS`]
+/// for symmetry. Without this, a wedged recursive nameserver
+/// during early-startup endpoint resolution would block the
+/// client's main loop indefinitely — no SOCKS5 listener bind,
+/// no error, no metrics signal.
+pub const SYSTEM_RESOLVER_TIMEOUT_SECS: u64 = 5;
 
 /// Resolve a `host:port` endpoint under a bootstrap-DNS policy.
 ///
@@ -131,8 +147,27 @@ pub async fn resolve_endpoint(
         });
     }
 
-    // Case 3 (default): system resolver.
-    let addrs = tokio::net::lookup_host(endpoint).await?;
+    // Case 3 (default): system resolver, bounded by
+    // SYSTEM_RESOLVER_TIMEOUT_SECS so a wedged recursive
+    // nameserver can't pin the caller indefinitely. Surfaces
+    // as a distinct error variant so the caller can recommend
+    // the operator switch to bootstrap_dns.direct_ip.
+    let lookup_fut = tokio::net::lookup_host(endpoint);
+    let addrs = match tokio::time::timeout(
+        std::time::Duration::from_secs(SYSTEM_RESOLVER_TIMEOUT_SECS),
+        lookup_fut,
+    )
+    .await
+    {
+        Ok(Ok(a)) => a,
+        Ok(Err(e)) => return Err(BootstrapError::Io(e)),
+        Err(_) => {
+            return Err(BootstrapError::SystemResolverTimeout(
+                SYSTEM_RESOLVER_TIMEOUT_SECS,
+                endpoint.to_string(),
+            ));
+        }
+    };
     let addr = addrs
         .into_iter()
         .next()
@@ -249,6 +284,31 @@ mod tests {
     async fn bad_endpoint_reports_error() {
         let err = resolve_endpoint("not_a_host_port", None).await;
         assert!(matches!(err, Err(BootstrapError::BadEndpoint(_))));
+    }
+
+    #[test]
+    fn system_resolver_timeout_constant_is_finite() {
+        // Sanity: the timeout must be a number a wedged resolver
+        // can't outwait but a healthy one can comfortably meet.
+        // Anything > 0 and < 30 is acceptable. const-asserted so a
+        // future revision that accidentally zeros the constant
+        // fails at compile time.
+        const _OK_LOWER: () = assert!(SYSTEM_RESOLVER_TIMEOUT_SECS > 0);
+        const _OK_UPPER: () = assert!(SYSTEM_RESOLVER_TIMEOUT_SECS < 30);
+    }
+
+    #[test]
+    fn system_resolver_timeout_error_message_includes_actionable_hint() {
+        // The error's Display impl must point operators at the
+        // bootstrap_dns.direct_ip fix — otherwise a wedged-resolver
+        // FAIL becomes a head-scratcher.
+        let e = BootstrapError::SystemResolverTimeout(5, "vps.example.com:8443".to_string());
+        let msg = format!("{e}");
+        assert!(
+            msg.contains("bootstrap_dns.direct_ip"),
+            "error must point at the direct_ip fix: {msg}"
+        );
+        assert!(msg.contains("vps.example.com:8443"));
     }
 
     #[test]

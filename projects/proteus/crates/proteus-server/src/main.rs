@@ -777,6 +777,18 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         .restart_state_file
         .as_ref()
         .map(|p| proteus_server::restart_tracker::RestartTracker::init(p.clone()));
+
+    // Single per-process DNS-resolver stats sink. The relay path
+    // bumps these counters on every upstream-dial DNS lookup; the
+    // metrics endpoint exposes them as
+    // `proteus_dns_lookups_total{outcome="ok|failed|timeout"}`.
+    // Closes the silent-DNS-hang class: without per-outcome
+    // counters, a wedged recursive nameserver silently pegs every
+    // relay task at the lookup timeout and the only signal is
+    // upstream-dial-timeout cascades (which look identical to a
+    // genuinely-unreachable destination).
+    let dns_resolver_stats =
+        Arc::new(proteus_transport_alpha::outbound_filter::DnsResolverStats::default());
     // Propagate the self-test outcome to the operator-visible
     // gauge BEFORE the metrics endpoint binds — operators
     // alert on `proteus_startup_self_test_passed == 0` to spot
@@ -1290,6 +1302,14 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         })];
         if let Some(rt) = restart_tracker.as_ref().cloned() {
             live_blocks.push(std::sync::Arc::new(move || rt.prometheus()));
+        }
+        // DNS resolver stats — same closure pattern as the
+        // restart tracker. Three counters (ok/failed/timeout)
+        // emitted as a labelled series so dashboards can compute
+        // timeout-ratio cheaply.
+        {
+            let dns_stats = Arc::clone(&dns_resolver_stats);
+            live_blocks.push(std::sync::Arc::new(move || dns_stats.prometheus()));
         }
         tokio::spawn(async move {
             if let Err(e) = proteus_transport_alpha::metrics_http::serve_with_auth_full_v12(
@@ -1994,6 +2014,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             .map(|q| q.on_kinds.iter().any(|k| k == "byte_budget"))
             .unwrap_or(false),
         outbound_filter: outbound_filter.clone(),
+        dns_resolver_stats: Some(Arc::clone(&dns_resolver_stats)),
         pad_quantum: cfg.pad_quantum,
     };
     if let Some(q) = cfg.pad_quantum {

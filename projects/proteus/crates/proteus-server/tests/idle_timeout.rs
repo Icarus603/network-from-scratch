@@ -71,6 +71,7 @@ async fn idle_session_reaps_within_deadline() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
@@ -201,6 +202,7 @@ async fn active_session_not_killed_by_idle_timeout() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {

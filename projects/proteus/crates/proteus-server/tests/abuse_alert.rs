@@ -111,6 +111,7 @@ async fn abuse_detector_fires_once_per_burst_on_repeated_byte_cap_hits() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {

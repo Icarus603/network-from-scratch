@@ -72,6 +72,7 @@ async fn byte_budget_tears_down_session_when_cap_hit() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {

@@ -82,6 +82,7 @@ async fn access_log_emits_one_record_per_session() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
 

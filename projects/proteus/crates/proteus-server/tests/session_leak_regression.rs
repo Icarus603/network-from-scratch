@@ -106,6 +106,7 @@ async fn server_does_not_leak_session_permits_on_upstream_eof() {
         user_quarantine: None,
         quarantine_on_byte_budget: false,
         outbound_filter: None,
+        dns_resolver_stats: None,
         pad_quantum: None,
     };
     let _server_task = tokio::spawn(server::serve(listener, ctx, move |session| {

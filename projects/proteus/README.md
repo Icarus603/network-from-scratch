@@ -1472,7 +1472,18 @@ proteus_restarts_total
 proteus_first_start_unix_seconds
 proteus_last_clean_shutdown_unix_seconds
 proteus_previous_run_unclean
+proteus_dns_lookups_total{outcome="ok|failed|timeout"}
 ```
+
+`proteus_dns_lookups_total{outcome="timeout"}` is incremented
+whenever an upstream-dial DNS lookup exceeds 5 seconds (the new
+hard ceiling — previously unbounded, which let a wedged recursive
+nameserver silently peg every relay task at lookup-wait
+indefinitely). Same bounded-resolver discipline applies to the
+client-side bootstrap path: `BootstrapError::SystemResolverTimeout`
+now surfaces with an actionable message pointing operators at
+`bootstrap_dns.direct_ip` as the fix. Alert on
+`rate(proteus_dns_lookups_total{outcome="timeout"}[5m]) > 0`.
 
 `proteus_panics_total` is incremented by the shared
 [`proteus-panic-hook`](crates/proteus-panic-hook/) installed in
