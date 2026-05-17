@@ -1490,6 +1490,31 @@ semantics over keep-running-with-one-session-down (default keeps
 running so a single hot-path panic doesn't tear down every other
 in-flight user).
 
+**systemd Type=notify + WatchdogSec=** — the bundled
+`proteus-server.service` ships `Type=notify` + `WatchdogSec=30s`.
+The binary uses [`proteus-sd-notify`](crates/proteus-sd-notify/)
+(zero-dep, `unsafe_code = "forbid"`) to send:
+
+  * `READY=1` after the listener is bound + self-test passes.
+    Downstream services ordered `After=proteus-server.service`
+    now start only when Proteus is *genuinely* ready, instead of
+    racing a still-loading backend.
+  * `WATCHDOG=1` every 15s (half the configured WatchdogSec).
+    A deadlocked tokio runtime can't run the ping task → systemd
+    sees the missed ping → restart. Closes the silent-deadlock
+    class: without this, a wedged runtime stays "active
+    (running)" forever and operators only notice when users
+    complain.
+  * `STOPPING=1` + `STATUS=draining N session(s)` on SIGTERM so
+    `TimeoutStopSec=` accounting starts immediately and
+    `systemctl status` shows the drain in progress.
+
+The protocol is a one-line datagram send (`sendto(unix-sock,
+"KEY=value\n")`); the crate implements it natively rather than
+pulling in `libsystemd.so` (which breaks on musl/alpine
+containers). When `$NOTIFY_SOCKET` is unset (manual launch /
+non-systemd container) all four functions cleanly no-op.
+
 `proteus_restarts_total` + the three adjacent series are emitted
 by [`proteus_server::restart_tracker`](crates/proteus-server/src/restart_tracker.rs)
 when the operator sets `restart_state_file: /var/lib/proteus/restart_state.json`

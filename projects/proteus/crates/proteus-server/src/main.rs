@@ -1343,6 +1343,44 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         .ready
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
+    // sd_notify(READY=1) — tell systemd we're actually ready to
+    // accept traffic. With Type=notify in the unit file, a
+    // downstream `After=proteus-server.service` (e.g. a Caddy
+    // reverse proxy) starts only AFTER this point — past TLS
+    // load, past self-test, past listener bind. Without this
+    // (Type=simple), systemd marks "active" the moment the
+    // process forks and the downstream races us. No-op when
+    // $NOTIFY_SOCKET is unset (manual run / non-systemd
+    // container).
+    let _ = proteus_sd_notify::notify_ready().await;
+    let _ = proteus_sd_notify::notify_status(&format!("ready on {}", listener.local_addr()?)).await;
+
+    // Watchdog ping task. systemd's WatchdogSec= declaration
+    // restarts the process if no WATCHDOG=1 arrives within the
+    // configured window. We ping at half the systemd-supplied
+    // timeout so scheduling jitter doesn't trip a false restart.
+    // A deadlocked tokio runtime can't run the ping task → the
+    // watchdog fires → systemd restarts → the new process picks
+    // up restart_tracker.previous_run_unclean = 1 (visible on
+    // /metrics). Closes the silent-deadlock class.
+    let watchdog_cancel = std::sync::Arc::new(tokio::sync::Notify::new());
+    let _watchdog_handle = if let Some(interval) = proteus_sd_notify::watchdog_interval() {
+        info!(
+            interval_secs = interval.as_secs(),
+            "sd_notify watchdog active — pinging WATCHDOG=1 at half the configured WatchdogSec"
+        );
+        Some(proteus_sd_notify::spawn_watchdog(
+            interval,
+            std::sync::Arc::clone(&watchdog_cancel),
+        ))
+    } else {
+        info!(
+            "sd_notify watchdog disabled (no WATCHDOG_USEC env var; \
+                 set WatchdogSec= in the systemd unit to enable)"
+        );
+        None
+    };
+
     // Periodic rate-limit vacuum (every 60 s) so per-IP token-bucket
     // memory stays bounded regardless of traffic patterns.
     {
@@ -2222,6 +2260,21 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             // stops sending new traffic. Existing in-flight sessions
             // continue to run during the drain window.
             metrics.ready.store(false, std::sync::atomic::Ordering::Relaxed);
+            // Tell systemd we're draining BEFORE the drain loop so
+            // `TimeoutStopSec=` accounting starts from STOPPING=1.
+            // Without this, systemd would consider us "exiting
+            // normally" at process-end time only, and any drain
+            // longer than the default TimeoutStopSec (90s) gets
+            // SIGKILL'd mid-flight.
+            let _ = proteus_sd_notify::notify_stopping().await;
+            let _ = proteus_sd_notify::notify_status(&format!(
+                "draining {} session(s)",
+                metrics.in_flight_sessions.load(std::sync::atomic::Ordering::Relaxed)
+            )).await;
+            // Cancel the watchdog ping cycle. Once we're
+            // draining, systemd shouldn't restart-on-timeout —
+            // we're already supposed to be going away.
+            watchdog_cancel.notify_one();
             info!(
                 secs = drain_secs,
                 in_flight = metrics.in_flight_sessions.load(std::sync::atomic::Ordering::Relaxed),

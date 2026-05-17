@@ -1046,6 +1046,7 @@ dependencies = [
  "ed25519-dalek",
  "proteus-crypto",
  "proteus-panic-hook",
+ "proteus-sd-notify",
  "proteus-spec",
  "proteus-transport-alpha",
  "proteus-transport-beta",
@@ -1116,6 +1117,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "proteus-sd-notify"
+version = "0.1.0"
+dependencies = [
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "proteus-server"
 version = "0.1.0"
 dependencies = [
@@ -1128,6 +1137,7 @@ dependencies = [
  "proteus-fingerprint",
  "proteus-handshake",
  "proteus-panic-hook",
+ "proteus-sd-notify",
  "proteus-spec",
  "proteus-transport-alpha",
  "proteus-transport-beta",

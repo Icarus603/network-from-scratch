@@ -288,6 +288,35 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     let listener = TcpListener::bind(&cfg.socks_listen).await?;
     info!(addr = %listener.local_addr()?, "SOCKS5 inbound bound");
 
+    // sd_notify(READY=1) — tell systemd the SOCKS5 listener is
+    // actually accepting traffic. Lets `Type=notify` units order
+    // an `After=proteus-client.service` upstream-app correctly.
+    // No-op when $NOTIFY_SOCKET is unset (manual run / container
+    // without systemd).
+    let _ = proteus_sd_notify::notify_ready().await;
+    let _ =
+        proteus_sd_notify::notify_status(&format!("SOCKS5 on {}", listener.local_addr()?)).await;
+
+    // Watchdog ping cycle for systemd liveness. systemd's
+    // WatchdogSec= restarts us if no WATCHDOG=1 arrives within
+    // the configured window — proves the tokio runtime is alive
+    // even under hot-path lock contention. The cancel notify
+    // stops the cycle on graceful shutdown so systemd's
+    // TimeoutStopSec window isn't confused by a stale ping.
+    let watchdog_cancel = Arc::new(tokio::sync::Notify::new());
+    let _watchdog_handle = if let Some(interval) = proteus_sd_notify::watchdog_interval() {
+        info!(
+            interval_secs = interval.as_secs(),
+            "sd_notify watchdog active"
+        );
+        Some(proteus_sd_notify::spawn_watchdog(
+            interval,
+            Arc::clone(&watchdog_cancel),
+        ))
+    } else {
+        None
+    };
+
     // Single per-process carrier-health tracker for the β path.
     // Lives across CONNECTs so back-off survives the SOCKS5
     // request boundary — see `carrier_health.rs` for the policy.
@@ -547,6 +576,13 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             }
         }
     }
+
+    // sd_notify(STOPPING=1) — tells systemd we're draining so
+    // `TimeoutStopSec=` accounting starts now (not at process
+    // exit). Cancel the watchdog cycle so a slow drain doesn't
+    // race with a false "watchdog tripped" restart.
+    let _ = proteus_sd_notify::notify_stopping().await;
+    watchdog_cancel.notify_one();
 
     // ----- Drain window -----
     //

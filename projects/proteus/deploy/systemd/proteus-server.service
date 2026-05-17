@@ -5,7 +5,28 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify — the binary sends sd_notify(READY=1) AFTER the
+# listener is bound and the startup self-test has passed. Lets
+# downstream services ordered `After=proteus-server.service`
+# (e.g. a reverse proxy) start only when Proteus genuinely is
+# ready, instead of racing a still-loading backend.
+#
+# `notify-reload` (systemd >= 253) would also let `systemctl
+# reload` route through sd_notify; we stay on `notify` for now
+# since the binary handles SIGHUP directly.
+Type=notify
+NotifyAccess=main
+
+# Liveness watchdog. If no WATCHDOG=1 ping arrives within this
+# window, systemd restarts the service. The binary pings at
+# half the configured interval (per sd_notify(3) guidance), so
+# 30s here means a ping every 15s — a deadlocked tokio runtime
+# (lock contention, dropped-task-leak, ...) is auto-restarted
+# within at most 30s, even though the process itself is alive.
+# Without this, a deadlocked Proteus stays "active (running)"
+# forever and operators only notice when users complain.
+WatchdogSec=30s
+
 User=proteus
 Group=proteus
 
@@ -13,7 +34,12 @@ Group=proteus
 ExecStart=/usr/local/bin/proteus-server run --config /etc/proteus/server.yaml
 Restart=on-failure
 RestartSec=2s
-TimeoutStopSec=10s
+# TimeoutStopSec must be >= server.yaml `drain_secs` + a small
+# margin so the binary can complete its drain (notify_stopping
+# fires the moment SIGTERM arrives, so accounting starts here).
+# Default drain_secs is 30s; bump this to 60s for a comfortable
+# margin during graceful rolling restarts.
+TimeoutStopSec=60s
 
 # --- Security hardening ---
 NoNewPrivileges=yes
@@ -41,9 +67,16 @@ SystemCallFilter=~@privileged @resources @debug @mount @cpu-emulation @obsolete
 AmbientCapabilities=CAP_NET_BIND_SERVICE
 CapabilityBoundingSet=CAP_NET_BIND_SERVICE
 
-# Read-only access to keys, read-write to logs.
+# Read-only access to keys, read-write to logs + state dir.
+# /var/lib/proteus is required when `restart_state_file:` is set
+# in server.yaml (recommended for production — exposes the
+# proteus_restarts_total + previous_run_unclean series so
+# operators can detect crash loops). systemd auto-creates the
+# StateDirectory= path with 0750 ownership.
 ReadOnlyPaths=/etc/proteus
 ReadWritePaths=/var/log/proteus
+StateDirectory=proteus
+StateDirectoryMode=0750
 
 # Network exposure.
 IPAddressAllow=any
