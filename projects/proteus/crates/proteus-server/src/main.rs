@@ -353,6 +353,8 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             window_secs = pa.window_secs,
             threshold = pa.threshold,
             max_prefixes = pa.max_prefixes,
+            autodeny_minutes = pa.autodeny_minutes,
+            autodeny_max_entries = pa.autodeny_max_entries,
             "probe-anomaly detector configured (per-/24 sliding window)"
         );
         let detector = std::sync::Arc::new(
@@ -363,6 +365,23 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             ),
         );
         ctx = ctx.with_probe_anomaly_detector(detector);
+        // Auto-deny is operator-opt-in: only wired when
+        // `autodeny_minutes > 0`. The detector still fires regardless
+        // (alerting != enforcement), so operators who only want the
+        // metric/log surface can leave autodeny unset.
+        if pa.autodeny_minutes > 0 {
+            let auto_deny =
+                std::sync::Arc::new(proteus_transport_alpha::auto_deny::AutoDenyList::new(
+                    std::time::Duration::from_secs(pa.autodeny_minutes * 60),
+                    pa.autodeny_max_entries,
+                ));
+            info!(
+                ttl_minutes = pa.autodeny_minutes,
+                max_entries = pa.autodeny_max_entries,
+                "auto-deny list wired — anomaly fires will short-circuit subsequent connections from the same /24 (v4) / /48 (v6)"
+            );
+            ctx = ctx.with_auto_deny_list(auto_deny);
+        }
     } else {
         // No-op: detector silent when unset; operators on long-lived
         // deployments should turn it on so probe-volume signals

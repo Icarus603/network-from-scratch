@@ -438,6 +438,35 @@ pub struct ProbeAnomalyCfg {
     /// — about 1 MiB of bookkeeping.
     #[serde(default = "default_probe_anomaly_max_prefixes")]
     pub max_prefixes: usize,
+    /// **Auto-deny TTL in minutes.** When > 0, every probe-anomaly
+    /// fire inserts the offending /24 (v4) / /48 (v6) into a TTL-
+    /// bounded in-memory deny list; `admission_ok` consults it
+    /// BEFORE the firewall snapshot so denied prefixes short-circuit
+    /// at the cheapest admission point. Entries auto-expire after
+    /// the TTL — transient false positives heal automatically
+    /// without operator intervention.
+    ///
+    /// Default 0 (disabled). Recommended starting value 15-60 for
+    /// production deploys: long enough that a sustained prober
+    /// loses many minutes of probing per fire, short enough that a
+    /// mis-trigger on a legitimate client clears within one human
+    /// coffee break.
+    ///
+    /// **The deny list is in-binary**, not pushed to the kernel
+    /// firewall — see `auto_deny.rs` for the design rationale
+    /// (operator firewall rules + auto-deny entries have different
+    /// lifecycles; mixing them in one SIGHUP-reloadable surface is
+    /// confusing). Connections that ARE denied by auto-deny still
+    /// route to the cover endpoint (same as firewall denies),
+    /// preserving the cover-server-pass-through fingerprint.
+    #[serde(default = "default_probe_anomaly_autodeny_minutes")]
+    pub autodeny_minutes: u64,
+    /// Hard cap on the auto-deny map size. Same defense semantics
+    /// as `max_prefixes` — when reached, new inserts are refused
+    /// (existing entries continue to refresh). Default 4096 entries
+    /// (~128 KiB bookkeeping).
+    #[serde(default = "default_probe_anomaly_autodeny_max_entries")]
+    pub autodeny_max_entries: usize,
 }
 
 const fn default_probe_anomaly_window_secs() -> u64 {
@@ -448,6 +477,17 @@ const fn default_probe_anomaly_threshold() -> usize {
 }
 const fn default_probe_anomaly_max_prefixes() -> usize {
     16 * 1024
+}
+const fn default_probe_anomaly_autodeny_minutes() -> u64 {
+    // Default DISABLED. Operator opts in by setting > 0 in
+    // server.yaml; we never apply a non-zero default because
+    // auto-deny is a policy action and policy actions need
+    // operator consent (false positives on legitimate clients
+    // would be unacceptable surprises).
+    0
+}
+const fn default_probe_anomaly_autodeny_max_entries() -> usize {
+    4096
 }
 
 #[derive(Debug, Deserialize)]

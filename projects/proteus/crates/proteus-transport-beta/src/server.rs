@@ -28,10 +28,8 @@ fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &SocketAddr) {
     let Some(detector) = ctx.probe_anomaly() else {
         return;
     };
-    if detector
-        .record_at(peer.ip(), std::time::Instant::now())
-        .is_some()
-    {
+    let now = std::time::Instant::now();
+    if detector.record_at(peer.ip(), now).is_some() {
         tracing::warn!(
             peer = %peer,
             carrier = "β",
@@ -45,6 +43,20 @@ fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &SocketAddr) {
         if let Some(m) = ctx.metrics() {
             m.probe_anomalies_fired
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Auto-deny: same policy as α. The list silently no-ops
+        // when not configured. Subsequent QUIC connections from
+        // this /24 short-circuit at `admission_ok` (which the β
+        // accept loop calls 1:1 with α).
+        if let Some(auto_deny) = ctx.auto_deny() {
+            if auto_deny.insert(peer.ip(), now) {
+                tracing::warn!(
+                    peer = %peer,
+                    carrier = "β",
+                    ttl_secs = auto_deny.ttl().as_secs(),
+                    "auto-deny: prefix added to TTL-bounded deny list"
+                );
+            }
         }
     }
 }

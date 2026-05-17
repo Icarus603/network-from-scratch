@@ -166,9 +166,11 @@ Proteus 的 active-probing 防禦是「byte-verbatim cover-server splice」（au
 
 **TODO**：
 1. ~~**Cover-endpoint pool 輪換**~~ ✅ **DONE 2026-05-18** —— `cover_endpoints: [...]` YAML 知識點 + `CoverEndpointPool` 含 per-source-IP /24（v4）/ /48（v6）一致性 affinity。**比 round-robin 強的點**：同一 observer 從同一 src IP 看到的 cover URL 跨任意多輪探測都一致（看起來像正常 cover server，沒有 rotation 信號），而 round-robin 會讓每輪換 URL —— 那本身就是 fingerprint。8 unit tests + 4 integration tests。`crates/proteus-transport-alpha/src/cover_pool.rs`。
-2. ~~**Probe-anomaly detector**~~ ✅ **DONE 2026-05-18** —— `ProbeAnomalyDetector` 同樣用 per-/24（v4）/ /48（v6）prefix 鍵，sliding window（預設 300s）+ threshold（預設 8）。Fire-once-per-burst：同一 /24 在 window 內第一次過閾值即 emit 一次 WARN log + bump `proteus_probe_anomalies_fired_total` Prometheus counter，後續同 burst 沉默直到 window 清空。Memory cap 16 KiB prefixes（~1 MiB bookkeeping）。**不直接封 IP** —— 把 enforcement 留給現有 rate-limiter，detector 只負責「讓 operator 看到 signal」。
+2. ~~**Probe-anomaly detector**~~ ✅ **DONE 2026-05-18** —— `ProbeAnomalyDetector` 同樣用 per-/24（v4）/ /48（v6）prefix 鍵，sliding window（預設 300s）+ threshold（預設 8）。Fire-once-per-burst：同一 /24 在 window 內第一次過閾值即 emit 一次 WARN log + bump `proteus_probe_anomalies_fired_total` Prometheus counter，後續同 burst 沉默直到 window 清空。Memory cap 16 KiB prefixes（~1 MiB bookkeeping）。
    - 8 unit tests + 3 α e2e tests `crates/proteus-transport-alpha/src/probe_anomaly.rs`
    - **NEW 2026-05-18 同日 follow-up**：β carrier 的 6 個 close-sites（`admission_ok` reject / `max_connections` reject / ALPN mismatch / bi-stream timeout / no exporter / Proteus handshake fail+timeout）全部 instrumented。沒有這層 wiring 的話一個只 probe β carrier 的對手就能繞過 anomaly counter。+2 β e2e tests `crates/proteus-transport-beta/tests/probe_anomaly_e2e.rs` lock 住 wire→β-failure→detector→metric 的整條鏈。
+   - **2026-05-18 P1 follow-up**：detector recent-fires ring buffer + 標籤 Prometheus gauge `proteus_probe_anomaly_recent_secs{prefix="…"}` + admin CLI status/JSON 直接列出 offender /24 — operator 不用 grep log 就能 IR。
+   - **2026-05-18 P1 follow-up（本次 iteration）**：`AutoDenyList` TTL-bounded in-binary deny list — operator 設 `probe_anomaly.autodeny_minutes > 0` 啟用：每次 fire 自動把 /24 / /48 加入 deny list，後續連線在 `admission_ok` 最頂端 short-circuit（比 firewall snapshot + global handshake budget + rate-limiter 都更早），TTL 過後自動清除（false positive 自癒）。9 unit + 2 e2e tests。**Alerting 與 enforcement 分層**：detector 永遠 alert，auto-deny 只在 operator opt-in 時才 enforce — 預設不啟用以避免 false-positive 鎖死真實 client。
 3. **β profile 同樣納入 cover 機制**：目前 β 沒有 cover-forward path（README 已標）。研究在 QUIC 失敗握手後 fallback 到一個真實的 H3 cover server 是否可行。
 
 ---
@@ -244,17 +246,17 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 
 α profile 是 TLS 1.3，第一字節 `\x16\x03\x03`（規則 2 放行）→ 不會觸發。**β profile 是 QUIC，UDP first byte 由 QUIC 長 header 決定**：
 
-剛好我們在 commit `5aedb61` 已把 β 的 prefix-noise 第 0 字節調整為「像 short-header QUIC」。但 **prefix-noise 本身仍可能觸發全加密啟發式**（16 個隨機字節，全不可印的機率高）。
+剛好我們在 commit `5aedb61` 已把 β 的 prefix-noise 第 0 字節調整為「像 short-header QUIC」。Commit `a187ea4`（2026-05-17）進一步把前 6 字節塑形為可印 ASCII（0x20–0x7E），同時滿足 USENIX 25 #2（short-header byte 0）+ USENIX 23 規則 1（< 70% 不可印）+ 規則 3（首 6 字節可印 → 白名單）三條約束。
 
 **Proteus 當前覆蓋**：
 - ✅ α profile 第一字節滿足規則 2（TLS marker），規則 1/3 不適用
-- ⚠️ β profile prefix-noise：commit `5aedb61` 已塑形第 0 字節，但 1-15 是純隨機。需要驗證是否觸發規則 1（70% 不可印）
-- ⚠️ QUIC Initial 本身 first 6 bytes 通常不可印
+- ✅ β profile prefix-noise 前 6 字節可印 ASCII，後 10 字節隨機，整體非可印密度 ≤ 62.5% 通過規則 1
+- ✅ QUIC Initial 本身：USENIX 25 paper 的 evasion 設計避免 GFW 對 Initial 做全加密分類（GFW 一旦識別 Initial 就走 QUIC SNI 檢查路徑，不走全加密分類器）
 
 **TODO**：
-1. **β prefix-noise 規則 1 防禦**（小修）：把 16 字節 prefix-noise 改成「前 6 字節是合法 ASCII 可印字元 + 後 10 字節隨機」，同時符合「像 short-header QUIC」（重新平衡 byte 0 的兩個約束）。
-2. **新增 wire 測試**：`quic_prefix_noise_printable_ratio.rs` —— assert prefix-noise 通過 GFW 全加密啟發式。
-3. **Spec §5.9 補充**：明確記錄 prefix-noise 要同時滿足 USENIX 25 #2 + USENIX 23 全加密規則。
+1. ~~**β prefix-noise 規則 1 防禦**~~ ✅ **DONE 2026-05-17 (commit a187ea4)**
+2. ~~**新增 wire 測試**~~ ✅ **DONE 2026-05-17**：`quic_prefix_noise.rs` PROPERTY 4 / 4a / 4b 三條 assertion 涵蓋 USENIX 23 規則 1 + 規則 3
+3. **Spec §5.9 補充**：明確記錄 prefix-noise 要同時滿足 USENIX 25 #2 + USENIX 23 全加密規則。（spec 文檔層工作，code 已 lock 死，wire-test 已 pin）
 
 ---
 
@@ -265,7 +267,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | Tiangou 商用 DPI（共享黑名單）| ✅ `proteus-server preflight check-ip-reputation` 離線分類 + operator watchlist | — |
 | Tiangou ML 行為分析 | ✅ cell-split + heartbeats | — |
 | uTLS bit-perfect ClientHello | ❌ | M3（README ❌ 已標）|
-| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）| TODO: deployment doc + multi-VPS HA |
+| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）+ `deploy/README.md` 「Deployment topology」section + security checklist 三條 operator-action item（2026-05-18 done）| ❌ multi-VPS HA still M3 |
 | QUIC SNI 審查 (USENIX 25 #1) | ✅ source-port walk | — |
 | QUIC SNI 審查 (USENIX 25 #2) | ✅ prefix-noise | — |
 | QUIC SNI 審查 (USENIX 25 #4) | ✅ migration API | — |
@@ -278,7 +280,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | UDP/QUIC throttling | ✅ α + `CarrierHealth` 自動 carrier 切換 + suppression 時段定期 probe 恢復（2026-05-18 done）| ❌ throughput-adapt（β 慢但活著的情況）still TODO |
 | γ profile (MASQUE) | ❌ | M3+ (spec §10.3) |
 | DoH/DoT 識別（bootstrap）| ✅ `bootstrap_dns: { direct_ip: <ip> }` + validate WARN | — |
-| 全加密啟發式（規則 1: 不可印 70%）| ⚠️ β prefix-noise 風險 | TODO: 調整 prefix-noise 前 6 字節 |
+| 全加密啟發式（規則 1: 不可印 70%）| ✅ β prefix-noise 前 6 字節塑形可印 ASCII（commit a187ea4），同時滿足規則 1 + 規則 3 + USENIX 25 #2 | — |
 | 全加密啟發式（規則 2: TLS/HTTP/SSH 前綴）| ✅ α 自然滿足 | — |
 | Post-quantum store-now-decrypt-later | ✅ ML-KEM-768 hybrid | — |
 | Forward secrecy / 4 MiB ratchet | ✅ | — |

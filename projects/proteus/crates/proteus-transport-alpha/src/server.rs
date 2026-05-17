@@ -108,6 +108,25 @@ pub enum ConnGate {
 /// Keep one canonical admission pipeline — never re-implement it
 /// in the β crate, or the two will drift.
 pub fn admission_ok(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) -> bool {
+    // TTL-bounded auto-deny check FIRST — cheaper than the firewall
+    // snapshot, and probe-anomaly-flagged prefixes shouldn't even
+    // pay the firewall lookup cost. Disabled when the operator
+    // hasn't wired the auto-deny list (the common case for
+    // small/personal deploys); short-circuit on `is_enabled = false`
+    // makes the unwired path effectively free.
+    if let Some(auto_deny) = ctx.auto_deny() {
+        if auto_deny.is_denied(peer.ip(), std::time::Instant::now()) {
+            tracing::debug!(
+                peer = %peer,
+                "auto-deny hit (probe-anomaly /24 within TTL); routing to cover"
+            );
+            if let Some(m) = ctx.metrics() {
+                m.firewall_denied
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+            return false;
+        }
+    }
     // Single snapshot of the firewall — atomic across the is_active +
     // admit pair so a concurrent SIGHUP reload can't observe us with a
     // stale "active" flag and a fresh "admit" result. Cloning the
@@ -222,10 +241,8 @@ fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) {
     let Some(detector) = ctx.probe_anomaly() else {
         return;
     };
-    if detector
-        .record_at(peer.ip(), std::time::Instant::now())
-        .is_some()
-    {
+    let now = std::time::Instant::now();
+    if detector.record_at(peer.ip(), now).is_some() {
         // Threshold crossed for this /24 — surface the signal.
         tracing::warn!(
             peer = %peer,
@@ -239,6 +256,20 @@ fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &std::net::SocketAddr) {
         if let Some(m) = ctx.metrics() {
             m.probe_anomalies_fired
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        // Auto-deny: when the operator has wired a TTL-bounded
+        // deny list, the anomaly fire is exactly the moment to
+        // blackhole the offending /24. The list silently no-ops
+        // when not configured.
+        if let Some(auto_deny) = ctx.auto_deny() {
+            let inserted = auto_deny.insert(peer.ip(), now);
+            if inserted {
+                tracing::warn!(
+                    peer = %peer,
+                    ttl_secs = auto_deny.ttl().as_secs(),
+                    "auto-deny: prefix added to TTL-bounded deny list"
+                );
+            }
         }
     }
 }
@@ -270,6 +301,15 @@ pub struct ServerCtx {
     /// When `None`, anomaly detection is disabled — operator opts in
     /// via `with_probe_anomaly_detector()`.
     probe_anomaly: Option<Arc<crate::probe_anomaly::ProbeAnomalyDetector>>,
+    /// Optional TTL-bounded auto-deny list. When configured, probe-
+    /// anomaly fires insert the offending /24 (v4) / /48 (v6) into
+    /// this list with the configured TTL; `admission_ok` consults
+    /// it BEFORE the firewall snapshot so denied connections short-
+    /// circuit at the cheapest possible point. Entries self-expire
+    /// after the TTL — transient false positives heal automatically
+    /// without operator intervention. Operator opt-in via
+    /// `probe_anomaly.autodeny_minutes > 0` in `server.yaml`.
+    auto_deny: Option<Arc<crate::auto_deny::AutoDenyList>>,
     /// Optional per-source-IP rate limiter.
     rate_limiter: Option<crate::rate_limit::RateLimiter>,
     /// Maximum time to spend on a single handshake before giving up
@@ -327,6 +367,7 @@ impl ServerCtx {
             replay: Mutex::new(ReplayWindow::new()),
             cover_endpoint: None,
             probe_anomaly: None,
+            auto_deny: None,
             rate_limiter: None,
             handshake_deadline: std::time::Duration::from_secs(15),
             tcp_keepalive_secs: 30,
@@ -704,6 +745,30 @@ impl ServerCtx {
     #[must_use]
     pub fn probe_anomaly(&self) -> Option<&Arc<crate::probe_anomaly::ProbeAnomalyDetector>> {
         self.probe_anomaly.as_ref()
+    }
+
+    /// Install a TTL-bounded auto-deny list. When configured, the
+    /// probe-anomaly fire helper (`record_probe_anomaly` in this
+    /// crate's server code and its β-side mirror) inserts the
+    /// offending prefix into the list with the list's configured
+    /// TTL. `admission_ok` consults this list BEFORE the firewall
+    /// snapshot so denied prefixes short-circuit at the cheapest
+    /// admission point.
+    ///
+    /// Pair with `with_probe_anomaly_detector` — the detector's
+    /// fires are what populate the deny list. Installing one
+    /// without the other gives you cheap admission lookups against
+    /// an always-empty map (correct but useless).
+    #[must_use]
+    pub fn with_auto_deny_list(mut self, list: Arc<crate::auto_deny::AutoDenyList>) -> Self {
+        self.auto_deny = Some(list);
+        self
+    }
+
+    /// Diagnostic accessor for the installed auto-deny list.
+    #[must_use]
+    pub fn auto_deny(&self) -> Option<&Arc<crate::auto_deny::AutoDenyList>> {
+        self.auto_deny.as_ref()
     }
 
     /// Public accessor for the ML-KEM EK bytes (for client config).

@@ -299,15 +299,32 @@ cover_endpoint: "www.cloudflare.com:443"
 #
 # Off by default — operators on long-lived deployments should turn
 # this on so probe-volume signals surface as alerts instead of
-# disappearing into noise. The detector does NOT block; the
-# operator's existing rate-limiter / firewall remains the
-# enforcement layer. Fire-once-per-burst semantics: one alert per
-# /24 per window, so a continuous attacker doesn't spam logs.
+# disappearing into noise. Fire-once-per-burst semantics: one alert
+# per /24 per window, so a continuous attacker doesn't spam logs.
+#
+# ## Auto-deny loop (operator opt-in)
+#
+# By default the detector ALERTS but doesn't ACT — the operator's
+# rate-limiter / firewall remain the enforcement layer. Set
+# `autodeny_minutes > 0` to engage an in-binary TTL-bounded deny
+# list: every anomaly fire inserts the offending /24 (v4) / /48
+# (v6) for the given window; subsequent connections from that
+# prefix short-circuit at `admission_ok` BEFORE the firewall +
+# global handshake budget + per-IP rate-limit checks. Entries
+# auto-expire after the TTL, so false positives heal automatically
+# without operator intervention.
+#
+# The deny list is IN-BINARY (not pushed to iptables/nft); see
+# `auto_deny.rs` for the design rationale. Denied connections
+# still route to the cover endpoint, preserving the
+# cover-server-pass-through fingerprint.
 #
 # probe_anomaly:
-#   window_secs: 300       # 5 min sliding window (default)
-#   threshold: 8           # 8 cover-forwards per /24 in window (default)
-#   max_prefixes: 16384    # memory cap on tracked prefixes (~1 MiB)
+#   window_secs: 300            # 5 min sliding window (default)
+#   threshold: 8                # 8 cover-forwards per /24 in window (default)
+#   max_prefixes: 16384         # memory cap on tracked prefixes (~1 MiB)
+#   autodeny_minutes: 0         # 0 = ALERT-ONLY (default). Set 15-60 for production.
+#   autodeny_max_entries: 4096  # cap on deny-list size (~128 KiB)
 
 # Server long-term keys (generated via `proteus-server keygen`).
 keys:

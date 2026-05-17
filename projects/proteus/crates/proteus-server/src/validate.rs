@@ -304,6 +304,35 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                 pa.max_prefixes * 64 / 1024
             ));
         }
+        // Auto-deny: opt-in policy action.
+        if pa.autodeny_minutes == 0 {
+            r.push_warn(
+                "probe_anomaly.autodeny_minutes = 0 — anomaly fires only ALERT, no automatic \
+                 blackhole. Recommended for production: set to 15-60 so sustained probers get \
+                 short-circuited at admission for that window",
+            );
+        } else if pa.autodeny_minutes > 24 * 60 {
+            r.push_warn(format!(
+                "probe_anomaly.autodeny_minutes = {} is > 24h; false positives on legitimate \
+                 clients would take a long time to heal (consider 15-60 first)",
+                pa.autodeny_minutes
+            ));
+        } else {
+            r.push_pass(format!(
+                "probe_anomaly.autodeny_minutes = {} (fires inject /24 into in-binary deny list \
+                 for this window; admission_ok short-circuits)",
+                pa.autodeny_minutes
+            ));
+        }
+        if pa.autodeny_max_entries == 0 {
+            r.push_fail("probe_anomaly.autodeny_max_entries = 0 disables the deny list");
+        } else if pa.autodeny_max_entries < 64 {
+            r.push_warn(format!(
+                "probe_anomaly.autodeny_max_entries = {} is very small; IP-sweep attacks would \
+                 fill the cap and refuse new denies (consider ≥ 1024)",
+                pa.autodeny_max_entries
+            ));
+        }
         // Coherence: anomaly detector without any cover endpoint
         // means there's nothing to count — the detector will sit
         // silent forever.

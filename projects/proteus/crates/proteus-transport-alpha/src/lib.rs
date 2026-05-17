@@ -31,6 +31,7 @@ pub use proteus_wire::ProfileHint;
 
 pub mod abuse_detector;
 pub mod access_log;
+pub mod auto_deny;
 pub mod client;
 pub mod cover;
 pub mod cover_pool;
