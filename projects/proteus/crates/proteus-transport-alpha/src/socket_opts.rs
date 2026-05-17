@@ -145,6 +145,42 @@ impl DialSocketOpts {
     }
 }
 
+/// Classify a raw OS error from `TcpListener::accept()` into
+/// "transient (back off and retry)" vs "fatal (let the
+/// supervisor restart us)".
+///
+/// Pre-iter-18 the server's accept loops propagated EVERY
+/// io::Error and died on transient FD exhaustion. Iter-18
+/// (server-side) fixed that with this classifier; iter-19
+/// (client-side) reuses the same classifier on the client's
+/// SOCKS5 accept loop so EBADF (listener dead — operator
+/// renamed the socks_listen address out from under us, etc.)
+/// stops the loop instead of spin-looping forever in a
+/// "transient" backoff.
+///
+/// Transient set (back off, retry):
+///   * EMFILE (24) — per-process FD limit hit
+///   * ENFILE (23) — system-wide FD limit hit
+///   * ENOMEM (12) — kernel out of memory for the socket
+///
+/// Everything else (the listener fd itself going bad,
+/// kernel state-loss, network stack issues) is fatal — the
+/// operator's systemd / supervisor restarts the binary.
+///
+/// `None` (io::Error with no raw_os_error) is treated as
+/// fatal: it's not a kernel-level transient, it's an
+/// internal libstd error path we shouldn't try to retry.
+///
+/// EAGAIN / EWOULDBLOCK (11) and EINTR (4) are NOT in the
+/// transient set — tokio's `accept().await` already retries
+/// on those internally; if they bubble up to our layer
+/// something else is wrong and double-retrying would
+/// re-introduce the spin-loop bug we just closed.
+#[must_use]
+pub fn is_transient_accept_error(raw_os_error: Option<i32>) -> bool {
+    matches!(raw_os_error, Some(24) | Some(23) | Some(12))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,5 +273,60 @@ mod tests {
         let stream = TcpStream::connect(addr).await.unwrap();
         apply_tcp_keepalive(&stream, 1).expect("1s keepalive");
         let _ = accept_task.await;
+    }
+
+    // ---- iter-18/19: accept-error classifier (moved here in iter-19) ----
+
+    /// EMFILE = errno 24 (per-process FD limit). Most common
+    /// transient on a busy server.
+    #[test]
+    fn emfile_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(24)));
+    }
+
+    /// ENFILE = errno 23 (system-wide FD limit).
+    #[test]
+    fn enfile_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(23)));
+    }
+
+    /// ENOMEM = errno 12 (kernel out of memory for the socket).
+    #[test]
+    fn enomem_classified_as_transient() {
+        assert!(is_transient_accept_error(Some(12)));
+    }
+
+    /// EBADF (errno 9, listener fd is dead) MUST kill the
+    /// accept loop — systemd / the operator's supervisor
+    /// should restart us. If we accidentally classified this
+    /// as transient we'd spin forever logging EBADF every
+    /// 5 seconds.
+    #[test]
+    fn ebadf_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(9)));
+    }
+
+    /// EINTR / EAGAIN are technically transient but tokio's
+    /// `accept().await` already retries on those internally
+    /// — they should NEVER bubble up to our layer. If they
+    /// do, treat as fatal so we don't accidentally double-
+    /// retry. Same logic for "no raw_os_error" — that's an
+    /// io::Error from some other source (libstd-internal),
+    /// not a kernel-level transient.
+    #[test]
+    fn eagain_and_none_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(11))); // EAGAIN/EWOULDBLOCK
+        assert!(!is_transient_accept_error(Some(4))); // EINTR
+        assert!(!is_transient_accept_error(None));
+    }
+
+    /// Sanity: ECONNRESET (104) is a per-CONNECTION error,
+    /// not an accept-level problem. The kernel still hands us
+    /// the accepted fd; the read on that fd later returns
+    /// ECONNRESET. So `accept()` itself returning 104 is
+    /// pathological and we kill the loop.
+    #[test]
+    fn econnreset_classified_as_fatal() {
+        assert!(!is_transient_accept_error(Some(104)));
     }
 }

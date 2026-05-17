@@ -1752,23 +1752,12 @@ enum AcceptOutcome {
 }
 
 /// Classify a raw OS error from `accept()` into "transient
-/// (back off)" vs "fatal (propagate up)". Exposed as a pure
-/// fn so unit tests can drive the classification logic
-/// without needing to actually exhaust the kernel's FD pool
-/// in-process.
+/// (back off)" vs "fatal (propagate up)".
 ///
-/// Transient set:
-///   * EMFILE (per-process FD limit hit)
-///   * ENFILE (system-wide FD limit hit)
-///   * ENOMEM (kernel out of memory for the socket)
-///
-/// Everything else (the listener fd itself going bad, etc.)
-/// is fatal — the operator's systemd restart picks up the
-/// pieces.
-#[must_use]
-fn is_transient_accept_error(raw_os_error: Option<i32>) -> bool {
-    matches!(raw_os_error, Some(24) | Some(23) | Some(12))
-}
+/// Iter-19: moved to `crate::socket_opts` so the proteus-client
+/// SOCKS5 accept loop can reuse the same classifier. Local
+/// re-export keeps server.rs call sites unchanged.
+use crate::socket_opts::is_transient_accept_error;
 
 /// Backoff applied after EMFILE / ENFILE / ENOMEM on accept.
 /// 100 ms is long enough that one already-spawned per-conn
@@ -2716,65 +2705,8 @@ fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
     bool::from(a.ct_eq(b))
 }
 
-#[cfg(test)]
-mod accept_classifier_tests {
-    //! Iter-18: unit tests for the accept-error classifier.
-    //! Placed at the END of this file (not inline with the
-    //! helper) so `clippy::items_after_test_module` stays
-    //! satisfied — the lint rejects production items
-    //! defined after a `#[cfg(test)]` block.
-
-    use super::*;
-
-    /// EMFILE = errno 24 (per-process FD limit). Most common
-    /// transient on a busy server.
-    #[test]
-    fn emfile_classified_as_transient() {
-        assert!(is_transient_accept_error(Some(24)));
-    }
-
-    /// ENFILE = errno 23 (system-wide FD limit).
-    #[test]
-    fn enfile_classified_as_transient() {
-        assert!(is_transient_accept_error(Some(23)));
-    }
-
-    /// ENOMEM = errno 12 (kernel out of memory for the socket).
-    #[test]
-    fn enomem_classified_as_transient() {
-        assert!(is_transient_accept_error(Some(12)));
-    }
-
-    /// EBADF (errno 9, listener fd is dead) MUST kill the
-    /// accept loop — systemd should restart us. If we
-    /// accidentally classified this as transient we'd spin
-    /// forever logging EBADF every 5 seconds.
-    #[test]
-    fn ebadf_classified_as_fatal() {
-        assert!(!is_transient_accept_error(Some(9)));
-    }
-
-    /// EINTR / EAGAIN are technically transient but tokio's
-    /// `accept().await` already retries on those internally
-    /// — they should NEVER bubble up to our layer. If they
-    /// do, treat as fatal so we don't accidentally double-
-    /// retry. Same logic for "no raw_os_error" — that's an
-    /// io::Error from some other source (libstd-internal),
-    /// not a kernel-level transient.
-    #[test]
-    fn eagain_and_none_classified_as_fatal() {
-        assert!(!is_transient_accept_error(Some(11))); // EAGAIN/EWOULDBLOCK
-        assert!(!is_transient_accept_error(Some(4))); // EINTR
-        assert!(!is_transient_accept_error(None));
-    }
-
-    /// Sanity: ECONNRESET (104) is a per-CONNECTION error,
-    /// not an accept-level problem. The kernel still hands us
-    /// the accepted fd; the read on that fd later returns
-    /// ECONNRESET. So `accept()` itself returning 104 is
-    /// pathological and we kill the loop.
-    #[test]
-    fn econnreset_classified_as_fatal() {
-        assert!(!is_transient_accept_error(Some(104)));
-    }
-}
+// `accept_classifier_tests` moved to `crate::socket_opts` in
+// iter-19 alongside the `is_transient_accept_error` helper
+// itself. Server-side accept loops still use the local
+// `use crate::socket_opts::is_transient_accept_error;`
+// re-export so call sites are unchanged.

@@ -766,21 +766,55 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         });
                     }
                     Err(e) => {
-                        // Transient errors (EMFILE, ENFILE, ECONNABORTED)
-                        // can make the loop spin if we just retry
-                        // immediately. Exponential backoff with a
-                        // 1-second cap so the process recovers cleanly
-                        // once the kernel resource pressure passes.
-                        accept_backoff_ms = (accept_backoff_ms * 2).clamp(10, 1000);
-                        warn!(
-                            error = %e,
-                            backoff_ms = accept_backoff_ms,
-                            "accept() failed; backing off"
-                        );
-                        // Release the permit so it doesn't sit unused
-                        // during the backoff.
-                        drop(permit);
-                        tokio::time::sleep(Duration::from_millis(accept_backoff_ms)).await;
+                        // Iter-19: distinguish transient kernel errors
+                        // (EMFILE / ENFILE / ENOMEM — back off and
+                        // retry) from fatal listener-fd-dead errors
+                        // (EBADF, ENETDOWN — propagate up so systemd
+                        // restarts us instead of spin-looping forever).
+                        //
+                        // Pre-iter-19: all errors were "transient" with
+                        // exponential backoff. That meant a permanently
+                        // broken listener (operator renamed the
+                        // socks_listen address out from under us, the
+                        // kernel state-loss class of bugs) would keep
+                        // the process alive in a perpetual 1-second
+                        // backoff spin — health checks pass, no traffic
+                        // serviced, operator can't tell anything's
+                        // wrong. Same silent-failure class as the
+                        // server's iter-18 fix.
+                        let is_transient =
+                            proteus_transport_alpha::socket_opts::is_transient_accept_error(
+                                e.raw_os_error(),
+                            );
+                        if is_transient {
+                            accept_backoff_ms = (accept_backoff_ms * 2).clamp(10, 1000);
+                            warn!(
+                                error = %e,
+                                raw_os_error = ?e.raw_os_error(),
+                                backoff_ms = accept_backoff_ms,
+                                "SOCKS5 accept() hit transient kernel error (FD/memory \
+                                 exhaustion); backing off"
+                            );
+                            // Release the permit so it doesn't sit unused
+                            // during the backoff.
+                            drop(permit);
+                            tokio::time::sleep(Duration::from_millis(accept_backoff_ms)).await;
+                        } else {
+                            // Fatal: log a single ERROR (operator's
+                            // alerting will catch the restart from
+                            // systemd anyway, but the explicit log
+                            // makes diagnosis instant) and break out
+                            // of the loop. The outer drain logic will
+                            // notice the listener is gone and exit.
+                            tracing::error!(
+                                error = %e,
+                                raw_os_error = ?e.raw_os_error(),
+                                "SOCKS5 accept() hit non-transient error; \
+                                 stopping listener — supervisor should restart us"
+                            );
+                            drop(permit);
+                            break;
+                        }
                     }
                 }
             }
