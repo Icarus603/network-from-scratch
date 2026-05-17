@@ -218,6 +218,62 @@ pub async fn run(path: &Path) -> PreflightReport {
                  server_endpoints[0]",
             );
         }
+
+        // Iter-43: TLS SNI consistency check.
+        //
+        // The dispatcher ALWAYS uses `cfg.tls.server_name` as the
+        // SNI for cert verification, regardless of which pool entry
+        // the connection lands on. That's correct when:
+        //   - pool entries are IP literals (operator decoupled
+        //     routing-address from cert-identity — every entry's
+        //     cert must validate as `tls.server_name`, the IP is
+        //     just where to dial); OR
+        //   - pool entries are hostnames that happen to match
+        //     `tls.server_name` exactly (e.g. all `vps.example.com`
+        //     resolving to different A records — pointless without
+        //     bootstrap_dns pinning, but valid).
+        //
+        // It's a real operator-trap when pool entries are
+        // *different hostnames* (e.g. `primary.vps.example.com` +
+        // `backup.vps.example.com`) than `tls.server_name`. Every
+        // dial after the first hostname-mismatch ends in TLS
+        // cert-verification failure with no obvious cause.
+        //
+        // Surface this at validate time, before deploy. The IP-
+        // literal case (most common production setup) is silently
+        // accepted; only hostname divergence trips the warn.
+        if let Some(tls) = cfg.tls.as_ref() {
+            let sni = tls.server_name.as_str();
+            if !sni.is_empty() {
+                let mut diverging = Vec::new();
+                for ep in &cfg.server_endpoints {
+                    let Some((host, _port)) = parse_host_port(ep) else {
+                        continue; // bad entry — already FAIL'd above
+                    };
+                    // IP literal? Skip — operator decoupled
+                    // routing from identity, which is fine.
+                    if host.parse::<std::net::IpAddr>().is_ok() {
+                        continue;
+                    }
+                    // Hostname matches SNI exactly? Fine.
+                    if host.eq_ignore_ascii_case(sni) {
+                        continue;
+                    }
+                    diverging.push(ep.clone());
+                }
+                if !diverging.is_empty() {
+                    r.push_warn(format!(
+                        "server_endpoints contains hostname(s) that don't match \
+                         tls.server_name={sni:?}: {diverging:?}. The dispatcher uses \
+                         tls.server_name as TLS SNI for EVERY pool entry, so dialing these \
+                         entries will fail TLS cert verification (the served cert must \
+                         validate as {sni:?}, not the dial-address hostname). If you need \
+                         per-entry SNI, use IP literals in server_endpoints and keep \
+                         tls.server_name as the operator-chosen cert identity.",
+                    ));
+                }
+            }
+        }
     }
 
     if cfg.socks_listen.is_empty() {

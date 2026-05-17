@@ -461,7 +461,16 @@ async fn bootstrap_dns_beta_hostname_under_system_warns_independently() {
 
 /// Pool of 3 entries with primary as entry[0] — the recommended
 /// shape. Validate MUST PASS, no warnings about split-brain or
-/// single-entry-pool.
+/// single-entry-pool or SNI divergence.
+///
+/// Iter-43 update: backup entries are IP literals (the recommended
+/// production shape — operator decouples routing-address from
+/// cert-identity). Pre-iter-43 the fixture used divergent
+/// HOSTNAMES (`vps-backup.example.com`), which iter-43's new SNI
+/// consistency check correctly flags as a misconfig (the
+/// dispatcher uses `tls.server_name=vps.example.com` as SNI for
+/// EVERY entry — divergent backup hostnames would all fail cert
+/// verification at dispatch time).
 #[tokio::test]
 async fn server_endpoints_well_formed_pool_passes() {
     let dir = tempdir("endpoints_good");
@@ -470,8 +479,8 @@ async fn server_endpoints_well_formed_pool_passes() {
         "server_endpoint: \"vps.example.com:8443\"\n\
          server_endpoints:\n  \
              - \"vps.example.com:8443\"\n  \
-             - \"vps-backup.example.com:8443\"\n  \
-             - \"vps-cn2.example.com:8443\"\n",
+             - \"198.51.100.10:8443\"\n  \
+             - \"198.51.100.20:8443\"\n",
     );
     let report = validate::run(&yaml).await;
     eprintln!("good pool report:\n{report}");
@@ -493,6 +502,16 @@ async fn server_endpoints_well_formed_pool_passes() {
         _ => false,
     });
     assert!(!split_warn);
+    // Iter-43: no SNI-divergence warn (IP literals are correctly
+    // skipped; primary entry's hostname matches tls.server_name).
+    let sni_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("tls.server_name") && s.contains("don't match"),
+        _ => false,
+    });
+    assert!(
+        !sni_warn,
+        "SNI-divergence warn must NOT fire when pool uses IP literals + matching primary hostname: {report}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -536,6 +555,124 @@ async fn server_endpoints_split_brain_warns() {
         _ => false,
     });
     assert!(split_warn, "split-brain WARN missing: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ---------- iter-43: pool ↔ tls.server_name SNI consistency ----------
+
+/// Operator-trap: a pool entry is a HOSTNAME that doesn't match
+/// tls.server_name. The dispatcher uses tls.server_name as SNI
+/// for cert verification regardless of which pool entry the
+/// connection lands on — so every dial of the divergent entry
+/// would fail at TLS verification with no obvious cause.
+#[tokio::test]
+async fn iter43_server_endpoints_hostname_diverging_from_sni_warns() {
+    let dir = tempdir("endpoints_sni_diverging");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"backup.different.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("sni-diverging report:\n{report}");
+    let sni_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("backup.different.example.com")
+                && s.contains("tls.server_name")
+                && s.contains("don't match")
+        }
+        _ => false,
+    });
+    assert!(
+        sni_warn,
+        "SNI-divergence WARN must fire for divergent hostname: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// IP literals in the pool are CORRECTLY skipped by the
+/// SNI-divergence check — the operator deliberately decoupled
+/// routing-address from cert-identity, which is the recommended
+/// production shape.
+#[tokio::test]
+async fn iter43_server_endpoints_ip_literals_do_not_trigger_sni_warn() {
+    let dir = tempdir("endpoints_ip_literals");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"198.51.100.42:8443\"\n  \
+             - \"203.0.113.99:8443\"\n  \
+             - \"2001:db8::1:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("ip-literals report:\n{report}");
+    let sni_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("tls.server_name") && s.contains("don't match"),
+        _ => false,
+    });
+    assert!(
+        !sni_warn,
+        "IP literal pool entries must NOT trigger SNI-divergence warn: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Multiple divergent hostnames → the warn lists every offender,
+/// not just the first one. Operators want one fix-cycle, not N.
+#[tokio::test]
+async fn iter43_server_endpoints_multiple_diverging_all_listed() {
+    let dir = tempdir("endpoints_multi_diverging");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"a.bad.example.com:8443\"\n  \
+             - \"b.bad.example.com:8443\"\n  \
+             - \"c.bad.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("multi-diverging report:\n{report}");
+    let warn_msg = report.checks.iter().find_map(|c| match c {
+        validate::Check::Warn(s) if s.contains("don't match") => Some(s.clone()),
+        _ => None,
+    });
+    let msg = warn_msg.expect("SNI-divergence warn must fire");
+    for needle in ["a.bad.example.com", "b.bad.example.com", "c.bad.example.com"] {
+        assert!(
+            msg.contains(needle),
+            "all 3 divergent hostnames must be listed; missing {needle:?} in:\n{msg}"
+        );
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hostname matches SNI case-insensitively → no warn. Operators
+/// who type `VPS.Example.Com` should NOT see false-positives.
+#[tokio::test]
+async fn iter43_server_endpoints_case_insensitive_hostname_no_warn() {
+    let dir = tempdir("endpoints_case_insensitive");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"VPS.Example.COM:8443\"\n  \
+             - \"vps.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("case-insensitive report:\n{report}");
+    let sni_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("tls.server_name") && s.contains("don't match"),
+        _ => false,
+    });
+    assert!(
+        !sni_warn,
+        "case-insensitive hostname match must NOT trigger SNI warn: {report}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 
