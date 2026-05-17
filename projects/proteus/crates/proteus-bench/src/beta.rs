@@ -440,6 +440,38 @@ pub async fn run_same_host_bench(
     connect_timeout: Duration,
     total_timeout: Duration,
 ) -> Result<RunReport, BenchError> {
+    // Back-compat shim — forwards to _with_netem with a no-op
+    // netem config (passthrough; no forwarder interposed).
+    run_same_host_bench_with_netem(
+        payload_bytes,
+        chunk_bytes,
+        perf,
+        connect_timeout,
+        total_timeout,
+        crate::netem::NetemConfig::default(),
+    )
+    .await
+}
+
+/// Same as `run_same_host_bench` but interposes a UDP loss/delay
+/// forwarder (see `crate::netem`) between client and server when
+/// the supplied `NetemConfig` is non-noop. When `netem.is_noop()`,
+/// behaves identically to the back-compat path — same code path,
+/// no overhead.
+///
+/// The forwarder's stats are NOT surfaced in the returned
+/// `RunReport` today (the report schema is append-only; adding a
+/// netem stats nested object is a follow-up). Operators who care
+/// about the per-direction drop counts run the harness via the
+/// CLI which logs them on completion.
+pub async fn run_same_host_bench_with_netem(
+    payload_bytes: usize,
+    chunk_bytes: usize,
+    perf: PerfProfile,
+    connect_timeout: Duration,
+    total_timeout: Duration,
+    netem: crate::netem::NetemConfig,
+) -> Result<RunReport, BenchError> {
     let cert = mint_self_signed(None)?;
     let server_keys = ServerKeys::generate();
     let mlkem_pk_bytes = server_keys.mlkem_pk_bytes.clone();
@@ -452,7 +484,7 @@ pub async fn run_same_host_bench(
         .map_err(|e: std::net::AddrParseError| BenchError::Bind(e.to_string()))?;
     let endpoint = beta_server::make_endpoint_with_perf(bind, cert.chain.clone(), cert.key, perf)
         .map_err(|e| BenchError::Bind(e.to_string()))?;
-    let local = endpoint
+    let server_real = endpoint
         .local_addr()
         .map_err(|e| BenchError::Bind(e.to_string()))?;
 
@@ -472,6 +504,19 @@ pub async fn run_same_host_bench(
         })
         .await;
     });
+
+    // Decide the address the client dials: if netem is configured,
+    // interpose a forwarder and dial THAT; otherwise dial the
+    // server directly. Hold the NetemHandle for the lifetime of the
+    // run so its tasks stay alive.
+    let (local, _netem_handle) = if netem.is_noop() {
+        (server_real, None)
+    } else {
+        let h = crate::netem::spawn_forwarder(server_real, netem)
+            .await
+            .map_err(|e| BenchError::Bind(format!("netem forwarder bind: {e}")))?;
+        (h.listen_addr, Some(h))
+    };
 
     let mut rng = rand_core::OsRng;
     let client_id_sk = proteus_crypto::sig::generate(&mut rng);
@@ -521,6 +566,17 @@ pub async fn run_same_host_bench(
     drop(client.endpoint);
     server_task.abort();
 
+    // Append netem label to perf_profile so the persisted JSONL
+    // distinguishes baseline runs from netem-injected runs. The
+    // RunReport schema's perf_profile field is a free-form
+    // string by design; readers parse it for human auditing,
+    // not as structured data.
+    let mut perf_label = format_perf_profile(perf);
+    if !netem.is_noop() {
+        perf_label.push(',');
+        perf_label.push_str(&netem.label());
+    }
+
     Ok(RunReport {
         profile: "beta",
         payload_bytes: payload_bytes as u64,
@@ -529,7 +585,7 @@ pub async fn run_same_host_bench(
         mib_per_sec,
         gbps,
         server_addr: local.to_string(),
-        perf_profile: format_perf_profile(perf),
+        perf_profile: perf_label,
         idle_timeout_secs: connect_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
     })
@@ -743,5 +799,85 @@ mod tests {
         let j = report.to_json();
         assert!(j.contains(r#""profile":"beta""#));
         assert!(j.contains(r#""payload_bytes":4194304"#));
+    }
+
+    /// Netem path: 0% loss + 0 ms delay should be functionally
+    /// identical to the no-netem path (forwarder bypass is the
+    /// `is_noop` short-circuit). Sanity-check that the
+    /// `_with_netem` entry point with a no-op config produces a
+    /// successful run.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_host_bench_with_noop_netem_works_like_baseline() {
+        let report = run_same_host_bench_with_netem(
+            4 * 1024 * 1024,
+            64 * 1024,
+            PerfProfile::default(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            crate::netem::NetemConfig::default(),
+        )
+        .await
+        .expect("noop-netem bench should succeed");
+        assert!(report.mib_per_sec > 0.0);
+        // No netem label in perf_profile when noop.
+        assert!(
+            !report.perf_profile.contains("loss="),
+            "noop netem must NOT append loss/delay label: {}",
+            report.perf_profile
+        );
+    }
+
+    /// Real netem path: 50 ms one-way delay should add ~100 ms RTT
+    /// to every send_record round-trip. The bench should still
+    /// succeed (BBR tolerates RTT inflation; we're not dropping)
+    /// AND the perf_profile string should carry the netem label.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_host_bench_with_50ms_delay_succeeds_with_netem_label() {
+        // Small payload to stay under timeout — RTT inflation
+        // matters more than throughput here.
+        let report = run_same_host_bench_with_netem(
+            256 * 1024,
+            64 * 1024,
+            PerfProfile::default(),
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+            crate::netem::NetemConfig {
+                loss_pct: 0.0,
+                delay: Duration::from_millis(50),
+                seed: None,
+            },
+        )
+        .await
+        .expect("netem-delay bench should succeed");
+        assert!(report.mib_per_sec > 0.0);
+        assert!(
+            report.perf_profile.contains("loss=0%,delay=50ms"),
+            "expected netem label suffix: {}",
+            report.perf_profile
+        );
+    }
+
+    /// Real netem path with 5% loss. BBR should still recover and
+    /// the bench should succeed (loss-tolerant by design). This is
+    /// the headline use case — "how does Proteus β behave at 5%
+    /// loss?".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn same_host_bench_with_5pct_loss_succeeds() {
+        let report = run_same_host_bench_with_netem(
+            512 * 1024,
+            64 * 1024,
+            PerfProfile::default(),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            crate::netem::NetemConfig {
+                loss_pct: 5.0,
+                delay: Duration::from_millis(0),
+                seed: None,
+            },
+        )
+        .await
+        .expect("5% loss bench should succeed");
+        assert!(report.mib_per_sec > 0.0);
+        assert!(report.perf_profile.contains("loss=5%"));
     }
 }

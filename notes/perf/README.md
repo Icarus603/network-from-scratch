@@ -113,6 +113,59 @@ A failed soak exits the bench binary with status 1 — drop-in
 suitable for CI gating ("don't merge this PR if the 60-second
 soak doesn't hit 100%").
 
+### Netem loss-sweep baseline
+
+[`2026-05-19-netem-loss-sweep.jsonl`](2026-05-19-netem-loss-sweep.jsonl):
+**16 MiB single-stream β throughput vs synthetic packet-loss
+percentage**, 3 runs per cell, Apple Silicon dev box. Loss is
+applied by `proteus-bench`'s **in-process UDP forwarder** (see
+`crates/proteus-bench/src/netem.rs`) — pure Rust, no Linux
+netem / OrbStack VM required, portable across macOS / Windows.
+
+| loss % | n | median MiB/s | min | max | observation |
+|---:|---:|---:|---:|---:|---|
+| 0  | 3 | 45.0 | 44.8 | 117.2 | Baseline; outlier max is the BBR-warmed run |
+| 1  | 3 | 36.1 | 23.7 |  37.0 | Mild degradation; BBR absorbs it |
+| 5  | 3 | 21.7 | 12.3 |  28.7 | Cellular-grade loss; ~50% of baseline |
+| 15 | 3 | 20.9 | 12.0 |  26.9 | Degraded long-haul; comparable to 5% |
+| 30 | 2 |  0.4 |  0.1 |   0.7 | Brutal regime; BBR essentially collapses |
+
+**What this says**:
+
+- **Up to 5–15% loss, β maintains useful throughput** (~20 MiB/s
+  / ~0.17 Gbps, half the baseline). This is the realistic 2026
+  GFW QUIC-throttling regime where Hy2/TUIC stops being a
+  reliable carrier without Brutal CC.
+- **At 30% loss, BBR collapses to ~0.4 MiB/s.** This is the
+  design point Hysteria2's Brutal congestion controller targets;
+  Proteus today uses quinn's default BBR which is not
+  loss-tolerant at that regime. **This is the headline gap
+  between "Proteus today" and "Proteus + Brutal-clone CC" (M3
+  work).**
+- The wide range at low-loss (44–117 MiB/s at 0%) is the
+  BBR-warmup effect: first run pays the bandwidth-probing cost,
+  later runs in the same process inherit the converged state.
+  Multi-run median is the honest summary; the cold/warm split is
+  documented at the cell level for transparency.
+
+**What this does NOT say**:
+
+- **Not a head-to-head vs Hy2/TUIC.** We can't claim "Proteus
+  beats Hy2 at 5% loss" without running Hy2 through the same
+  forwarder under identical conditions. The harness is ready to
+  do that; what's missing is the operator running the Hy2 binary
+  against `proteus-bench`'s forwarder (which sits between any
+  UDP client and server, not just Proteus).
+- **Not a substitute for real netem.** The forwarder models
+  independent uniform loss; netem additionally supports
+  correlated loss (Gilbert-Elliott), reordering, and corruption.
+  A 5% number from the forwarder is a *lower bound* on the
+  Gilbert-Elliott reality — bursty loss is harder for BBR than
+  uniform loss.
+- **Not cross-validated against Linux netem yet.** That's the
+  next-step honesty check. Until done, treat these as
+  "directionally correct, magnitude-approximate".
+
 ### How to reproduce
 
 ```bash
@@ -141,6 +194,18 @@ done
 ```
 
 The full matrix takes about 30 seconds on this dev box.
+
+```bash
+# Netem loss sweep (16 MiB payload across 0/1/5/15/30% loss, 3 runs each):
+for loss in 0 1 5 15 30; do
+  for _ in 1 2 3; do
+    ./target/release/proteus-bench beta \
+      --payload-mib 16 --loss-pct $loss \
+      --connect-timeout-secs 120 --total-timeout-secs 180 \
+      2>/dev/null | grep '^{'
+  done
+done > netem-sweep.jsonl
+```
 
 ```bash
 # Soak (100 clients × 60 seconds × 16 KiB):

@@ -491,6 +491,27 @@ failure → drop-in CI gate.
 
 ---
 
+**Netem loss-sweep baseline** (same machine + date) — raw JSONL at
+[`notes/perf/2026-05-19-netem-loss-sweep.jsonl`](../../notes/perf/2026-05-19-netem-loss-sweep.jsonl).
+**β single-stream throughput vs synthetic packet loss**, via
+`proteus-bench`'s in-process UDP forwarder (no Linux netem
+required — pure-Rust, portable):
+
+| loss % | median MiB/s | n | comment |
+|---:|---:|---:|---|
+| 0  | 45.0 | 3 | Baseline |
+| 1  | 36.1 | 3 | Wi-Fi grade |
+| 5  | 21.7 | 3 | Cellular grade — half of baseline |
+| 15 | 20.9 | 3 | Long-haul degraded |
+| 30 |  0.4 | 2 | **BBR collapses — design point for Brutal CC (M3 work)** |
+
+Up to 15 % loss, β keeps useful throughput (~20 MiB/s, the realistic
+2026 GFW QUIC-throttling regime). At 30 % loss BBR collapses;
+this is the headline gap between "Proteus today" and "Proteus
+with a Brutal-clone CC" — currently scoped M3.
+
+---
+
 **Single-stream throughput baseline** (same machine + date) — raw JSONL at
 [`notes/perf/2026-05-19-loopback-baseline.jsonl`](../../notes/perf/2026-05-19-loopback-baseline.jsonl),
 12 runs across 5 cells:

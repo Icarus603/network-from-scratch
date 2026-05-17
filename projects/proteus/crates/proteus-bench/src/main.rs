@@ -161,6 +161,21 @@ struct BetaArgs {
     /// per-stream override semantics.
     #[arg(long)]
     connection_window_mib: Option<u32>,
+    /// Synthetic packet-loss percentage applied by an in-process
+    /// UDP forwarder between client and server. 0 = passthrough
+    /// (no forwarder spawned, no overhead). The forwarder is
+    /// pure Rust, runs in-process on any platform — no Linux
+    /// netem / tc qdisc required. Common cells: 1 (typical
+    /// Wi-Fi), 5 (congested cellular), 15 (degraded long-haul),
+    /// 30 (Hy2 Brutal's stress design point).
+    #[arg(long, default_value = "0.0")]
+    loss_pct: f64,
+    /// One-way packet delay (milliseconds) applied by the
+    /// forwarder. RTT = `2 × delay`. 0 = passthrough. Common
+    /// cells: 0 (LAN), 10 (regional), 50 (transcontinental),
+    /// 200 (satellite).
+    #[arg(long, default_value = "0")]
+    delay_ms: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -326,6 +341,11 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
     let chunk_bytes = (args.chunk_kib as usize) * 1024;
     let connect_timeout = Duration::from_secs(args.connect_timeout_secs);
     let total_timeout = Duration::from_secs(args.total_timeout_secs);
+    let netem = proteus_bench::netem::NetemConfig {
+        loss_pct: args.loss_pct,
+        delay: Duration::from_millis(args.delay_ms),
+        seed: None,
+    };
 
     for run_ix in 0..args.runs {
         info!(
@@ -333,14 +353,17 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
             of = args.runs,
             payload_mib = args.payload_mib,
             chunk_kib = args.chunk_kib,
+            loss_pct = args.loss_pct,
+            delay_ms = args.delay_ms,
             "bench run starting"
         );
-        let report = beta::run_same_host_bench(
+        let report = beta::run_same_host_bench_with_netem(
             payload_bytes,
             chunk_bytes,
             perf,
             connect_timeout,
             total_timeout,
+            netem,
         )
         .await?;
         // ONE LINE OF JSON to stdout. Operators pipe stdout through

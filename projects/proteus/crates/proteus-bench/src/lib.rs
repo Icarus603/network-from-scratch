@@ -52,5 +52,6 @@
 //!   path.
 
 pub mod beta;
+pub mod netem;
 pub mod report;
 pub mod soak;
