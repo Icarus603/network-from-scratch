@@ -530,16 +530,51 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
             option_env!("RUSTC_VERSION").unwrap_or(""),
             option_env!("TARGET").unwrap_or(""),
         ));
-    let ctx = Arc::new(
-        ClientCtx::new(
-            Arc::clone(&health),
-            endpoint_pool.clone(),
-            session_slots.clone(),
-            max_inflight,
-            beta_configured,
-        )
-        .with_process_info(process_info),
-    );
+    // Build the TLS connector ONCE at startup so every SOCKS5
+    // request doesn't pay for `build_connector_*` (root-store
+    // parse + ALPN clone + crypto-provider installation). The
+    // cached connector lives in `ClientCtx` and is `Arc`-cloned
+    // per request — `tokio_rustls::TlsConnector` is internally
+    // `Arc<ClientConfig>` so the clone itself is free. When the
+    // operator's `tls:` block is unset (dev / plaintext-α mode)
+    // we attach None and try_alpha falls through to its
+    // per-request build path.
+    let cached_tls_connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>> =
+        if let Some(tls_cfg) = cfg.tls.as_ref() {
+            let connector = match tls_cfg.trusted_ca.as_ref() {
+                Some(ca) => {
+                    proteus_transport_alpha::tls::build_connector_with_ca(ca).map_err(|e| {
+                        format!("failed to build cached TLS connector (pinned CA): {e}")
+                    })?
+                }
+                None => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                    .map_err(|e| format!("failed to build cached TLS connector (webpki): {e}"))?,
+            };
+            info!(
+                server_name = %tls_cfg.server_name,
+                "cached TLS connector built — SOCKS5 requests will reuse it instead of rebuilding per request"
+            );
+            Some(Arc::new(connector))
+        } else {
+            info!(
+                "no tls: config — α handshakes will run in plaintext mode (dev/test only); \
+             no cached TLS connector wired"
+            );
+            None
+        };
+
+    let mut ctx_builder = ClientCtx::new(
+        Arc::clone(&health),
+        endpoint_pool.clone(),
+        session_slots.clone(),
+        max_inflight,
+        beta_configured,
+    )
+    .with_process_info(process_info);
+    if let Some(c) = cached_tls_connector.clone() {
+        ctx_builder = ctx_builder.with_tls_connector(c);
+    }
+    let ctx = Arc::new(ctx_builder);
 
     // ----- Admin HTTP endpoint -----
     //

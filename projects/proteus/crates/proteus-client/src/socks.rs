@@ -124,12 +124,19 @@ pub async fn handle_socks5_with_ctx(
     // bootstrap-DNS counter atomics so `try_alpha` / `try_beta` can
     // bump the right counter without holding a full ctx reference.
     let bootstrap = Some(ctx.bootstrap_counter_handles());
+    // Cached TLS connector (built once at startup, free to clone
+    // since `TlsConnector` is `Arc<ClientConfig>` internally).
+    // When `None` (no tls: config or running in dev mode without
+    // TLS), `try_alpha` falls through to the legacy
+    // build-connector-per-request path.
+    let connector = ctx.tls_connector.clone();
     let res = handle_socks5_with_health_and_pool_and_bootstrap_counters(
         sock,
         cfg,
         &ctx.carrier,
         pool_snapshot.as_ref(),
         bootstrap,
+        connector,
     )
     .await;
     match &res {
@@ -157,8 +164,11 @@ pub async fn handle_socks5_with_health_and_pool(
 ) -> Result<(), SocksError> {
     // Back-compat shim — tests + non-ctx callers get None for the
     // bootstrap counters so resolution paths aren't bumped against
-    // any handles (counters stay at their default zero).
-    handle_socks5_with_health_and_pool_and_bootstrap_counters(sock, cfg, health, pool, None).await
+    // any handles (counters stay at their default zero). Same for
+    // the cached TLS connector — when None, `try_alpha` falls
+    // through to building one inline per request.
+    handle_socks5_with_health_and_pool_and_bootstrap_counters(sock, cfg, health, pool, None, None)
+        .await
 }
 
 /// Full-fidelity dispatch entry point. `bootstrap` is the
@@ -171,6 +181,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     health: &Arc<CarrierHealth>,
     pool: Option<&Arc<EndpointPool>>,
     bootstrap: Option<crate::ctx::BootstrapCounterHandles>,
+    connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -254,13 +265,29 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     // to skip recently-failed endpoints. Within each chosen entry,
     // the existing CarrierHealth still decides β-vs-α.
     if let Some(p) = pool {
-        return dispatch_via_pool(cfg, health, p, target_bytes, &mut sock, bootstrap.as_ref())
-            .await;
+        return dispatch_via_pool(
+            cfg,
+            health,
+            p,
+            target_bytes,
+            &mut sock,
+            bootstrap.as_ref(),
+            connector.as_ref(),
+        )
+        .await;
     }
 
     // Single-endpoint path (legacy / pool not configured). Behavior
     // is identical to the pre-pool dispatcher.
-    single_endpoint_dispatch(cfg, health, &target_bytes, &mut sock, bootstrap.as_ref()).await
+    single_endpoint_dispatch(
+        cfg,
+        health,
+        &target_bytes,
+        &mut sock,
+        bootstrap.as_ref(),
+        connector.as_ref(),
+    )
+    .await
 }
 
 /// Pre-pool single-endpoint dispatcher. Kept as a separate function
@@ -271,6 +298,7 @@ async fn single_endpoint_dispatch(
     target_bytes: &[u8],
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
+    connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
 ) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
@@ -313,7 +341,7 @@ async fn single_endpoint_dispatch(
         );
     }
 
-    try_alpha(cfg, target_bytes, sock, None, bootstrap).await
+    try_alpha(cfg, target_bytes, sock, None, bootstrap, connector).await
 }
 
 /// Multi-VPS dispatcher. Walks `pool` in operator-specified order,
@@ -335,6 +363,7 @@ async fn dispatch_via_pool(
     target_bytes: Vec<u8>,
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
+    connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
 ) -> Result<(), SocksError> {
     let mut last_err: Option<SocksError> = None;
     let mut any_endpoint_attempted = false;
@@ -371,8 +400,16 @@ async fn dispatch_via_pool(
         // who run α and β on the same host:port (the
         // recommended deployment) get one address per pool entry
         // covering both carriers.
-        let result =
-            attempt_one_pool_entry(cfg, health, &addr_owned, &target_bytes, sock, bootstrap).await;
+        let result = attempt_one_pool_entry(
+            cfg,
+            health,
+            &addr_owned,
+            &target_bytes,
+            sock,
+            bootstrap,
+            connector,
+        )
+        .await;
         match result {
             Ok(()) => {
                 // record_success returns true IFF this transitioned
@@ -430,8 +467,16 @@ async fn dispatch_via_pool(
             .endpoint_health(0)
             .expect("pool has at least one entry");
         primary_health.record_attempt();
-        let result =
-            attempt_one_pool_entry(cfg, health, &primary, &target_bytes, sock, bootstrap).await;
+        let result = attempt_one_pool_entry(
+            cfg,
+            health,
+            &primary,
+            &target_bytes,
+            sock,
+            bootstrap,
+            connector,
+        )
+        .await;
         match &result {
             Ok(()) => {
                 primary_health.record_success();
@@ -456,6 +501,7 @@ async fn attempt_one_pool_entry(
     target_bytes: &[u8],
     sock: &mut TcpStream,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
+    connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
 ) -> Result<(), SocksError> {
     let beta_configured = cfg.server_endpoint_beta.is_some();
     let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
@@ -476,7 +522,15 @@ async fn attempt_one_pool_entry(
             }
         }
     }
-    try_alpha(cfg, target_bytes, sock, Some(endpoint), bootstrap).await
+    try_alpha(
+        cfg,
+        target_bytes,
+        sock,
+        Some(endpoint),
+        bootstrap,
+        connector,
+    )
+    .await
 }
 
 /// Attempt a β-profile (QUIC) handshake.
@@ -617,6 +671,7 @@ async fn try_alpha(
     sock: &mut TcpStream,
     endpoint_override: Option<&str>,
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
+    cached_connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
 ) -> Result<(), SocksError> {
     let hs_cfg = cfg.build_handshake_config()?;
     let alpha_endpoint: &str = endpoint_override.unwrap_or(cfg.server_endpoint.as_str());
@@ -635,18 +690,29 @@ async fn try_alpha(
     }
 
     if let Some(tls_cfg) = cfg.tls.as_ref() {
-        let connector = match tls_cfg.trusted_ca.as_ref() {
-            Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
-                .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
-            None => proteus_transport_alpha::tls::build_connector_webpki_roots()
-                .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
+        // Prefer the ctx-cached connector (built ONCE at startup) so
+        // we don't pay for `build_connector_*` per request. Falls back
+        // to per-request construction when ctx didn't attach one
+        // (legacy entry points, integration tests that bypass ctx).
+        let owned_connector;
+        let connector: &proteus_transport_alpha::tls::TlsConnector = match cached_connector {
+            Some(c) => c.as_ref(),
+            None => {
+                owned_connector = match tls_cfg.trusted_ca.as_ref() {
+                    Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
+                        .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
+                    None => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                        .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
+                };
+                &owned_connector
+            }
         };
         // Dial the IP literal we just resolved. The TLS SNI continues
         // to be `tls_cfg.server_name` (hostname) so cert verification
         // still works against the operator's Let's Encrypt cert.
         let tcp = tokio::net::TcpStream::connect(server_addr).await?;
         let session =
-            p_client::handshake_over_tls(tcp, &connector, &tls_cfg.server_name, &hs_cfg).await?;
+            p_client::handshake_over_tls(tcp, connector, &tls_cfg.server_name, &hs_cfg).await?;
         let proteus_transport_alpha::session::AlphaSession {
             mut sender,
             mut receiver,

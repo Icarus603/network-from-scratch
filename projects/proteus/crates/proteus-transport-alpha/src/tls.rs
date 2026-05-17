@@ -32,7 +32,10 @@ use rustls::{
 use tokio::net::TcpStream;
 use tokio_rustls::client::TlsStream as ClientTlsStream;
 use tokio_rustls::server::TlsStream as ServerTlsStream;
-use tokio_rustls::{TlsAcceptor, TlsConnector};
+use tokio_rustls::TlsAcceptor;
+// `TlsConnector` is re-exported as `pub use` below so binaries
+// can name the type without depending on `tokio-rustls` directly.
+pub use tokio_rustls::TlsConnector;
 
 /// Build a CryptoProvider whose `cipher_suites` list is ordered to
 /// approximate a Chrome 124 ClientHello.
@@ -171,6 +174,11 @@ pub type ClientStream = ClientTlsStream<TcpStream>;
 /// the legacy `ServerStream` so the binary doesn't need a
 /// direct `tokio-rustls` dependency just to spell the type.
 pub type GatedServerStream = ServerTlsStream<crate::knock_dispatch::PrependedStream>;
+
+// (`TlsConnector` is `pub use`d at the top of this module so
+// binaries can name the type via `proteus_transport_alpha::tls::
+// TlsConnector` without depending on `tokio-rustls` directly.
+// Symmetric to the `GatedServerStream` alias above.)
 
 /// Server handshake: drive the TLS 1.3 handshake on `stream`, returning
 /// the encrypted stream ready for the inner Proteus framing.

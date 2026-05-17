@@ -89,6 +89,28 @@ pub struct ClientCtx {
     /// Whether β is configured (carrier health tracker presence
     /// doesn't tell us — it's always created).
     pub beta_configured: bool,
+    /// Cached `TlsConnector` for the α profile. Built ONCE at
+    /// startup from the operator's `tls:` config; reused on every
+    /// SOCKS5 CONNECT instead of rebuilding the connector
+    /// (root-store parse + ALPN clone + crypto-provider
+    /// installation) per request. `None` when `tls:` is unset
+    /// (test/dev plaintext-α mode).
+    ///
+    /// `proteus_transport_alpha::tls::TlsConnector` is itself `Arc<ClientConfig>`
+    /// internally and `Clone` is free; we wrap in `Arc` here for
+    /// symmetry with the other ctx fields and to make the
+    /// per-request snapshot fully zero-cost.
+    ///
+    /// **Why this lives in ClientCtx, not in `try_alpha`**: every
+    /// SOCKS5 request before this iteration paid for
+    /// `build_connector_*` (PEM parse if pinned, webpki-roots
+    /// `extend` clone if not, `proteus_chrome_provider()` clone,
+    /// ALPN vec construction, `ClientConfig::builder` chain). On
+    /// short-lived high-concurrency workloads (HTTP/2 short
+    /// requests, browser navigation) this was the dominant
+    /// latency before the network even moved. Caching saves both
+    /// CPU and the GC churn from a fresh `ClientConfig` per dial.
+    pub tls_connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
     /// Process-lifecycle info — captured once at startup, read at
     /// scrape time by the admin endpoint for the
     /// `proteus_client_process_*` Prometheus block + the `/status`
@@ -124,6 +146,11 @@ impl ClientCtx {
             bootstrap_via_pinned_direct_ip: Arc::new(AtomicU64::new(0)),
             bootstrap_via_system_resolver: Arc::new(AtomicU64::new(0)),
             beta_configured,
+            // Default: no cached connector. Main binary attaches
+            // one via `with_tls_connector` after building it from
+            // the operator's `tls:` config. Tests use ClientCtx
+            // without TLS and skip this.
+            tls_connector: None,
             // Default process_info: empty strings + start_unix
             // captured at construction. Real binary overrides via
             // `with_process_info` so /metrics reports the actual
@@ -146,6 +173,22 @@ impl ClientCtx {
         pi: Arc<proteus_transport_alpha::process_info::ProcessInfo>,
     ) -> Self {
         self.process_info = pi;
+        self
+    }
+
+    /// Attach a pre-built TLS connector. Called at startup after
+    /// the operator's `tls:` config has been parsed and the
+    /// connector built ONCE (via `tls::build_connector_with_ca`
+    /// or `tls::build_connector_webpki_roots`). All subsequent
+    /// SOCKS5 CONNECTs read this from `ctx.tls_connector.clone()`
+    /// instead of rebuilding, eliminating ~one rustls
+    /// `ClientConfig` construction per request.
+    #[must_use]
+    pub fn with_tls_connector(
+        mut self,
+        conn: Arc<proteus_transport_alpha::tls::TlsConnector>,
+    ) -> Self {
+        self.tls_connector = Some(conn);
         self
     }
 
@@ -500,5 +543,39 @@ mod tests {
         let c = ctx.dial_counters();
         assert_eq!(c.attempted, 10);
         assert_eq!(c.succeeded + c.failed, c.attempted);
+    }
+
+    /// Default ctx (built by `mk_ctx` without `with_tls_connector`)
+    /// MUST report `tls_connector = None` — that's the legacy
+    /// per-request build path's fallback signal.
+    #[test]
+    fn default_ctx_has_no_cached_tls_connector() {
+        let ctx = mk_ctx(None, 0);
+        assert!(
+            ctx.tls_connector.is_none(),
+            "fresh ctx must not have a cached TLS connector — main.rs attaches it explicitly"
+        );
+    }
+
+    /// `with_tls_connector` MUST preserve the exact same `Arc` —
+    /// not clone the inner `ClientConfig` — so per-request handler
+    /// hot paths can `Arc::clone` for free.
+    #[test]
+    fn with_tls_connector_preserves_arc_identity() {
+        // Build a real connector against webpki-roots so the test
+        // exercises the same shape main.rs uses. We never actually
+        // dial; only checking that ctx holds the SAME Arc we put in.
+        let connector = proteus_transport_alpha::tls::build_connector_webpki_roots()
+            .expect("build_connector_webpki_roots");
+        let arc = Arc::new(connector);
+        let ctx = mk_ctx(None, 0).with_tls_connector(Arc::clone(&arc));
+        let held = ctx
+            .tls_connector
+            .as_ref()
+            .expect("ctx must hold the connector after with_tls_connector");
+        assert!(
+            Arc::ptr_eq(&arc, held),
+            "with_tls_connector must store the SAME Arc, not clone the inner config"
+        );
     }
 }
