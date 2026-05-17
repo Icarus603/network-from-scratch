@@ -22,6 +22,35 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
     pub server_endpoint: String,
+    /// Optional ordered list of fallback α endpoints, dialed in
+    /// the order given when `server_endpoint` (the primary) becomes
+    /// unhealthy. Per-endpoint health tracking (sibling of
+    /// `CarrierHealth`) records consecutive failure streaks; after
+    /// 3 consecutive failures on an endpoint the dispatcher
+    /// suppresses it for 15s → 30s → ... → 300s capped exponential
+    /// back-off, with a periodic recovery probe so transient
+    /// outages heal automatically.
+    ///
+    /// Operator-opt-in for multi-VPS HA — when unset (the default)
+    /// the dispatcher behaves identically to the pre-pool single-
+    /// endpoint code. When set, the LIST IS USED IN ORDER: the
+    /// primary `server_endpoint` is conventionally also entry [0]
+    /// of `server_endpoints` so the operator can decide whether the
+    /// fallbacks include or exclude the primary.
+    ///
+    /// Each entry is a `host:port` string (same shape as
+    /// `server_endpoint`). The pool consumes one
+    /// `Arc<EndpointHealth>` per entry — cheap; no per-CONNECT
+    /// allocation.
+    ///
+    /// **NOTE (2026-05-18)**: this commit ships the type +
+    /// validation + YAML wiring; the SOCKS dispatch refactor that
+    /// actually consults the pool is a follow-up commit. Operators
+    /// can set the field today without behavior change — the
+    /// foundation is in place but dispatch still uses
+    /// `server_endpoint` only.
+    #[serde(default)]
+    pub server_endpoints: Vec<String>,
     pub socks_listen: String,
     pub user_id: String,
     pub keys: KeysCfg,

@@ -30,6 +30,29 @@
 # without `bootstrap_dns: direct_ip`.
 server_endpoint: "vps.example.com:8443"
 
+# Optional multi-VPS HA fallback list. When set, the dispatcher
+# tries entries in order; per-endpoint health tracking (sibling of
+# the β CarrierHealth back-off) skips suppressed entries after 3
+# consecutive failures with capped exponential back-off + periodic
+# recovery probes. Operator-opt-in for personal-scale HA without
+# any external load balancer.
+#
+# Convention: include `server_endpoint` as entry [0] of this list
+# so the primary stays at the top of the failover order. The
+# `validate` subcommand warns if `server_endpoint` is missing
+# from the pool (suspicious split-brain configuration).
+#
+# NOTE (2026-05-18): the type + validation + YAML wiring is in
+# place; the SOCKS dispatch refactor that actually consults the
+# pool is the next-iteration deliverable. Setting this field
+# today is harmless (no behavior change) but doesn't yet do
+# anything until the dispatch wiring lands.
+#
+# server_endpoints:
+#   - "vps.example.com:8443"
+#   - "vps-backup.example.com:8443"
+#   - "vps-cn2-backup.example.com:8443"
+
 # Optional bootstrap-DNS policy. See the discussion above
 # `server_endpoint`. Pick ONE form:
 #

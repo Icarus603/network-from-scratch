@@ -9,5 +9,6 @@
 pub mod bootstrap;
 pub mod carrier_health;
 pub mod config;
+pub mod endpoint_pool;
 pub mod socks;
 pub mod validate;

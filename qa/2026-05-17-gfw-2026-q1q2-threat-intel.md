@@ -97,7 +97,8 @@ Tiangou 的 SSL/TLS 攔截 + ML 行為分析 ≠ 古典 DPI 簽名匹配。我�
 - ✅ 設計上就是 client → VPS 直連，無境內中轉依賴
 - ✅ `proteus-client validate` 已能預檢配置
 - ✅ **NEW 2026-05-18**：`deploy/README.md` 「Deployment topology」section 完整警告 + Mermaid 三圖（direct-dial 推薦、relay 死亡、商用 farm 高風險）+ security checklist 三項 operator-action item
-- ❌ 沒有 multi-VPS 自動故障轉移（spec §10.4 multipath QUIC 還沒做）
+- ⚠️ multi-VPS HA：foundation 已 ship（2026-05-18 `EndpointPool` + `EndpointHealth` + YAML `server_endpoints: [...]` + validate 4 條 guidance lines + 10 unit + 4 validate-CLI tests），SOCKS dispatch refactor 是下個 iteration deliverable。Operator 設了該欄位現在無 behavior change 但 type system + validate 已 ready。
+- ❌ multipath QUIC 還沒做（spec §10.4，M3+）
 
 **TODO**：
 1. ~~**`deploy/README.md` 增加「Topology Recommendations」一節**~~ ✅ **DONE 2026-05-18** —— see new "Deployment topology" section with TL;DR + 3 Mermaid diagrams + IP-preflight workflow + security-checklist items.
@@ -161,8 +162,8 @@ Proteus 的 active-probing 防禦是「byte-verbatim cover-server splice」（au
 - ✅ 三層 rate limiter：global handshake budget + per-IP token bucket + per-user post-handshake byte budget
 - ✅ Proof-of-work tunable gate（0/8/16/24 difficulty）
 - ✅ **NEW (本次 commit)**：所有 CONNECTION_CLOSE 走 NO_ERROR/empty reason，消除主動探測重試的分類信號
-- ❌ 對「相同 cover-URL 被探測 N 次」沒有時間維度的 anomaly tracking
-- ❌ 沒有 **decoy cover 多輪換** —— 我們的 cover_endpoint 是靜態配置
+- ✅ **NEW 2026-05-18**：`ProbeAnomalyDetector` 對「相同 src_ip /24 被探測 N 次」做 sliding-window 計數 + Prometheus alert + admin CLI offender 列表 + 可選 auto-deny（fire 後 TTL-bounded 黑洞，β 在 `Incoming::ignore()` 階段就 short-circuit）
+- ✅ **NEW 2026-05-18**：`CoverEndpointPool` decoy 多輪換 + per-src-IP /24 affinity routing（同 observer 跨輪 probe 看一致 cover URL — 沒有 rotation fingerprint）
 
 **TODO**：
 1. ~~**Cover-endpoint pool 輪換**~~ ✅ **DONE 2026-05-18** —— `cover_endpoints: [...]` YAML 知識點 + `CoverEndpointPool` 含 per-source-IP /24（v4）/ /48（v6）一致性 affinity。**比 round-robin 強的點**：同一 observer 從同一 src IP 看到的 cover URL 跨任意多輪探測都一致（看起來像正常 cover server，沒有 rotation 信號），而 round-robin 會讓每輪換 URL —— 那本身就是 fingerprint。8 unit tests + 4 integration tests。`crates/proteus-transport-alpha/src/cover_pool.rs`。
@@ -268,7 +269,7 @@ GFW 用 5 條啟發式規則找「看起來是加密流量但不像 TLS/SSH/HTTP
 | Tiangou 商用 DPI（共享黑名單）| ✅ `proteus-server preflight check-ip-reputation` 離線分類 + operator watchlist | — |
 | Tiangou ML 行為分析 | ✅ cell-split + heartbeats | — |
 | uTLS bit-perfect ClientHello | ❌ | M3（README ❌ 已標）|
-| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）+ `deploy/README.md` 「Deployment topology」section + security checklist 三條 operator-action item（2026-05-18 done）| ❌ multi-VPS HA still M3 |
+| 2026-04 中轉節點拔線 | ✅ 設計上免疫（直連架構）+ `deploy/README.md` topology section + security checklist + **multi-VPS HA foundation: `EndpointPool` + YAML `server_endpoints:` 配置 + validate guidance（2026-05-18 done）** | ⚠ dispatch refactor 下個 iteration |
 | QUIC SNI 審查 (USENIX 25 #1) | ✅ source-port walk | — |
 | QUIC SNI 審查 (USENIX 25 #2) | ✅ prefix-noise | — |
 | QUIC SNI 審查 (USENIX 25 #4) | ✅ migration API | — |

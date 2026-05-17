@@ -456,3 +456,110 @@ async fn bootstrap_dns_beta_hostname_under_system_warns_independently() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---------- server_endpoints multi-VPS HA pool ----------
+
+/// Pool of 3 entries with primary as entry[0] — the recommended
+/// shape. Validate MUST PASS, no warnings about split-brain or
+/// single-entry-pool.
+#[tokio::test]
+async fn server_endpoints_well_formed_pool_passes() {
+    let dir = tempdir("endpoints_good");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"vps-backup.example.com:8443\"\n  \
+             - \"vps-cn2.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("good pool report:\n{report}");
+    assert!(!report.has_failures(), "{report}");
+    let pool_pass = report.checks.iter().any(|c| match c {
+        validate::Check::Pass(s) => s.contains("server_endpoints pool") && s.contains("3 entries"),
+        _ => false,
+    });
+    assert!(pool_pass, "PASS row for 3-entry pool missing: {report}");
+    // No single-entry warn.
+    let single_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("only one entry"),
+        _ => false,
+    });
+    assert!(!single_warn);
+    // No split-brain warn (primary IS in the pool).
+    let split_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("split-brain"),
+        _ => false,
+    });
+    assert!(!split_warn);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Single-entry pool → WARN (equivalent to no pool at all,
+/// operator probably meant more).
+#[tokio::test]
+async fn server_endpoints_single_entry_warns() {
+    let dir = tempdir("endpoints_single");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  - \"vps.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("single-entry pool report:\n{report}");
+    assert!(!report.has_failures(), "{report}");
+    let single_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("only one entry"),
+        _ => false,
+    });
+    assert!(single_warn, "single-entry WARN missing: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Primary not in the pool list → split-brain WARN.
+#[tokio::test]
+async fn server_endpoints_split_brain_warns() {
+    let dir = tempdir("endpoints_split");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps-backup.example.com:8443\"\n  \
+             - \"vps-cn2.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("split-brain pool report:\n{report}");
+    assert!(!report.has_failures(), "{report}");
+    let split_warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("split-brain"),
+        _ => false,
+    });
+    assert!(split_warn, "split-brain WARN missing: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Bad host:port in pool → FAIL.
+#[tokio::test]
+async fn server_endpoints_bad_entry_fails() {
+    let dir = tempdir("endpoints_bad");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"this-is-not-a-valid-endpoint\"\n  \
+             - \"vps-cn2.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("bad-entry pool report:\n{report}");
+    assert!(report.has_failures(), "{report}");
+    let bad_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("server_endpoints has bad host:port") && s.contains("[1]")
+        }
+        _ => false,
+    });
+    assert!(bad_fail, "FAIL row for bad entry missing: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

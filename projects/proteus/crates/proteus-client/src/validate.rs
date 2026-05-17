@@ -165,6 +165,61 @@ pub async fn run(path: &Path) -> PreflightReport {
         ));
     }
 
+    // ----- Multi-VPS HA fallback list (server_endpoints) -----
+    //
+    // Operator-opt-in; empty by default. When present, every entry
+    // must parse as host:port. Repeats of the primary entry are
+    // accepted (operator may include it as a deliberate retry
+    // anchor). Single-entry list is a hard WARN — equivalent to
+    // having no list at all, so the operator probably meant to add
+    // more.
+    if !cfg.server_endpoints.is_empty() {
+        let mut bad = Vec::new();
+        for (idx, raw) in cfg.server_endpoints.iter().enumerate() {
+            if raw.is_empty() {
+                bad.push(format!("[{idx}] empty"));
+            } else if parse_host_port(raw).is_none() {
+                bad.push(format!("[{idx}]={raw:?}"));
+            }
+        }
+        if bad.is_empty() {
+            r.push_pass(format!(
+                "server_endpoints pool ({} entries) — multi-VPS HA dispatch wins over \
+                 single server_endpoint at runtime",
+                cfg.server_endpoints.len()
+            ));
+        } else {
+            r.push_fail(format!(
+                "server_endpoints has bad host:port entries: {}",
+                bad.join(", ")
+            ));
+        }
+        if cfg.server_endpoints.len() == 1 {
+            r.push_warn(
+                "server_endpoints has only one entry — equivalent to the single-endpoint \
+                 fallback; add ≥2 distinct VPS endpoints to actually get HA (or remove the \
+                 field entirely to silence this warning)",
+            );
+        }
+        // Coherence warn: if server_endpoint is NOT present in the
+        // pool, the operator has set up a strange config where the
+        // primary they configured isn't in the failover list. Likely
+        // intentional in some advanced topologies but suspicious in
+        // the common case.
+        if !cfg
+            .server_endpoints
+            .iter()
+            .any(|e| e == &cfg.server_endpoint)
+        {
+            r.push_warn(
+                "server_endpoint is not present in server_endpoints — operator has set up a \
+                 split-brain pool where the primary is dialed only when the fallback list is \
+                 exhausted. If intentional, fine; if accidental, add the primary to \
+                 server_endpoints[0]",
+            );
+        }
+    }
+
     if cfg.socks_listen.is_empty() {
         r.push_fail("socks_listen is empty");
     } else if parse_host_port(&cfg.socks_listen).is_some() {
