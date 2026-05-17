@@ -51,6 +51,36 @@ fn pool_entry_beta_fail_throttle() -> &'static Throttle {
     T.get_or_init(|| Throttle::new(3, 0.2))
 }
 
+/// Iter-27: drain + reset the per-call-site suppression counts
+/// for the iter-23 client-side throttles. Returns a `(site,
+/// suppressed_in_window)` list with only the non-zero entries.
+///
+/// Mirrors the server-side `rejection_log_throttle_drain_rollups()`
+/// (proteus-transport-alpha/src/server.rs). Called from a 60s
+/// periodic task in main.rs so a long-running upstream-down
+/// outage produces an operator-friendly summary line each
+/// window instead of a sparse trickle of throttled WARNs
+/// scattered over hours.
+///
+/// Each `roll_up()` call ATOMICALLY swaps the throttle's
+/// "since last rollup" counter to zero, so calling this
+/// periodically doesn't double-count.
+#[must_use]
+pub fn drain_failure_log_rollups() -> Vec<(&'static str, u64)> {
+    let mut out = Vec::new();
+    for (site, t) in [
+        ("beta_dial_fail", beta_dial_fail_throttle()),
+        ("pool_entry_fail", pool_entry_fail_throttle()),
+        ("pool_entry_beta_fail", pool_entry_beta_fail_throttle()),
+    ] {
+        let n = t.roll_up();
+        if n > 0 {
+            out.push((site, n));
+        }
+    }
+    out
+}
+
 #[derive(thiserror::Error, Debug)]
 pub enum SocksError {
     #[error("io: {0}")]

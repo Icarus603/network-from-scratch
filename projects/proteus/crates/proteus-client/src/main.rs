@@ -451,6 +451,36 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         None
     };
 
+    // Iter-27: periodic rollup of the iter-23 client-side failure-
+    // log throttles. Mirrors the server-side
+    // `rejection_log_throttle_drain_rollups` periodic task. Without
+    // this, a long-running upstream-VPS-down outage produces a
+    // sparse trickle of throttled WARN lines spread over hours;
+    // with it, the journal carries one clean rollup line every 60s
+    // showing "N WARN lines suppressed in the last window for site
+    // X" — operators see the magnitude of an outage at a glance via
+    // `journalctl -u proteus-client | grep log-throttle`.
+    //
+    // Window matches the server's 60s default. We `Skip` missed
+    // ticks so a long pause (e.g. system sleep on a laptop) doesn't
+    // generate a burst of catch-up rollups.
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        tick.tick().await; // skip immediate fire
+        loop {
+            tick.tick().await;
+            for (site, suppressed) in proteus_client::socks::drain_failure_log_rollups() {
+                warn!(
+                    site,
+                    suppressed,
+                    window_secs = 60,
+                    "client log-throttle: suppressed similar failure messages in last window"
+                );
+            }
+        }
+    });
+
     // Single per-process carrier-health tracker for the β path.
     // Lives across CONNECTs so back-off survives the SOCKS5
     // request boundary — see `carrier_health.rs` for the policy.
