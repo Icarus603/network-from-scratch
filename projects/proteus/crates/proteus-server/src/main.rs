@@ -165,6 +165,51 @@ enum PreflightCmd {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// Run **every** offline preflight (`check-ip-reputation` +
+    /// `check-host` + a fingerprint capture) in a single shot.
+    /// One exit code, one unified report. Designed for the
+    /// Ansible/Terraform deploy-gate use case: replace three
+    /// chained `&&`-wired subcommands with one call.
+    ///
+    /// Output:
+    ///   - `--format text` (default): per-section banners + the
+    ///     same per-finding lines each sub-check emits, plus a
+    ///     bottom-line `summary: Np, Nw, Nf  (exit N)` totals row.
+    ///   - `--format json`: one-line JSON document
+    ///     `{"kind":"preflight_summary", "sections":{...},
+    ///     "totals":{...}, "exit_code":N}`. Schema is append-only.
+    ///
+    /// Exit code:
+    ///   - `0` when every sub-check is PASS+WARN-only.
+    ///   - `1` when any sub-check reports FAIL.
+    ///
+    /// Fingerprint drift is treated as WARN (not FAIL) — operators
+    /// may have intentionally landed uTLS-replay; the
+    /// `EXPECTED_BASELINE` constant in `tls_fingerprint_observer.rs`
+    /// is the single source of truth they update when promoting.
+    All {
+        /// Shared YAML config (used by both ip_reputation and
+        /// host_posture sub-checks).
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Operator-supplied public IP — wins over config-derived
+        /// listen IP for the ip_reputation sub-check.
+        #[arg(long)]
+        public_ip: Option<std::net::IpAddr>,
+        /// Optional operator watchlist of known-burned CIDRs for
+        /// the ip_reputation sub-check.
+        #[arg(long)]
+        watchlist: Option<PathBuf>,
+        /// Skip the fingerprint sub-check. Use when CI has already
+        /// run `proteus-server fingerprint` separately and you
+        /// don't want the extra ~50–100 ms loopback handshake.
+        #[arg(long, default_value_t = false)]
+        skip_fingerprint: bool,
+        /// Output format: `text` (default, human-friendly) or
+        /// `json` (single-document JSON for scripted gates).
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -283,6 +328,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 };
                 let code = proteus_server::host_preflight::cli_run(input)?;
+                if code != 0 {
+                    std::process::exit(code);
+                }
+            }
+            PreflightCmd::All {
+                config,
+                public_ip,
+                watchlist,
+                skip_fingerprint,
+                format,
+            } => {
+                let input = proteus_server::preflight_orchestrator::PreflightAllInput {
+                    config_path: config,
+                    public_ip_override: public_ip,
+                    watchlist_path: watchlist,
+                    skip_fingerprint,
+                };
+                let code = proteus_server::preflight_orchestrator::cli_run(input, &format).await?;
                 if code != 0 {
                     std::process::exit(code);
                 }

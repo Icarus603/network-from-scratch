@@ -10,6 +10,7 @@ pub mod config;
 pub mod host_preflight;
 pub mod ip_reputation;
 pub mod preflight;
+pub mod preflight_orchestrator;
 pub mod relay;
 pub mod startup;
 pub mod startup_self_test;

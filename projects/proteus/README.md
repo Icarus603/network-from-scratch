@@ -168,30 +168,22 @@ sudo install -m 0644 alice.ed25519.pk /etc/proteus/keys/clients/
 sudo install -m 0644 deploy/server.example.yaml /etc/proteus/server.yaml
 sudoedit /etc/proteus/server.yaml
 
-# 7. Preflight: classify the VPS IP against our offline reputation table.
-#    Catches the most common operator mistakes — bound to a special-use
-#    IP, picked an over-collected commercial-cloud range — BEFORE the
-#    server is exposed. 2026 GFW threat-intel main lines 1+4.
-proteus-server preflight check-ip-reputation \
+# 7. Preflight: run EVERY offline check in one shot — IP reputation
+#    classification (2026 GFW threat-intel main lines 1+4: catches
+#    special-use binds + commercial-cloud over-collected ranges),
+#    host posture (key file modes, ulimits, sysctls governing β QUIC
+#    throughput, /dev/urandom, NTP, disk free), AND TLS ClientHello
+#    JA4 fingerprint capture vs. locked baseline. Single command,
+#    one exit code, one unified report.
+proteus-server preflight all \
     --config /etc/proteus/server.yaml \
     --public-ip "$(curl -s https://api.ipify.org)"
-# Exit code 0 on PASS/WARN; 1 on FAIL. Operators can suppress the WARN
-# (e.g. fresh DigitalOcean droplet known to be unburned) by accepting
-# the exit code and proceeding. Operators with a known-burned-IP list
-# can feed it as --watchlist /etc/proteus/burned-ips.txt.
-
-# 7b. Host-posture preflight: audits key file modes, ulimits, kernel
-#     sysctls that govern β QUIC throughput, /dev/urandom availability,
-#     NTP sync, and disk free. Catches the silent-degradation classes
-#     that bite operators AFTER a green `validate`: world-readable PQ
-#     keys (mode 0644 silent compromise), distro-default ulimit 1024
-#     (accept loop EMFILEs at ~2k sessions), Ubuntu 22.04's 212992-byte
-#     SO_RCVBUF clamp that silently caps β QUIC's BBR window, broken
-#     NTP causing every handshake to look like a replay.
-proteus-server preflight check-host --config /etc/proteus/server.yaml
-# Exit 0 on PASS+WARN-only, 1 on any FAIL. Read-only — no chmod, no
-# sysctl writes, no external probes. Suitable for Ansible/Terraform
-# deploy gates.
+# Exit 0 on PASS+WARN-only across all sections, 1 on any FAIL.
+# Watchlist: --watchlist /etc/proteus/burned-ips.txt
+# JSON for scripted deploy gates: --format json (one-line summary).
+# Sub-checks individually: `preflight check-ip-reputation`,
+# `preflight check-host`, `fingerprint` (still standalone, identical
+# semantics, useful when you want a single section in isolation).
 
 # 8. systemd unit
 sudo install -m 0644 deploy/systemd/proteus-server.service /etc/systemd/system/
