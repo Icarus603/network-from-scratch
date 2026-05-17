@@ -2451,6 +2451,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         outbound_filter: outbound_filter.clone(),
         dns_resolver_stats: Some(Arc::clone(&dns_resolver_stats)),
         pad_quantum: cfg.pad_quantum,
+        // Reuse the same `tcp_keepalive_secs` knob the accept-loop
+        // uses for client-facing sockets — operators who tuned it
+        // for an aggressive-NAT environment expect symmetric
+        // treatment on the upstream egress side too.
+        tcp_keepalive_secs: cfg.tcp_keepalive_secs,
     };
     if let Some(q) = cfg.pad_quantum {
         if q > 0 {

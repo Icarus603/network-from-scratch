@@ -96,6 +96,7 @@ async fn outbound_filter_blocks_aws_metadata_ip() {
         outbound_filter: Some(Arc::new(OutboundPolicy::default())),
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -155,6 +156,7 @@ async fn outbound_filter_blocks_disallowed_port() {
         outbound_filter: Some(Arc::new(policy)),
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -209,6 +211,7 @@ async fn outbound_filter_blocks_hostname_not_on_allowlist() {
         outbound_filter: Some(Arc::new(policy)),
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -268,6 +271,7 @@ async fn outbound_filter_blocks_hostname_on_denylist() {
         outbound_filter: Some(Arc::new(policy)),
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();
@@ -324,6 +328,7 @@ async fn outbound_filter_allows_explicitly_permitted_destination() {
         outbound_filter: Some(Arc::new(policy)),
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let proxy_addr = listener.local_addr().unwrap();

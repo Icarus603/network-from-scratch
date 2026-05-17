@@ -45,6 +45,7 @@ async fn handshake_latency_histogram_records_a_real_handshake() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let metrics_for_handler = Arc::clone(&server_metrics);
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {

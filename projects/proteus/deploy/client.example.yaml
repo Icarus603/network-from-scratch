@@ -215,3 +215,29 @@ pow_difficulty: 0
 # For true traffic-analysis resistance set BOTH client and server
 # `pad_quantum` (otherwise one direction stays unpadded).
 # pad_quantum: 64
+
+# TCP keepalive interval (seconds) for the outbound dial toward the
+# Proteus server. Defaults to 30 if unset — matches the server's
+# accept-loop default, so both ends of the connection have
+# symmetric keepalive behavior.
+#
+# Why this matters: long-idle Proteus sessions (you leave a browser
+# tab open over lunch, an SSH tunnel sits warm) traverse CGNAT and
+# corporate firewalls that reap idle TCP bindings after typically
+# 2-30 minutes. WITHOUT keepalive the kernel doesn't notice the
+# binding is dead until the next outbound write fails with EPIPE,
+# at which point the user sees a "broken" session that masquerades
+# as flaky network. WITH keepalive, the kernel either keeps the
+# binding warm OR fast-detects the dead peer so the session can
+# be reopened cleanly.
+#
+# Operator tuning:
+#   - Mobile carriers / aggressive CGNAT: drop to 15 (occasional
+#     mobile-data deployments where the carrier reaps idle
+#     bindings every 30-60s).
+#   - Clean direct path (residential ISP, no CGNAT): 60-120 is
+#     fine; the periodic probes are tiny (a few bytes/minute,
+#     wire-encrypted inside the TLS stream).
+#   - Default 30 is the right value for the typical
+#     residential-ISP-to-VPS deployment this project targets.
+# tcp_keepalive_secs: 30

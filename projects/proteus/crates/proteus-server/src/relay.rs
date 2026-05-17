@@ -116,6 +116,25 @@ pub struct RelayConfig {
     /// traffic-analysis MUST set this on the server side too, or
     /// the response direction leaks unpadded lengths.
     pub pad_quantum: Option<u16>,
+    /// TCP keepalive interval (seconds) applied to the UPSTREAM
+    /// socket the relay dials toward the SOCKS5 target. `None` =
+    /// 30 seconds (the same default the server accept-loop uses
+    /// for client-facing sockets via `ServerCtx::tcp_keepalive_secs`).
+    ///
+    /// Why this matters: long-lived upstream connections
+    /// (persistent SSH tunnels, HTTP/2 long-poll, WebSocket idle)
+    /// traverse the operator's outbound NAT path. CGNAT / cloud-
+    /// provider NAT typically reaps idle bindings after 2-30 min,
+    /// causing the upstream socket to silently go half-open.
+    /// Without TCP keepalive the kernel doesn't notice until the
+    /// next outbound write returns EPIPE — by which time the
+    /// session looks "broken" to the user. With keepalive on,
+    /// the kernel keeps the binding warm OR fast-detects the
+    /// dead peer.
+    ///
+    /// Iter-14 added this knob; pre-iter-14 the upstream socket
+    /// only had `set_nodelay(true)` and no keepalive at all.
+    pub tcp_keepalive_secs: Option<u64>,
 }
 
 impl std::fmt::Debug for RelayConfig {
@@ -400,7 +419,33 @@ where
             return Ok("upstream_dial_timeout");
         }
     };
-    upstream.set_nodelay(true).ok();
+    // Apply nodelay + TCP keepalive on the upstream socket so:
+    //   * small writes (HTTP/2 control frames, SSH echo) don't
+    //     wait on Nagle when crossing a high-RTT path
+    //   * long-idle relays (persistent SSH tunnel, HTTP/2
+    //     long-poll, websocket idle) survive NAT idle-timer
+    //     reaping — without keepalive the upstream socket
+    //     silently goes half-open after typically 2-30 minutes
+    //     of inactivity and the next write fails with EPIPE.
+    //
+    // Iter-14: both options applied via the shared
+    // `socket_opts::apply_dial_socket_opts` helper; pre-iter-14
+    // we only set nodelay and left keepalive disabled, leading
+    // to the silent-half-open class of bugs.
+    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
+        &upstream,
+        cfg.tcp_keepalive_secs.unwrap_or(30),
+    );
+    if let Some(e) = dial_opts.nodelay_err {
+        warn!(error = %e, host = %target.0, "upstream TCP_NODELAY failed (proceeding)");
+    }
+    if let Some(e) = dial_opts.keepalive_err {
+        warn!(
+            error = %e,
+            host = %target.0,
+            "upstream TCP keepalive failed (proceeding — connection may silently die in NAT idle)"
+        );
+    }
     let (mut up_r, mut up_w) = upstream.into_split();
 
     // Bidirectional pump. Each direction is independently bounded by

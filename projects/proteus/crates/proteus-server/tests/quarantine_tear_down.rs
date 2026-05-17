@@ -76,6 +76,7 @@ async fn in_flight_session_torn_down_when_user_quarantined() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
         let cfg = relay_cfg.clone();
@@ -186,6 +187,7 @@ async fn quarantine_does_not_tear_down_sessions_for_other_users() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let server_task = tokio::spawn(server::serve(listener, server_ctx, move |session| {
         let cfg = relay_cfg.clone();

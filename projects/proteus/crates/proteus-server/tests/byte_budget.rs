@@ -74,6 +74,7 @@ async fn byte_budget_tears_down_session_when_cap_hit() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
         let cfg = relay_cfg.clone();

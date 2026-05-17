@@ -113,6 +113,7 @@ async fn abuse_detector_fires_once_per_burst_on_repeated_byte_cap_hits() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
         let cfg = relay_cfg.clone();

@@ -57,6 +57,7 @@ pub mod process_resources;
 pub mod rate_limit;
 pub mod server;
 pub mod session;
+pub mod socket_opts;
 pub mod tls;
 pub mod tls_watcher;
 pub mod user_quarantine;

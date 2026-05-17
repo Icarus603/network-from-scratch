@@ -1723,25 +1723,11 @@ pub async fn bind_listener_with_reuseaddr(addr: &str) -> std::io::Result<TcpList
     TcpListener::from_std(std_listener)
 }
 
-#[allow(unsafe_code)] // tightly-scoped: dup(2) + OwnedFd wrapper only
-fn apply_tcp_keepalive(stream: &TcpStream, interval_secs: u64) -> std::io::Result<()> {
-    use std::os::fd::{AsRawFd, FromRawFd};
-    let fd = stream.as_raw_fd();
-    // SAFETY: dup(2) returns a fresh fd that we own. We check for -1
-    // before wrapping it.
-    let dup_fd = unsafe { libc::dup(fd) };
-    if dup_fd < 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    // SAFETY: dup_fd is a freshly-owned valid fd.
-    let owned = unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) };
-    let sock = socket2::Socket::from(owned);
-    let cfg = socket2::TcpKeepalive::new()
-        .with_time(std::time::Duration::from_secs(interval_secs))
-        .with_interval(std::time::Duration::from_secs(interval_secs));
-    sock.set_tcp_keepalive(&cfg)
-    // `sock` drops here, closing the dup'd fd. tokio's fd is untouched.
-}
+// `apply_tcp_keepalive` moved to `crate::socket_opts` in iter-14
+// so both the server accept-loop AND outbound dialers (client
+// SOCKS5, server upstream) share one implementation. Local
+// re-export keeps the existing call sites unchanged.
+use crate::socket_opts::apply_tcp_keepalive;
 
 struct HandshakeFailure {
     buffer: Vec<u8>,

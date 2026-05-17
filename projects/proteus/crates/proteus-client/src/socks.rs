@@ -778,6 +778,25 @@ async fn try_alpha(
         // to be `tls_cfg.server_name` (hostname) so cert verification
         // still works against the operator's Let's Encrypt cert.
         let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+        // Iter-14: apply nodelay + TCP keepalive on the outbound
+        // socket so long-idle Proteus sessions survive NAT
+        // idle-timer reaping and small writes don't wait on
+        // Nagle when the path is high-RTT. Both options are
+        // best-effort; failures are logged and proceeded past
+        // since they're defense-in-depth not correctness.
+        let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
+            &tcp,
+            cfg.tcp_keepalive_secs.unwrap_or(30),
+        );
+        if let Some(e) = dial_opts.nodelay_err {
+            tracing::warn!(error = %e, "client→server TCP_NODELAY failed (proceeding)");
+        }
+        if let Some(e) = dial_opts.keepalive_err {
+            tracing::warn!(
+                error = %e,
+                "client→server TCP keepalive failed (proceeding — session may silently die in NAT idle)"
+            );
+        }
         let session =
             p_client::handshake_over_tls(tcp, connector, &tls_cfg.server_name, &hs_cfg).await?;
         let proteus_transport_alpha::session::AlphaSession {
@@ -800,6 +819,20 @@ async fn try_alpha(
 
     // No TLS configured (test/dev mode). Dial the resolved IP directly.
     let tcp = tokio::net::TcpStream::connect(server_addr).await?;
+    // Same iter-14 socket-opts pattern as the TLS branch above.
+    let dial_opts = proteus_transport_alpha::socket_opts::apply_dial_socket_opts(
+        &tcp,
+        cfg.tcp_keepalive_secs.unwrap_or(30),
+    );
+    if let Some(e) = dial_opts.nodelay_err {
+        tracing::warn!(error = %e, "client→server (plaintext) TCP_NODELAY failed (proceeding)");
+    }
+    if let Some(e) = dial_opts.keepalive_err {
+        tracing::warn!(
+            error = %e,
+            "client→server (plaintext) TCP keepalive failed (proceeding)"
+        );
+    }
     let session = p_client::handshake_over_tcp(tcp, &hs_cfg).await?;
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,

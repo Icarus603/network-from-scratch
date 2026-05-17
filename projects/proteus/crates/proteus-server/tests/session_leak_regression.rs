@@ -108,6 +108,7 @@ async fn server_does_not_leak_session_permits_on_upstream_eof() {
         outbound_filter: None,
         dns_resolver_stats: None,
         pad_quantum: None,
+        tcp_keepalive_secs: None,
     };
     let _server_task = tokio::spawn(server::serve(listener, ctx, move |session| {
         let cfg = relay_cfg.clone();

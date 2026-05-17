@@ -187,6 +187,29 @@ pub struct ClientConfig {
     /// MUST set this on BOTH client AND server.
     #[serde(default)]
     pub knock_psk_file: Option<PathBuf>,
+    /// **TCP keepalive interval (seconds)** for the outbound dial
+    /// toward the Proteus server. `None` = 30 seconds (mirrors
+    /// the server's default — symmetric treatment of both ends
+    /// of the connection).
+    ///
+    /// Iter-14 added this knob because pre-iter-14 client→server
+    /// TCP connections went on the wire with NO keepalive at
+    /// all. A long-idle Proteus session crossing a CGNAT / corp
+    /// firewall would silently die after the NAT idle-timer
+    /// (typically 2-30 min). The user-visible symptom was
+    /// "everything was working, then suddenly nothing loaded;
+    /// I refreshed and it worked again" — the worst kind of
+    /// production bug because it masquerades as flaky network.
+    ///
+    /// Operators behind aggressive NAT (some mobile carriers
+    /// reap idle bindings as fast as 30 s) can drop this to 15.
+    /// Operators on a clean direct path can raise it to 120 or
+    /// disable by setting a very large value; the option also
+    /// adds tiny periodic kernel-level wire activity, which is
+    /// invisible on the wire (encrypted) but does add a few
+    /// bytes per minute.
+    #[serde(default)]
+    pub tcp_keepalive_secs: Option<u64>,
     /// **Bootstrap DNS policy** — how to resolve the hostname half of
     /// `server_endpoint` / `server_endpoint_beta`. Defaults to
     /// `system`, which goes through the OS resolver (which in 2026
