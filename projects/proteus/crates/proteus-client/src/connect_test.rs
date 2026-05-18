@@ -406,6 +406,19 @@ pub async fn cli_run(
     connect_timeout_secs: u64,
     format: &str,
 ) -> std::io::Result<i32> {
+    // Iter-108: sanity-check the timeout. `--connect-timeout-secs
+    // 0` means "every step times out instantly with a deadline-
+    // exceeded error". Operators have hit this trying to "make
+    // the test faster" — exit early with a clean error instead
+    // of running through all stages and reporting bogus
+    // "timed out after 0s" everywhere.
+    if connect_timeout_secs == 0 {
+        eprintln!(
+            "connect-test: connect_timeout_secs = 0 means every stage times out \
+             instantly. Use a real value (default 10s, sensible range 5-60s)."
+        );
+        return Ok(2);
+    }
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
     let report = match run(config_path, connect_timeout).await {
         Ok(r) => r,
@@ -442,6 +455,16 @@ pub async fn cli_run_all_endpoints(
     connect_timeout_secs: u64,
     format: &str,
 ) -> std::io::Result<i32> {
+    // Iter-108: same sanity check as cli_run — `--all-endpoints`
+    // doesn't change the per-stage timeout semantics.
+    if connect_timeout_secs == 0 {
+        eprintln!(
+            "connect-test --all-endpoints: connect_timeout_secs = 0 means every \
+             stage times out instantly. Use a real value (default 10s, sensible \
+             range 5-60s)."
+        );
+        return Ok(2);
+    }
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
     let reports = match run_against_all_endpoints(config_path, connect_timeout).await {
         Ok(r) => r,
@@ -801,6 +824,25 @@ mod tests {
             1
         };
         assert_eq!(exit, 0, "all-ok must exit 0");
+    }
+
+    /// Iter-108: cli_run rejects connect_timeout_secs=0 early
+    /// with exit 2 instead of running through all stages.
+    #[tokio::test]
+    async fn iter108_cli_run_rejects_zero_timeout() {
+        // Path doesn't matter — we exit before touching disk.
+        let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
+        let exit = cli_run(bogus_path, 0, "text").await.expect("clean exit");
+        assert_eq!(exit, 2, "0-timeout must exit 2 (setup error)");
+    }
+
+    #[tokio::test]
+    async fn iter108_cli_run_all_endpoints_rejects_zero_timeout() {
+        let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
+        let exit = cli_run_all_endpoints(bogus_path, 0, "text")
+            .await
+            .expect("clean exit");
+        assert_eq!(exit, 2, "0-timeout must exit 2 (setup error)");
     }
 
     #[test]
