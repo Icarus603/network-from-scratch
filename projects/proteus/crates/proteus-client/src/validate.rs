@@ -553,6 +553,37 @@ pub async fn run(path: &Path) -> PreflightReport {
                     );
                 }
             }
+
+            // Iter-70: bootstrap_dns.direct_ip in private / special-
+            // use IP space → WARN. Symmetric with server iter-67/68
+            // but client-side. Three failure modes:
+            //   1. The operator's "VPS" is actually a LAN box at
+            //      192.168.1.100 — they pasted the wrong IP. Every
+            //      dial fails when not on that LAN.
+            //   2. The IP is 169.254.169.254 (cloud metadata) — the
+            //      client tries to authenticate the Proteus
+            //      handshake against the cloud metadata service.
+            //      Won't work, but the dial attempts leak the
+            //      operator's user_id + Ed25519 sig into the
+            //      metadata service's logs.
+            //   3. CGNAT / link-local — same misconfiguration class.
+            // WARN-not-FAIL because some VPN tunneling setups
+            // legitimately use private-space VPS reachable only via
+            // a parent tunnel (WireGuard etc.) — but flagging is
+            // strictly the right default.
+            if let Some(ip) = b.pinned_ip() {
+                if is_private_or_special_use(ip) {
+                    r.push_warn(format!(
+                        "bootstrap_dns.direct_ip = {ip} is in a private / special-use IP \
+                         range (RFC 1918 / CGNAT / link-local / ULA). Every Proteus dial \
+                         will go to this address. Three traps: (1) you may have pasted a \
+                         LAN address instead of your VPS public IP; (2) 169.254.169.254 \
+                         is the cloud metadata service — the dial leaks your user_id + \
+                         Ed25519 sig into its logs; (3) WireGuard-tunneled setups \
+                         legitimately use this — if intentional, ignore the warn.",
+                    ));
+                }
+            }
         }
     }
 
@@ -759,6 +790,32 @@ fn check_secret_file_mode(r: &mut PreflightReport, label: &str, path: &Path) {
 #[cfg(not(unix))]
 fn check_secret_file_mode(_r: &mut PreflightReport, _label: &str, _path: &Path) {
     // No-op on non-Unix; the world-readable concept doesn't map.
+}
+
+/// Iter-70: detect IPs that should never appear as a
+/// `bootstrap_dns.direct_ip` pin. Symmetric with the server-
+/// side `is_private_or_special_use` helper. Covers IPv4 RFC 1918
+/// plus CGNAT plus link-local, IPv6 ULA plus link-local, plus
+/// multicast and unspecified.
+fn is_private_or_special_use(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                // CGNAT: 100.64.0.0/10
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_multicast()
+                || v6.is_unspecified()
+                || (seg0 & 0xfe00) == 0xfc00
+                || (seg0 & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 fn base64_or_raw(input: &[u8]) -> Vec<u8> {

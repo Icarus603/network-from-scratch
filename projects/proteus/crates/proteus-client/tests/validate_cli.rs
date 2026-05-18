@@ -957,6 +957,81 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-70: bootstrap_dns.direct_ip private-IP detection ----------
+
+/// Operator-trap: `bootstrap_dns.direct_ip: 192.168.1.100` —
+/// the "VPS" is actually a LAN box (pasted wrong). Every dial
+/// goes to LAN; fails the moment the operator leaves their
+/// home network. WARN with the three-traps message.
+#[tokio::test]
+async fn iter70_bootstrap_direct_ip_rfc1918_warns() {
+    let dir = tempdir("bootstrap-private");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 192.168.1.100\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("bootstrap-private report:\n{report}");
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip") && s.contains("private")
+        }
+        _ => false,
+    });
+    assert!(
+        warn,
+        "RFC 1918 bootstrap direct_ip MUST WARN: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-70: the worst-case foot-gun — cloud metadata IP. The
+/// dial leaks user_id + Ed25519 sig into the cloud provider's
+/// metadata service logs.
+#[tokio::test]
+async fn iter70_bootstrap_direct_ip_cloud_metadata_warns() {
+    let dir = tempdir("bootstrap-metadata");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 169.254.169.254\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip")
+                && (s.contains("metadata") || s.contains("private"))
+        }
+        _ => false,
+    });
+    assert!(warn, "cloud-metadata direct_ip MUST WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-70: legitimate public VPS IP → no warn.
+#[tokio::test]
+async fn iter70_bootstrap_direct_ip_public_no_warn() {
+    let dir = tempdir("bootstrap-public");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 198.51.100.42\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip") && s.contains("private")
+        }
+        _ => false,
+    });
+    assert!(
+        !warn,
+        "public direct_ip must NOT trigger iter-70 WARN: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-59: duplicate-pool-entry detection ----------
 
 /// Operator-trap: `server_endpoints: [primary, primary, backup]`
