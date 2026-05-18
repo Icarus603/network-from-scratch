@@ -1087,6 +1087,38 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
              Sessions would be reaped while still finishing setup. Almost certainly a typo.",
         ));
     }
+    // Iter-89: session_idle_secs sanity (explicit zero / absurd).
+    if let Some(idle_secs) = cfg.session_idle_secs {
+        if idle_secs == 0 {
+            r.push_warn(
+                "session_idle_secs = 0 disables the per-direction idle reaper. Sessions \
+                 with both directions silent (NAT-dead, dead client, dead upstream) \
+                 hold FDs + crypto state indefinitely until OS keepalive kicks in \
+                 (typically 2 hours on Linux). FD leak under sustained flood. \
+                 Recommended: 60-600s.",
+            );
+        } else if idle_secs > 86400 {
+            r.push_warn(format!(
+                "session_idle_secs = {idle_secs} (>24h) is excessive — dead sessions \
+                 hold resources for {} days before reap. Recommended: ≤3600s.",
+                idle_secs / 86400,
+            ));
+        }
+    }
+    // Iter-89: max_session_bytes = 0 explicitly disables the
+    // per-session byte cap (any one session can consume
+    // unbounded bandwidth + memory). Differs from `None`
+    // (default = no cap) only in that the operator
+    // EXPLICITLY typed 0 — flag the explicit-disable case.
+    if cfg.max_session_bytes == Some(0) {
+        r.push_warn(
+            "max_session_bytes = 0 explicitly disables the per-session byte cap. \
+             Each session can consume unbounded bandwidth. The runtime tolerates \
+             this (None and Some(0) are equivalent), but the explicit-zero is \
+             almost always a typo for 'no cap' which is achieved by removing \
+             the field entirely. Remove the field to silence this warn.",
+        );
+    }
 
     // 16. max_connections < rate_limit.burst.
     // The per-IP rate limit's burst is the worst-case number of
@@ -2074,6 +2106,48 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-89: session_idle_secs = 0 → WARN.
+    #[test]
+    fn iter89_session_idle_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.session_idle_secs = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("session_idle_secs = 0") && s.contains("FD leak"))
+        });
+        assert!(warn, "session_idle_secs=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-89: session_idle_secs > 24h → WARN.
+    #[test]
+    fn iter89_session_idle_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.session_idle_secs = Some(259200); // 3 days
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("session_idle_secs = 259200") && s.contains("excessive"))
+        });
+        assert!(warn, "session_idle_secs=259200 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-89: max_session_bytes = 0 (explicit zero) → WARN.
+    #[test]
+    fn iter89_max_session_bytes_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_session_bytes = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("max_session_bytes = 0") && s.contains("explicitly"))
+        });
+        assert!(warn, "max_session_bytes=0 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
