@@ -272,6 +272,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             timeout_secs,
             format,
         } => {
+            // Iter-110: mirror of iter-108/iter-109 — reject
+            // zero timeout with exit 2 + actionable stderr.
+            if timeout_secs == 0 {
+                eprintln!(
+                    "alerts-check: timeout_secs = 0 deadlines every step instantly. \
+                     Use a real value (default 5s, sensible range 1-30s)."
+                );
+                std::process::exit(2);
+            }
             let code = proteus_client::admin_alerts_check::cli_run(
                 &url,
                 std::time::Duration::from_secs(timeout_secs),
