@@ -195,6 +195,49 @@ override OR raise default_period_bytes"; `ProteusAeadDropsCatastrophic`
 points to "identify source IP from access_log + firewall-deny
 immediately. If multiple sources, treat as coordinated attack."
 
+### Grafana dashboard
+
+A pre-built Grafana dashboard ships at
+`deploy/grafana/dashboards/proteus-overview.json` covering 30+
+panels across the server + client surface. Import via Grafana
+UI ("Import dashboard" → upload JSON) OR provision via
+`provisioning/dashboards/`:
+
+```yaml
+# /etc/grafana/provisioning/dashboards/proteus.yaml
+apiVersion: 1
+providers:
+  - name: proteus
+    type: file
+    options:
+      path: /var/lib/grafana/dashboards/proteus
+```
+
+The dashboard's panel families:
+
+- **Liveness** (server/client up, TLS cert days remaining, panic
+  count, previous-run-unclean, restart count)
+- **Throughput** (handshakes/sec, in-flight sessions, bytes/sec,
+  handshake latency p50/p95/p99)
+- **DNS + bootstrap** (DoH-leak signal: bootstrap_via_system_resolver)
+- **Log throttling** (rate-of-suppressed log lines, access-log
+  writer alive)
+- **Cover-forward** (rate + REJECTIONs)
+- **Client dial outcomes** (per-endpoint success/fail rate,
+  carrier-suppressed, all-endpoints-suppressed)
+- **SIGHUP reload backlog** (per surface: firewall, rate_limit,
+  user_rate_limit, handshake_budget, client_pool_reload)
+- **Per-user observability** (top-5 bandwidth via `topk()`,
+  abuse-fires across the 3 detectors)
+- **Attack signals** (AEAD integrity drops + ratchets context,
+  SSRF rejections, probe-anomaly per-/24 attribution, handshake
+  failure vs success rate, per-user quota rejections,
+  session-lifecycle reaps)
+
+Every panel description references the alert rule that fires on
+the same signal, so an operator clicking a panel can immediately
+trace back to "what would page me about this graph going red".
+
 ### In-process `alerts-check` (no Prometheus needed)
 
 Single-user / personal-VPN deploys often don't run Prometheus.

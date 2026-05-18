@@ -75,6 +75,43 @@ fn readme_documents_alerts_check_evaluator() {
     );
 }
 
+/// Iter-119: the Grafana dashboard section must reference the
+/// bundled JSON file by path + explain how to import.
+#[test]
+fn iter119_readme_documents_grafana_dashboard() {
+    let body = read_readme();
+    assert!(
+        body.contains("### Grafana dashboard"),
+        "deploy/README.md must document the bundled Grafana dashboard"
+    );
+    // Must reference the JSON by exact path so operators can
+    // find it.
+    assert!(
+        body.contains("deploy/grafana/dashboards/proteus-overview.json"),
+        "must reference the dashboard JSON by path"
+    );
+    // Must show the provisioning recipe (a real operator workflow,
+    // not just "import via UI").
+    assert!(
+        body.contains("provisioning/dashboards/"),
+        "must explain provisioning workflow alongside UI import"
+    );
+    // Must enumerate panel families so operators know what they
+    // get without opening the JSON.
+    for family in [
+        "Liveness",
+        "Throughput",
+        "Cover-forward",
+        "Per-user observability",
+        "Attack signals",
+    ] {
+        assert!(
+            body.contains(family),
+            "must enumerate the {family:?} dashboard panel family"
+        );
+    }
+}
+
 #[test]
 fn readme_alerts_section_calls_out_headline_attack_signals() {
     let body = read_readme();
