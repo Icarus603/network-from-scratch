@@ -630,9 +630,38 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     } else if let Some(addr) = cfg.metrics_listen.as_ref() {
         if !crate::is_loopback(addr) {
-            r.push_warn(format!(
-                "metrics_listen={addr:?} is non-loopback but metrics_token_file is unset; /metrics is unauthenticated"
-            ));
+            // Iter-73: tier the severity. Wildcard bind without
+            // a token is a hard FAIL — anyone on the internet
+            // (cloud VPS deploy) can scrape /metrics, which
+            // exposes panic_count, session_count, allowlist_size,
+            // cover-forward rate, restart history, TLS cert
+            // expiry — an attack-prep inventory of the server's
+            // operational state. Other non-loopback binds stay
+            // WARN (operator may have a deliberate
+            // tunnel-interface monitoring setup).
+            let host = addr
+                .rsplit_once(':')
+                .map_or(addr.as_str(), |(h, _)| h);
+            let unbracketed = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            let is_wildcard = matches!(unbracketed, "0.0.0.0" | "::" | "");
+            if is_wildcard {
+                r.push_fail(format!(
+                    "metrics_listen={addr:?} binds the unauthenticated /metrics endpoint \
+                     to the wildcard interface. On a cloud VPS deploy, anyone on the \
+                     internet can scrape panic_count / session_count / allowlist_size / \
+                     cover-forward rate / restart history / TLS cert expiry — an attack-\
+                     prep inventory of your operational state. Either bind 127.0.0.1 \
+                     (and reach metrics via SSH tunnel) OR set metrics_token_file for \
+                     bearer-token auth."
+                ));
+            } else {
+                r.push_warn(format!(
+                    "metrics_listen={addr:?} is non-loopback but metrics_token_file is unset; /metrics is unauthenticated"
+                ));
+            }
         }
     }
 
@@ -1852,7 +1881,12 @@ mod tests {
     fn nonloopback_metrics_without_token_warns_but_passes() {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
-        cfg.metrics_listen = Some("0.0.0.0:9090".to_string());
+        // Iter-73: use a non-loopback NON-wildcard address.
+        // 0.0.0.0:9090 now escalates to FAIL (open-prep
+        // inventory exposure on cloud VPS); a LAN-interface
+        // bind stays WARN (operator may have a tunnel-
+        // interface monitoring setup).
+        cfg.metrics_listen = Some("192.168.1.100:9090".to_string());
         // metrics_token_file unset
         let report = preflight(&cfg);
         assert!(
@@ -1865,6 +1899,58 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c, Check::Warn(m) if m.contains("non-loopback"))),
             "expected a non-loopback warning: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-73: wildcard metrics_listen without a token → FAIL.
+    /// This is the cloud-VPS open-prep-inventory trap.
+    #[test]
+    fn iter73_wildcard_metrics_listen_without_token_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.metrics_listen = Some("0.0.0.0:9090".to_string());
+        // metrics_token_file unset
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "wildcard metrics_listen w/o token MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("metrics_listen") && s.contains("wildcard")
+            }
+            _ => false,
+        });
+        assert!(
+            fail,
+            "FAIL must call out 'wildcard' + provide a recovery hint: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-73: wildcard metrics_listen WITH a token → no FAIL
+    /// (bearer token gates access; the iter-65 token-strength
+    /// check covers token quality).
+    #[test]
+    fn iter73_wildcard_metrics_listen_with_token_no_fail() {
+        let dir = tmpdir();
+        let token_path = dir.join("metrics.token");
+        write(
+            &token_path,
+            b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n",
+        );
+        let mut cfg = minimal_cfg(&dir);
+        cfg.metrics_listen = Some("0.0.0.0:9090".to_string());
+        cfg.metrics_token_file = Some(token_path);
+        let report = preflight(&cfg);
+        let wildcard_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("metrics_listen") && s.contains("wildcard"),
+            _ => false,
+        });
+        assert!(
+            !wildcard_fail,
+            "wildcard + token must NOT FAIL the iter-73 check: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

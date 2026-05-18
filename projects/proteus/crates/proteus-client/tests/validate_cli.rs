@@ -957,6 +957,61 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-73: admin_listen wildcard escalation ----------
+
+/// Iter-73: admin_listen on 0.0.0.0 → FAIL (open-prep
+/// inventory exposure). The admin endpoint has NO auth and
+/// exposes /status, /healthz, /metrics with operational state
+/// — CarrierHealth, EndpointPool topology, per-endpoint dial
+/// counters, cert expiry. A scanner gets the full HA inventory.
+#[tokio::test]
+async fn iter73_admin_listen_wildcard_fails() {
+    let dir = tempdir("admin-wildcard");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         admin_listen: \"0.0.0.0:9091\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    eprintln!("admin-wildcard report:\n{report}");
+    assert!(
+        report.has_failures(),
+        "admin_listen=0.0.0.0 MUST FAIL: {report}"
+    );
+    let fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("admin_listen") && s.contains("wildcard"),
+        _ => false,
+    });
+    assert!(fail, "FAIL must name 'wildcard': {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-73: admin_listen on a tunnel-interface IP stays WARN
+/// (operator may deliberately bind WireGuard/Tailscale IP
+/// for cross-device monitoring).
+#[tokio::test]
+async fn iter73_admin_listen_lan_bind_warns() {
+    let dir = tempdir("admin-lan");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         admin_listen: \"192.168.1.100:9091\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("admin_listen") && s.contains("NON-loopback")
+        }
+        _ => false,
+    });
+    assert!(warn, "LAN bind must WARN: {report}");
+    assert!(
+        !report.has_failures(),
+        "LAN bind must NOT escalate to FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-71: socks_listen open-proxy detection ----------
 
 /// Operator-trap: socks_listen on 0.0.0.0 makes the entire

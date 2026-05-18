@@ -370,9 +370,16 @@ pub async fn run(path: &Path) -> PreflightReport {
         ));
     }
 
-    // admin_listen is operator-opt-in; validate the format and warn
-    // when a non-loopback bind is configured (matches the runtime
-    // warn! line so operators see the same caution at preflight time).
+    // admin_listen is operator-opt-in; validate the format and
+    // warn/fail when a non-loopback bind is configured.
+    //
+    // Iter-73: tiered severity matching iter-71's socks_listen
+    // escalation. Wildcard binds are FAIL (anyone on the
+    // internet for a cloud VPS deploy can scrape Carrier /
+    // EndpointPool state — an inventory of the operator's HA
+    // topology + per-endpoint failure rates is a useful
+    // attack-prep signal); other non-loopback binds stay WARN
+    // (tunnel-interface sharing is a legitimate edge case).
     if let Some(admin_addr) = cfg.admin_listen.as_deref() {
         match parse_host_port(admin_addr) {
             Some((host, _port)) => {
@@ -380,14 +387,30 @@ pub async fn run(path: &Path) -> PreflightReport {
                 // (the conventional `127.0.0.1` and oddballs like
                 // `127.0.0.99` that bind to loopback), IPv6 `::1`, and
                 // the literal `localhost` (system resolver maps to
-                // loopback on every sensible system). Wildcard binds
-                // (`0.0.0.0`, `::`, empty) are flagged non-loopback.
-                let loopback_ip = host
+                // loopback on every sensible system).
+                let unbracketed = host
+                    .strip_prefix('[')
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(host);
+                let loopback_ip = unbracketed
                     .parse::<std::net::IpAddr>()
                     .is_ok_and(|ip| ip.is_loopback());
-                let is_loopback = loopback_ip || host.eq_ignore_ascii_case("localhost");
+                let is_loopback = loopback_ip || unbracketed.eq_ignore_ascii_case("localhost");
+                let is_wildcard = matches!(unbracketed, "0.0.0.0" | "::" | "");
                 if is_loopback {
                     r.push_pass(format!("admin_listen = {admin_addr} (loopback, no auth)"));
+                } else if is_wildcard {
+                    r.push_fail(format!(
+                        "admin_listen = {admin_addr} binds the admin endpoint to the \
+                         wildcard interface. The endpoint has NO authentication; on a \
+                         cloud VPS deploy, anyone on the internet can scrape \
+                         /status, /healthz, /metrics — revealing your in-process \
+                         CarrierHealth, EndpointPool topology, per-endpoint dial \
+                         counters, and TLS-cert expiry timeline. This is an \
+                         attack-prep inventory of your HA topology. Bind 127.0.0.1 / \
+                         [::1] (or an explicit tunnel-interface IP for legitimate \
+                         cross-device monitoring)."
+                    ));
                 } else {
                     r.push_warn(format!(
                         "admin_listen = {admin_addr} is NON-loopback. The endpoint has no \
