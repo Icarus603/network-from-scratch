@@ -23,7 +23,7 @@ use proteus_transport_alpha::access_log::{AccessLogHandle, AccessLogRecord};
 use proteus_transport_alpha::metrics::ServerMetrics;
 use proteus_transport_alpha::outbound_filter::{Decision, OutboundPolicy};
 use proteus_transport_alpha::session::AlphaSession;
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
@@ -465,7 +465,31 @@ where
             "upstream TCP_USER_TIMEOUT failed (proceeding — actively-sending socket may hold FD for ~15min on wedged peer)"
         );
     }
-    let (mut up_r, mut up_w) = upstream.into_split();
+    let (mut up_r, up_w_raw) = upstream.into_split();
+    // Iter-62: wrap upstream writer in a 64 KiB BufWriter to
+    // coalesce small Proteus records into single TCP write
+    // syscalls.
+    //
+    // Pre-iter-62 every `receiver.recv_record()` result became
+    // its own `up_w.write_all(&buf)` syscall on the upstream
+    // socket. For traffic shapes that ship many small records
+    // (HTTP/2 control frames at ~9 bytes each, MQTT keepalives,
+    // SSH keystrokes) this was N syscalls per round-trip — Hy2 /
+    // TUIC5 use sndbuf-side coalescing to avoid the per-write
+    // syscall + kernel TX path cost.
+    //
+    // 64 KiB matches the AlphaSender::TX_BUF_CAPACITY on the
+    // OTHER direction (upstream→client) so the coalescing
+    // budget is symmetric: a Proteus record fills the BufWriter
+    // cleanly and consecutive full reads coalesce on both legs.
+    //
+    // We flush adaptively (matching the upstream→client
+    // direction): only when the inbound record is shorter than
+    // the BufWriter capacity, indicating a natural batch
+    // boundary. A record at exactly BufWriter capacity implies
+    // more inbound bytes may be queued at the source — coalesce
+    // by skipping the flush.
+    let mut up_w = BufWriter::with_capacity(64 * 1024, up_w_raw);
 
     // Bidirectional pump. Each direction is independently bounded by
     // `cfg.idle_timeout`: a direction that goes idle longer than this
@@ -520,10 +544,25 @@ where
                     // mid-write, we still finish this one buffer so the
                     // upstream sees a consistent stream boundary, but
                     // the next iteration tears down.
+                    let buf_len = buf.len();
                     let new_total = bytes_c2u
-                        .fetch_add(buf.len() as u64, std::sync::atomic::Ordering::Relaxed)
-                        + buf.len() as u64;
+                        .fetch_add(buf_len as u64, std::sync::atomic::Ordering::Relaxed)
+                        + buf_len as u64;
                     if up_w.write_all(&buf).await.is_err() {
+                        set_reason(&reason_c2u, "upstream_write_fail");
+                        break;
+                    }
+                    // Iter-62: adaptive flush. If this record is
+                    // smaller than the BufWriter capacity (64 KiB),
+                    // it's a natural batch boundary — flush so the
+                    // upstream sees the bytes without waiting for
+                    // another record to pack them. If the record
+                    // is exactly capacity-sized, more bytes may
+                    // be in flight — coalesce by skipping the
+                    // flush and letting BufWriter accumulate.
+                    // Mirrors the upstream→client adaptive flush
+                    // semantics (line ~618).
+                    if buf_len < 64 * 1024 && up_w.flush().await.is_err() {
                         set_reason(&reason_c2u, "upstream_write_fail");
                         break;
                     }
