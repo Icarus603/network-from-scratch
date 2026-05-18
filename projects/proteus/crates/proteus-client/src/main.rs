@@ -61,9 +61,21 @@ enum Cmd {
     /// Exit code 0 on green, 1 on any FAIL — suitable for CI / Ansible
     /// pre-deploy gates.
     Validate {
-        /// Path to the YAML file to validate. Positional, like the
-        /// server-side `proteus-server validate <path>`.
-        path: PathBuf,
+        /// Iter-132: named --config flag, EXACTLY mirroring the
+        /// server-side `proteus-server validate --config <path>`.
+        /// Pre-iter-132 the client took ONLY a positional argument
+        /// while the server took ONLY --config; the deploy
+        /// README's 5-command preflight gate (and every operator
+        /// muscle memory built around it) used --config on both
+        /// sides, which silently failed on the client with clap
+        /// exit 2 + "unexpected argument '--config'".
+        #[arg(long, conflicts_with = "path")]
+        config: Option<PathBuf>,
+        /// Positional path. Backward-compat — pre-iter-132
+        /// callers using `proteus-client validate <path>` keep
+        /// working unchanged. New scripts should prefer --config
+        /// for symmetry with the server side.
+        path: Option<PathBuf>,
     },
     /// Query a running `proteus-client`'s admin endpoint for the
     /// in-process health snapshot (CarrierHealth + EndpointPool
@@ -233,8 +245,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.cmd {
         Cmd::Keygen { out, force } => keygen::run_with_force(&out, force)?,
         Cmd::Run { config } => run(&config).await?,
-        Cmd::Validate { path } => {
-            let code = proteus_client::validate::cli_run(&path).await?;
+        Cmd::Validate { config, path } => {
+            // Iter-132: accept either --config or positional path.
+            // Exactly one must be provided. clap's
+            // `conflicts_with = "path"` on the `config` field
+            // already prevents BOTH simultaneously; here we
+            // handle the "neither" case with an exit-2 usage
+            // error that names both supported forms.
+            let resolved = match (config, path) {
+                (Some(p), None) | (None, Some(p)) => p,
+                (None, None) => {
+                    eprintln!(
+                        "error: proteus-client validate requires the config path. \
+                         Pass either `--config <path>` (symmetric with \
+                         `proteus-server validate --config <path>`) or a positional \
+                         `<path>` argument (backward-compat with pre-iter-132 \
+                         scripts)."
+                    );
+                    std::process::exit(2);
+                }
+                (Some(_), Some(_)) => unreachable!(
+                    "clap conflicts_with should have rejected this combination"
+                ),
+            };
+            let code = proteus_client::validate::cli_run(&resolved).await?;
             std::process::exit(code);
         }
         Cmd::Status { url, format } => status_cmd(&url, &format).await?,

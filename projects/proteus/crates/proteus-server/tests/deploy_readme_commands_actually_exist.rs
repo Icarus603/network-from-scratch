@@ -396,3 +396,50 @@ fn iter124_project_readme_does_not_reintroduce_phantom_host_preflight() {
         );
     }
 }
+
+/// Iter-132: the `validate` subcommand must accept `--config <path>`
+/// on BOTH binaries. Pre-iter-132 the client took only a positional
+/// path while the server took only --config — the deploy
+/// README's 5-command preflight gate used --config on both sides,
+/// silently failing on the client with clap exit 2.
+///
+/// The iter-123 executable-contract test missed this because it
+/// only invoked `--help` on each subcommand chain; `--help` short-
+/// circuits clap's per-subcommand flag parser, so a subcommand
+/// can ship with broken arg shapes and still pass the help-only
+/// check. This test goes one level deeper: it invokes
+/// `validate --config /tmp/does-not-exist.yaml` on both binaries
+/// and asserts neither exits with 2 (= clap rejected) and neither
+/// stderr contains "unexpected argument '--config'".
+///
+/// `--config` for a non-existent path will produce exit 1 ("file
+/// not found / yaml parse failed"), which is fine — what we're
+/// pinning is the CLAP-level acceptance of the flag.
+#[test]
+fn iter132_validate_dash_dash_config_works_on_both_binaries() {
+    let client_bin = client_bin_path();
+    let client_bin_str = client_bin.to_string_lossy().into_owned();
+    for (label, bin_path) in [
+        ("proteus-server", SERVER_BIN),
+        ("proteus-client", client_bin_str.as_str()),
+    ] {
+        let output = std::process::Command::new(bin_path)
+            .args(["validate", "--config", "/tmp/iter132-does-not-exist.yaml"])
+            .output()
+            .expect("spawn binary");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_ne!(
+            output.status.code(),
+            Some(2),
+            "{label} validate --config <path> must NOT be rejected by clap; \
+             pre-iter-132 the client rejected it as 'unexpected argument'. \
+             This is the iter-122 deploy/README.md preflight gate form, so \
+             a regression here breaks every operator deploy. stderr={stderr}"
+        );
+        assert!(
+            !stderr.contains("unexpected argument '--config'"),
+            "{label} stderr must not contain 'unexpected argument --config'; \
+             stderr={stderr}"
+        );
+    }
+}

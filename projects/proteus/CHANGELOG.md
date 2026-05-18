@@ -15,6 +15,43 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-client validate` rejected the canonical `--config` form (iter-132)
+
+The iter-122 deploy/README.md mandatory preflight gate calls
+`proteus-client validate --config ~/.proteus/client.yaml` — same
+shape as the server side. Pre-iter-132 the client took ONLY a
+positional `<path>` argument (`proteus-client validate <path>`),
+so the gate command failed at clap with exit 2 + "unexpected
+argument '--config'". The deploy README's flagship preflight
+recipe was silently broken for every operator who copy-pasted
+it. Same impact class as iter-123 (phantom subcommand), but on
+the per-subcommand flag-shape axis.
+
+The iter-123 executable-contract test missed this because it
+only invoked `--help` on each subcommand chain — `--help` short-
+circuits clap's per-subcommand flag parser, so a subcommand can
+ship with broken arg shapes and still pass the help-only check.
+Iter-132 fixes both halves:
+
+- **Client CLI**: `validate` now accepts EITHER `--config <path>`
+  (mirroring the server side) OR a positional `<path>`
+  (backward-compat with pre-iter-132 scripts). `conflicts_with`
+  prevents using both simultaneously. No-arg invocation produces
+  exit 2 + an actionable error naming both supported forms.
+- **Stronger backstop**: new
+  `iter132_validate_dash_dash_config_works_on_both_binaries` test
+  in `deploy_readme_commands_actually_exist.rs` directly invokes
+  `validate --config /tmp/does-not-exist.yaml` on BOTH binaries
+  and asserts neither exits with 2 (clap rejected). 5 narrower
+  tests in `crates/proteus-client/tests/iter132_validate_config_flag_symmetry.rs`
+  pin each form individually + the canonical preflight-gate
+  recipe exact-match form.
+
+This closes a documentation-gap class the iter-123 surface-level
+contract couldn't catch — the contract now verifies not just
+"does the subcommand exist?" but also "does the documented flag
+shape parse?".
+
 ### Added — Key rotation runbooks for the iter-130 anti-clobber behavior (iter-131)
 
 Iter-130 made all key-emitting CLIs refuse to overwrite by default,
