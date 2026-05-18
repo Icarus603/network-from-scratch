@@ -64,7 +64,45 @@ use rand_core::{OsRng, RngCore};
 /// 0644 then we tighten). Operators concerned about this window
 /// can run from inside `umask 0177` which makes the initial
 /// create 0600.
+///
+/// **Anti-clobber** (iter-130): refuses to overwrite an existing
+/// file at `out_path` by default. Pre-iter-130 this function
+/// silently clobbered any file at the target path with the new
+/// PSK + 0600 mode — a fat-fingered `--out /etc/passwd` would
+/// have been a real disaster. Callers wanting to deliberately
+/// rotate must use [`run_with_force`].
+// `run` is the no-force convenience wrapper kept as a stable
+// lib surface for tests + future callers. The `proteus-server`
+// binary calls `run_with_force` directly so it can wire the
+// `--force` CLI flag.
+#[allow(dead_code)]
 pub fn run(out_path: &Path) -> Result<[u8; KNOCK_PSK_LEN], Box<dyn std::error::Error>> {
+    run_with_force(out_path, false)
+}
+
+/// Iter-130: same as [`run`] but with explicit `force` flag.
+/// `force=true` mirrors the pre-iter-130 behavior (silent
+/// overwrite) for the deliberate-rotation case driven by the
+/// CLI `--force` flag.
+pub fn run_with_force(
+    out_path: &Path,
+    force: bool,
+) -> Result<[u8; KNOCK_PSK_LEN], Box<dyn std::error::Error>> {
+    if !force && out_path.exists() {
+        return Err(format!(
+            "refusing to overwrite existing file {}. The previous knock PSK \
+             is still in use by every client; clobbering it would \
+             immediately break every active session AND every future \
+             connect (clients would send knocks signed with the old PSK \
+             which the server would reject). If you ARE deliberately \
+             rotating: 1) pre-stage the new PSK to every client \
+             out-of-band, 2) re-run with `--force` to overwrite, \
+             3) cycle the server. If you're not rotating, pick a \
+             different `--out` path or remove the file first.",
+            out_path.display()
+        )
+        .into());
+    }
     if let Some(parent) = out_path.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;

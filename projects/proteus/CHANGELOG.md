@@ -15,6 +15,57 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — every key-emitting CLI silently clobbered existing files (iter-130)
+
+Pre-iter-130 the four key-emitting subcommands (`proteus-server
+keygen` / `gencert` / `knock-keygen`, `proteus-client keygen`)
+silently overwrote whatever was at the target path:
+
+- **`knock-keygen` was the worst**: it took a single `--out
+  <file>` and silently replaced any file at that path with a
+  32-byte PSK + mode 0600 lockdown. An operator fat-fingering
+  `--out /etc/passwd` would have a real disaster on their hands
+  (file replaced + locked to mode 0600).
+- **`keygen`** could half-clobber a production server identity
+  bundle (regenerating `server_lt.mlkem768.pk` would make the
+  new fingerprint mismatch every client's `server.pq.fingerprint`
+  pin → "fingerprint mismatch" on the very next connect).
+- **`gencert`** would silently replace `fullchain.pem` and
+  `privkey.pem`, breaking every in-flight TLS handshake AND every
+  new one (if the rotation failed mid-write, the cert and key
+  would be cryptographically unrelated).
+- **Client `keygen`** would silently overwrite the long-term
+  client identity; the new `client.ed25519.pk` would not be on
+  the server allowlist → every handshake fails with "unknown
+  client_id" and the operator has no way back to the old
+  identity (the SK is gone).
+
+Iter-130 makes every key-emitting subcommand **refuse to
+overwrite by default**. New `--force` flag on each command opts
+into deliberate rotation. Refusal returns exit 1 + an actionable
+error message explaining:
+1. WHAT will break if the overwrite proceeds (so the operator
+   understands the blast radius before re-running with `--force`),
+2. HOW to actually rotate safely (pre-distribute new key
+   out-of-band → re-run with `--force` → cycle the server),
+3. The alternative ("pick a different `--out` directory or
+   remove the file first").
+
+Belt-and-braces: each module exposes both `run()` (no-force,
+stable lib surface) and `run_with_force(force: bool)` so future
+callers can't bypass the gate by going around `main.rs`. Atomic
+guarantee: rejected calls touch NO files — verified by an
+integration test that captures the existing file's bytes before
+the refused call and asserts byte-for-byte equality after.
+gencert specifically refuses if EITHER `fullchain.pem` OR
+`privkey.pem` exists (the pair must be replaced atomically; a
+single-side overwrite would leave the cert and key
+cryptographically unrelated).
+
+9 new integration tests (7 server + 2 client). All existing
+keygen / gencert / knock-keygen tests still pass (they use
+fresh tmpdirs).
+
 ### Fixed — `proteus-server gencert` minted broken certs from any garbage SAN string (iter-129)
 
 Pre-iter-129 `proteus-server gencert --dns-name <anything>` silently

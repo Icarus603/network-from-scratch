@@ -18,7 +18,55 @@ use proteus_crypto::key_schedule;
 use rand_core::OsRng;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 
+#[allow(dead_code)] // stable lib surface; binary calls run_with_force
 pub fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_force(out_dir, false)
+}
+
+/// Iter-130: same as [`run`] but with explicit `force` flag.
+/// `force=true` mirrors the pre-iter-130 behavior (overwrite any
+/// existing key file). `force=false` (the default for the CLI)
+/// refuses if ANY of the 6 bundle files exists at the target path
+/// — preventing the operator from accidentally re-running keygen
+/// over a production key bundle. The keys MUST be replaced as a
+/// set (mlkem_sk + mlkem_pk + fingerprint + x25519_sk + x25519_pk
+/// are cryptographically bound together) so even a partial
+/// overwrite of one file would corrupt the bundle.
+pub fn run_with_force(
+    out_dir: &Path,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Iter-130: pre-check all 6 target paths. If ANY exists and
+    // !force, refuse before generating any new keys.
+    let targets = [
+        out_dir.join("server_lt.mlkem768.pk"),
+        out_dir.join("server_lt.mlkem768.sk"),
+        out_dir.join("server_lt.pq.fingerprint"),
+        out_dir.join("server_lt.x25519.pk"),
+        out_dir.join("server_lt.x25519.sk"),
+        out_dir.join("README"),
+    ];
+    if !force {
+        for p in &targets {
+            if p.exists() {
+                return Err(format!(
+                    "refusing to overwrite existing key file {}. The current \
+                     server identity bundle is in active use — every client's \
+                     `server.pq.fingerprint` pin would mismatch the new \
+                     mlkem768.pk and reject the handshake with \
+                     'fingerprint mismatch' on the very next connect. If you \
+                     ARE deliberately rotating: 1) pre-distribute the new \
+                     fingerprint to every client (out-of-band), 2) re-run \
+                     with `--force` to overwrite, 3) restart the server. If \
+                     you're not rotating, pick a different `--out` directory \
+                     (the bundle keys must be co-located so don't try to \
+                     hand-merge into an existing dir).",
+                    p.display()
+                )
+                .into());
+            }
+        }
+    }
     fs::create_dir_all(out_dir)?;
     let mut rng = OsRng;
 

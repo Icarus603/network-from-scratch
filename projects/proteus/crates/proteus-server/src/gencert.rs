@@ -103,19 +103,52 @@ pub fn validate_dns_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[allow(dead_code)] // stable lib surface; binary calls run_with_force
 pub fn run(dns_name: &str, out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    run_with_force(dns_name, out_dir, false)
+}
+
+/// Iter-130: same as [`run`] but with explicit `force` flag.
+pub fn run_with_force(
+    dns_name: &str,
+    out_dir: &Path,
+    force: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Iter-129: belt-and-braces. The CLI dispatcher in main.rs
     // calls validate_dns_name() up front (so it can exit 2 on
     // operator error), but we re-check here so any other caller
     // (a future test, a future scripting hook) can't bypass the
     // gate by going straight to gencert::run().
     validate_dns_name(dns_name).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let cert_path = out_dir.join("fullchain.pem");
+    let key_path = out_dir.join("privkey.pem");
+    // Iter-130: refuse to overwrite either cert OR key. The pair
+    // must be replaced atomically (mismatch breaks every TLS
+    // handshake); refusing on EITHER existence avoids the
+    // half-replaced state.
+    if !force {
+        for p in [&cert_path, &key_path] {
+            if p.exists() {
+                return Err(format!(
+                    "refusing to overwrite existing TLS file {}. The current \
+                     cert+key pair MUST be replaced atomically (a half-replaced \
+                     state breaks every TLS handshake mid-rotation). Options: \
+                     1) `--force` if you're deliberately re-minting (every \
+                     active TLS session keeps its old cert, only new sessions \
+                     use the new cert — zero-downtime rotation), 2) remove \
+                     {} AND {} first, 3) pick a different `--out` directory.",
+                    p.display(),
+                    cert_path.display(),
+                    key_path.display()
+                )
+                .into());
+            }
+        }
+    }
     fs::create_dir_all(out_dir)?;
     let ck = rcgen::generate_simple_self_signed(vec![dns_name.to_string()])?;
     let cert_pem = ck.cert.pem();
     let key_pem = ck.key_pair.serialize_pem();
-    let cert_path = out_dir.join("fullchain.pem");
-    let key_path = out_dir.join("privkey.pem");
     fs::write(&cert_path, cert_pem)?;
     fs::write(&key_path, key_pem)?;
     #[cfg(unix)]

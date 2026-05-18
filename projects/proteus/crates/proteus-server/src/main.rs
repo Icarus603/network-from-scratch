@@ -51,6 +51,14 @@ enum Cmd {
         /// Output directory for keys.
         #[arg(long, default_value = "./keys")]
         out: PathBuf,
+        /// Iter-130: refuse to overwrite existing key files by
+        /// default. Pass `--force` to deliberately rotate (the
+        /// old keys are LOST — make sure you have a backup or
+        /// don't care about losing existing connections). Default
+        /// false keeps the operator from accidentally clobbering
+        /// production keys by re-running the bootstrap command.
+        #[arg(long, default_value = "false")]
+        force: bool,
     },
     /// Generate a self-signed TLS certificate for `--dns-name`.
     ///
@@ -64,6 +72,10 @@ enum Cmd {
         /// Output directory.
         #[arg(long, default_value = "./keys/tls")]
         out: PathBuf,
+        /// Iter-130: refuse to overwrite existing cert files by
+        /// default. Pass `--force` to deliberately re-mint.
+        #[arg(long, default_value = "false")]
+        force: bool,
     },
     /// Mint a fresh 32-byte server-knock PSK and write it to
     /// `--out` with mode 0600. Operator distributes the SAME bytes
@@ -88,6 +100,17 @@ enum Cmd {
         /// a single key, not a bundle).
         #[arg(long, default_value = "/etc/proteus/keys/server.knock_psk")]
         out: PathBuf,
+        /// Iter-130: refuse to overwrite an existing PSK file by
+        /// default. Pre-iter-130 knock-keygen silently clobbered
+        /// whatever was at the target path — any file, with mode
+        /// 0600 lockdown afterwards. An operator who fat-fingered
+        /// the path (`--out /etc/passwd`) would have a real
+        /// disaster on their hands. Pass `--force` to deliberately
+        /// rotate (every client must re-receive the new PSK or
+        /// they STOP CONNECTING — make sure your distribution
+        /// channel is ready).
+        #[arg(long, default_value = "false")]
+        force: bool,
     },
     /// Start the server.
     Run {
@@ -390,8 +413,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Keygen { out } => keygen::run(&out)?,
-        Cmd::Gencert { dns_name, out } => {
+        Cmd::Keygen { out, force } => keygen::run_with_force(&out, force)?,
+        Cmd::Gencert { dns_name, out, force } => {
             // Iter-129: gate --dns-name at parse time + exit 2 on
             // operator error (not exit 1 = "the tool itself
             // failed"). exit 2 matches the clap-style "usage
@@ -401,10 +424,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 eprintln!("error: {msg}");
                 std::process::exit(2);
             }
-            gencert::run(&dns_name, &out)?;
+            gencert::run_with_force(&dns_name, &out, force)?;
         }
-        Cmd::KnockKeygen { out } => {
-            knock_keygen::run(&out)?;
+        Cmd::KnockKeygen { out, force } => {
+            knock_keygen::run_with_force(&out, force)?;
         }
         Cmd::Run { config } => run(&config).await?,
         Cmd::Validate { config } => {

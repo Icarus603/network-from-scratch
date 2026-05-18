@@ -43,6 +43,13 @@ enum Cmd {
     Keygen {
         #[arg(long, default_value = "./keys/client")]
         out: PathBuf,
+        /// Iter-130: refuse to overwrite existing key files by
+        /// default. Pass `--force` to deliberately rotate (after
+        /// coordinating with the server admin — the new public
+        /// key MUST be allowlisted on the server side before the
+        /// client can authenticate again).
+        #[arg(long, default_value = "false")]
+        force: bool,
     },
     /// Run the SOCKS5 inbound + Proteus outbound.
     Run {
@@ -224,7 +231,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Keygen { out } => keygen::run(&out)?,
+        Cmd::Keygen { out, force } => keygen::run_with_force(&out, force)?,
         Cmd::Run { config } => run(&config).await?,
         Cmd::Validate { path } => {
             let code = proteus_client::validate::cli_run(&path).await?;
