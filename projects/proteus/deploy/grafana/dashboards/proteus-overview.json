@@ -577,6 +577,37 @@
       }
     },
     {
+      "id": 100,
+      "type": "timeseries",
+      "title": "Session lifecycle reaps (server)",
+      "description": "rate(proteus_session_idle_reaped_total[5m]) + rate(proteus_session_byte_budget_exhausted_total[5m]) — abnormal session-lifecycle terminations. Idle-reap > 0 sustained means many sessions hit the per-direction idle timeout without natural EOF (dead clients / dead upstreams / NAT-killed long-idle sessions). Byte-budget-exhausted > 0 sustained means many users are hitting the per-session cap (operator may need to raise max_session_bytes for legit users OR investigate abuse).",
+      "gridPos": {"x": 0, "y": 108, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_session_idle_reaped_total[5m])",
+          "refId": "idle",
+          "legendFormat": "idle-reaped/sec"
+        },
+        {
+          "expr": "rate(proteus_session_byte_budget_exhausted_total[5m])",
+          "refId": "byte_budget",
+          "legendFormat": "byte-budget-exhausted/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.1}
+            ]
+          }
+        }
+      }
+    },
+    {
       "id": 90,
       "type": "timeseries",
       "title": "AEAD integrity drops (server)",

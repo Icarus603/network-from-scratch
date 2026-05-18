@@ -125,6 +125,12 @@ fn known_metric_names() -> HashSet<&'static str> {
         "proteus_ratchets_total",
         "proteus_handshakes_failed_total",
         "proteus_handshakes_succeeded_total",
+        // Iter-103: session-lifecycle reaps panel surfaces the
+        // wedged-peer-class (high idle reap rate) and the
+        // byte-budget-pressure signals operators want for
+        // capacity planning.
+        "proteus_session_idle_reaped_total",
+        "proteus_session_byte_budget_exhausted_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling

@@ -143,6 +143,12 @@ fn every_documented_client_metric_has_at_least_one_alert() {
         "proteus_client_bootstrap_via_system_resolver_total",
         "proteus_client_pool_reload_attempts_total",
         "proteus_client_pool_reload_succeeded_total",
+        // Iter-101: client-side panic-hook counter. The
+        // ProteusClientPanic alert fires on rate > 0; if a
+        // future iteration drops the metric (or renames it
+        // via the panic-hook crate refactor) this test breaks
+        // loudly.
+        "proteus_panics_total",
     ]
     .into_iter()
     .collect();
