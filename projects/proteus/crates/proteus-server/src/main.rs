@@ -482,6 +482,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 interval_secs,
                 format,
             } => {
+                // Iter-117: reject negative / NaN / zero interval.
+                // The renderer has a guard (≤0 → 1.0) but the JSON
+                // output echoes the raw value verbatim, which
+                // breaks scripts that filter by it. Catch the bad
+                // value at the CLI boundary.
+                if !interval_secs.is_finite() || interval_secs <= 0.0 {
+                    eprintln!(
+                        "admin diff: interval_secs = {interval_secs} must be positive + \
+                         finite. The value is the wall-clock seconds between the two \
+                         scrapes; non-positive values produce divide-by-zero or \
+                         nonsense rates. Use a real value (typical 30s)."
+                    );
+                    std::process::exit(2);
+                }
                 let fmt: proteus_server::admin::OutputFormat = format.parse()?;
                 proteus_server::admin::run_diff(&before, &after, interval_secs, fmt)?;
             }
