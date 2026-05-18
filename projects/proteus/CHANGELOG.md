@@ -15,6 +15,51 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `deploy/README.md` documented non-existent subcommands (iter-123)
+
+Pre-iter-123 the deploy guide's mandatory preflight gate
+(iter-122) instructed operators to run
+`proteus-server host-preflight` and `proteus-client host-preflight`
+— neither subcommand exists. The real CLI shape is
+`proteus-server preflight check-host` (under the `preflight`
+umbrella, alongside `check-ip-reputation` + `all`) and
+`proteus-client check-host` (top-level, no umbrella). An operator
+following the gate would have hit clap exit 2 with
+"unrecognized subcommand 'host-preflight'" on step 2 of 5.
+
+Root cause was a missing executability assertion: the
+iter-118/120/122 README contract tests only grepped the README
+for the string `proteus-server host-preflight`, which passed
+trivially because the README contained the string — they couldn't
+distinguish aspiration from reality.
+
+Iter-123 fixes both halves:
+
+- **README**: rewrites the host-posture preflight section + the
+  5-command gate + the security-checklist gate to use the real
+  command names. Adds an explicit "asymmetric subcommand naming"
+  paragraph (server `preflight check-host` vs. client `check-host`)
+  so operators who skim and grep for "host-preflight" get a
+  signpost instead of clap exit 2.
+- **Source comments**: server `validate.rs` + client `validate.rs`
+  warn messages were pointing operators at the same phantom
+  command. All operator-facing warn text now references the real
+  subcommand names.
+- **CHANGELOG**: prior entries referencing the phantom commands
+  rewritten to the real names (history of "what we shipped" must
+  match what actually shipped).
+- **New backstop**:
+  `crates/proteus-server/tests/deploy_readme_commands_actually_exist.rs`
+  parses every fenced bash block in `deploy/README.md`, extracts
+  every `proteus-{server,client} <subcommand chain>`, and shells
+  out to the actual binary with `--help` on each. Any documented
+  command clap doesn't recognise FAILs the test with the full
+  list of broken invocations — string-grep tests can no longer
+  pin an aspirational contract. A narrow regression test
+  (`iter123_readme_does_not_reintroduce_phantom_host_preflight_subcommand`)
+  pins the specific `host-preflight` phantom so a future revert
+  fails CI immediately with a copy-pasteable explanation.
+
 ### Added — multi-VPS HA client (`server_endpoints:` pool)
 
 - `EndpointPool` + per-entry `EndpointHealth` with streak-based
@@ -40,9 +85,12 @@ below are organised by concern.
   - SNI consistency — pool entries with hostnames that diverge
     from `tls.server_name` (cert verification would fail at
     dispatch time); IP literals are correctly skipped.
-- `proteus-client host-preflight` now scans `server_endpoints:`
-  list entries for DNS resolvability (pre-iter-44 only the
-  primary `server_endpoint:` scalar was checked).
+- `proteus-client check-host` (the operator-facing CLI surface
+  for the client's host-posture preflight; the internal module
+  is named `host_preflight` for symmetry with the server side)
+  now scans `server_endpoints:` list entries for DNS
+  resolvability (pre-iter-44 only the primary `server_endpoint:`
+  scalar was checked).
 
 ### Added — observability (Prometheus + alerts + dashboard pentad)
 
@@ -327,8 +375,8 @@ silent-failure-at-deploy-time that was previously missed:
   the same diagnostic at preflight (was fatal-at-startup).
 - **Secret-key file mode warn** — Unix mode bits on `*_sk`
   files; group-or-other-readable → WARN with `chmod 0600`
-  hint (host-preflight is the FAIL gate for the same class;
-  validate is early-warning).
+  hint (`preflight check-host` is the FAIL gate for the same
+  class; validate is early-warning).
 - **Pool ↔ tls.server_name SNI consistency** — pool entries
   with hostnames diverging from `tls.server_name` → WARN
   (cert verification would fail at dispatch with no obvious

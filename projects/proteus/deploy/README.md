@@ -508,33 +508,44 @@ Suitable for CI / Ansible / Terraform pre-deploy gating. The
 preflight does NOT bind sockets or talk to the cover endpoint — it
 only verifies what can be verified locally.
 
-### Host-posture preflight (`host-preflight`)
+### Host-posture preflight (`preflight check-host` / `check-host`)
 
-`validate` checks the YAML + referenced files; `host-preflight`
-checks the HOST's posture (key file modes, DNS resolvability of
-hostname endpoints, urandom seeding, clock skew, trusted_ca
-readability). Run alongside `validate` for full coverage:
+`validate` checks the YAML + referenced files; the host-posture
+preflight checks the HOST's posture (key file modes, DNS
+resolvability of hostname endpoints, urandom seeding, clock skew,
+trusted_ca readability). Run alongside `validate` for full
+coverage. **Note the asymmetric subcommand naming**: the server
+binary exposes it under the `preflight` umbrella (one of three
+sub-checks; `preflight all` runs everything in one shot — see
+the next section), the client binary exposes it as a top-level
+`check-host` command (no umbrella — the client only has the one
+preflight surface):
 
 ```bash
-# Server
-sudo -u proteus proteus-server host-preflight --config /etc/proteus/server.yaml
+# Server — full preflight suite (IP reputation + host posture + JA4 fingerprint):
+sudo -u proteus proteus-server preflight all \
+    --config /etc/proteus/server.yaml \
+    --public-ip "$(curl -s https://api.ipify.org)"
 
-# Client (operator's laptop)
-proteus-client host-preflight --config ~/.proteus/client.yaml
+# Server — host posture only:
+sudo -u proteus proteus-server preflight check-host --config /etc/proteus/server.yaml
+
+# Client (operator's laptop) — host posture, top-level subcommand:
+proteus-client check-host --config ~/.proteus/client.yaml
 ```
 
-What `host-preflight` catches that `validate` doesn't:
+What the host-posture preflight catches that `validate` doesn't:
 
 - **Key file mode (0600 on Unix)** — a `rsync` without `-p` leaves
   PQ secret keys world-readable on the destination. `validate`
-  only checks the file exists; `host-preflight` FAILs on
+  only checks the file exists; `preflight check-host` FAILs on
   group-or-world readable.
 - **Hostname endpoint DNS resolvability** — `vps.example.com:8443`
   in `server_endpoint` typoed to `vps.exmple.com:8443` won't be
   caught by `validate` (it's a valid host:port string); the
-  client `host-preflight` does an actual DNS lookup.
+  client `check-host` does an actual DNS lookup.
 - **CA bundle PEM block presence** — `tls.trusted_ca` is a file
-  but `validate` doesn't parse the bytes; `host-preflight`
+  but `validate` doesn't parse the bytes; `preflight check-host`
   confirms there's at least one PEM block.
 
 ### Live handshake smoke (`connect-test`)
@@ -558,15 +569,15 @@ pool entry — without it operators only verify the primary,
 leaving HA backup entries unverified until first failover (the
 worst possible moment for a surprise).
 
-Three-command pre-deploy smoke checklist (gate every operator
+Five-command pre-deploy smoke checklist (gate every operator
 edit through this):
 
 ```bash
 proteus-server validate --config /etc/proteus/server.yaml || exit 1
-proteus-server host-preflight --config /etc/proteus/server.yaml || exit 1
+proteus-server preflight check-host --config /etc/proteus/server.yaml || exit 1
 # (on client laptop after the server is up:)
 proteus-client validate --config ~/.proteus/client.yaml || exit 1
-proteus-client host-preflight --config ~/.proteus/client.yaml || exit 1
+proteus-client check-host --config ~/.proteus/client.yaml || exit 1
 proteus-client connect-test --all-endpoints --config ~/.proteus/client.yaml || exit 1
 ```
 
@@ -834,10 +845,10 @@ below. Run on every deploy + every config edit:
 
 ```bash
 proteus-server validate --config /etc/proteus/server.yaml
-proteus-server host-preflight --config /etc/proteus/server.yaml
+proteus-server preflight check-host --config /etc/proteus/server.yaml
 # (on the client laptop, AFTER the server is up:)
 proteus-client validate --config ~/.proteus/client.yaml
-proteus-client host-preflight --config ~/.proteus/client.yaml
+proteus-client check-host --config ~/.proteus/client.yaml
 proteus-client connect-test --all-endpoints --config ~/.proteus/client.yaml
 ```
 

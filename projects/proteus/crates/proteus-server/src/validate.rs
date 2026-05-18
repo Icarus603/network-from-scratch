@@ -1779,7 +1779,7 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
             // the destination. Public PQ keys exposed to the
             // operator's user is bad; exposed to OTHER users on the
             // VPS (shared hosting / chroot escape) is catastrophic.
-            // `host-preflight` already catches this but many
+            // `preflight check-host` already catches this but many
             // operators only run `validate` before deploy — same
             // signal should fire there.
             //
@@ -1802,10 +1802,10 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
 ///   - Operators ship in containers with restricted process users
 ///     where loose modes are still safe in practice
 ///   - The runtime would happily start with a 0644 SK — emitting a
-///     hard FAIL would block deploys that the host-preflight WARN
-///     already flagged
-///   - `host-preflight` is the FAIL gate for this class; `validate`
-///     is the lighter early-warning surface
+///     hard FAIL would block deploys that the `preflight check-host`
+///     WARN already flagged
+///   - `preflight check-host` is the FAIL gate for this class;
+///     `validate` is the lighter early-warning surface
 #[cfg(unix)]
 fn check_secret_file_mode(report: &mut PreflightReport, label: &str, path: &Path) {
     use std::os::unix::fs::PermissionsExt;
@@ -1822,7 +1822,7 @@ fn check_secret_file_mode(report: &mut PreflightReport, label: &str, path: &Path
         report.push_warn(format!(
             "{label} {path:?} has mode {mode:#o} — group or world readable. \
              SECRET key exposure on shared hosts. Fix: `chmod 0600 {path:?}`. \
-             (validate emits a warn; the harder gate is `proteus-server host-preflight`.)"
+             (validate emits a warn; the harder gate is `proteus-server preflight check-host`.)"
         ));
     }
 }
@@ -3487,8 +3487,9 @@ mod tests {
     }
 
     /// Iter-52: secret key files with world-readable mode get a
-    /// WARN (not FAIL — same severity philosophy as host-preflight
-    /// gates this harder; validate is the early-warning surface).
+    /// WARN (not FAIL — same severity philosophy as
+    /// `preflight check-host` gates this harder; validate is the
+    /// early-warning surface).
     #[cfg(unix)]
     #[test]
     fn iter52_world_readable_secret_key_warns() {
@@ -3523,7 +3524,7 @@ mod tests {
             "world-readable SECRET key must WARN at validate: {report}"
         );
         // Must NOT escalate to FAIL — validate is early-warning,
-        // host-preflight is the hard gate.
+        // `preflight check-host` is the hard gate.
         assert!(
             !report.has_failures(),
             "iter-52 mode warn must NOT escalate to FAIL: {report}"

@@ -75,11 +75,21 @@ fn readme_documents_alerts_check_evaluator() {
     );
 }
 
-/// Iter-122: security checklist must promote the 5-command
+/// Iter-122/123: security checklist must promote the 5-command
 /// preflight gate to the top and reference the iter-118+/120
 /// commands explicitly. Pre-iter-122 the checklist had 9 ad-
 /// hoc items but no canonical preflight sequence; operators
 /// had to thread the deploy guide manually.
+///
+/// Iter-123 fix: the README originally documented
+/// `proteus-server host-preflight` / `proteus-client host-preflight`,
+/// but those subcommands do not exist — the real names are
+/// `proteus-server preflight check-host` (server) and
+/// `proteus-client check-host` (client). An operator copy-pasting
+/// the old recipe would hit "unrecognized subcommand" on the very
+/// first preflight call. The test now pins the REAL command names
+/// and `tests/deploy_readme_commands_actually_exist.rs` shells out
+/// to both binaries to prove each documented command is recognized.
 #[test]
 fn iter122_security_checklist_promotes_preflight_gate() {
     let body = read_readme();
@@ -92,9 +102,9 @@ fn iter122_security_checklist_promotes_preflight_gate() {
     // proteus-` gets a copy-pasteable recipe.
     for cmd in [
         "proteus-server validate",
-        "proteus-server host-preflight",
+        "proteus-server preflight check-host",
         "proteus-client validate",
-        "proteus-client host-preflight",
+        "proteus-client check-host",
         "proteus-client connect-test --all-endpoints",
     ] {
         assert!(
@@ -152,28 +162,42 @@ fn iter121_threat_surface_lists_operator_trap_class_defenses() {
     );
 }
 
-/// Iter-120: host-preflight + connect-test must be documented
-/// alongside validate so operators know the full pre-deploy
-/// smoke checklist.
+/// Iter-120 (revised iter-123): host-posture preflight +
+/// connect-test must be documented alongside validate so operators
+/// know the full pre-deploy smoke checklist.
+///
+/// Iter-123 fix: the original assertion `body.contains("proteus-server
+/// host-preflight")` passed because the README had the string, but
+/// the binary has no such subcommand — clap exits 2 with
+/// "unrecognized subcommand 'host-preflight'". The real CLI shape is
+/// `proteus-server preflight check-host` (under the `preflight`
+/// umbrella, alongside `check-ip-reputation` + `all`) and
+/// `proteus-client check-host` (top-level, no umbrella). The test
+/// now pins the REAL command names; the new
+/// `deploy_readme_commands_actually_exist.rs` integration test
+/// shells out to both binaries to prove every documented command is
+/// recognized.
 #[test]
 fn iter120_readme_documents_host_preflight_and_connect_test() {
     let body = read_readme();
     assert!(
         body.contains("### Host-posture preflight"),
-        "deploy/README.md must document the host-preflight subcommand"
+        "deploy/README.md must document the host-posture preflight subcommand"
     );
     assert!(
         body.contains("### Live handshake smoke"),
         "deploy/README.md must document the connect-test subcommand"
     );
-    // Both binaries' host-preflight commands shown.
+    // Both binaries' host-posture commands shown — using the REAL
+    // CLI names (iter-123 fix; the prior "host-preflight" strings
+    // were aspirational, not real).
     assert!(
-        body.contains("proteus-server host-preflight"),
-        "server-side host-preflight command must be shown"
+        body.contains("proteus-server preflight check-host"),
+        "server-side `preflight check-host` command must be shown"
     );
     assert!(
-        body.contains("proteus-client host-preflight"),
-        "client-side host-preflight command must be shown"
+        body.contains("proteus-client check-host"),
+        "client-side top-level `check-host` command must be shown"
     );
     // connect-test --all-endpoints shown (the recommended form
     // for multi-VPS HA deploys — iter-42).
@@ -185,6 +209,16 @@ fn iter120_readme_documents_host_preflight_and_connect_test() {
     assert!(
         body.contains("production ready") && body.contains("FAIL"),
         "must enumerate the 5-command pre-deploy checklist + pass/fail gate"
+    );
+    // Iter-123: the README MUST call out the asymmetric subcommand
+    // naming explicitly. Operators who skim the recipe and grep for
+    // "host-preflight" need a signpost that the server uses
+    // `preflight check-host` and the client uses bare `check-host`.
+    assert!(
+        body.contains("asymmetric subcommand naming"),
+        "must call out the asymmetric CLI naming (server `preflight check-host` \
+         vs. client `check-host`) so operators don't grep for a unified name \
+         that doesn't exist"
     );
 }
 

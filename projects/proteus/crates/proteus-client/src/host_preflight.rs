@@ -739,8 +739,11 @@ pub async fn cli_run(input: HostPreflightInput, format: &str) -> std::io::Result
     // Iter-115: validate format before running. Mirror of
     // iter-113/114 pattern — pre-iter-115 typos like
     // `--format jsno` silently fell through to text, breaking
-    // scripted `proteus-client host-preflight --format json |
-    // jq` consumers without operator-facing error.
+    // scripted `proteus-client check-host --format json | jq`
+    // consumers without operator-facing error. (The CLI surface
+    // is `proteus-client check-host`; the module is named
+    // `host_preflight` for symmetry with the server-side module
+    // — see iter-123 in CHANGELOG for why these don't match.)
     if format != "text" && format != "json" {
         eprintln!(
             "host-preflight: unknown --format {format:?} (expected 'text' or 'json')"
