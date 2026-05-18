@@ -168,6 +168,143 @@ fn iter126_beta_client_rejects_zero_runs() {
     );
 }
 
+// ─── iter-127: MTU + loss-pct range gates ──────────────────────
+
+#[test]
+fn iter127_beta_rejects_mtu_below_quic_floor() {
+    expect_exit_2_with(
+        &["beta", "--initial-mtu", "12"],
+        &["--initial-mtu = 12", "QUIC-realistic range", "[1200, 9000]"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_mtu_above_jumbo_ceiling() {
+    expect_exit_2_with(
+        &["beta", "--initial-mtu", "65535"],
+        &["--initial-mtu = 65535"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_zero_mtu_upper_bound() {
+    expect_exit_2_with(
+        &["beta", "--mtu-upper-bound", "0"],
+        &["--mtu-upper-bound = 0"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_upper_bound_below_initial() {
+    expect_exit_2_with(
+        &["beta", "--initial-mtu", "1400", "--mtu-upper-bound", "1300"],
+        &["--mtu-upper-bound", "< --initial-mtu", "can't probe upward"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_loss_pct_above_100() {
+    expect_exit_2_with(
+        &["beta", "--loss-pct", "150.0"],
+        &["--loss-pct = 150", "[0, 100]", "mathematically meaningless"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_negative_loss_pct() {
+    // clap parses `-5.0` as a flag; pass it via the `=` form so
+    // clap routes it to --loss-pct's value slot intact.
+    expect_exit_2_with(
+        &["beta", "--loss-pct=-5.0"],
+        &["--loss-pct = -5", "[0, 100]"],
+    );
+}
+
+#[test]
+fn iter127_beta_rejects_nan_loss_pct() {
+    expect_exit_2_with(
+        &["beta", "--loss-pct", "NaN"],
+        &["--loss-pct = NaN", "[0, 100]"],
+    );
+}
+
+#[test]
+fn iter127_beta_loss_pct_zero_is_valid() {
+    // 0 means "passthrough" — explicitly documented + supported.
+    let output = Command::new(BIN)
+        .args([
+            "beta",
+            "--loss-pct",
+            "0.0",
+            "--runs",
+            "1",
+            "--payload-mib",
+            "1",
+            "--total-timeout-secs",
+            "30",
+            "--connect-timeout-secs",
+            "5",
+        ])
+        .output()
+        .expect("spawn proteus-bench");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "--loss-pct 0 must NOT be rejected (it's the documented \
+         passthrough default); stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn iter127_beta_loss_pct_100_is_valid_at_boundary() {
+    // 100 = lose every packet. Useless for throughput, but
+    // legitimate for chaos/regression-testing how the bench
+    // reports connect-timeout outcomes. Must pass the gate
+    // (the bench will then fail with handshake timeout, which
+    // is the EXPECTED outcome the operator wanted to test).
+    let output = Command::new(BIN)
+        .args([
+            "beta",
+            "--loss-pct",
+            "100.0",
+            "--connect-timeout-secs",
+            "1",
+            "--total-timeout-secs",
+            "5",
+        ])
+        .output()
+        .expect("spawn proteus-bench");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "--loss-pct 100 must pass the parse gate (it's a valid \
+         chaos-test value, even if the bench then times out)"
+    );
+}
+
+#[test]
+fn iter127_beta_client_rejects_mtu_below_floor() {
+    expect_exit_2_with(
+        &[
+            "beta-client",
+            "--server-addr",
+            "127.0.0.1:1",
+            "--server-leaf-cert-hex",
+            "00",
+            "--server-mlkem-pk-hex",
+            "00",
+            "--server-x25519-pub-hex",
+            "00",
+            "--server-pq-fingerprint-hex",
+            "00",
+            "--initial-mtu",
+            "576",
+        ],
+        &["--initial-mtu = 576"],
+    );
+}
+
 // ─── positive value still works (regression guard) ─────────────
 
 #[test]

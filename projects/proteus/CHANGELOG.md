@@ -15,6 +15,34 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-bench` accepted unphysical MTU + loss-pct values (iter-127)
+
+Pre-iter-127, even after the iter-126 zero-arg gate, the bench
+still accepted unphysical MTU and loss-percentage values:
+
+- `--initial-mtu 12` → quinn-proto silently clamps to its internal
+  ~1200 floor; bench emits a JSON report with `mtu_init=12` echoed
+  back while running at 1200. Operator never learns the bench ran
+  at a different MTU than they asked for.
+- `--initial-mtu 65535` → same silent clamp behavior on the high side.
+- `--mtu-upper-bound 0` → upper-bound knob becomes a no-op; PMTU
+  probing can't go anywhere.
+- `--mtu-upper-bound 1300 --initial-mtu 1400` → ceiling below floor;
+  same silent no-op.
+- `--loss-pct 150.0` → bench runs with 100% loss, dies 5s later
+  with misleading "handshake timed out" message.
+- `--loss-pct -5.0` → bench runs with negative loss (mathematically
+  meaningless).
+- `--loss-pct NaN` → undefined behavior in netem forwarder math.
+
+Iter-127 adds `reject_out_of_range_mtu()` (range [1200, 9000] = RFC
+9000 §14 floor + jumbo-frame ceiling) and `reject_invalid_loss_pct()`
+(finite, [0.0, 100.0]) plus a coherence check that
+`--mtu-upper-bound ≥ --initial-mtu`. Boundary values that ARE
+valid (`--loss-pct 0` = passthrough, `--loss-pct 100` = chaos test)
+pass the gate — explicit boundary tests pin both. 10 new iter-127
+tests in `tests/iter126_zero_arg_rejection.rs`.
+
 ### Fixed — `proteus-bench` accepted zero-valued args, ran through, then failed mysteriously (iter-126)
 
 Pre-iter-126 `proteus-bench beta --connect-timeout-secs 0` ran

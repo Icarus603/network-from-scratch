@@ -315,6 +315,49 @@ fn reject_zero_usize(name: &str, value: usize, hint: &str) -> Result<(), String>
     Ok(())
 }
 
+/// Iter-127: MTU values must be in the QUIC-realistic range
+/// [576, 9000]. 576 is the IPv4 minimum any link must support;
+/// 9000 is jumbo-frame ceiling. quinn-proto silently clamps
+/// invalid values to its internal floor (1200 IIRC) so a typo
+/// like `--initial-mtu 12` produces a perfectly normal-looking
+/// JSON report with `mtu_init=12` echoed back — the operator
+/// never learns the bench actually ran at 1200.
+fn reject_out_of_range_mtu(name: &str, value: u16) -> Result<(), String> {
+    const QUIC_MIN: u16 = 1200; // RFC 9000 §14 hard floor
+    const PRACTICAL_MAX: u16 = 9000; // jumbo-frame ceiling
+    if !(QUIC_MIN..=PRACTICAL_MAX).contains(&value) {
+        return Err(format!(
+            "{name} = {value} is outside the QUIC-realistic range \
+             [{QUIC_MIN}, {PRACTICAL_MAX}] (RFC 9000 §14 floor + \
+             jumbo-frame ceiling). quinn-proto silently clamps invalid \
+             values to its internal default, so the bench would emit \
+             a JSON report echoing the bad number while running at a \
+             different MTU — useless. Pick a real path MTU."
+        ));
+    }
+    Ok(())
+}
+
+/// Iter-127: synthetic loss percentage gated to [0, 100]. The
+/// netem forwarder is documented to take 0 for passthrough (no
+/// forwarder spawned at all) so 0 IS valid; the trap is on the
+/// upper end — `--loss-pct 150.0` is accepted, then the bench
+/// silently runs with 100% loss and dies with the misleading
+/// "handshake timed out" message 5s later. Make the operator
+/// error visible at parse time.
+fn reject_invalid_loss_pct(value: f64) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=100.0).contains(&value) {
+        return Err(format!(
+            "--loss-pct = {value} is outside [0, 100] (percentage). \
+             Above 100 means 'lose more packets than exist', which is \
+             mathematically meaningless — the bench would silently drop \
+             every packet and report 'handshake timed out' 5s later \
+             with no hint that the operator picked a bad number."
+        ));
+    }
+    Ok(())
+}
+
 fn validate_soak_args(a: &SoakArgs) -> Result<(), String> {
     reject_zero_usize(
         "--clients",
@@ -387,6 +430,19 @@ fn validate_beta_args(a: &BetaArgs) -> Result<(), String> {
         "0-second total deadline = run aborts before any data \
          can flow",
     )?;
+    // Iter-127: MTU + loss-pct gates.
+    reject_out_of_range_mtu("--initial-mtu", a.initial_mtu)?;
+    reject_out_of_range_mtu("--mtu-upper-bound", a.mtu_upper_bound)?;
+    if a.mtu_upper_bound < a.initial_mtu {
+        return Err(format!(
+            "--mtu-upper-bound ({}) < --initial-mtu ({}). The ceiling \
+             must be ≥ the floor or quinn-proto can't probe upward at \
+             all; the bench would silently run at --initial-mtu and \
+             the upper-bound knob would be a no-op.",
+            a.mtu_upper_bound, a.initial_mtu
+        ));
+    }
+    reject_invalid_loss_pct(a.loss_pct)?;
     Ok(())
 }
 
@@ -416,6 +472,17 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
         a.total_timeout_secs,
         "0-second total deadline = run aborts before any data can flow",
     )?;
+    // Iter-127: MTU gates (no loss-pct knob on beta-client; the
+    // cross-host bench can't synthesise loss in-process).
+    reject_out_of_range_mtu("--initial-mtu", a.initial_mtu)?;
+    reject_out_of_range_mtu("--mtu-upper-bound", a.mtu_upper_bound)?;
+    if a.mtu_upper_bound < a.initial_mtu {
+        return Err(format!(
+            "--mtu-upper-bound ({}) < --initial-mtu ({}). The ceiling \
+             must be ≥ the floor or quinn-proto can't probe upward.",
+            a.mtu_upper_bound, a.initial_mtu
+        ));
+    }
     Ok(())
 }
 
