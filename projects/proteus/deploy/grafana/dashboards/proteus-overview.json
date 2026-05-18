@@ -577,6 +577,42 @@
       }
     },
     {
+      "id": 80,
+      "type": "timeseries",
+      "title": "Per-user abuse fires (server)",
+      "description": "rate(proteus_abuse_alerts_*_total[5m]) — three per-user abuse detectors (byte_budget / rate_limit / per_user_bandwidth). Steady-state should be flat zero. Sustained rate > 0 on any series fires ProteusAbuseAlerts{ByteBudget,RateLimit,Bandwidth} (WARN). Likely cause: credential compromised + attacker scripting heavy use with one user_id. Recovery: audit access_log for the offending user_id, rotate the affected ed25519 key.",
+      "gridPos": {"x": 0, "y": 76, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_abuse_alerts_byte_budget_total[5m])",
+          "refId": "byte_budget",
+          "legendFormat": "byte_budget"
+        },
+        {
+          "expr": "rate(proteus_abuse_alerts_rate_limit_total[5m])",
+          "refId": "rate_limit",
+          "legendFormat": "rate_limit"
+        },
+        {
+          "expr": "rate(proteus_abuse_alerts_per_user_bandwidth_total[5m])",
+          "refId": "bandwidth",
+          "legendFormat": "per_user_bandwidth"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.001}
+            ]
+          }
+        }
+      }
+    },
+    {
       "id": 70,
       "type": "timeseries",
       "title": "SSRF / outbound-filter rejections (server)",

@@ -108,6 +108,14 @@ fn known_metric_names() -> HashSet<&'static str> {
         // network attempts BEFORE waiting on the page-grade
         // ProteusSsrfAttemptsCatastrophic alert.
         "proteus_outbound_blocked_total",
+        // Iter-80: per-user abuse-fires dashboard panel surfaces
+        // the three abuse-detector rates as a single stacked
+        // chart. Operators see credential-compromise +
+        // attacker-scripting-bulk-use as it builds, not just at
+        // the alert page.
+        "proteus_abuse_alerts_byte_budget_total",
+        "proteus_abuse_alerts_rate_limit_total",
+        "proteus_abuse_alerts_per_user_bandwidth_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling
