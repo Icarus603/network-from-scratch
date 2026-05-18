@@ -804,6 +804,68 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
+    // Iter-96: periodic_self_test_failure_threshold sanity.
+    //
+    // The threshold = consecutive failures before draining the
+    // node from health/LB rotation. Operator foot-guns:
+    //   - 0 → effectively "drain on every failure" (no hysteresis;
+    //         single-blip drains the node, expensive symptom)
+    //   - >10 → so much hysteresis the operator never notices
+    //           real failures until a sustained outage
+    if let Some(t) = cfg.periodic_self_test_failure_threshold {
+        if t == 0 {
+            r.push_warn(
+                "periodic_self_test_failure_threshold = 0 — single transient blip \
+                 (RNG starvation, tokio scheduling hiccup, brief CPU pressure) \
+                 immediately drains the node from LB rotation. Symptom (re-add \
+                 latency) often dwarfs the cause (single blip). Recommended: 2 \
+                 (default; absorbs single blip, drains within 2× interval).",
+            );
+        } else if t > 10 {
+            r.push_warn(format!(
+                "periodic_self_test_failure_threshold = {t} (>10) is excessive \
+                 hysteresis. Operator won't notice real outages until {t} × \
+                 periodic_interval seconds of sustained failures — that's often \
+                 longer than the user-facing impact window. Recommended: 2-5.",
+            ));
+        }
+    }
+
+    // Iter-96: tls_cert_watcher_interval_secs sanity.
+    //
+    // 0 (default) means "watcher disabled" — operator uses
+    // SIGHUP-on-rotation instead. > 0 enables mtime polling.
+    // Foot-guns:
+    //   - 1-5  → stat() every 1-5s is wasteful even though
+    //            cheap; recommended ≥30s
+    //   - >3600 → cert rotation window > 1h means the
+    //             pre-rotation cert might expire before the
+    //             watcher picks up the new one
+    if let Some(t) = cfg.tls_cert_watcher_interval_secs {
+        if t == 0 {
+            // Explicit 0 = disabled; same as unset. PASS-with-
+            // note only (the watcher is a feature, not a
+            // required safety net).
+            r.push_pass(
+                "tls_cert_watcher_interval_secs = 0 — cert auto-reload watcher \
+                 disabled (operator uses SIGHUP on rotation)",
+            );
+        } else if t < 5 {
+            r.push_warn(format!(
+                "tls_cert_watcher_interval_secs = {t} (<5s) — the stat() polling \
+                 is cheap but every {t}s is wasteful. Recommended: 30-300s; cert \
+                 rotation tooling typically has 1+ minute granularity anyway.",
+            ));
+        } else if t > 3600 {
+            r.push_warn(format!(
+                "tls_cert_watcher_interval_secs = {t} (>1h) is excessive — if the \
+                 pre-rotation cert expires before the watcher picks up the new \
+                 one (worst case: {t}s after rotation), every new TLS handshake \
+                 fails. Recommended: 60-300s.",
+            ));
+        }
+    }
+
     // Iter-90: self-test knobs sanity.
     //
     // The startup self-test exercises crypto + relay paths
@@ -2306,6 +2368,76 @@ mod tests {
             matches!(c, Check::Warn(s) if s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"))
         });
         assert!(warn, "ack=500 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-96: periodic_self_test_failure_threshold = 0 → WARN.
+    #[test]
+    fn iter96_self_test_threshold_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.periodic_self_test_failure_threshold = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("periodic_self_test_failure_threshold = 0") && s.contains("blip"))
+        });
+        assert!(warn, "threshold=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-96: threshold > 10 → WARN (over-hysteresis).
+    #[test]
+    fn iter96_self_test_threshold_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.periodic_self_test_failure_threshold = Some(20);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("periodic_self_test_failure_threshold = 20") && s.contains("hysteresis"))
+        });
+        assert!(warn, "threshold=20 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-96: tls_cert_watcher_interval_secs = 0 → PASS (disabled is valid).
+    #[test]
+    fn iter96_cert_watcher_zero_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.tls_cert_watcher_interval_secs = Some(0);
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(s) if s.contains("tls_cert_watcher_interval_secs = 0") && s.contains("disabled"))
+        });
+        assert!(pass, "watcher=0 must PASS with note: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-96: watcher interval < 5 → WARN.
+    #[test]
+    fn iter96_cert_watcher_too_tight_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.tls_cert_watcher_interval_secs = Some(2);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("tls_cert_watcher_interval_secs = 2") && s.contains("wasteful"))
+        });
+        assert!(warn, "watcher=2 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-96: watcher interval > 1h → WARN.
+    #[test]
+    fn iter96_cert_watcher_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.tls_cert_watcher_interval_secs = Some(7200);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("tls_cert_watcher_interval_secs = 7200") && s.contains("rotation"))
+        });
+        assert!(warn, "watcher=7200 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
