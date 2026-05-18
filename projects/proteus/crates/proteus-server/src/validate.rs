@@ -912,11 +912,44 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
-    // Iter-86: per_user_bandwidth_rate sanity.
+    // Iter-86 + iter-95: per_user_bandwidth_rate sanity.
     //
     // Each knob has a runtime default; explicit zero/absurd
     // values silently degrade the detector.
     if let Some(bw) = cfg.per_user_bandwidth_rate.as_ref() {
+        // Iter-95: threshold_mb_per_sec sanity. 0 = detector
+        // wired but silent (documented "observability-only").
+        // Absurdly low values (1-5 MB/s) fire on any modern
+        // streaming workload (4K = 25 Mbps = 3.1 MB/s; HD
+        // Netflix ≈ 5 Mbps = 0.6 MB/s). Absurdly high values
+        // (>10 GB/s) never fire — operator probably set the
+        // wrong unit (bits vs bytes confusion).
+        if bw.threshold_mb_per_sec == 0 {
+            r.push_warn(
+                "per_user_bandwidth_rate.threshold_mb_per_sec = 0 — the detector is \
+                 wired (gauges emit) but no alert is ever raised. This is the \
+                 documented 'observability-only' mode. If you want enforcement, set \
+                 a positive threshold (typical: 10-100 MB/s; 50 is reasonable for \
+                 personal-VPN, 200+ for bandwidth-heavy use cases like media \
+                 servers).",
+            );
+        } else if bw.threshold_mb_per_sec < 5 {
+            r.push_warn(format!(
+                "per_user_bandwidth_rate.threshold_mb_per_sec = {} is very low. \
+                 4K streaming alone is ~3 MB/s; HD Netflix is ~0.6 MB/s; a single \
+                 user reading their email + watching Netflix will trip the threshold. \
+                 Recommended: ≥10 for personal-VPN.",
+                bw.threshold_mb_per_sec,
+            ));
+        } else if bw.threshold_mb_per_sec > 10_000 {
+            r.push_warn(format!(
+                "per_user_bandwidth_rate.threshold_mb_per_sec = {} (>10 GB/s) is \
+                 absurdly high — even at 100 Gbps line rate that's 12.5 GB/s. The \
+                 detector will likely never fire. Did you mean Mbps (bits) instead \
+                 of MB/s (bytes)? Recommended: ≤1000 for personal-VPN.",
+                bw.threshold_mb_per_sec,
+            ));
+        }
         if bw.window_secs == 0 {
             r.push_fail(
                 "per_user_bandwidth_rate.window_secs = 0 collapses the sliding-window \
@@ -2499,6 +2532,56 @@ mod tests {
             .filter(|c| matches!(c, Check::Fail(s) if s.contains("abuse_detector")))
             .collect();
         assert_eq!(fails.len(), 2, "both sub-blocks must fail independently: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-95: threshold_mb_per_sec = 0 → WARN (observability-only).
+    #[test]
+    fn iter95_bw_threshold_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 0\nmax_users: 1000\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("threshold_mb_per_sec = 0") && s.contains("observability-only"))
+        });
+        assert!(warn, "threshold=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-95: threshold_mb_per_sec < 5 → WARN (fires on
+    /// streaming).
+    #[test]
+    fn iter95_bw_threshold_too_low_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 2\nmax_users: 1000\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("threshold_mb_per_sec = 2") && s.contains("Netflix"))
+        });
+        assert!(warn, "threshold=2 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-95: threshold_mb_per_sec > 10000 → WARN
+    /// (unit-confusion).
+    #[test]
+    fn iter95_bw_threshold_absurd_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 50000\nmax_users: 1000\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("threshold_mb_per_sec = 50000") && s.contains("Mbps"))
+        });
+        assert!(warn, "threshold=50000 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
