@@ -1210,7 +1210,23 @@ async fn pump<R, W>(
     R: tokio::io::AsyncRead + Unpin + Send,
     W: tokio::io::AsyncWrite + Unpin + Send,
 {
-    let (mut sock_r, mut sock_w) = tokio::io::split(sock);
+    let (mut sock_r, sock_w_raw) = tokio::io::split(sock);
+    // Iter-63: wrap the SOCKS5 outbound writer in a 64 KiB
+    // BufWriter to coalesce small Proteus inbound records into
+    // single TCP write syscalls to the downstream local app.
+    //
+    // Pre-iter-63 every `receiver.recv_record()` result became
+    // its own `sock_w.write_all(&buf)` syscall. The same Hy2 /
+    // TUIC5 speed gap iter-62 fixed on the server-upstream side
+    // applies here on the client-downstream side: small Proteus
+    // records (HTTP/2 control frames at ~9 bytes, MQTT keepalives,
+    // SSH keystrokes) each spent a full TCP write syscall +
+    // kernel TX path traversal.
+    //
+    // 64 KiB matches AlphaSender::TX_BUF_CAPACITY (the inbound-
+    // side coalescing budget on the OTHER direction). Symmetric
+    // budgets on both legs.
+    let mut sock_w = tokio::io::BufWriter::with_capacity(64 * 1024, sock_w_raw);
     let client_to_server = async {
         // 64 KiB matches AlphaSender::TX_BUF_CAPACITY so a single
         // read can fill the BufWriter, and consecutive full reads
@@ -1247,7 +1263,18 @@ async fn pump<R, W>(
         loop {
             match receiver.recv_record().await {
                 Ok(Some(buf)) if !buf.is_empty() => {
+                    let buf_len = buf.len();
                     if sock_w.write_all(&buf).await.is_err() {
+                        break;
+                    }
+                    // Iter-63: adaptive flush, symmetric with the
+                    // upstream→client server-side direction. Flush
+                    // when the record is smaller than the BufWriter
+                    // capacity (natural batch boundary; downstream
+                    // wants the bytes without waiting for the next
+                    // record). Coalesce when the record is at
+                    // capacity — more inbound bytes likely queued.
+                    if buf_len < 64 * 1024 && sock_w.flush().await.is_err() {
                         break;
                     }
                 }
