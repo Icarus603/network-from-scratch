@@ -454,6 +454,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeout_secs,
                 format,
             } => {
+                // Iter-109: reject zero timeout (deadline-exceeded
+                // on every step → useless output). Same pattern as
+                // client iter-108 on connect-test.
+                if timeout_secs == 0 {
+                    eprintln!(
+                        "admin status: timeout_secs = 0 deadlines every step instantly. \
+                         Use a real value (default 5s, sensible range 1-30s)."
+                    );
+                    std::process::exit(2);
+                }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
                     None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
@@ -482,6 +492,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 interval_secs,
                 format,
             } => {
+                // Iter-109: reject zero timeout/interval. timeout=0
+                // deadlines every scrape; interval=0 spins the
+                // watch loop with no pause (100 % CPU + scrape
+                // storm against the server).
+                if timeout_secs == 0 {
+                    eprintln!(
+                        "admin watch: timeout_secs = 0 deadlines every scrape instantly. \
+                         Use a real value (sensible range 1-30s)."
+                    );
+                    std::process::exit(2);
+                }
+                if interval_secs == 0 {
+                    eprintln!(
+                        "admin watch: interval_secs = 0 spins the watch loop with no \
+                         pause, hammering the server with scrapes at 100% CPU. Use a \
+                         real value (sensible range 1-60s)."
+                    );
+                    std::process::exit(2);
+                }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
                     None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
@@ -501,6 +530,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 timeout_secs,
                 format,
             } => {
+                // Iter-109: reject zero timeout (same as Status).
+                if timeout_secs == 0 {
+                    eprintln!(
+                        "admin alerts-check: timeout_secs = 0 deadlines every step \
+                         instantly. Use a real value (sensible range 1-30s)."
+                    );
+                    std::process::exit(2);
+                }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
                     None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
