@@ -489,19 +489,34 @@ async fn http_get_async(url: &str, timeout: Duration) -> Result<String, AlertsCh
 /// loopback-by-default, no TLS). Returns `(host, port, path)`;
 /// path defaults to `/`.
 fn parse_http_url(url: &str) -> Result<(String, u16, String), AlertsCheckError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| AlertsCheckError::BadUrl(format!("only http:// supported: {url:?}")))?;
+    // Iter-116: actionable error messages mirroring the
+    // server-side parse_http_url + client main.rs version.
+    if url.starts_with("https://") {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "{url:?}: admin endpoint is HTTP-only (loopback-by-default; no TLS \
+             terminator between the operator and the binary). Use `http://`."
+        )));
+    }
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        AlertsCheckError::BadUrl(format!(
+            "{url:?}: missing `http://` scheme prefix. Expected `http://host:port[/path]`."
+        ))
+    })?;
     let (authority, path) = match rest.find('/') {
         Some(ix) => (&rest[..ix], rest[ix..].to_string()),
         None => (rest, "/".to_string()),
     };
-    let (host, port) = authority
-        .rsplit_once(':')
-        .ok_or_else(|| AlertsCheckError::BadUrl(format!("URL needs explicit :port: {url:?}")))?;
-    let port: u16 = port
-        .parse()
-        .map_err(|e| AlertsCheckError::BadUrl(format!("port parse: {e}")))?;
+    let (host, port) = authority.rsplit_once(':').ok_or_else(|| {
+        AlertsCheckError::BadUrl(format!(
+            "{url:?}: missing explicit `:port` — the admin endpoint has no default port. \
+             Example: `http://127.0.0.1:9091`."
+        ))
+    })?;
+    let port: u16 = port.parse().map_err(|_| {
+        AlertsCheckError::BadUrl(format!(
+            "{url:?}: port {port:?} isn't a valid u16 (1-65535)"
+        ))
+    })?;
     Ok((host.to_string(), port, path))
 }
 
@@ -855,6 +870,38 @@ mod tests {
         let s = format!("{r}");
         assert!(s.contains("summary:"));
         assert!(s.contains("exit"));
+    }
+
+    /// Iter-116: client alerts-check parse_http_url HTTPS
+    /// rejection now actionable.
+    #[test]
+    fn iter116_parse_https_rejected_with_actionable_msg() {
+        let err = parse_http_url("https://127.0.0.1:9091").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HTTP-only") && msg.contains("loopback"),
+            "iter-116 must explain HTTPS rejection: {msg}"
+        );
+    }
+
+    #[test]
+    fn iter116_parse_missing_scheme_rejected_with_actionable_msg() {
+        let err = parse_http_url("127.0.0.1:9091").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("http://") && msg.contains("scheme"),
+            "iter-116 must explain missing scheme: {msg}"
+        );
+    }
+
+    #[test]
+    fn iter116_parse_bad_port_rejected_with_actionable_msg() {
+        let err = parse_http_url("http://127.0.0.1:99999").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("99999") && msg.contains("u16"),
+            "iter-116 must name bad port + valid range: {msg}"
+        );
     }
 
     /// Iter-114: unknown --format errors BEFORE any network I/O.

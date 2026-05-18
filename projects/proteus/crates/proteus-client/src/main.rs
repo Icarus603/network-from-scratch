@@ -428,9 +428,23 @@ async fn status_cmd(url: &str, format: &str) -> Result<(), Box<dyn std::error::E
 /// accept HTTP (not HTTPS) — the admin endpoint is loopback-only.
 /// Returns `(host, port, path)`; `path` defaults to `"/"`.
 fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| format!("only http:// URLs supported (got {url:?})"))?;
+    // Iter-116: actionable HTTPS-specific error mirroring the
+    // server-side parse_http_url. Pre-iter-116 the HTTPS case
+    // produced the generic "only http://" message — the
+    // operator might think the tool simply refused HTTPS
+    // arbitrarily; the new message explains the loopback-only
+    // design choice.
+    if url.starts_with("https://") {
+        return Err(format!(
+            "{url:?}: admin endpoint is HTTP-only (loopback-by-default; no TLS \
+             terminator between the operator and the binary). Use `http://` not `https://`."
+        ));
+    }
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        format!(
+            "{url:?}: missing `http://` scheme prefix. Expected `http://host:port[/path]`."
+        )
+    })?;
     let (authority, path) = match rest.find('/') {
         Some(ix) => (&rest[..ix], rest[ix..].to_string()),
         None => (rest, "/".to_string()),
@@ -439,11 +453,12 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
         Some((h, p)) => (
             h.to_string(),
             p.parse::<u16>()
-                .map_err(|e| format!("bad port in {url:?}: {e}"))?,
+                .map_err(|_| format!("{url:?}: port {p:?} isn't a valid u16 (1-65535)"))?,
         ),
         None => {
             return Err(format!(
-                "URL must include explicit port (got {url:?}); admin endpoint requires `host:port`"
+                "{url:?}: missing explicit `:port` — the admin endpoint has no default port. \
+                 Example: `http://127.0.0.1:9091/status`."
             ));
         }
     };
@@ -1093,10 +1108,37 @@ mod cli_helpers_tests {
         assert_eq!(path, "/sub");
     }
 
+    /// Iter-116: HTTPS now produces actionable explanation,
+    /// not bare "only http://".
     #[test]
     fn parse_http_url_rejects_https() {
         let err = parse_http_url("https://example.com:443").unwrap_err();
-        assert!(err.contains("http://"), "should reject https: {err}");
+        assert!(
+            err.contains("HTTP-only") && err.contains("loopback"),
+            "iter-116 must explain WHY https isn't accepted: {err}"
+        );
+    }
+
+    /// Iter-116: missing scheme (raw host:port) produces
+    /// actionable message.
+    #[test]
+    fn iter116_parse_http_url_rejects_missing_scheme() {
+        let err = parse_http_url("127.0.0.1:9091").unwrap_err();
+        assert!(
+            err.contains("http://") && err.contains("scheme"),
+            "iter-116 must explain missing scheme: {err}"
+        );
+    }
+
+    /// Iter-116: bad port → actionable message names the bad
+    /// port + valid range.
+    #[test]
+    fn iter116_parse_http_url_rejects_bad_port() {
+        let err = parse_http_url("http://127.0.0.1:99999").unwrap_err();
+        assert!(
+            err.contains("99999") && err.contains("u16"),
+            "iter-116 must name the bad port + valid range: {err}"
+        );
     }
 
     #[test]

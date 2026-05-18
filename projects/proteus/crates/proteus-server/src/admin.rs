@@ -1109,22 +1109,49 @@ fn parse_labelled_prefix(name: &str, value: &str, metric_prefix: &str) -> Option
 /// endpoint is always plain HTTP; rely on bind-loopback or VPN for
 /// confidentiality and bearer for auth, not TLS).
 pub fn parse_http_url(url: &str) -> Result<(String, u16, String), AdminError> {
-    let rest = url
-        .strip_prefix("http://")
-        .ok_or_else(|| AdminError::BadUrl(url.to_string()))?;
+    // Iter-116: actionable error messages for the three common
+    // typos that previously got the bare AdminError::BadUrl(url):
+    //   - https:// (admin endpoint is HTTP-only, loopback-by-
+    //     default; HTTPS isn't supported)
+    //   - missing scheme entirely (raw host:port)
+    //   - missing explicit port (the runtime needs one; no
+    //     default 80 fallback for the admin endpoint)
+    if let Some(rest) = url.strip_prefix("https://") {
+        let _ = rest; // silence unused warning if any
+        return Err(AdminError::BadUrl(format!(
+            "{url:?}: admin endpoint is HTTP-only (loopback-by-default; no TLS terminator \
+             between the operator and the binary). Use `http://` not `https://`."
+        )));
+    }
+    let rest = url.strip_prefix("http://").ok_or_else(|| {
+        AdminError::BadUrl(format!(
+            "{url:?}: missing `http://` scheme prefix. Expected `http://host:port[/path]`."
+        ))
+    })?;
     let (authority, path) = match rest.find('/') {
         Some(idx) => (&rest[..idx], &rest[idx..]),
         None => (rest, "/"),
     };
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => {
-            let port: u16 = p.parse().map_err(|_| AdminError::BadUrl(url.to_string()))?;
+            let port: u16 = p.parse().map_err(|_| {
+                AdminError::BadUrl(format!(
+                    "{url:?}: port {p:?} isn't a valid u16 (1-65535)"
+                ))
+            })?;
             (h.to_string(), port)
         }
-        None => return Err(AdminError::BadUrl(url.to_string())),
+        None => {
+            return Err(AdminError::BadUrl(format!(
+                "{url:?}: missing explicit `:port` — the admin endpoint has no default port. \
+                 Example: `http://127.0.0.1:9090/metrics`."
+            )));
+        }
     };
     if host.is_empty() {
-        return Err(AdminError::BadUrl(url.to_string()));
+        return Err(AdminError::BadUrl(format!(
+            "{url:?}: host portion is empty (likely `http://:port` without a host)."
+        )));
     }
     Ok((host, port, path.to_string()))
 }
@@ -1801,14 +1828,51 @@ proteus_some_future_counter_total 43
         assert_eq!(path, "/metrics");
     }
 
+    /// Iter-116: HTTPS rejection now includes actionable message.
     #[test]
     fn parse_http_url_rejects_https() {
-        assert!(parse_http_url("https://example.com:443/metrics").is_err());
+        let err = parse_http_url("https://example.com:443/metrics").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("HTTP-only") && msg.contains("loopback"),
+            "iter-116 must explain WHY https isn't accepted: {msg}"
+        );
     }
 
+    /// Iter-116: missing-port rejection now includes example.
     #[test]
     fn parse_http_url_rejects_missing_port() {
-        assert!(parse_http_url("http://example.com/metrics").is_err());
+        let err = parse_http_url("http://example.com/metrics").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains(":port") && msg.contains("127.0.0.1:9090"),
+            "iter-116 must include the recommended-example: {msg}"
+        );
+    }
+
+    /// Iter-116: missing-scheme rejection — `127.0.0.1:9090/metrics`
+    /// (no `http://`) now produces an actionable message instead
+    /// of bare BadUrl(url).
+    #[test]
+    fn iter116_parse_http_url_rejects_missing_scheme_with_actionable_msg() {
+        let err = parse_http_url("127.0.0.1:9090/metrics").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("http://") && msg.contains("scheme"),
+            "iter-116 must explain that the scheme is missing: {msg}"
+        );
+    }
+
+    /// Iter-116: bad port (non-u16) — `http://host:99999` now
+    /// reports the specific bad port string.
+    #[test]
+    fn iter116_parse_http_url_rejects_bad_port_with_actionable_msg() {
+        let err = parse_http_url("http://127.0.0.1:99999/metrics").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("99999") && msg.contains("u16"),
+            "iter-116 must name the bad port + valid range: {msg}"
+        );
     }
 
     #[test]
