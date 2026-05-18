@@ -15,6 +15,40 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server gencert` minted broken certs from any garbage SAN string (iter-129)
+
+Pre-iter-129 `proteus-server gencert --dns-name <anything>` silently
+produced a "successful" cert with whatever string the operator typed
+embedded as the SAN. rcgen has no syntactic validation — it accepted
+empty string, "...", "Hello World", "vps.example..com" (double-dot
+typo), "internal_vps.example.com" (underscore), "-leading.example.com"
+(leading hyphen), `*.` (bare wildcard), 65535-char strings — all
+emitted "✓ TLS cert written" and exited 0.
+
+The operator's first hint of trouble was rustls's opaque
+`NotValidForName` error on every subsequent client handshake — with
+no indication that the cert itself was the problem (vs. clock skew,
+SNI mismatch, hostname pin failure, etc.). This is one of the most
+operationally painful first-deploy traps: hours of debugging "why
+does TLS fail?" with all the symptoms pointing at the wrong layer.
+
+Iter-129 adds `validate_dns_name()` enforcing RFC 1035 §2.3.1 LDH +
+RFC 6125 §6.4.3 wildcard semantics + RFC 1035 §3.1 label length
+caps. The CLI dispatcher calls the validator BEFORE rcgen so an
+operator error produces exit 2 + an actionable stderr message
+naming the specific failure class ("contains an empty label", "has
+a leading or trailing dot", "contains non-LDH character ' '")
+PLUS the consequence ("every TLS client rejects this cert with
+NotValidForName"). IP literals + wildcards remain accepted; the
+gate is purely about rejecting garbage that rcgen would have
+silently embedded.
+
+Belt-and-braces: `gencert::run()` also calls `validate_dns_name()`
+so any future caller (test, scripting hook) can't bypass the gate
+by going around `main.rs`. Rejected calls do NOT write files —
+verified by an integration test that asserts the outdir is empty
+after a rejected call. 15 unit tests + 9 integration tests.
+
 ### Fixed — `proteus-bench soak --min-success-rate` accepted impossible values (iter-128)
 
 Pre-iter-128 `proteus-bench soak --min-success-rate 2.5` made every

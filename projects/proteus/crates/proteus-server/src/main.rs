@@ -391,7 +391,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen { out } => keygen::run(&out)?,
-        Cmd::Gencert { dns_name, out } => gencert::run(&dns_name, &out)?,
+        Cmd::Gencert { dns_name, out } => {
+            // Iter-129: gate --dns-name at parse time + exit 2 on
+            // operator error (not exit 1 = "the tool itself
+            // failed"). exit 2 matches the clap-style "usage
+            // error" convention every other binary surface uses
+            // (iter-108 / 109 / 110 / 117 / 126 / 127 / 128).
+            if let Err(msg) = gencert::validate_dns_name(&dns_name) {
+                eprintln!("error: {msg}");
+                std::process::exit(2);
+            }
+            gencert::run(&dns_name, &out)?;
+        }
         Cmd::KnockKeygen { out } => {
             knock_keygen::run(&out)?;
         }
