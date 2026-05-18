@@ -102,6 +102,12 @@ fn known_metric_names() -> HashSet<&'static str> {
         "proteus_user_rate_limit_reload_succeeded_total",
         "proteus_handshake_budget_reload_attempts_total",
         "proteus_handshake_budget_reload_succeeded_total",
+        // Iter-78: SSRF / outbound-filter rejection panel
+        // surfaces this on the bundled dashboard so operators
+        // see credential-compromise + attacker-mapping-internal-
+        // network attempts BEFORE waiting on the page-grade
+        // ProteusSsrfAttemptsCatastrophic alert.
+        "proteus_outbound_blocked_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling

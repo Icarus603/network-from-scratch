@@ -575,6 +575,33 @@
           }
         }
       }
+    },
+    {
+      "id": 70,
+      "type": "timeseries",
+      "title": "SSRF / outbound-filter rejections (server)",
+      "description": "rate(proteus_outbound_blocked_total[5m]) — the OutboundFilter's per-second block rate. Steady-state should be flat zero. Any sustained rate > 0 fires ProteusSsrfAttemptsObserved (WARN); rate > 1/sec for 2+ min fires ProteusSsrfAttemptsCatastrophic (CRIT — credential compromise, attacker mapping internal network via proxy). Recovery: rotate the offending user's ed25519 key, audit access_log for the destination pattern, consider firewall-deny on source IP.",
+      "gridPos": {"x": 0, "y": 68, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_outbound_blocked_total[5m])",
+          "refId": "blocked",
+          "legendFormat": "outbound blocks/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.001},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
     }
   ]
 }
