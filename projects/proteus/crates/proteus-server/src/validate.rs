@@ -1010,6 +1010,88 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
         _ => {}
     }
 
+    // Iter-84: handshake_deadline_secs sanity.
+    //
+    // The handshake deadline is the slow-loris guard on the
+    // pre-handshake phase (client connects but never sends
+    // ClientHello / takes hours sending bytes one at a time).
+    // Runtime default 15s; operator can override via
+    // server.yaml. Two foot-guns:
+    //
+    //   - `handshake_deadline_secs: 0` → instant abort; every
+    //     handshake fails. FAIL.
+    //   - `handshake_deadline_secs: 1` → tight but plausible
+    //     for low-latency LAN; on real internet RTTs the
+    //     ML-KEM Decap roundtrip plus PoW (if non-zero)
+    //     barely fits. WARN.
+    //   - `handshake_deadline_secs > 300` → 5min slow-loris
+    //     window is excessive; an attacker can hold a
+    //     max_connections slot for 5min per connection.
+    //     WARN.
+    if let Some(secs) = cfg.handshake_deadline_secs {
+        if secs == 0 {
+            r.push_fail(
+                "handshake_deadline_secs = 0 means every handshake aborts instantly — \
+                 every dial fails before the client can send ClientHello. If you want \
+                 the runtime default (15s), remove the field entirely.",
+            );
+        } else if secs == 1 {
+            r.push_warn(
+                "handshake_deadline_secs = 1 is very tight; on real-internet RTTs the \
+                 TLS handshake + ML-KEM Decap roundtrip + any PoW solving barely fits. \
+                 Recommended: ≥5s for production, ≥15s if pow_difficulty > 12.",
+            );
+        } else if secs > 300 {
+            r.push_warn(format!(
+                "handshake_deadline_secs = {secs} is excessive — slow-loris attackers \
+                 can hold a max_connections slot for {secs}s per connection. \
+                 Recommended: ≤60s for production.",
+            ));
+        } else {
+            r.push_pass(format!("handshake_deadline_secs = {secs}"));
+        }
+    }
+
+    // Iter-84: max_connections sanity. The global session
+    // semaphore caps total in-flight connections; protects
+    // against FD exhaustion. Two foot-guns:
+    //
+    //   - `max_connections: 0` → cap is zero, every accept
+    //     immediately drops. FAIL.
+    //   - `max_connections: 1_000_000` → absurd; each
+    //     in-flight session has crypto state + buffers;
+    //     1M sessions ≈ 16 TB worst-case memory.
+    if let Some(n) = cfg.max_connections {
+        if n == 0 {
+            r.push_fail(
+                "max_connections = 0 means the global session semaphore is empty — \
+                 every accept immediately drops the connection. If you want unbounded, \
+                 remove the field entirely (runtime falls back to OS FD ceiling).",
+            );
+        } else if n > 65535 {
+            r.push_warn(format!(
+                "max_connections = {n} is very high; each in-flight session reserves \
+                 ~16 MiB worst-case (cipher state + scratch + buffers). {n} sessions \
+                 ≈ {} GiB worst-case memory ceiling. Ensure the host has the RAM.",
+                (n as u64 * 16) / 1024,
+            ));
+        }
+    }
+
+    // Iter-84: tcp_keepalive_secs = 0 disables TCP keepalive on
+    // accepted client streams. The NAT idle-timer reaping class
+    // (iter-14 fix) returns: long-idle Proteus sessions die
+    // silently in mid-path NAT translators. WARN-not-FAIL (the
+    // operator may legitimately disable for a measurement
+    // experiment).
+    if cfg.tcp_keepalive_secs == Some(0) {
+        r.push_warn(
+            "tcp_keepalive_secs = 0 disables TCP keepalive on accepted client streams. \
+             Long-idle Proteus sessions will silently die in mid-path NAT translators \
+             (the iter-14 fix class). If unset, runtime defaults to 30s.",
+        );
+    }
+
     // 17. Firewall allow ∩ deny: an IP matching both is denied
     // (deny wins). Likely an operator typo where they thought
     // allow trumps deny.
@@ -1781,6 +1863,95 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: handshake_deadline_secs = 0 → FAIL.
+    #[test]
+    fn iter84_handshake_deadline_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.handshake_deadline_secs = Some(0);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "handshake_deadline=0 MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: handshake_deadline_secs = 1 → WARN (tight).
+    #[test]
+    fn iter84_handshake_deadline_tight_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.handshake_deadline_secs = Some(1);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("handshake_deadline_secs") && s.contains("tight"))
+        });
+        assert!(warn, "handshake_deadline=1 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: handshake_deadline_secs > 300 → WARN (slow-
+    /// loris window too long).
+    #[test]
+    fn iter84_handshake_deadline_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.handshake_deadline_secs = Some(600);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("handshake_deadline_secs") && s.contains("excessive"))
+        });
+        assert!(warn, "handshake_deadline=600 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: max_connections = 0 → FAIL.
+    #[test]
+    fn iter84_max_connections_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_connections = Some(0);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "max_connections=0 MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("max_connections") && s.contains("immediately drops"))
+        });
+        assert!(fail, "FAIL must explain: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: max_connections > 65535 → WARN.
+    #[test]
+    fn iter84_max_connections_absurd_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_connections = Some(1_000_000);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("max_connections") && s.contains("1000000"))
+        });
+        assert!(warn, "absurd max_connections must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-84: tcp_keepalive_secs = 0 → WARN.
+    #[test]
+    fn iter84_tcp_keepalive_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.tcp_keepalive_secs = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("tcp_keepalive_secs") && s.contains("NAT"))
+        });
+        assert!(warn, "tcp_keepalive=0 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
