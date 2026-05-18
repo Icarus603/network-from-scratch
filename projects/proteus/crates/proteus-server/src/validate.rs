@@ -964,6 +964,84 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
                 ));
             }
         }
+        // Iter-67: cover_endpoint in RFC 1918 / RFC 4193 / link-
+        // local / CGNAT private ranges → FAIL.
+        //
+        // An operator who configures cover_endpoint as an IP
+        // literal in private address space (10/8, 172.16/12,
+        // 192.168/16, 100.64/10 CGNAT, fc00::/7 ULA, fe80::/10
+        // link-local) is pointing unauth'd internet traffic
+        // at their internal network. Three failure modes:
+        //   - The cover destination is an internal mgmt UI
+        //     (router admin, NAS web interface) — every probe
+        //     from the internet gets a tiny window into the
+        //     LAN's surface
+        //   - The cover destination doesn't exist on the LAN
+        //     anymore → every probe sees connection-refused,
+        //     defeating the "looks like a normal HTTPS site"
+        //     defense
+        //   - On a multi-tenant cloud, the private IP may
+        //     belong to ANOTHER tenant — unauth probes flow
+        //     into someone else's network
+        //
+        // FAIL because the security/privacy consequence is
+        // severe and there's no legitimate use case (a
+        // legitimate "internal" cover endpoint would still
+        // need to be a publicly-routable host the operator
+        // owns).
+        // Strip IPv6 `[...]` brackets if present — `rsplit_once(':')`
+        // above keeps them when the source was `[fc00::1]:443`.
+        let cover_host_unbracketed = cover_host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(cover_host);
+        if let Ok(cover_ip) = cover_host_unbracketed.parse::<std::net::IpAddr>() {
+            let is_private = is_private_or_special_use(cover_ip);
+            if is_private {
+                r.push_fail(format!(
+                    "cover_endpoint {cover_host:?} is in a private / special-use IP range \
+                     (RFC 1918 / RFC 4193 / link-local / CGNAT). Forwarding unauthenticated \
+                     internet traffic to an internal address is a privacy/security leak: \
+                     internal services see public-internet payloads, and on multi-tenant \
+                     hosts the private IP may belong to another tenant. Use a publicly-\
+                     routable cover host (cloudflare.com / microsoft.com / apple.com / your \
+                     own legitimate HTTPS site)."
+                ));
+            }
+        }
+    }
+}
+
+/// Iter-67: detect IPs that should never appear as a public-
+/// forwarded `cover_endpoint`. Covers IPv4 RFC 1918 / RFC 6598
+/// CGNAT / link-local, and IPv6 ULA / link-local. Loopback is
+/// handled by the earlier check; multicast / unspecified are
+/// detected via std's helpers.
+fn is_private_or_special_use(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            // RFC 1918 private, RFC 6598 CGNAT (100.64.0.0/10),
+            // link-local (169.254.0.0/16). is_private() covers the
+            // RFC 1918 subset; we add the rest explicitly.
+            let octets = v4.octets();
+            v4.is_private()
+                || v4.is_link_local()
+                || v4.is_multicast()
+                || v4.is_unspecified()
+                // CGNAT: 100.64.0.0/10
+                || (octets[0] == 100 && (octets[1] & 0xc0) == 64)
+        }
+        std::net::IpAddr::V6(v6) => {
+            // ULA (fc00::/7), link-local (fe80::/10), multicast,
+            // unspecified.
+            let seg0 = v6.segments()[0];
+            v6.is_multicast()
+                || v6.is_unspecified()
+                // ULA fc00::/7: top 7 bits = 0b1111110x
+                || (seg0 & 0xfe00) == 0xfc00
+                // Link-local fe80::/10: top 10 bits = 0b1111111010
+                || (seg0 & 0xffc0) == 0xfe80
+        }
     }
 }
 
@@ -1417,6 +1495,96 @@ mod tests {
         cfg.metrics_token_file = Some(token_path);
         let report = preflight(&cfg);
         assert!(!report.has_failures(), "got: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-67: cover_endpoint in RFC 1918 → FAIL (forwards
+    /// unauth'd internet traffic into LAN).
+    #[test]
+    fn iter67_cover_endpoint_rfc1918_fails() {
+        for victim in [
+            "10.0.0.1:443",
+            "192.168.1.1:443",
+            "172.16.0.1:443",
+            "100.64.0.1:443",  // CGNAT
+            "169.254.169.254:80",  // link-local (cloud metadata!)
+        ] {
+            let dir = tmpdir();
+            let mut cfg = minimal_cfg(&dir);
+            cfg.cover_endpoint = Some(victim.to_string());
+            let report = preflight(&cfg);
+            assert!(
+                report.has_failures(),
+                "cover_endpoint={victim} MUST FAIL: {report}"
+            );
+            let fail = report.checks.iter().any(|c| match c {
+                Check::Fail(s) => {
+                    s.contains("cover_endpoint") && s.contains("private")
+                }
+                _ => false,
+            });
+            assert!(
+                fail,
+                "FAIL must call out 'private' for {victim:?}: {report}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Iter-67: IPv6 ULA + link-local also FAIL.
+    #[test]
+    fn iter67_cover_endpoint_ipv6_private_fails() {
+        for victim in [
+            "[fc00::1]:443",  // ULA
+            "[fe80::1]:443",  // link-local
+        ] {
+            let dir = tmpdir();
+            let mut cfg = minimal_cfg(&dir);
+            cfg.cover_endpoint = Some(victim.to_string());
+            let report = preflight(&cfg);
+            assert!(
+                report.has_failures(),
+                "IPv6 cover_endpoint={victim} MUST FAIL: {report}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Iter-67: hostnames are SKIPPED (we can't resolve at
+    /// validate time without spawning DNS; cloud cover hosts
+    /// like microsoft.com are always hostnames).
+    #[test]
+    fn iter67_cover_endpoint_hostname_not_flagged_as_private() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoint = Some("microsoft.com:443".to_string());
+        let report = preflight(&cfg);
+        let any_private_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("cover_endpoint") && s.contains("private"),
+            _ => false,
+        });
+        assert!(
+            !any_private_fail,
+            "hostname cover_endpoint must NOT trigger private-IP FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-67: public IP literal → OK.
+    #[test]
+    fn iter67_cover_endpoint_public_ip_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoint = Some("198.51.100.1:443".to_string()); // TEST-NET-2, public-routable
+        let report = preflight(&cfg);
+        let any_private_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("cover_endpoint") && s.contains("private"),
+            _ => false,
+        });
+        assert!(
+            !any_private_fail,
+            "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
