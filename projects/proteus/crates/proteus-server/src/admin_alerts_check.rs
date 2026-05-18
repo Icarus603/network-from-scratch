@@ -346,6 +346,63 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── Iter-99: rejection-counter checks (×5) ────
+    //
+    // Same shape as iter-76 SSRF + iter-98 AEAD: cumulative
+    // counter → PASS / WARN tiers. No CRIT tier — these are
+    // operator-investigation signals, not page-grade.
+    //
+    // Each surface gets its own check name so dashboards /
+    // PagerDuty / Slack can route differently.
+    for (rule_name, metric, friendly_cause) in [
+        (
+            "ProteusFirewallDeniedHighRate",
+            "proteus_firewall_denied_total",
+            "firewall denials (active scanning from blocked ranges)",
+        ),
+        (
+            "ProteusHandshakeBudgetExhausted",
+            "proteus_handshake_budget_rejected_total",
+            "global handshake-budget rejections (legitimate burst OR DDoS)",
+        ),
+        (
+            "ProteusConnLimitRejecting",
+            "proteus_conn_limit_rejected_total",
+            "max_connections cap hits (raise limit OR investigate slow-shutdown)",
+        ),
+        (
+            "ProteusUserRateRejected",
+            "proteus_user_rate_rejected_total",
+            "per-user rate-limit rejections (audit access_log for offending user_id)",
+        ),
+        (
+            "ProteusUserQuarantineRejecting",
+            "proteus_user_quarantine_rejected_total",
+            "auto-quarantine rejections (user previously marked for ban)",
+        ),
+    ] {
+        if let Some(v) = g(metric) {
+            if v > 0.0 {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Warn,
+                    message: format!(
+                        "{v} {friendly_cause} since process start — investigate operator-\
+                         facing signal."
+                    ),
+                    equivalent_promql: "rate({metric}[5m]) > 0",
+                });
+            } else {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Pass,
+                    message: format!("no {friendly_cause}"),
+                    equivalent_promql: "",
+                });
+            }
+        }
+    }
+
     // ──── ProteusAeadDrops{Observed,Catastrophic} ────
     //
     // Iter-98: bit-level integrity failures on the data plane.
@@ -1262,6 +1319,111 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-99: rejection-counter checks ────
+
+    /// All 5 surfaces zero → 5 PASS checks.
+    #[test]
+    fn iter99_all_rejection_counters_zero_pass() {
+        let body = body_with(
+            "proteus_firewall_denied_total 0\n\
+             proteus_handshake_budget_rejected_total 0\n\
+             proteus_conn_limit_rejected_total 0\n\
+             proteus_user_rate_rejected_total 0\n\
+             proteus_user_quarantine_rejected_total 0",
+        );
+        let r = evaluate(&body);
+        for rule_name in [
+            "ProteusFirewallDeniedHighRate",
+            "ProteusHandshakeBudgetExhausted",
+            "ProteusConnLimitRejecting",
+            "ProteusUserRateRejected",
+            "ProteusUserQuarantineRejecting",
+        ] {
+            let check = r
+                .checks
+                .iter()
+                .find(|c| c.rule_name == rule_name)
+                .unwrap_or_else(|| panic!("{rule_name} must fire"));
+            assert_eq!(check.severity, CheckSeverity::Pass, "{rule_name}");
+        }
+    }
+
+    /// Single surface non-zero → that surface WARNs, others PASS.
+    #[test]
+    fn iter99_firewall_denied_fires_independently() {
+        let body = body_with(
+            "proteus_firewall_denied_total 42\n\
+             proteus_handshake_budget_rejected_total 0\n\
+             proteus_conn_limit_rejected_total 0\n\
+             proteus_user_rate_rejected_total 0\n\
+             proteus_user_quarantine_rejected_total 0",
+        );
+        let r = evaluate(&body);
+        let fw = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusFirewallDeniedHighRate")
+            .unwrap();
+        assert_eq!(fw.severity, CheckSeverity::Warn);
+        assert!(fw.message.contains("42"));
+        // Other 4 must PASS.
+        for rule_name in [
+            "ProteusHandshakeBudgetExhausted",
+            "ProteusConnLimitRejecting",
+            "ProteusUserRateRejected",
+            "ProteusUserQuarantineRejecting",
+        ] {
+            let check = r.checks.iter().find(|c| c.rule_name == rule_name).unwrap();
+            assert_eq!(check.severity, CheckSeverity::Pass, "{rule_name}");
+        }
+    }
+
+    /// All 5 surfaces firing → 5 independent WARN checks.
+    #[test]
+    fn iter99_all_five_fire_independently() {
+        let body = body_with(
+            "proteus_firewall_denied_total 10\n\
+             proteus_handshake_budget_rejected_total 20\n\
+             proteus_conn_limit_rejected_total 30\n\
+             proteus_user_rate_rejected_total 40\n\
+             proteus_user_quarantine_rejected_total 50",
+        );
+        let r = evaluate(&body);
+        let warns: Vec<_> = r
+            .checks
+            .iter()
+            .filter(|c| {
+                matches!(
+                    c.rule_name,
+                    "ProteusFirewallDeniedHighRate"
+                        | "ProteusHandshakeBudgetExhausted"
+                        | "ProteusConnLimitRejecting"
+                        | "ProteusUserRateRejected"
+                        | "ProteusUserQuarantineRejecting"
+                ) && c.severity == CheckSeverity::Warn
+            })
+            .collect();
+        assert_eq!(warns.len(), 5, "all 5 must fire independently");
+    }
+
+    /// Metrics absent → all 5 checks suppressed.
+    #[test]
+    fn iter99_missing_metrics_suppress_all() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| {
+            matches!(
+                c.rule_name,
+                "ProteusFirewallDeniedHighRate"
+                    | "ProteusHandshakeBudgetExhausted"
+                    | "ProteusConnLimitRejecting"
+                    | "ProteusUserRateRejected"
+                    | "ProteusUserQuarantineRejecting"
+            )
+        });
+        assert!(!any);
     }
 
     // ──── iter-98: AEAD drops + handshake failure-ratio ────

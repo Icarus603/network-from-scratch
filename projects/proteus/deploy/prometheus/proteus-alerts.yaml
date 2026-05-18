@@ -301,6 +301,93 @@ groups:
         an attacker downloading bulk content on stolen
         credentials. Audit + rotate as above.
 
+- name: proteus-rejection-rates
+  interval: 30s
+  rules:
+
+  # Iter-99: rejection-counter alerts.
+  #
+  # Each per-policy rejection counter signals a different
+  # attack/operator-error mode. Pre-iter-99 these counters
+  # were exposed but no alert fired on creep — operators
+  # only saw them on the dashboard if they were actively
+  # watching.
+  - alert: ProteusFirewallDeniedHighRate
+    expr: rate(proteus_firewall_denied_total[5m]) > 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: firewall denials > 1/sec — active scan"
+      description: |
+        {{ printf "%.3f" $value }} firewall denials/sec on
+        {{ $labels.instance }} for 5+ min. Sustained probing
+        from blocked source ranges. Cross-reference with
+        proteus_probe_anomalies_fired_total for per-/24
+        attribution.
+
+  - alert: ProteusHandshakeBudgetExhausted
+    expr: rate(proteus_handshake_budget_rejected_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: global handshake budget exhausting"
+      description: |
+        {{ printf "%.3f" $value }} budget rejections/sec on
+        {{ $labels.instance }} for 5+ min. The global
+        handshake budget (token bucket) is hitting its cap.
+        Either legitimate burst above operator's configured
+        budget, OR a DDoS attempting to exhaust the gate.
+        Raise handshake_budget.burst + refill_per_sec if
+        legitimate; firewall-deny the source range if
+        attack.
+
+  - alert: ProteusConnLimitRejecting
+    expr: rate(proteus_conn_limit_rejected_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: max_connections cap hit"
+      description: |
+        {{ printf "%.3f" $value }} connection-cap rejections/sec
+        on {{ $labels.instance }} for 5+ min. The global
+        max_connections semaphore is full — new accepts are
+        dropped. Operator likely needs to raise max_connections
+        OR investigate FD-leak / slow-shutdown sessions
+        holding slots indefinitely.
+
+  - alert: ProteusUserRateRejected
+    expr: rate(proteus_user_rate_rejected_total[5m]) > 0.5
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: per-user rate-limit rejecting > 0.5/sec"
+      description: |
+        {{ printf "%.3f" $value }} per-user rate rejections/sec
+        on {{ $labels.instance }} for 5+ min. One or more
+        user_ids hammering above the configured per-user
+        rate. Audit access_log for the offending user_id;
+        cross-reference proteus_abuse_alerts_rate_limit_total
+        for the sliding-window abuse signal.
+
+  - alert: ProteusUserQuarantineRejecting
+    expr: rate(proteus_user_quarantine_rejected_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: quarantined-user sessions being rejected"
+      description: |
+        {{ printf "%.3f" $value }} quarantine rejections/sec
+        on {{ $labels.instance }} for 5+ min. Auto-quarantine
+        is actively gating sessions — the offending user_id
+        was earlier marked for ban (byte_budget /
+        rate_limit / bandwidth_rate trip). Audit access_log
+        + decide credential rotation.
+
 - name: proteus-aead-integrity
   interval: 30s
   rules:

@@ -194,6 +194,15 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         "proteus_aead_drops_total",
         "proteus_handshakes_failed_total",
         "proteus_handshakes_succeeded_total",
+        // Iter-99: rejection-counter alerts (5 surfaces).
+        // Each was exposed but unalerted; operator-facing
+        // signal of active probing / DDoS / per-user-abuse
+        // events was visible only on dashboard.
+        "proteus_firewall_denied_total",
+        "proteus_handshake_budget_rejected_total",
+        "proteus_conn_limit_rejected_total",
+        "proteus_user_rate_rejected_total",
+        "proteus_user_quarantine_rejected_total",
     ]
     .into_iter()
     .collect();
