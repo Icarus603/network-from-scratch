@@ -346,6 +346,49 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusSsrfAttemptsObserved / Catastrophic ────
+    //
+    // Iter-76: point-in-time approximation. We can't compute
+    // rate(5m) without a TSDB; instead surface ANY non-zero
+    // outbound_blocked counter as WARN, and flag a "high"
+    // threshold (>100 cumulative blocks) as CRIT. Operators
+    // running alerts-check on a fresh boot won't trip false
+    // positives because both metrics start at zero.
+    if let Some(blocked) = g("proteus_outbound_blocked_total") {
+        if blocked > 100.0 {
+            r.push(Check {
+                rule_name: "ProteusSsrfAttemptsCatastrophic",
+                severity: CheckSeverity::Crit,
+                message: format!(
+                    "{blocked} outbound-filter blocks since process start — sustained \
+                     SSRF probing observed. Treat as credential compromise: rotate the \
+                     affected user's ed25519 key, audit access_log for destination \
+                     pattern, consider firewall deny on source IP."
+                ),
+                equivalent_promql: "rate(proteus_outbound_blocked_total[5m]) > 1",
+            });
+        } else if blocked > 0.0 {
+            r.push(Check {
+                rule_name: "ProteusSsrfAttemptsObserved",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{blocked} outbound-filter block(s) since process start — SSRF or \
+                     internal-network probing observed. Causes: (a) credential compromised \
+                     + attacker probing internal network via proxy; (b) misconfigured \
+                     client. Audit access_log for the destination + user_id."
+                ),
+                equivalent_promql: "rate(proteus_outbound_blocked_total[5m]) > 0",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusSsrfAttemptsObserved",
+                severity: CheckSeverity::Pass,
+                message: "no SSRF / outbound-filter blocks observed".to_string(),
+                equivalent_promql: "",
+            });
+        }
+    }
+
     // ──── ProteusHandshakeLatencyHigh / Catastrophic ────
     //
     // Iter-74: point-in-time approximation of the Prometheus
@@ -1051,6 +1094,67 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-76: SSRF / outbound-filter rejections ────
+
+    /// Zero blocked → PASS.
+    #[test]
+    fn iter76_no_outbound_blocks_passes() {
+        let body = body_with("proteus_outbound_blocked_total 0");
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusSsrfAttemptsObserved")
+            .expect("rule must fire when metric present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    /// Some blocks (1-100 cumulative) → WARN.
+    #[test]
+    fn iter76_some_outbound_blocks_warn() {
+        let body = body_with("proteus_outbound_blocked_total 5");
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusSsrfAttemptsObserved")
+            .expect("rule must fire");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("5"));
+        assert!(warn.message.contains("SSRF") || warn.message.contains("credential"));
+    }
+
+    /// >100 cumulative blocks → CRIT.
+    #[test]
+    fn iter76_many_outbound_blocks_crit() {
+        let body = body_with("proteus_outbound_blocked_total 500");
+        let r = evaluate(&body);
+        let crit = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusSsrfAttemptsCatastrophic")
+            .expect("catastrophic rule must fire on >100 blocks");
+        assert_eq!(crit.severity, CheckSeverity::Crit);
+        assert!(crit.message.contains("500"));
+        assert!(crit.message.contains("rotate"));
+    }
+
+    /// Metric absent (fresh server, no SSRF surface ever exercised)
+    /// → check suppressed.
+    #[test]
+    fn iter76_missing_metric_suppresses_check() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| {
+            c.rule_name == "ProteusSsrfAttemptsObserved"
+                || c.rule_name == "ProteusSsrfAttemptsCatastrophic"
+        });
+        assert!(
+            !any,
+            "absent metric → no SSRF check should fire"
+        );
     }
 
     // ──── iter-74: handshake latency check ────

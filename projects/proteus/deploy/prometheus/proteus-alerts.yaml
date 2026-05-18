@@ -187,6 +187,57 @@ groups:
         succeed. Pre-SIGHUP budget is still in effect. Check
         journalctl for the parse error.
 
+- name: proteus-ssrf-attempts
+  interval: 30s
+  rules:
+
+  # Iter-76: outbound-destination-filter rejections.
+  #
+  # The OutboundFilter blocks SSRF-class CONNECT targets: cloud
+  # metadata (169.254.169.254 — IAM creds), RFC 1918, link-local,
+  # loopback, IPv6 ULA. A rising
+  # `proteus_outbound_blocked_total` counter is the operator-
+  # facing signal of:
+  #   (a) credential compromised + attacker probing the operator's
+  #       internal network via the proxy as an SSRF gateway
+  #   (b) misconfigured client trying to reach an internal
+  #       service it doesn't have a legitimate path to
+  #
+  # Pre-iter-76 the metric existed but no alert fired — the
+  # operator would only see the SSRF probing in the access_log
+  # if they audit by hand. Now both Prometheus and the
+  # in-process alerts-check evaluator catch it.
+  - alert: ProteusSsrfAttemptsObserved
+    expr: rate(proteus_outbound_blocked_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: SSRF / outbound-filter rejections observed"
+      description: |
+        {{ printf "%.2f" $value }} outbound-filter block(s)/sec
+        on {{ $labels.instance }} for 5+ min. Likely causes:
+        (a) credential compromised + attacker probing internal
+        network via proxy SSRF; (b) misconfigured client
+        targeting internal services. Audit access_log for the
+        offending user_id + destination; consider rotating the
+        affected ed25519 key.
+
+  - alert: ProteusSsrfAttemptsCatastrophic
+    expr: rate(proteus_outbound_blocked_total[5m]) > 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server: SSRF attempts at >1/sec — active attack"
+      description: |
+        {{ printf "%.2f" $value }} outbound-filter block(s)/sec
+        on {{ $labels.instance }} for 2+ min — sustained SSRF
+        probing. Treat as credential compromise: rotate the
+        affected user's ed25519 key immediately, audit
+        access_log for the destination pattern, consider adding
+        the source IP to the firewall deny list.
+
 - name: proteus-handshake-latency
   interval: 30s
   rules:

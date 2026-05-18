@@ -169,6 +169,11 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         // CPU-exhaustion attacks (PoW-bypass) were invisible
         // outside the dashboard.
         "proteus_handshake_duration_seconds_bucket",
+        // Iter-76: SSRF / outbound-filter rejections. Pre-iter-76
+        // the metric existed but no alert fired; credential-
+        // compromise + internal-network-probing attacks were
+        // visible only via manual access_log audit.
+        "proteus_outbound_blocked_total",
     ]
     .into_iter()
     .collect();
