@@ -835,6 +835,55 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
         }
     }
 
+    // Iter-66: cover-forward unboundedness check.
+    //
+    // The cover-forward path opens a TCP connection to the
+    // configured cover endpoint for EVERY auth-fail / probe
+    // event. Without a cap, a probe storm (intentional or GFW-
+    // triggered) can spawn unbounded cover-forward tasks and
+    // exhaust FDs — even with iter-18 EMFILE-survival in place,
+    // the binary's effective throughput collapses.
+    //
+    // Three states:
+    //   - max_cover_forwards explicitly set to 0 → FAIL
+    //     ("0" is "disabled cap = unbounded", almost never what
+    //     the operator meant; if they truly want unbounded they
+    //     should leave it unset and accept the runtime warn)
+    //   - max_cover_forwards unset AND max_connections unset
+    //     → WARN (matches the runtime warn; surface at preflight
+    //     too)
+    //   - max_cover_forwards explicitly set > 0, OR
+    //     max_connections set (runtime derives 4×) → PASS
+    match (cfg.max_cover_forwards, cfg.max_connections) {
+        (Some(0), _) => {
+            r.push_fail(
+                "max_cover_forwards = 0 explicitly disables the cover-forward concurrency \
+                 cap — a single probe storm can spawn unbounded cover-tunnel tasks and \
+                 exhaust FDs. If you genuinely want unbounded (NOT recommended), remove \
+                 the field entirely; the runtime then emits a WARN and falls back to the \
+                 max_connections × 4 derived bound, or runs uncapped if neither is set.",
+            );
+        }
+        (Some(n), _) if n > 0 => {
+            r.push_pass(format!(
+                "max_cover_forwards = {n} (cover-forward path bounded)",
+            ));
+        }
+        (None, Some(_n)) => {
+            // Will be derived at runtime: max_connections * 4.
+        }
+        (None, None) => {
+            r.push_warn(
+                "max_cover_forwards AND max_connections both unset — cover-forward path \
+                 is unbounded. Under a probe storm (GFW-triggered or otherwise) the binary \
+                 can exhaust FDs even with iter-18 EMFILE-survival. Recommended: set \
+                 max_cover_forwards: 4096 in server.yaml (or max_connections: 1024 to \
+                 inherit the 4× derived bound).",
+            );
+        }
+        _ => {}
+    }
+
     // 17. Firewall allow ∩ deny: an IP matching both is denied
     // (deny wins). Likely an operator typo where they thought
     // allow trumps deny.
@@ -1368,6 +1417,83 @@ mod tests {
         cfg.metrics_token_file = Some(token_path);
         let report = preflight(&cfg);
         assert!(!report.has_failures(), "got: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-66: max_cover_forwards explicitly = 0 → FAIL.
+    /// "0" disables the cover-forward concurrency cap (unbounded);
+    /// almost never what the operator meant.
+    #[test]
+    fn iter66_max_cover_forwards_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_cover_forwards = Some(0);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "max_cover_forwards=0 MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("max_cover_forwards") && s.contains("disables"),
+            _ => false,
+        });
+        assert!(fail, "FAIL must explain why 0 is bad: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-66: explicit max_cover_forwards > 0 → PASS row.
+    #[test]
+    fn iter66_max_cover_forwards_positive_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_cover_forwards = Some(4096);
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| match c {
+            Check::Pass(s) => s.contains("max_cover_forwards = 4096"),
+            _ => false,
+        });
+        assert!(pass, "iter-66 PASS row missing: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-66: max_connections set → no WARN (runtime derives
+    /// 4× from it). Validate stays quiet — operator already
+    /// chose the cap mechanism.
+    #[test]
+    fn iter66_max_connections_set_silences_cover_warn() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.max_connections = Some(1024);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("max_cover_forwards") && s.contains("unbounded"),
+            _ => false,
+        });
+        assert!(
+            !warn,
+            "max_connections set must suppress the unbounded WARN: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-66: both unset → WARN (unbounded cover-forward).
+    /// minimal_cfg already exercises this in
+    /// minimal_config_passes_with_warnings; this dedicated test
+    /// pins the specific WARN message format.
+    #[test]
+    fn iter66_both_unset_warns_about_unbounded_cover_forward() {
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => {
+                s.contains("max_cover_forwards")
+                    && s.contains("max_connections")
+                    && s.contains("unbounded")
+            }
+            _ => false,
+        });
+        assert!(warn, "iter-66 unbounded-cover WARN missing: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
