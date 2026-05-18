@@ -116,6 +116,9 @@ fn known_metric_names() -> HashSet<&'static str> {
         "proteus_abuse_alerts_byte_budget_total",
         "proteus_abuse_alerts_rate_limit_total",
         "proteus_abuse_alerts_per_user_bandwidth_total",
+        // Iter-81: probe-anomaly fires panel surfaces per-/24
+        // source attribution for the active-probing detector.
+        "proteus_probe_anomalies_fired_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling

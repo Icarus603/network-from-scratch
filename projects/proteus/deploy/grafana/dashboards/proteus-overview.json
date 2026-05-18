@@ -577,6 +577,33 @@
       }
     },
     {
+      "id": 81,
+      "type": "timeseries",
+      "title": "Probe-anomaly fires (per-/24 attribution)",
+      "description": "rate(proteus_probe_anomalies_fired_total[5m]) — the probe-anomaly detector fires when a specific /24 source range produces sustained cover-forward bursts. Steady-state should be flat zero. Rate > 0/sec fires ProteusProbeAnomalyFired (WARN — single /24); rate > 1/sec fires ProteusProbeAnomalyCatastrophic (CRIT — coordinated campaign). Recovery: identify the source CIDR from access_log + structured probe_anomaly log lines, firewall-deny via `firewall.deny: [<cidr>/24]` + SIGHUP.",
+      "gridPos": {"x": 0, "y": 84, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_probe_anomalies_fired_total[5m])",
+          "refId": "anomalies",
+          "legendFormat": "probe-anomalies/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.001},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
       "id": 80,
       "type": "timeseries",
       "title": "Per-user abuse fires (server)",

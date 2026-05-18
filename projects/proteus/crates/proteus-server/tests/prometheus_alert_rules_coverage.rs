@@ -182,6 +182,11 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         "proteus_abuse_alerts_byte_budget_total",
         "proteus_abuse_alerts_rate_limit_total",
         "proteus_abuse_alerts_per_user_bandwidth_total",
+        // Iter-81: probe-anomaly per-/24 attribution alert.
+        // Pre-iter-81 the metric existed but no alert fired
+        // on it directly; operators had to grep the metric
+        // manually for the per-/24 breakdown.
+        "proteus_probe_anomalies_fired_total",
     ]
     .into_iter()
     .collect();

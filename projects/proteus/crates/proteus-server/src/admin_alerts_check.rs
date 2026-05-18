@@ -346,6 +346,47 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusProbeAnomalyFired / Catastrophic ────
+    //
+    // Iter-81: per-/24 probe-anomaly attribution. Same shape
+    // as the iter-76 SSRF check: cumulative counter →
+    // PASS / WARN / CRIT tiers based on absolute count
+    // (in-process check can't compute rate).
+    if let Some(fired) = g("proteus_probe_anomalies_fired_total") {
+        if fired > 50.0 {
+            r.push(Check {
+                rule_name: "ProteusProbeAnomalyCatastrophic",
+                severity: CheckSeverity::Crit,
+                message: format!(
+                    "{fired} probe-anomaly fires since process start — sustained \
+                     coordinated probing campaign. Identify offending /24(s) from \
+                     access_log + structured probe_anomaly log lines, then \
+                     `firewall.deny: [<cidr>/24]` + SIGHUP. Consider raising \
+                     pow_difficulty + tightening max_cover_forwards."
+                ),
+                equivalent_promql: "rate(proteus_probe_anomalies_fired_total[5m]) > 1",
+            });
+        } else if fired > 0.0 {
+            r.push(Check {
+                rule_name: "ProteusProbeAnomalyFired",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{fired} probe-anomaly fire(s) since process start — at least one \
+                     /24 source range produced sustained cover-forward bursts. Use \
+                     access_log to identify + firewall-deny."
+                ),
+                equivalent_promql: "rate(proteus_probe_anomalies_fired_total[5m]) > 0",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusProbeAnomalyFired",
+                severity: CheckSeverity::Pass,
+                message: "no probe-anomaly fires observed".to_string(),
+                equivalent_promql: "",
+            });
+        }
+    }
+
     // ──── ProteusAbuseAlerts{ByteBudget,RateLimit,Bandwidth} ────
     //
     // Iter-79: per-user abuse-detector fires. Each surface ships
@@ -1141,6 +1182,59 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-81: probe-anomaly check ────
+
+    #[test]
+    fn iter81_no_probe_anomaly_passes() {
+        let body = body_with("proteus_probe_anomalies_fired_total 0");
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusProbeAnomalyFired")
+            .expect("rule must fire when metric present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    #[test]
+    fn iter81_single_24_burst_warns() {
+        let body = body_with("proteus_probe_anomalies_fired_total 3");
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusProbeAnomalyFired")
+            .expect("rule must fire");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("3"));
+        assert!(warn.message.contains("firewall-deny"));
+    }
+
+    #[test]
+    fn iter81_campaign_level_crits() {
+        let body = body_with("proteus_probe_anomalies_fired_total 200");
+        let r = evaluate(&body);
+        let crit = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusProbeAnomalyCatastrophic")
+            .expect("catastrophic must fire on >50 anomalies");
+        assert_eq!(crit.severity, CheckSeverity::Crit);
+        assert!(crit.message.contains("200"));
+        assert!(crit.message.contains("coordinated"));
+    }
+
+    #[test]
+    fn iter81_missing_metric_suppresses_check() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| {
+            c.rule_name == "ProteusProbeAnomalyFired"
+                || c.rule_name == "ProteusProbeAnomalyCatastrophic"
+        });
+        assert!(!any);
     }
 
     // ──── iter-79: per-user abuse-alerts checks ────

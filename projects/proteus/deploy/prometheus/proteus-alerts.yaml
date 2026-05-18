@@ -187,6 +187,56 @@ groups:
         succeed. Pre-SIGHUP budget is still in effect. Check
         journalctl for the parse error.
 
+- name: proteus-probe-anomaly
+  interval: 30s
+  rules:
+
+  # Iter-81: per-/24 source-IP probe-anomaly detector fires.
+  #
+  # The probe-anomaly detector triggers when a single /24
+  # source range produces sustained cover-forward bursts
+  # within the configured sliding window. Unlike the broader
+  # ProteusCoverForwardStorm alert (which catches global
+  # rate exhaustion), this is per-source-range attribution —
+  # tells the operator WHICH /24 to firewall-deny.
+  #
+  # Pre-iter-81 the metric was emitted but no alert fired
+  # on it directly; operators saw the existing
+  # ProteusCoverForward{Rejecting,Storm} alerts and had to
+  # manually grep the metric for the per-/24 breakdown.
+  - alert: ProteusProbeAnomalyFired
+    expr: rate(proteus_probe_anomalies_fired_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: probe-anomaly detector fired (per-/24 source attribution)"
+      description: |
+        {{ printf "%.3f" $value }} probe-anomaly fire(s)/sec
+        on {{ $labels.instance }} for 5+ min. A specific /24
+        source range is producing sustained cover-forward
+        bursts beyond the configured threshold. Likely an
+        active prober mapping the VPS surface. Use
+        access_log + the structured probe_anomaly log line to
+        identify the offending /24 + firewall-deny via
+        `firewall.deny: [<source-cidr>/24]` + SIGHUP.
+
+  - alert: ProteusProbeAnomalyCatastrophic
+    expr: rate(proteus_probe_anomalies_fired_total[5m]) > 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server: probe-anomaly fires > 1/sec — sustained attack"
+      description: |
+        {{ printf "%.3f" $value }} probe-anomaly fires/sec
+        on {{ $labels.instance }} for 2+ min. Multiple /24
+        ranges OR very high per-range frequency. Either way
+        this is a coordinated probing campaign — consider
+        raising pow_difficulty + tightening
+        max_cover_forwards. Recovery requires identifying
+        the source CIDR(s) from the access_log + firewall-deny.
+
 - name: proteus-abuse-alerts
   interval: 30s
   rules:
