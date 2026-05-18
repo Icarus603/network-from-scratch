@@ -346,6 +346,31 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusServerDrainStuck ────
+    //
+    // Iter-102: proteus_ready=0 + proteus_up=1 is the legit
+    // SIGTERM-drain state. The in-process alerts-check is a
+    // single-shot scrape so we can't measure "for 5min"; we
+    // just surface the state. PASS-with-note is wrong (the
+    // state IS suboptimal); WARN is the right severity. The
+    // Prometheus alert has the time-based threshold; this
+    // check fires immediately on observation.
+    let up = g("proteus_up").unwrap_or(0.0);
+    let ready = g("proteus_ready").unwrap_or(0.0);
+    if up >= 1.0 && ready < 1.0 {
+        r.push(Check {
+            rule_name: "ProteusServerDrainStuck",
+            severity: CheckSeverity::Warn,
+            message: "proteus_ready=0 + proteus_up=1 — binary is in SIGTERM-drain \
+                      state. If this is during a planned shutdown, expect it; if not, \
+                      drain is wedged (in-flight sessions refusing to close OR \
+                      supervisor never escalated to SIGKILL). Check \
+                      proteus_in_flight_sessions + journalctl for SIGTERM log line."
+                .to_string(),
+            equivalent_promql: "proteus_ready == 0 and proteus_up == 1",
+        });
+    }
+
     // ──── Iter-99: rejection-counter checks (×5) ────
     //
     // Same shape as iter-76 SSRF + iter-98 AEAD: cumulative
@@ -1319,6 +1344,42 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-102: drain-stuck check ────
+
+    /// up=1, ready=1 → no DrainStuck check fires.
+    #[test]
+    fn iter102_running_ready_no_drain_stuck() {
+        let body = body_with("proteus_up 1\nproteus_ready 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| c.rule_name == "ProteusServerDrainStuck");
+        assert!(!any, "ready=1 must NOT fire DrainStuck");
+    }
+
+    /// up=1, ready=0 → DrainStuck WARN.
+    #[test]
+    fn iter102_draining_warns() {
+        let body = body_with("proteus_up 1\nproteus_ready 0");
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusServerDrainStuck")
+            .expect("must fire on drain state");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("SIGTERM-drain"));
+    }
+
+    /// up=0, ready=0 → no DrainStuck (ProteusServerUnhealthy
+    /// covers this; we only fire on the up=1 + ready=0
+    /// transitional state).
+    #[test]
+    fn iter102_down_no_drain_stuck() {
+        let body = body_with("proteus_up 0\nproteus_ready 0");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| c.rule_name == "ProteusServerDrainStuck");
+        assert!(!any, "up=0 must NOT fire DrainStuck");
     }
 
     // ──── iter-99: rejection-counter checks ────

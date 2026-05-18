@@ -55,6 +55,28 @@ groups:
         not bound or the binary is mid-drain. If this fires
         OUTSIDE a maintenance window, investigate immediately.
 
+  # Iter-102: drain stuck. proteus_ready=0 + proteus_up=1 is
+  # the legitimate SIGTERM-drain state. If the binary stays
+  # in this state for >5 min, the drain is wedged — either
+  # in-flight sessions refuse to close, OR the operator's
+  # supervisor never sent SIGKILL after the drain window.
+  - alert: ProteusServerDrainStuck
+    expr: proteus_ready == 0 and proteus_up == 1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server has been draining for 5+ min"
+      description: |
+        proteus_ready=0 + proteus_up=1 on {{ $labels.instance }}
+        for 5+ min — drain is wedged. Either in-flight
+        sessions refuse to close (long-lived streams, dead
+        upstream blocking the half-close handshake) OR the
+        operator's supervisor (systemd / docker) never escalated
+        to SIGKILL after the drain window. Check
+        proteus_in_flight_sessions gauge + journalctl for the
+        SIGTERM log line + drain-secs timeout.
+
 - name: proteus-tls-cert
   interval: 30s
   rules:

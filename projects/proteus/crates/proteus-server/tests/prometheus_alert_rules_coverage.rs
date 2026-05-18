@@ -203,6 +203,10 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         "proteus_conn_limit_rejected_total",
         "proteus_user_rate_rejected_total",
         "proteus_user_quarantine_rejected_total",
+        // Iter-102: drain-stuck alert references proteus_ready
+        // (gauge that goes 0 on SIGTERM). Pre-iter-102 the
+        // signal was undocumented in any alert.
+        "proteus_ready",
     ]
     .into_iter()
     .collect();
