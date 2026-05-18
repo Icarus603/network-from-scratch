@@ -166,6 +166,52 @@ readinessProbe:
   failureThreshold: 2
 ```
 
+### Prometheus alerts
+
+This repo ships ready-to-load Prometheus alert rules:
+
+- `deploy/prometheus/proteus-alerts.yaml` — 40+ server-side alerts
+- `deploy/prometheus/proteus-client-alerts.yaml` — 10 client-side alerts
+
+Load with `rule_files:` in `prometheus.yml`, or mount into a
+Prometheus Operator `PrometheusRule` resource. Severity grammar:
+
+- **critical** — operator must act now (paging-grade); examples:
+  `ProteusServerDown`, `ProteusPanic`, `ProteusTlsCertExpired`,
+  `ProteusAeadDropsCatastrophic` (>1 AEAD-drop/sec for 2 min =
+  active MITM), `ProteusSsrfAttemptsCatastrophic` (credential
+  compromise + internal-network probing), `ProteusHandshakeLatencyP99Catastrophic`
+  (CPU-exhaustion attack / PoW-bypass).
+- **warning** — investigate within the hour; examples:
+  `ProteusCoverForwardStorm`, `ProteusUserQuotaAdmissionRejecting`,
+  `ProteusProbeAnomalyFired`, `ProteusFirewallReloadFailing`,
+  `ProteusServerDrainStuck` (sustained SIGTERM drain).
+- **info** — trending signal; dashboard-panel-grade, not paging.
+
+Every alert message includes a recovery action in the
+description. Example: `ProteusUserQuotaAdmissionRejecting`
+points the operator to "audit access_log + adjust per-user
+override OR raise default_period_bytes"; `ProteusAeadDropsCatastrophic`
+points to "identify source IP from access_log + firewall-deny
+immediately. If multiple sources, treat as coordinated attack."
+
+### In-process `alerts-check` (no Prometheus needed)
+
+Single-user / personal-VPN deploys often don't run Prometheus.
+Both binaries ship a one-shot evaluator that scrapes `/metrics`
+in-process and prints per-rule verdicts:
+
+```
+proteus-server admin alerts-check --token-file /etc/proteus/keys/metrics.token
+proteus-client alerts-check --url http://127.0.0.1:9091
+```
+
+Exits 0 on PASS+WARN-only, 1 on any CRIT. Wire into
+Ansible/Terraform deploy gates + cron for fresh-deploy smoke
+checks. Every rule in the bundled `*-alerts.yaml` files has a
+matching in-process check (except a small number that
+genuinely need a TSDB for `rate(...[5m])` semantics).
+
 ### Authentication
 
 `/healthz` and `/readyz` are **never** authenticated — orchestrator
