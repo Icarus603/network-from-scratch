@@ -699,10 +699,89 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         if let Some(path) = uq.persistence_path.as_ref() {
             check_parent_writable(&mut r, "user_quotas.persistence_path", path);
         }
+        // Iter-85: user_quotas numeric + override sanity.
+        //
+        // period_secs = 0 → instant reset; every quota check
+        // immediately resets the bucket → no enforcement. FAIL.
+        if uq.period_secs == 0 {
+            r.push_fail(
+                "user_quotas.period_secs = 0 makes the quota window collapse to zero — \
+                 buckets reset on every check, so no quota is ever enforced. Either set \
+                 a real window (typical 86400 for daily, 2592000 for monthly) or remove \
+                 the user_quotas block to disable the system entirely.",
+            );
+        }
+        // max_entries = 0 → no users tracked → no quotas
+        // enforced. FAIL.
+        if uq.max_entries == 0 {
+            r.push_fail(
+                "user_quotas.max_entries = 0 disables user tracking — no quotas are \
+                 ever enforced. If you want to disable quotas entirely, remove the \
+                 user_quotas block.",
+            );
+        }
+        // Override sanity: user_id must be in client_allowlist
+        // (or the override is dead code), and each user_id
+        // must appear at most once.
+        let allowed_uids: std::collections::HashSet<&str> = cfg
+            .client_allowlist
+            .iter()
+            .map(|c| c.user_id.as_str())
+            .collect();
+        let mut override_seen: std::collections::HashSet<&str> =
+            std::collections::HashSet::with_capacity(uq.overrides.len());
+        let mut override_dupes: Vec<&str> = Vec::new();
+        let mut override_orphans: Vec<&str> = Vec::new();
+        for ovr in &uq.overrides {
+            let uid = ovr.user_id.as_str();
+            if !override_seen.insert(uid) && !override_dupes.contains(&uid) {
+                override_dupes.push(uid);
+            }
+            if !allowed_uids.is_empty() && !allowed_uids.contains(uid) {
+                override_orphans.push(uid);
+            }
+        }
+        if !override_dupes.is_empty() {
+            r.push_fail(format!(
+                "user_quotas.overrides contains duplicate user_id(s): {override_dupes:?}. \
+                 The runtime hashmap silently drops the earlier entry; only the LAST \
+                 override per user_id wins. Likely a typo — give each user_id one \
+                 override line.",
+            ));
+        }
+        if !override_orphans.is_empty() {
+            r.push_warn(format!(
+                "user_quotas.overrides references user_id(s) not in client_allowlist: \
+                 {override_orphans:?}. These overrides are dead code (the user_id can \
+                 never authenticate; the override never applies). Likely a typo OR a \
+                 pre-rotation entry the operator forgot to delete.",
+            ));
+        }
     }
     if let Some(uq) = cfg.user_quarantine.as_ref() {
         if let Some(path) = uq.persistence_path.as_ref() {
             check_parent_writable(&mut r, "user_quarantine.persistence_path", path);
+        }
+        // Iter-85: user_quarantine numeric sanity.
+        //
+        // ttl_secs = 0 is documented as "list wired but
+        // disabled" (no entry ever sticks). PASS-with-note
+        // because it's a legitimate operator choice for
+        // observability-only deploys; FAIL would be wrong.
+        if uq.ttl_secs == 0 {
+            r.push_warn(
+                "user_quarantine.ttl_secs = 0 — the quarantine list is wired but every \
+                 insert immediately expires. This is the documented 'observability-only' \
+                 mode (counters fire, no enforcement). If you want enforcement, set a \
+                 non-zero TTL (typical 600 for personal, 3600 for stricter).",
+            );
+        }
+        if uq.max_entries == 0 {
+            r.push_fail(
+                "user_quarantine.max_entries = 0 disables tracking — quarantine inserts \
+                 immediately drop. If you want to disable entirely, remove the \
+                 user_quarantine block.",
+            );
         }
     }
 
@@ -1862,6 +1941,120 @@ mod tests {
         assert!(
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: user_quotas.period_secs = 0 → FAIL.
+    #[test]
+    fn iter85_user_quotas_zero_period_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "period_secs: 0\nmax_entries: 100\ndefault_period_bytes: 0\n";
+        cfg.user_quotas =
+            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "period_secs=0 MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: user_quotas.max_entries = 0 → FAIL.
+    #[test]
+    fn iter85_user_quotas_zero_max_entries_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "period_secs: 86400\nmax_entries: 0\ndefault_period_bytes: 0\n";
+        cfg.user_quotas =
+            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "max_entries=0 MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: duplicate user_id in overrides → FAIL.
+    #[test]
+    fn iter85_user_quotas_duplicate_override_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "period_secs: 86400\nmax_entries: 100\ndefault_period_bytes: 0\n\
+            overrides:\n  \
+                - {user_id: \"alice\", period_bytes: 100}\n  \
+                - {user_id: \"alice\", period_bytes: 200}\n";
+        cfg.user_quotas =
+            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "duplicate override user_id MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("user_quotas.overrides") && s.contains("duplicate") && s.contains("alice"))
+        });
+        assert!(fail, "FAIL must name duplicate + offender: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: override user_id not in client_allowlist → WARN.
+    #[test]
+    fn iter85_user_quotas_orphan_override_warns() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        std::fs::write(&pk, b"some-non-zero-content").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let yaml = "period_secs: 86400\nmax_entries: 100\ndefault_period_bytes: 0\n\
+            overrides:\n  \
+                - {user_id: \"alice\", period_bytes: 100}\n  \
+                - {user_id: \"orphan\", period_bytes: 200}\n";
+        cfg.user_quotas =
+            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("user_quotas.overrides") && s.contains("orphan"))
+        });
+        assert!(warn, "orphan override must WARN: {report}");
+        // Not a FAIL: overrides referencing absent users is just dead code.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: user_quarantine.ttl_secs = 0 → WARN (legit
+    /// observability-only mode, but worth surfacing).
+    #[test]
+    fn iter85_user_quarantine_zero_ttl_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "ttl_secs: 0\nmax_entries: 100\n";
+        cfg.user_quarantine =
+            Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("user_quarantine.ttl_secs") && s.contains("observability-only"))
+        });
+        assert!(warn, "ttl_secs=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-85: user_quarantine.max_entries = 0 → FAIL.
+    #[test]
+    fn iter85_user_quarantine_zero_max_entries_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "ttl_secs: 600\nmax_entries: 0\n";
+        cfg.user_quarantine =
+            Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "user_quarantine.max_entries=0 MUST FAIL: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
