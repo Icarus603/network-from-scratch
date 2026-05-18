@@ -52,11 +52,26 @@ fn client_bin_path() -> std::path::PathBuf {
     candidate
 }
 
-fn deploy_readme_path() -> PathBuf {
+fn proteus_root() -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.pop(); // crates/
     p.pop(); // proteus/
+    p
+}
+
+fn deploy_readme_path() -> PathBuf {
+    let mut p = proteus_root();
     p.push("deploy");
+    p.push("README.md");
+    p
+}
+
+/// The project root README. This is the first thing operators
+/// see on the GitHub repo home page; if it documents a phantom
+/// command the very first "let me try this on a VPS" attempt
+/// fails at clap. Iter-124 brought it under the same contract.
+fn project_readme_path() -> PathBuf {
+    let mut p = proteus_root();
     p.push("README.md");
     p
 }
@@ -64,6 +79,10 @@ fn deploy_readme_path() -> PathBuf {
 fn read_readme() -> String {
     let p = deploy_readme_path();
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+fn read_file(path: &std::path::Path) -> String {
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
 /// Pull out every `proteus-server <subcommand>` or
@@ -303,6 +322,77 @@ fn iter123_readme_does_not_reintroduce_phantom_host_preflight_subcommand() {
              `proteus-client check-host` (see iter-123 in CHANGELOG.md). If you \
              renamed/added a subcommand, update both the README and the \
              `iter120_readme_documents_host_preflight_and_connect_test` test."
+        );
+    }
+}
+
+/// Iter-124: the same backstop applied to the project root
+/// `projects/proteus/README.md`. That README is the FIRST surface
+/// landing visitors see on the GitHub repo (github.com/Icarus603/
+/// network-from-scratch). If it ships a phantom subcommand, the
+/// repo's flagship "Quick start (Linux VPS)" recipe fails at
+/// step N for every new operator.
+///
+/// At iter-124 the root README is clean (uses `preflight all`,
+/// `preflight check-host`, top-level `check-host`); this test
+/// pins that state so a future doc refactor can't regress it.
+#[test]
+fn iter124_project_readme_commands_are_recognized_by_clap() {
+    let body = read_file(&project_readme_path());
+    let commands = extract_documented_commands(&body);
+    assert!(
+        !commands.is_empty(),
+        "extractor found no `proteus-{{server,client}} <cmd>` references in \
+         the project root README — extractor regression suspected"
+    );
+
+    let client_bin = client_bin_path();
+    let client_bin_str = client_bin.to_string_lossy().into_owned();
+    let mut failures = Vec::new();
+    let mut invoked = 0usize;
+    for (bin, chain) in &commands {
+        if skip_command(bin, chain) {
+            continue;
+        }
+        let bin_path: &str = match bin.as_str() {
+            "proteus-server" => SERVER_BIN,
+            "proteus-client" => &client_bin_str,
+            _ => unreachable!("extractor only emits two binary names"),
+        };
+        invoked += 1;
+        if let Some(reason) = invoke_help(bin_path, chain) {
+            failures.push(format!("  - `{} {}`: {}", bin, chain.join(" "), reason));
+        }
+    }
+    assert!(
+        invoked >= 5,
+        "extractor invoked only {invoked} commands on the project README; \
+         expected at least 5 — extractor regression suspected"
+    );
+    assert!(
+        failures.is_empty(),
+        "projects/proteus/README.md documents {} command line(s) that the \
+         actual binary doesn't recognise. Broken commands:\n{}",
+        failures.len(),
+        failures.join("\n")
+    );
+}
+
+/// Iter-124: the project root README MUST NOT reintroduce the
+/// phantom `host-preflight` names either — the bug class spans
+/// both READMEs. Symmetric with iter-123's deploy-side guard.
+#[test]
+fn iter124_project_readme_does_not_reintroduce_phantom_host_preflight() {
+    let body = read_file(&project_readme_path());
+    for phantom in [
+        "proteus-server host-preflight",
+        "proteus-client host-preflight",
+    ] {
+        assert!(
+            !body.contains(phantom),
+            "projects/proteus/README.md contains `{phantom}` but no such \
+             subcommand exists. Real CLI: `proteus-server preflight \
+             check-host` / `proteus-client check-host` (iter-123)."
         );
     }
 }
