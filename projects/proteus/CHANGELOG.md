@@ -77,6 +77,38 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — security observability gates (iter 73-76)
+
+Four more layers closing security blind-spots, each pairing
+validate-time prevention with runtime alert/check:
+
+- **admin_listen + metrics_listen wildcard FAIL escalation**
+  (iter-73): pre-iter-73 wildcard binds on the unauthenticated
+  admin/metrics endpoints were uniformly WARN. Now FAIL on
+  `0.0.0.0` / `[::]` — exposing the full HA topology +
+  panic_count + cert-expiry-timeline to an internet scanner is
+  attack-prep material the operator should NOT ship by accident.
+- **Handshake p99 latency alerts** (iter-74): the histogram
+  metric existed + dashboard panel referenced it, but no alert
+  fired on creep. CPU-exhaustion attacks (PoW-bypass → ML-KEM
+  Decap flooding) were invisible outside the dashboard. Two
+  tiers: WARN at p99>200ms (10min), CRIT at p99>1s (5min, page-
+  grade). In-process alerts-check approximates via mean.
+- **outbound_filter SSRF-policy validate sanity** (iter-75):
+  pre-iter-75 an operator could ship `disabled: true` or
+  `replace_default_blocklist: true` and validate said green.
+  Now FAIL on the three foot-guns: explicit-disable (any
+  allowlist'd client → LAN/IAM-creds), blanket-blocklist-
+  replace (almost always a typo), and unparseable CIDR
+  (runtime silently ignores; gate breaks).
+- **SSRF-attempts runtime alerts** (iter-76): the
+  `proteus_outbound_blocked_total` counter existed but no
+  alert fired. Credential compromise + attacker mapping
+  internal network via proxy was visible only via manual
+  access_log audit. Two tiers: WARN rate>0 (5min), CRIT
+  rate>1/sec (2min, page-grade). In-process alerts-check
+  uses cumulative-counter heuristics.
+
 ### Added — client-side validate security gates (iter 70-71)
 
 Two more validate-time security gates closing client-side
