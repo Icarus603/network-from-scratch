@@ -758,6 +758,47 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    // Iter-87: abuse_detector entry sanity (byte_budget +
+    // rate_limit). Each sub-block has the same shape; both get
+    // the same three-state check via a small inline loop.
+    if let Some(ad) = cfg.abuse_detector.as_ref() {
+        for (label, entry_opt) in [
+            ("abuse_detector.byte_budget", ad.byte_budget.as_ref()),
+            ("abuse_detector.rate_limit", ad.rate_limit.as_ref()),
+        ] {
+            let Some(entry) = entry_opt else { continue };
+            if entry.window_secs == 0 {
+                r.push_fail(format!(
+                    "{label}.window_secs = 0 — the sliding window has no width; \
+                     the abuse-fire counter never accumulates and the alert never \
+                     fires. Remove the sub-block to disable, or set a real window \
+                     (typical: 300s)."
+                ));
+            } else if entry.window_secs > 86400 {
+                r.push_warn(format!(
+                    "{label}.window_secs = {} (>24h) is very long; an attacker \
+                     spreading exactly under the threshold over a full day evades \
+                     detection. Recommended: 60-3600s.",
+                    entry.window_secs,
+                ));
+            }
+            if entry.threshold == 0 {
+                r.push_fail(format!(
+                    "{label}.threshold = 0 means every single qualifying event \
+                     fires an alert — every legitimate cap-hit produces a page. \
+                     Likely a typo for 'I want to disable threshold'. The \
+                     threshold gates abuse vs noise; recommended 3-10."
+                ));
+            } else if entry.threshold == 1 {
+                r.push_warn(format!(
+                    "{label}.threshold = 1 fires on every single event — every \
+                     legitimate cap-hit produces an alert. Operator should \
+                     consider raising to 3 (default) to gate noise."
+                ));
+            }
+        }
+    }
+
     // Iter-86: per_user_bandwidth_rate sanity.
     //
     // Each knob has a runtime default; explicit zero/absurd
@@ -1999,6 +2040,78 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-87: abuse_detector.byte_budget.window_secs = 0 → FAIL.
+    #[test]
+    fn iter87_abuse_byte_budget_zero_window_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "byte_budget:\n  window_secs: 0\n  threshold: 3\n";
+        cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "byte_budget.window_secs=0 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-87: abuse_detector.byte_budget.window_secs > 24h → WARN.
+    #[test]
+    fn iter87_abuse_byte_budget_excessive_window_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "byte_budget:\n  window_secs: 172800\n  threshold: 3\n";
+        cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("abuse_detector.byte_budget.window_secs"))
+        });
+        assert!(warn, "excessive window must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-87: abuse_detector.rate_limit.threshold = 0 → FAIL.
+    #[test]
+    fn iter87_abuse_rate_limit_zero_threshold_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "rate_limit:\n  window_secs: 300\n  threshold: 0\n";
+        cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "rate_limit.threshold=0 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-87: abuse_detector.byte_budget.threshold = 1 → WARN.
+    #[test]
+    fn iter87_abuse_threshold_one_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "byte_budget:\n  window_secs: 300\n  threshold: 1\n";
+        cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("abuse_detector.byte_budget.threshold") && s.contains("noise"))
+        });
+        assert!(warn, "threshold=1 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-87: both sub-blocks misconfigured → both surface
+    /// independently.
+    #[test]
+    fn iter87_abuse_both_sub_blocks_surface_independently() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "byte_budget:\n  window_secs: 0\n  threshold: 3\nrate_limit:\n  window_secs: 300\n  threshold: 0\n";
+        cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
+        let report = preflight(&cfg);
+        let fails: Vec<_> = report
+            .checks
+            .iter()
+            .filter(|c| matches!(c, Check::Fail(s) if s.contains("abuse_detector")))
+            .collect();
+        assert_eq!(fails.len(), 2, "both sub-blocks must fail independently: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
