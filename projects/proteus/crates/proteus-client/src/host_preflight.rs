@@ -183,21 +183,42 @@ pub async fn run(input: HostPreflightInput) -> HostReport {
         }
         check_bootstrap_dns_consistency(cfg_path, &mut r);
     } else {
-        r.push(HostFinding::pass(
+        // Iter-125: symmetric with the server-side fix. Pre-
+        // iter-125 these emitted PASS, which meant an operator
+        // running `proteus-client check-host` WITHOUT --config
+        // saw "0 fail" and thought the audit was clean — but
+        // every config-derived check (client SK mode, endpoint
+        // DNS resolvability, bootstrap_dns consistency, trusted
+        // CA readability) had been silently skipped. Each of
+        // those four is the only check on its respective class;
+        // a silent skip = a class-wide blind spot. Now each
+        // emits WARN with explicit "AUDIT SKIPPED" + the
+        // operator-facing message of what was NOT verified.
+        r.push(HostFinding::warn(
             "key_file_modes",
-            "skipped — no --config supplied",
+            "AUDIT SKIPPED — no --config supplied. The client SK \
+             mode check (`client_ed25519_sk` world-readable on shared \
+             hosts = long-term identity exfil) DID NOT RUN. Re-run \
+             with `--config ~/.proteus/client.yaml` to actually audit",
         ));
-        r.push(HostFinding::pass(
+        r.push(HostFinding::warn(
             "endpoint_dns",
-            "skipped — no --config supplied",
+            "AUDIT SKIPPED — no --config supplied. The server_endpoint \
+             DNS-resolvability check (catches typos in vps.example.com \
+             before first SOCKS5 connect) DID NOT RUN",
         ));
-        r.push(HostFinding::pass(
+        r.push(HostFinding::warn(
             "bootstrap_dns_consistency",
-            "skipped — no --config supplied",
+            "AUDIT SKIPPED — no --config supplied. The bootstrap_dns \
+             DoH-leak surface check (2026 GFW threat-intel main line 6) \
+             DID NOT RUN",
         ));
-        r.push(HostFinding::pass(
+        r.push(HostFinding::warn(
             "trusted_ca_readable",
-            "skipped — no --config supplied",
+            "AUDIT SKIPPED — no --config supplied. The trusted_ca PEM \
+             readability check (catches silent rustls fallback to \
+             webpki-roots when the operator's CA pinning fails to load) \
+             DID NOT RUN",
         ));
     }
 
@@ -812,6 +833,62 @@ mod tests {
         let r = run(HostPreflightInput::default()).await;
         // At minimum urandom + clock + 4 skipped-with-config notes.
         assert!(r.findings.len() >= 4, "got: {:?}", r.findings);
+    }
+
+    /// Iter-125: pre-iter-125 every config-derived check on the
+    /// client side (key_file_modes, endpoint_dns,
+    /// bootstrap_dns_consistency, trusted_ca_readable) emitted
+    /// PASS when no --config was supplied. That meant a client
+    /// operator who typed `proteus-client check-host` without
+    /// arguments saw "0 fail" in the summary and concluded the
+    /// host was safe to run on — but the audit had NOT VERIFIED:
+    ///   - client_ed25519_sk mode (long-term identity exfil class)
+    ///   - server_endpoint hostname DNS resolvability
+    ///   - bootstrap_dns DoH-leak surface
+    ///   - trusted_ca PEM readability
+    /// All four are the SOLE check on their respective class — a
+    /// silent skip = a class-wide blind spot. Iter-125 escalates
+    /// each to WARN with explicit "AUDIT SKIPPED" so the summary
+    /// shows 4 yellow flags instead of a fully green report.
+    #[tokio::test]
+    async fn iter125_no_config_makes_every_config_check_a_warn_not_a_silent_pass() {
+        let r = run(HostPreflightInput::default()).await;
+        let must_warn = [
+            "key_file_modes",
+            "endpoint_dns",
+            "bootstrap_dns_consistency",
+            "trusted_ca_readable",
+        ];
+        for name in must_warn {
+            let finding = r
+                .findings
+                .iter()
+                .find(|f| f.check == name)
+                .unwrap_or_else(|| {
+                    panic!("{name} must appear even when --config absent: {:?}", r.findings)
+                });
+            assert_eq!(
+                finding.severity,
+                Severity::Warn,
+                "{name} must WARN when --config absent (was PASS pre-iter-125, \
+                 which let careless operators conclude the audit was clean \
+                 when it had been silently skipped): {finding:?}"
+            );
+            assert!(
+                finding.message.contains("AUDIT SKIPPED"),
+                "{name} message must shout AUDIT SKIPPED so it's eye-catching \
+                 in the summary: {}",
+                finding.message
+            );
+        }
+        let (_, warns, fails) = r.counts();
+        assert!(
+            warns >= 4,
+            "no-config run must contribute ≥4 warns (one per skipped \
+             config-derived check): {:?}",
+            r.findings
+        );
+        assert_eq!(fails, 0, "no-config run must not FAIL");
     }
 
     #[test]

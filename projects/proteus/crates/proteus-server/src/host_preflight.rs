@@ -164,13 +164,31 @@ pub fn run(input: HostPreflightInput) -> HostReport {
 
     // Key-file mode check — only when a config is available (the
     // key file paths come from the YAML).
+    //
+    // Iter-125: pre-iter-125 the "no --config supplied" branch
+    // emitted PASS. That meant an operator running
+    // `proteus-server preflight check-host` WITHOUT --config
+    // saw "0 fail" in the summary and proceeded to deploy — but
+    // the most operator-critical audit (world-readable SECRET
+    // keys, the #1 cause of long-term-key exfil on shared
+    // hosts) had been silently skipped. Now the branch emits
+    // WARN: the summary shows "1 warn" so the human eye lands
+    // on it, and the message is explicit that the audit DID
+    // NOT RUN. Exit code stays 0 (warn is non-fatal) to keep
+    // the dev-laptop "I'm just checking my own posture without
+    // a config" workflow green, but operators running the
+    // canonical preflight gate (with --config) get the real
+    // audit and operators running carelessly get a yellow flag.
     if let Some(cfg_path) = input.config_path.as_ref() {
         check_key_file_modes(cfg_path, &mut r);
     } else {
-        r.push(HostFinding::pass(
+        r.push(HostFinding::warn(
             "key_file_modes",
-            "skipped — no --config supplied (re-run with --config to audit \
-             /etc/proteus/*.sk and tls/privkey.pem modes)",
+            "AUDIT SKIPPED — no --config supplied. The key-file mode \
+             check (which catches world-readable SECRET keys, the #1 \
+             long-term-identity exfil class) DID NOT RUN. Re-run with \
+             `--config /etc/proteus/server.yaml` to actually audit \
+             /etc/proteus/*.sk + tls/privkey.pem modes",
         ));
     }
 
@@ -825,6 +843,57 @@ mod tests {
             report.findings.len() >= 4,
             "expected ≥4 findings, got: {:?}",
             report.findings
+        );
+    }
+
+    /// Iter-125: when the operator runs `preflight check-host`
+    /// without `--config`, the key-file mode audit can't run (it
+    /// needs the YAML to know which paths to chmod-check). The
+    /// PRE-iter-125 behavior emitted PASS for this skipped check,
+    /// so the summary said "0 fail" — a careless operator deployed
+    /// with world-readable SECRET keys because they read the green
+    /// line and didn't notice the skip.
+    ///
+    /// Iter-125 makes the skip a WARN with an explicit "AUDIT
+    /// SKIPPED" message. Exit code stays 0 (warn is non-fatal so
+    /// the dev-laptop workflow doesn't break), but the summary
+    /// shows "1 warn" and the message tells the operator exactly
+    /// what wasn't checked.
+    #[test]
+    fn iter125_no_config_makes_key_file_audit_a_warn_not_a_silent_pass() {
+        let report = run(HostPreflightInput::default());
+        let key_check = report
+            .findings
+            .iter()
+            .find(|f| f.check == "key_file_modes")
+            .expect("key_file_modes must appear even when --config absent");
+        assert_eq!(
+            key_check.severity,
+            Severity::Warn,
+            "skipped key-file audit must be WARN (was PASS pre-iter-125, \
+             which let operators deploy with world-readable SK files \
+             without noticing): {key_check:?}"
+        );
+        assert!(
+            key_check.message.contains("AUDIT SKIPPED"),
+            "message must announce the skip in shout-case so it's \
+             eye-catching in the green summary: {}",
+            key_check.message
+        );
+        assert!(
+            key_check.message.contains("--config"),
+            "message must tell operator HOW to re-run with audit \
+             enabled: {}",
+            key_check.message
+        );
+        // Exit code preservation: warn is non-fatal.
+        let (_, warns, fails) = report.counts();
+        assert!(warns >= 1, "no-config run must contribute ≥1 warn");
+        assert_eq!(
+            fails, 0,
+            "no-config run must not FAIL — operator on dev laptop \
+             without a config should still get a usable host posture \
+             report"
         );
     }
 

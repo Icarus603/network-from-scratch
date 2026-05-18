@@ -15,6 +15,33 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `check-host` silently emitted PASS for audits it didn't run (iter-125)
+
+Pre-iter-125 `proteus-server preflight check-host` and
+`proteus-client check-host` emitted **PASS** for every audit they
+skipped because the operator hadn't passed `--config`. The summary
+line said "0 fail" and the careless operator concluded their host
+was safe — but on the server side the key-file mode audit (the #1
+long-term-key exfil class) had been silently skipped, and on the
+client side ALL FOUR config-derived checks (client SK mode,
+server_endpoint DNS resolvability, bootstrap_dns DoH-leak surface,
+trusted_ca PEM readability) had been silently skipped.
+
+Each of those four client-side checks is the **sole audit on its
+respective class** — a silent skip = a class-wide blind spot.
+Server-side, world-readable `*_sk` files are catastrophic on
+shared/multi-user hosts.
+
+Iter-125 makes every skipped-because-no-config check a **WARN**
+with an `AUDIT SKIPPED` message in shout-case. The operator sees
+"1 warn" (server) or "4 warn" (client) in the summary, the message
+states explicitly what was NOT verified + how to re-run with the
+audit enabled. Exit code stays 0 (WARN is non-fatal) so the
+dev-laptop "I just want to see my own host's posture" workflow
+keeps working — but the dishonest "everything green" outcome is
+gone. New tests in both `host_preflight.rs` modules pin the WARN
+semantics so a future refactor can't silently regress.
+
 ### Fixed — `deploy/README.md` documented non-existent subcommands (iter-123)
 
 Pre-iter-123 the deploy guide's mandatory preflight gate
