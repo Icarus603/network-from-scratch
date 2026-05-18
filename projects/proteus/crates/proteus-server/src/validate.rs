@@ -538,13 +538,66 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
-    // 7. Metrics bearer-token file readable + nonempty.
+    // 7. Metrics bearer-token file readable + nonempty +
+    //    strong enough.
+    //
+    // Iter-65: pre-iter-65 we only checked nonempty. An operator
+    // could put `token` or `changeme` in the file, validate said
+    // green, and anyone who scanned the public metrics endpoint
+    // with a small wordlist would walk straight through the bearer
+    // gate. Three new checks:
+    //   - minimum length (32 chars: a base64-encoded 24-byte
+    //     random value, what `proteus-server keygen-metrics-token`
+    //     would emit if we had one)
+    //   - trivial-value blacklist (catches "changeme", "token",
+    //     "admin", "password" etc.)
+    //   - file mode (secret-file-mode warn, same as iter-52
+    //     keys/SK handling)
     if let Some(path) = cfg.metrics_token_file.as_ref() {
         match std::fs::read_to_string(path) {
             Ok(s) if s.trim().is_empty() => {
                 r.push_fail(format!("metrics_token_file {path:?} is empty"));
             }
-            Ok(_) => r.push_pass(format!("metrics_token_file readable ({path:?})")),
+            Ok(s) => {
+                let token = s.trim();
+                if token.len() < 32 {
+                    r.push_warn(format!(
+                        "metrics_token_file {path:?} contains a {}-char token; <32 chars is \
+                         brute-forceable. Use `openssl rand -base64 24` (32 chars base64) or \
+                         longer. The runtime still accepts the short token, but the gate is \
+                         weak against scanners.",
+                        token.len(),
+                    ));
+                }
+                // Trivial-value blacklist. Case-insensitive prefix
+                // match to catch trailing newlines / whitespace
+                // that already got trimmed.
+                const TRIVIAL: &[&str] = &[
+                    "changeme",
+                    "change-me",
+                    "change_me",
+                    "secret",
+                    "token",
+                    "admin",
+                    "password",
+                    "test",
+                    "default",
+                    "proteus",
+                ];
+                let token_lower = token.to_ascii_lowercase();
+                if TRIVIAL.iter().any(|t| token_lower == *t) {
+                    r.push_fail(format!(
+                        "metrics_token_file {path:?} contains the trivial value \
+                         {token_lower:?}. Any attacker scanning the metrics endpoint with a \
+                         small wordlist will walk through. Replace with a real secret: \
+                         `openssl rand -base64 24 > {path:?}`.",
+                    ));
+                } else {
+                    r.push_pass(format!("metrics_token_file readable ({path:?})"));
+                }
+                // Secret-file mode (iter-52 helper).
+                check_secret_file_mode(&mut r, "metrics_token_file", path);
+            }
             Err(e) => r.push_fail(format!("metrics_token_file {path:?}: {e}")),
         }
     } else if let Some(addr) = cfg.metrics_listen.as_ref() {
@@ -1303,13 +1356,94 @@ mod tests {
     fn nonempty_metrics_token_file_passes() {
         let dir = tmpdir();
         let token_path = dir.join("metrics.token");
-        write(&token_path, b"abcdef1234567890\n");
+        // Iter-65: bump fixture to a 32+ char value so the new
+        // weak-token WARN doesn't fire on a test that wants to
+        // assert "everything green".
+        write(
+            &token_path,
+            b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n",
+        );
         let mut cfg = minimal_cfg(&dir);
         cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
         cfg.metrics_token_file = Some(token_path);
         let report = preflight(&cfg);
         assert!(!report.has_failures(), "got: {report}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-65: short token → WARN but not FAIL. The runtime
+    /// still accepts it; we're nudging the operator toward a
+    /// strong default.
+    #[test]
+    fn iter65_short_metrics_token_warns_not_fails() {
+        let dir = tmpdir();
+        let token_path = dir.join("metrics.token");
+        write(&token_path, b"short-token\n");
+        let mut cfg = minimal_cfg(&dir);
+        cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
+        cfg.metrics_token_file = Some(token_path);
+        let report = preflight(&cfg);
+        assert!(
+            !report.has_failures(),
+            "short token must WARN not FAIL: {report}"
+        );
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => {
+                s.contains("metrics_token_file") && s.contains("brute-forceable")
+            }
+            _ => false,
+        });
+        assert!(
+            warn,
+            "short token must produce brute-forceable WARN: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-65: trivial-value token → FAIL. "changeme" / "token"
+    /// / "admin" etc. are the first values any scanner tries.
+    #[test]
+    fn iter65_trivial_metrics_token_fails() {
+        let dir = tmpdir();
+        let token_path = dir.join("metrics.token");
+        write(&token_path, b"changeme\n");
+        let mut cfg = minimal_cfg(&dir);
+        cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
+        cfg.metrics_token_file = Some(token_path);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "trivial token MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("trivial") && s.contains("changeme"),
+            _ => false,
+        });
+        assert!(
+            fail,
+            "FAIL must name the trivial value + 'trivial': {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-65: trivial-value detection is case-insensitive.
+    /// `CHANGEME`, `ChangeMe`, `Changeme` are all bad.
+    #[test]
+    fn iter65_trivial_metrics_token_case_insensitive() {
+        for variant in ["CHANGEME", "ChangeMe", "Token", "ADMIN"] {
+            let dir = tmpdir();
+            let token_path = dir.join("metrics.token");
+            std::fs::write(&token_path, format!("{variant}\n")).unwrap();
+            let mut cfg = minimal_cfg(&dir);
+            cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
+            cfg.metrics_token_file = Some(token_path);
+            let report = preflight(&cfg);
+            assert!(
+                report.has_failures(),
+                "case-variant {variant:?} MUST FAIL: {report}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 
     #[test]
