@@ -758,6 +758,25 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    // Iter-88: pad_quantum sanity. Mirror of the client-side
+    // check. Pre-iter-88 a typo like `pad_quantum: 1300` (the
+    // operator meant 1280) silently shipped — the runtime
+    // accepts any u16 value but downstream code expects one
+    // of the documented common sizes.
+    if let Some(q) = cfg.pad_quantum {
+        const COMMON: &[u16] = &[0, 64, 128, 256, 512, 1280];
+        if !COMMON.contains(&q) {
+            r.push_warn(format!(
+                "pad_quantum = {q} is unusual (typical values: {COMMON:?}); typo for \
+                 1280? The padding boundary affects wire-fingerprint uniformity; \
+                 non-standard values may cause subtle observability mismatches with \
+                 the documented threat-model coverage."
+            ));
+        } else {
+            r.push_pass(format!("pad_quantum = {q}"));
+        }
+    }
+
     // Iter-87: abuse_detector entry sanity (byte_budget +
     // rate_limit). Each sub-block has the same shape; both get
     // the same three-state check via a small inline loop.
@@ -1036,6 +1055,21 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
                 "drain_secs={drain} is set but metrics_listen is unset — no /readyz endpoint \
                  means upstream load balancers can't observe the drain. Either set \
                  metrics_listen or accept that drain is a server-internal flush only.",
+            ));
+        }
+        // Iter-88: drain bound sanity.
+        if drain == 0 {
+            r.push_warn(
+                "drain_secs = 0 — graceful drain is effectively disabled (SIGTERM \
+                 immediately tears down accepted sessions). For browser-facing deploys \
+                 this drops user requests mid-page-load. Recommended: 15-60s.",
+            );
+        } else if drain > 600 {
+            r.push_warn(format!(
+                "drain_secs = {drain} (>10min) is very long; systemd TimeoutStopSec \
+                 must be at least {} or the kernel SIGKILLs the binary before drain \
+                 completes. Recommended: ≤300s.",
+                drain + 30,
             ));
         }
     }
@@ -2040,6 +2074,62 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-88: server pad_quantum unusual value → WARN.
+    #[test]
+    fn iter88_pad_quantum_unusual_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.pad_quantum = Some(1300); // typo for 1280
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("pad_quantum") && s.contains("1300"))
+        });
+        assert!(warn, "unusual pad_quantum must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-88: server pad_quantum common value → PASS.
+    #[test]
+    fn iter88_pad_quantum_common_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.pad_quantum = Some(1280);
+        let report = preflight(&cfg);
+        let pass = report.checks.iter().any(|c| {
+            matches!(c, Check::Pass(s) if s.contains("pad_quantum = 1280"))
+        });
+        assert!(pass, "common pad_quantum must PASS: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-88: drain_secs = 0 → WARN (graceful drain disabled).
+    #[test]
+    fn iter88_drain_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.drain_secs = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("drain_secs = 0") && s.contains("disabled"))
+        });
+        assert!(warn, "drain=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-88: drain_secs > 600 → WARN (SIGKILL race).
+    #[test]
+    fn iter88_drain_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.drain_secs = Some(1200);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("drain_secs = 1200") && s.contains("TimeoutStopSec"))
+        });
+        assert!(warn, "drain=1200 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
