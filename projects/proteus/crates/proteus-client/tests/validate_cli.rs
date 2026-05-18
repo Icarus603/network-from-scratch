@@ -957,6 +957,96 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-83: max_inflight_sessions / socks_request_timeout sanity ----------
+
+#[tokio::test]
+async fn iter83_max_inflight_zero_fails() {
+    let dir = tempdir("inflight-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         max_inflight_sessions: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "max_inflight_sessions=0 MUST FAIL: {report}"
+    );
+    let fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("max_inflight_sessions") && s.contains("OOM")
+        }
+        _ => false,
+    });
+    assert!(fail, "FAIL must explain why 0 is bad: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter83_max_inflight_huge_warns() {
+    let dir = tempdir("inflight-huge");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         max_inflight_sessions: 100000\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("max_inflight_sessions") && s.contains("100000")
+        }
+        _ => false,
+    });
+    assert!(warn, "huge max_inflight must WARN: {report}");
+    assert!(
+        !report.has_failures(),
+        "huge max_inflight is WARN not FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter83_socks_request_timeout_zero_fails() {
+    let dir = tempdir("socks-timeout-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         socks_request_timeout_secs: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "socks_request_timeout_secs=0 MUST FAIL: {report}"
+    );
+    let fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("socks_request_timeout") && s.contains("slow-loris")
+        }
+        _ => false,
+    });
+    assert!(fail, "FAIL must call out slow-loris: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter83_socks_request_timeout_excessive_warns() {
+    let dir = tempdir("socks-timeout-high");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         socks_request_timeout_secs: 120\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("socks_request_timeout_secs") && s.contains("120")
+        }
+        _ => false,
+    });
+    assert!(warn, "high socks_request_timeout must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-73: admin_listen wildcard escalation ----------
 
 /// Iter-73: admin_listen on 0.0.0.0 → FAIL (open-prep

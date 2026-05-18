@@ -715,6 +715,56 @@ pub async fn run(path: &Path) -> PreflightReport {
         }
     }
 
+    // Iter-83: max_inflight_sessions = 0 disables the per-session
+    // semaphore (runtime says "not recommended" + warn-logs at
+    // startup). FAIL because the consequence is real: on a
+    // SOCKS5-from-browser scenario, a flooded fan-out (page load
+    // with 50+ images) can cascade into per-CONNECT Proteus
+    // session allocations, each with crypto state + buffers,
+    // and the proteus-client process OOMs locally. The 1024
+    // default sustains a normal browsing burst; we surface the
+    // disabled case at preflight so the operator must
+    // explicitly understand the risk.
+    if let Some(n) = cfg.max_inflight_sessions {
+        if n == 0 {
+            r.push_fail(
+                "max_inflight_sessions = 0 disables the per-session concurrency cap. \
+                 Under a SOCKS5 fan-out burst (browser page load with 50+ images), \
+                 per-CONNECT Proteus session allocations cascade and the client OOMs \
+                 locally. If you genuinely need unbounded sessions (e.g., bench harness), \
+                 remove the field entirely to inherit the 1024 default — explicit 0 is \
+                 almost always a typo for 'I want a high cap'.",
+            );
+        } else if n > 16384 {
+            r.push_warn(format!(
+                "max_inflight_sessions = {n} is very high; each in-flight session reserves \
+                 ~16 MiB worst-case (cipher state + scratch + buffers). 16384 sessions \
+                 ≈ 256 GiB worst-case memory ceiling. If you genuinely need this, ensure \
+                 the host has the RAM.",
+            ));
+        }
+    }
+
+    // Iter-83: socks_request_timeout_secs = 0 disables the
+    // slow-loris guard on the SOCKS5 pre-CONNECT phase. A
+    // stalled or malicious downstream can occupy a
+    // max_inflight_sessions slot indefinitely. FAIL.
+    if let Some(t) = cfg.socks_request_timeout_secs {
+        if t == 0 {
+            r.push_fail(
+                "socks_request_timeout_secs = 0 disables the slow-loris guard on SOCKS5 \
+                 greeting/method-select/request parse. A stalled or malicious local app \
+                 can occupy a max_inflight_sessions slot indefinitely. Recommended: \
+                 leave unset (defaults to 10 s) or set explicitly to 5-30 s.",
+            );
+        } else if t > 60 {
+            r.push_warn(format!(
+                "socks_request_timeout_secs = {t} is high; a single stalled app holds \
+                 a session slot for {t}s before reclaim. Recommended: ≤30 s for production.",
+            ));
+        }
+    }
+
     r
 }
 
