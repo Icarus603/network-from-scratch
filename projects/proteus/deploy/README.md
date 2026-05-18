@@ -508,6 +508,70 @@ Suitable for CI / Ansible / Terraform pre-deploy gating. The
 preflight does NOT bind sockets or talk to the cover endpoint — it
 only verifies what can be verified locally.
 
+### Host-posture preflight (`host-preflight`)
+
+`validate` checks the YAML + referenced files; `host-preflight`
+checks the HOST's posture (key file modes, DNS resolvability of
+hostname endpoints, urandom seeding, clock skew, trusted_ca
+readability). Run alongside `validate` for full coverage:
+
+```bash
+# Server
+sudo -u proteus proteus-server host-preflight --config /etc/proteus/server.yaml
+
+# Client (operator's laptop)
+proteus-client host-preflight --config ~/.proteus/client.yaml
+```
+
+What `host-preflight` catches that `validate` doesn't:
+
+- **Key file mode (0600 on Unix)** — a `rsync` without `-p` leaves
+  PQ secret keys world-readable on the destination. `validate`
+  only checks the file exists; `host-preflight` FAILs on
+  group-or-world readable.
+- **Hostname endpoint DNS resolvability** — `vps.example.com:8443`
+  in `server_endpoint` typoed to `vps.exmple.com:8443` won't be
+  caught by `validate` (it's a valid host:port string); the
+  client `host-preflight` does an actual DNS lookup.
+- **CA bundle PEM block presence** — `tls.trusted_ca` is a file
+  but `validate` doesn't parse the bytes; `host-preflight`
+  confirms there's at least one PEM block.
+
+### Live handshake smoke (`connect-test`)
+
+For end-to-end verification (the operator wants to know "does my
+new client.yaml actually CONNECT, not just parse?"), the client
+ships a one-shot handshake test:
+
+```bash
+# Test the configured server_endpoint
+proteus-client connect-test --config ~/.proteus/client.yaml
+
+# Test EVERY entry in server_endpoints: pool independently
+proteus-client connect-test --all-endpoints --config ~/.proteus/client.yaml
+```
+
+Runs the full Proteus α-profile handshake (TLS + ML-KEM + X25519
++ Finished MAC), drops the session, prints per-stage timing +
+exit 0 / 1. The `--all-endpoints` form runs the test once per
+pool entry — without it operators only verify the primary,
+leaving HA backup entries unverified until first failover (the
+worst possible moment for a surprise).
+
+Three-command pre-deploy smoke checklist (gate every operator
+edit through this):
+
+```bash
+proteus-server validate --config /etc/proteus/server.yaml || exit 1
+proteus-server host-preflight --config /etc/proteus/server.yaml || exit 1
+# (on client laptop after the server is up:)
+proteus-client validate --config ~/.proteus/client.yaml || exit 1
+proteus-client host-preflight --config ~/.proteus/client.yaml || exit 1
+proteus-client connect-test --all-endpoints --config ~/.proteus/client.yaml || exit 1
+```
+
+All five green = production ready. Any FAIL = fix before deploy.
+
 ## TLS certificate hot-reload (SIGHUP)
 
 `proteus-server` installs a SIGHUP handler that re-reads the

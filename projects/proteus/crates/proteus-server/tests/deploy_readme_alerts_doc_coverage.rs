@@ -75,6 +75,42 @@ fn readme_documents_alerts_check_evaluator() {
     );
 }
 
+/// Iter-120: host-preflight + connect-test must be documented
+/// alongside validate so operators know the full pre-deploy
+/// smoke checklist.
+#[test]
+fn iter120_readme_documents_host_preflight_and_connect_test() {
+    let body = read_readme();
+    assert!(
+        body.contains("### Host-posture preflight"),
+        "deploy/README.md must document the host-preflight subcommand"
+    );
+    assert!(
+        body.contains("### Live handshake smoke"),
+        "deploy/README.md must document the connect-test subcommand"
+    );
+    // Both binaries' host-preflight commands shown.
+    assert!(
+        body.contains("proteus-server host-preflight"),
+        "server-side host-preflight command must be shown"
+    );
+    assert!(
+        body.contains("proteus-client host-preflight"),
+        "client-side host-preflight command must be shown"
+    );
+    // connect-test --all-endpoints shown (the recommended form
+    // for multi-VPS HA deploys — iter-42).
+    assert!(
+        body.contains("proteus-client connect-test --all-endpoints"),
+        "must show --all-endpoints form for HA pools"
+    );
+    // 5-command pre-deploy smoke checklist enumerated.
+    assert!(
+        body.contains("production ready") && body.contains("FAIL"),
+        "must enumerate the 5-command pre-deploy checklist + pass/fail gate"
+    );
+}
+
 /// Iter-119: the Grafana dashboard section must reference the
 /// bundled JSON file by path + explain how to import.
 #[test]
