@@ -77,6 +77,26 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — client-side validate security gates (iter 70-71)
+
+Two more validate-time security gates closing client-side
+operator-trap classes:
+
+- **bootstrap_dns.direct_ip private-IP detection** (iter-70):
+  WARN on RFC 1918 / CGNAT / link-local / ULA / cloud-metadata
+  IP pinned for client DNS. Three trap classes called out:
+  (a) "VPS is actually a LAN box" paste error, (b) cloud
+  metadata IP `169.254.169.254` leaks user_id + Ed25519 sig
+  into the metadata service logs, (c) WireGuard-tunneled
+  setups legitimately use this — flagging is the right default
+  but stays WARN-not-FAIL for the legitimate case.
+- **socks_listen open-proxy detection** (iter-71): SOCKS5
+  inbound has NO authentication (RFC 1928 method 0x00). FAIL
+  on wildcard binds (`0.0.0.0`, `[::]`) which on a cloud VPS
+  make the entire internet a free relay through the operator's
+  egress IP. WARN on any other non-loopback bind (deliberate
+  tunnel-interface sharing — flag the trust assumption).
+
 ### Added — validate-time security gates (iter 65-68)
 
 Four new preflight checks targeting silent security/privacy
