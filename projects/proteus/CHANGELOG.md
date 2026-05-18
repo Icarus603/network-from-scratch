@@ -77,6 +77,41 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — runtime-state + per-user observability completeness (iter 101-105)
+
+The pattern of the prior iter-98/99 arc continued: every
+exposed counter / gauge that still lacked an alert + check +
+dashboard surface gets one. After iter-105, the operator
+running EITHER Prometheus OR the in-process `alerts-check`
+sees every documented attack signal AND every operational
+health metric within minutes of it changing.
+
+- **`ProteusClientPanic`** (iter 101): mirror of server-side
+  panic alert. The client emitted `proteus_panics_total` via
+  the shared `proteus-panic-hook` crate but the bundled
+  client alerts file + in-process check never flagged it.
+  CRIT-grade at rate > 0.
+- **`ProteusServerDrainStuck`** (iter 102): `proteus_ready=0
+  + proteus_up=1` is the legitimate SIGTERM-drain state but
+  if it sticks (in-flight sessions refusing to close OR
+  supervisor never escalating to SIGKILL) the binary sits
+  there indefinitely. WARN at 5 min sustained drain.
+- **session-lifecycle reaps panel** (iter 103): Grafana
+  panel id=100 surfaces `proteus_session_idle_reaped_total`
+  + `proteus_session_byte_budget_exhausted_total`. Wedged-
+  peer + per-session-cap-pressure signals operators want
+  for capacity planning.
+- **top-5 per-user bandwidth panel** (iter 104): Grafana
+  panel id=101 uses `topk(5, rate(proteus_per_user_bytes_sent_total[1m]))`
+  to show who's actually using the proxy at any moment.
+  Visual abuse-by-credential spotting before the alert
+  fires.
+- **`ProteusUserQuotaAdmissionRejecting`** (iter 105): per-
+  user `period_bytes` cap rejections. Pre-iter-105 the
+  operator had no signal when a user_id consumed their
+  quota; all new sessions for that user got admission-
+  rejected silently. WARN @ rate > 0/sec.
+
 ### Added — config-knob sanity + attack-detection observability (iter 83-99)
 
 The validate surface now catches **every documented
