@@ -358,6 +358,34 @@ fn reject_invalid_loss_pct(value: f64) -> Result<(), String> {
     Ok(())
 }
 
+/// Iter-128: `--min-success-rate` is a fraction in [0.0, 1.0].
+/// `--min-success-rate 2.5` makes EVERY soak fail (no real success
+/// rate can exceed 1.0), and a CI script that fat-fingers `0.99`
+/// as `2.99` would have every commit fail with a misleading
+/// "regression" error — the soak ran fine but the gate is
+/// impossible. The PASS-with-NaN trap is even worse: NaN
+/// comparisons return false, so `passed(NaN)` always fails
+/// silently regardless of the real success rate. Iter-128
+/// rejects {non-finite, < 0.0, > 1.0} at parse time.
+///
+/// NB: 0.0 IS valid — explicit operator intent of "I want to
+/// fail only on spawn_leak or zero-dials, not on success rate".
+/// soak.rs's `passed()` already handles 0.0 correctly.
+fn reject_invalid_success_rate(value: f64) -> Result<(), String> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(format!(
+            "--min-success-rate = {value} is outside [0.0, 1.0] (fraction, \
+             NOT a percentage). 0.99 = 'at least 99% of dials succeed'; \
+             0.0 = 'don't gate on success rate at all'. Values above 1.0 \
+             make every soak fail (no real success rate can exceed 1.0); \
+             NaN makes every soak silently fail (NaN comparisons return \
+             false). A CI script that fat-fingers `0.99` as `2.99` would \
+             have every commit produce a misleading 'regression' error."
+        ));
+    }
+    Ok(())
+}
+
 fn validate_soak_args(a: &SoakArgs) -> Result<(), String> {
     reject_zero_usize(
         "--clients",
@@ -396,6 +424,8 @@ fn validate_soak_args(a: &SoakArgs) -> Result<(), String> {
              would always read 0 dials attempted",
         )?;
     }
+    // Iter-128: success-rate gate.
+    reject_invalid_success_rate(a.min_success_rate)?;
     Ok(())
 }
 

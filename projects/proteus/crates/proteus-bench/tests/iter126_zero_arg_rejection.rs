@@ -305,6 +305,100 @@ fn iter127_beta_client_rejects_mtu_below_floor() {
     );
 }
 
+// ─── iter-128: --min-success-rate fraction gate ────────────────
+
+#[test]
+fn iter128_soak_rejects_success_rate_above_1() {
+    // The most operationally-dangerous trap in the bench surface:
+    // --min-success-rate 2.5 makes every soak fail, but the
+    // pre-iter-128 error message
+    // ("soak FAILED: success_rate 1.0000 < min 2.5000 ...") reads
+    // like a real regression. A CI script fat-finger of "0.99"
+    // to "2.99" would break every commit.
+    expect_exit_2_with(
+        &["soak", "--min-success-rate=2.5"],
+        &["--min-success-rate = 2.5", "[0.0, 1.0]", "fraction, NOT a percentage"],
+    );
+}
+
+#[test]
+fn iter128_soak_rejects_negative_success_rate() {
+    expect_exit_2_with(
+        &["soak", "--min-success-rate=-0.5"],
+        &["--min-success-rate = -0.5", "[0.0, 1.0]"],
+    );
+}
+
+#[test]
+fn iter128_soak_rejects_nan_success_rate() {
+    // The silent-fail variant: NaN comparisons return false in
+    // IEEE-754, so `passed(NaN)` always returns false regardless
+    // of the real rate. Pre-iter-128 every NaN soak failed
+    // silently with no hint why.
+    expect_exit_2_with(
+        &["soak", "--min-success-rate", "NaN"],
+        &["--min-success-rate = NaN"],
+    );
+}
+
+#[test]
+fn iter128_soak_rejects_infinity_success_rate() {
+    expect_exit_2_with(
+        &["soak", "--min-success-rate", "inf"],
+        &["--min-success-rate = inf"],
+    );
+}
+
+#[test]
+fn iter128_soak_success_rate_zero_is_valid() {
+    // 0.0 = "don't gate on success rate at all" — explicit
+    // operator intent for soaks that only want spawn-leak +
+    // zero-dials gating. Must pass the iter-128 gate.
+    let output = Command::new(BIN)
+        .args([
+            "soak",
+            "--min-success-rate",
+            "0.0",
+            "--clients",
+            "1",
+            "--duration-secs",
+            "1",
+        ])
+        .output()
+        .expect("spawn proteus-bench");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "--min-success-rate 0.0 is valid (don't gate on rate); stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn iter128_soak_success_rate_one_is_valid_at_boundary() {
+    // 1.0 = "every dial must succeed". Tighter than the 0.99
+    // default; explicit operator intent for the "absolute zero
+    // regression tolerance" gate. Boundary value, must pass.
+    let output = Command::new(BIN)
+        .args([
+            "soak",
+            "--min-success-rate",
+            "1.0",
+            "--clients",
+            "1",
+            "--duration-secs",
+            "1",
+        ])
+        .output()
+        .expect("spawn proteus-bench");
+    assert_ne!(
+        output.status.code(),
+        Some(2),
+        "--min-success-rate 1.0 must pass the gate (it's the strictest \
+         valid value, useful for zero-regression-tolerance CI)"
+    );
+}
+
 // ─── positive value still works (regression guard) ─────────────
 
 #[test]

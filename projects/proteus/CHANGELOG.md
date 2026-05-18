@@ -15,6 +15,31 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-bench soak --min-success-rate` accepted impossible values (iter-128)
+
+Pre-iter-128 `proteus-bench soak --min-success-rate 2.5` made every
+soak fail (no real success rate can exceed 1.0), but the error message
+("soak FAILED: success_rate 1.0000 < min 2.5000 OR spawn_leak=0 OR
+zero dials succeeded") read like a real regression. The most
+operationally dangerous shape: a CI script fat-fingering `0.99` to
+`2.99` would have every commit produce a misleading "regression"
+error.
+
+The silent-fail variant was worse: `--min-success-rate NaN` is
+silently accepted, then `passed(NaN)` returns false unconditionally
+(IEEE-754 NaN comparisons all return false). Every soak failed
+silently with no hint why.
+
+Iter-128 adds `reject_invalid_success_rate()` gating the value to a
+finite fraction in [0.0, 1.0]. 0.0 is valid (explicit operator
+intent of "don't gate on success rate, only on spawn_leak +
+zero-dials") and 1.0 is valid (strictest zero-regression-tolerance
+gate). Both boundary tests pin those. Error message states
+"fraction, NOT a percentage" so an operator who typed `99` instead
+of `0.99` understands the unit.
+
+6 new iter-128 tests; 30 total in the bench arg-validation file.
+
 ### Fixed — `proteus-bench` accepted unphysical MTU + loss-pct values (iter-127)
 
 Pre-iter-127, even after the iter-126 zero-arg gate, the bench
