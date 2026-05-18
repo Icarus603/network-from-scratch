@@ -736,6 +736,17 @@ fn extract_host(ep: &str) -> String {
 
 /// CLI entry. Writes the report (text or JSON) and returns the exit code.
 pub async fn cli_run(input: HostPreflightInput, format: &str) -> std::io::Result<i32> {
+    // Iter-115: validate format before running. Mirror of
+    // iter-113/114 pattern — pre-iter-115 typos like
+    // `--format jsno` silently fell through to text, breaking
+    // scripted `proteus-client host-preflight --format json |
+    // jq` consumers without operator-facing error.
+    if format != "text" && format != "json" {
+        eprintln!(
+            "host-preflight: unknown --format {format:?} (expected 'text' or 'json')"
+        );
+        return Ok(2);
+    }
     let report = run(input).await;
     let stdout = std::io::stdout();
     let mut h = stdout.lock();
@@ -1185,5 +1196,22 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Iter-115: host-preflight rejects unknown --format with
+    /// exit 2 BEFORE running checks. Mirror of iter-113/114
+    /// format-validation pattern.
+    #[tokio::test]
+    async fn iter115_host_preflight_rejects_unknown_format() {
+        let exit = cli_run(
+            HostPreflightInput {
+                config_path: None,
+                skip_dns_resolution: true,
+            },
+            "yaml",
+        )
+        .await
+        .expect("clean exit");
+        assert_eq!(exit, 2, "unknown format must exit 2");
     }
 }

@@ -569,6 +569,16 @@ async fn run_fingerprint_cmd(
     format: &str,
     target: &str,
 ) -> Result<i32, Box<dyn std::error::Error>> {
+    // Iter-115: validate format up-front. Pre-iter-115 typos
+    // like `--format jsno` silently fell through to text mode,
+    // breaking scripted jq pipelines. Mirror of iter-113/114
+    // format-validation pattern.
+    if format != "text" && format != "json" {
+        return Err(format!(
+            "fingerprint: unknown --format {format:?} (expected 'text' or 'json')"
+        )
+        .into());
+    }
     // Mint a fresh throwaway leaf so we don't need the operator's
     // production cert to run this offline command. JA4 is computed
     // entirely from the CLIENT side, so the cert is irrelevant
