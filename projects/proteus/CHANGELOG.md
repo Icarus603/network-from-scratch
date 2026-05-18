@@ -77,6 +77,29 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — validate-time security gates (iter 65-68)
+
+Four new preflight checks targeting silent security/privacy
+failures that pass all earlier validate gates:
+
+- **metrics_token strength** (iter-65): WARN on <32 char tokens
+  (brute-forceable), FAIL on case-insensitive trivial blacklist
+  (`changeme` / `token` / `admin` / `password` / etc. — the first
+  values any scanner tries), WARN on world-readable mode.
+  Bearer token is the ONLY auth gate on non-loopback /metrics.
+- **max_cover_forwards bound** (iter-66): FAIL on explicit `0`
+  (unbounded; FD exhaustion under probe storm), WARN when both
+  `max_cover_forwards` and `max_connections` are unset.
+  Mirrors the existing runtime warn at preflight time.
+- **cover_endpoint in private IP space** (iter-67): FAIL on
+  RFC 1918 / RFC 6598 CGNAT / RFC 4193 ULA / link-local. Catches
+  the LAN-exposure trap (internal mgmt UI exposure) AND the
+  cloud-metadata foot-gun (`169.254.169.254` exfils IAM creds
+  on AWS / GCP / Azure / DO).
+- **cover_endpoints[] pool private-IP check** (iter-68): sister
+  fix applying iter-67 to every pool entry. The pool has the
+  same exposure as single-URL cover.
+
 ### Added — speed (Hy2 / TUIC5-grade data plane) iter 61-63
 
 Three data-plane speed wins closing the remaining gap with
