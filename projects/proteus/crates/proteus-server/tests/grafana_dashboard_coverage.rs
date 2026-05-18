@@ -119,6 +119,12 @@ fn known_metric_names() -> HashSet<&'static str> {
         // Iter-81: probe-anomaly fires panel surfaces per-/24
         // source attribution for the active-probing detector.
         "proteus_probe_anomalies_fired_total",
+        // Iter-98: AEAD integrity drops + ratchets-context +
+        // handshake failure/success rate panels.
+        "proteus_aead_drops_total",
+        "proteus_ratchets_total",
+        "proteus_handshakes_failed_total",
+        "proteus_handshakes_succeeded_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling

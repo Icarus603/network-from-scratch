@@ -301,6 +301,79 @@ groups:
         an attacker downloading bulk content on stolen
         credentials. Audit + rotate as above.
 
+- name: proteus-aead-integrity
+  interval: 30s
+  rules:
+
+  # Iter-98: AEAD drops — bit-level integrity failures on the
+  # data plane.
+  #
+  # Each AEAD decryption rejection means: an attacker flipped
+  # bits in a record (active MITM tampering), OR the protocol
+  # state machine has a bug (key rotation race, replay window
+  # mismatch). Steady-state should be flat zero. ANY non-zero
+  # rate is investigation-grade; sustained > 1/sec is active
+  # attack-grade.
+  - alert: ProteusAeadDropsObserved
+    expr: rate(proteus_aead_drops_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: AEAD decryption rejections observed"
+      description: |
+        {{ printf "%.3f" $value }} AEAD drop(s)/sec on
+        {{ $labels.instance }} for 5+ min. Each rejection is a
+        bit-level integrity failure — either an active MITM
+        tampering with records OR a protocol state machine bug
+        (key rotation race, replay window mismatch). Audit
+        access_log for the affected session; cross-reference
+        proteus_ratchets_total (high ratchet activity + AEAD
+        drops = key-rotation race).
+
+  - alert: ProteusAeadDropsCatastrophic
+    expr: rate(proteus_aead_drops_total[5m]) > 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server: AEAD drops > 1/sec — active integrity attack"
+      description: |
+        {{ printf "%.3f" $value }} AEAD drop(s)/sec on
+        {{ $labels.instance }} for 2+ min. Sustained bit-level
+        tampering attempt. Action: identify the affected
+        source IP from the access_log AEAD drop messages,
+        firewall-deny the source range immediately. If this
+        affects MULTIPLE source IPs, the threat model is
+        worse than a single MITM — investigate as a
+        co-ordinated attack.
+
+- name: proteus-handshake-failures
+  interval: 30s
+  rules:
+
+  # Iter-98: handshake failures — credential-bruteforce /
+  # protocol-incompatible-client / active-rejection signal.
+  - alert: ProteusHandshakeFailuresHigh
+    expr: |
+      rate(proteus_handshakes_failed_total[5m]) > 0.5
+      and
+      rate(proteus_handshakes_failed_total[5m])
+        > rate(proteus_handshakes_succeeded_total[5m]) * 0.1
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: handshake failure rate > 10% of successes"
+      description: |
+        {{ printf "%.3f" $value }} handshake failure(s)/sec on
+        {{ $labels.instance }} (>10% of success rate) for 10+
+        min. Likely cause: credential bruteforce (attacker
+        rotating user_ids / pubkeys), protocol-incompatible
+        client (operator's old client.yaml is stale after a
+        rotation), OR active GFW-style probing trying to
+        elicit Proteus responses.
+
 - name: proteus-ssrf-attempts
   interval: 30s
   rules:

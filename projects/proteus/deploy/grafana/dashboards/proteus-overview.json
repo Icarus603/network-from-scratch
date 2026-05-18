@@ -577,6 +577,60 @@
       }
     },
     {
+      "id": 90,
+      "type": "timeseries",
+      "title": "AEAD integrity drops (server)",
+      "description": "rate(proteus_aead_drops_total[5m]) — bit-level integrity failures on the data plane. Each rejection is either active MITM tampering OR a protocol bug (key rotation race / replay window mismatch). Steady-state should be flat zero. Any sustained rate > 0 fires ProteusAeadDropsObserved (WARN); >1/sec fires ProteusAeadDropsCatastrophic (CRIT — active attack, page-grade). Cross-reference proteus_ratchets_total on the same panel as a sanity check.",
+      "gridPos": {"x": 0, "y": 92, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_aead_drops_total[5m])",
+          "refId": "drops",
+          "legendFormat": "aead-drops/sec"
+        },
+        {
+          "expr": "rate(proteus_ratchets_total[5m])",
+          "refId": "ratchets",
+          "legendFormat": "ratchets/sec (context)"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 0.001},
+              {"color": "red", "value": 1}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 91,
+      "type": "timeseries",
+      "title": "Handshake failure rate vs success rate (server)",
+      "description": "rate(proteus_handshakes_succeeded_total[5m]) vs rate(proteus_handshakes_failed_total[5m]). Failure > 10% of success for 10+ min fires ProteusHandshakeFailuresHigh (WARN). Causes: (a) credential bruteforce, (b) stale client.yaml after rotation, (c) GFW-style probing.",
+      "gridPos": {"x": 0, "y": 100, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "rate(proteus_handshakes_succeeded_total[5m])",
+          "refId": "ok",
+          "legendFormat": "succeeded/sec"
+        },
+        {
+          "expr": "rate(proteus_handshakes_failed_total[5m])",
+          "refId": "fail",
+          "legendFormat": "failed/sec"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "ops"}
+      }
+    },
+    {
       "id": 81,
       "type": "timeseries",
       "title": "Probe-anomaly fires (per-/24 attribution)",

@@ -346,6 +346,86 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusAeadDrops{Observed,Catastrophic} ────
+    //
+    // Iter-98: bit-level integrity failures on the data plane.
+    // Each AEAD rejection means active MITM tampering OR a
+    // protocol state machine bug. Same shape as the iter-76
+    // SSRF check.
+    if let Some(drops) = g("proteus_aead_drops_total") {
+        if drops > 100.0 {
+            r.push(Check {
+                rule_name: "ProteusAeadDropsCatastrophic",
+                severity: CheckSeverity::Crit,
+                message: format!(
+                    "{drops} AEAD decryption rejections since process start — \
+                     sustained bit-level integrity attack. Identify source IP from \
+                     access_log + AEAD drop messages, firewall-deny immediately. \
+                     If multiple sources, treat as coordinated attack."
+                ),
+                equivalent_promql: "rate(proteus_aead_drops_total[5m]) > 1",
+            });
+        } else if drops > 0.0 {
+            r.push(Check {
+                rule_name: "ProteusAeadDropsObserved",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{drops} AEAD decryption rejection(s) since process start — \
+                     bit-level integrity failure. Either active MITM tampering or \
+                     a protocol state machine bug (key rotation race, replay \
+                     window mismatch). Audit access_log + cross-reference \
+                     proteus_ratchets_total."
+                ),
+                equivalent_promql: "rate(proteus_aead_drops_total[5m]) > 0",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusAeadDropsObserved",
+                severity: CheckSeverity::Pass,
+                message: "no AEAD drops observed".to_string(),
+                equivalent_promql: "",
+            });
+        }
+    }
+
+    // ──── ProteusHandshakeFailuresHigh ────
+    //
+    // Iter-98: handshake failure ratio. Computing rate-ratios
+    // without a TSDB is awkward; we approximate via cumulative
+    // ratio (failures / max(1, successes)). 10% threshold
+    // matches the Prometheus alert.
+    let hs_succ = g("proteus_handshakes_succeeded_total").unwrap_or(0.0);
+    let hs_fail = g("proteus_handshakes_failed_total").unwrap_or(0.0);
+    if hs_succ + hs_fail > 0.0 {
+        let denom = if hs_succ > 0.0 { hs_succ } else { 1.0 };
+        let ratio = hs_fail / denom;
+        if ratio > 0.1 && hs_fail > 5.0 {
+            r.push(Check {
+                rule_name: "ProteusHandshakeFailuresHigh",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "{hs_fail} handshake failures vs {hs_succ} successes ({:.1}% ratio) \
+                     since process start. Likely cause: credential bruteforce (rotating \
+                     user_ids), stale client.yaml after key rotation, OR active GFW \
+                     probing. Audit access_log for the source-IP pattern.",
+                    ratio * 100.0,
+                ),
+                equivalent_promql:
+                    "rate(proteus_handshakes_failed_total[5m]) > 0.5 and rate(...failed/...succeeded) > 0.1",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusHandshakeFailuresHigh",
+                severity: CheckSeverity::Pass,
+                message: format!(
+                    "{hs_fail} failures vs {hs_succ} successes ({:.2}% ratio) — healthy",
+                    ratio * 100.0,
+                ),
+                equivalent_promql: "",
+            });
+        }
+    }
+
     // ──── ProteusProbeAnomalyFired / Catastrophic ────
     //
     // Iter-81: per-/24 probe-anomaly attribution. Same shape
@@ -1182,6 +1262,110 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-98: AEAD drops + handshake failure-ratio ────
+
+    #[test]
+    fn iter98_no_aead_drops_passes() {
+        let body = body_with("proteus_aead_drops_total 0");
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAeadDropsObserved")
+            .expect("rule must fire when metric present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    #[test]
+    fn iter98_some_aead_drops_warn() {
+        let body = body_with("proteus_aead_drops_total 7");
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAeadDropsObserved")
+            .expect("rule must fire");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("7"));
+        assert!(warn.message.contains("MITM") || warn.message.contains("integrity"));
+    }
+
+    #[test]
+    fn iter98_many_aead_drops_crit() {
+        let body = body_with("proteus_aead_drops_total 500");
+        let r = evaluate(&body);
+        let crit = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAeadDropsCatastrophic")
+            .expect("catastrophic must fire on >100 drops");
+        assert_eq!(crit.severity, CheckSeverity::Crit);
+        assert!(crit.message.contains("500"));
+        assert!(crit.message.contains("firewall-deny"));
+    }
+
+    /// Handshake failure ratio < 10% → PASS.
+    #[test]
+    fn iter98_handshake_ratio_healthy_passes() {
+        let body = body_with(
+            "proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 5",
+        );
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeFailuresHigh")
+            .expect("rule must fire when handshake counters present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    /// Handshake failure ratio > 10% → WARN.
+    #[test]
+    fn iter98_handshake_ratio_high_warns() {
+        let body = body_with(
+            "proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 25",
+        );
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeFailuresHigh")
+            .expect("rule must fire on high ratio");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("25"));
+        assert!(warn.message.contains("bruteforce") || warn.message.contains("GFW"));
+    }
+
+    /// Tiny failure count (≤5) doesn't trigger even with high
+    /// ratio — avoids false positives on a fresh server with 1
+    /// stale-client failure out of 5 successes.
+    #[test]
+    fn iter98_handshake_few_failures_no_warn_even_high_ratio() {
+        // 1 fail vs 5 successes = 20% ratio, but fail count is
+        // small enough to be noise.
+        let body = body_with(
+            "proteus_handshakes_succeeded_total 5\nproteus_handshakes_failed_total 1",
+        );
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeFailuresHigh")
+            .expect("rule must fire");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    /// Metrics absent → check suppressed.
+    #[test]
+    fn iter98_aead_metric_absent_suppresses() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| {
+            c.rule_name == "ProteusAeadDropsObserved" || c.rule_name == "ProteusAeadDropsCatastrophic"
+        });
+        assert!(!any);
     }
 
     // ──── iter-81: probe-anomaly check ────

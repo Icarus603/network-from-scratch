@@ -187,6 +187,13 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         // on it directly; operators had to grep the metric
         // manually for the per-/24 breakdown.
         "proteus_probe_anomalies_fired_total",
+        // Iter-98: AEAD-integrity + handshake-failure alerts.
+        // Pre-iter-98 these counters existed but no alert
+        // fired — active MITM tampering + credential
+        // bruteforce were invisible outside the dashboard.
+        "proteus_aead_drops_total",
+        "proteus_handshakes_failed_total",
+        "proteus_handshakes_succeeded_total",
     ]
     .into_iter()
     .collect();
