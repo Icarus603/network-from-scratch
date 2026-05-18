@@ -758,6 +758,52 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    // Iter-93: server-side β-QUIC tuning knobs sanity.
+    // Symmetric with client iter-92.
+    if let Some(mtu) = cfg.beta_initial_mtu {
+        if !(1200..=1500).contains(&mtu) {
+            r.push_fail(format!(
+                "beta_initial_mtu = {mtu} is out of sane range [1200, 1500]. \
+                 Below 1200 is below QUIC v1 minimum; above 1500 exceeds typical \
+                 Ethernet MTU and risks IP fragmentation blackhole."
+            ));
+        }
+    }
+    if let Some(ub) = cfg.beta_mtu_upper_bound {
+        if ub < 1200 {
+            r.push_fail(format!(
+                "beta_mtu_upper_bound = {ub} < 1200 (QUIC v1 minimum). MTU \
+                 discovery will fail every probe attempt."
+            ));
+        } else if ub > 9216 {
+            r.push_warn(format!(
+                "beta_mtu_upper_bound = {ub} > 9216 (10G NIC jumbo-frame max). \
+                 quinn-udp won't probe past 9000 by default."
+            ));
+        } else if let Some(initial) = cfg.beta_initial_mtu {
+            if ub < initial {
+                r.push_fail(format!(
+                    "beta_mtu_upper_bound = {ub} is LESS than beta_initial_mtu = \
+                     {initial}. Discovery cannot widen; the probe ceiling is below \
+                     the starting MTU."
+                ));
+            }
+        }
+    }
+    if let Some(thr) = cfg.beta_ack_eliciting_threshold {
+        if thr == 0 {
+            r.push_fail(
+                "beta_ack_eliciting_threshold = 0 is invalid (would mean 'never ACK'). \
+                 Valid: 1 (default) or 2-10 for measured long-fat-pipe paths."
+            );
+        } else if thr > 100 {
+            r.push_warn(format!(
+                "beta_ack_eliciting_threshold = {thr} (>100) is extreme; BBR's \
+                 bandwidth estimator may not converge. Recommended: 2-10."
+            ));
+        }
+    }
+
     // Iter-90: self-test knobs sanity.
     //
     // The startup self-test exercises crypto + relay paths
@@ -2154,6 +2200,79 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_initial_mtu out-of-range → FAIL.
+    #[test]
+    fn iter93_server_beta_initial_mtu_out_of_range_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_initial_mtu = Some(1000);
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "MTU=1000 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_mtu_upper_bound < 1200 → FAIL.
+    #[test]
+    fn iter93_server_beta_mtu_upper_below_min_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_mtu_upper_bound = Some(1000);
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "MTU upper < 1200 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_mtu_upper_bound > 9216 → WARN.
+    #[test]
+    fn iter93_server_beta_mtu_upper_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_mtu_upper_bound = Some(10000);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("beta_mtu_upper_bound = 10000"))
+        });
+        assert!(warn, "MTU > 9216 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_mtu_upper_bound < initial → FAIL.
+    #[test]
+    fn iter93_server_beta_mtu_upper_below_initial_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_initial_mtu = Some(1450);
+        cfg.beta_mtu_upper_bound = Some(1300);
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "upper < initial MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_ack_eliciting_threshold = 0 → FAIL.
+    #[test]
+    fn iter93_server_beta_ack_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_ack_eliciting_threshold = Some(0);
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "ack=0 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-93: server beta_ack_eliciting_threshold > 100 → WARN.
+    #[test]
+    fn iter93_server_beta_ack_extreme_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_ack_eliciting_threshold = Some(500);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"))
+        });
+        assert!(warn, "ack=500 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
