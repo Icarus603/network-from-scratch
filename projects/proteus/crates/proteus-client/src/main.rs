@@ -295,7 +295,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// `proteus-client diagnose` — hit `/diagnose` and stream the body.
 /// Same hand-rolled HTTP/1.1 client as `status_cmd`; no extra deps.
+///
+/// Iter-112: wrap the connect + read in a hard timeout. The admin
+/// endpoint is loopback by convention but a wedged process can
+/// pin the CLI tool forever; the operator hits Ctrl-C and assumes
+/// the tool is broken. 10s is generous for a loopback GET that
+/// returns ~50 KB.
 async fn diagnose_cmd(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    use std::time::Duration;
     let (host, port, base_path) = parse_http_url(url)?;
     let request_path = if base_path == "/" {
         "/diagnose".to_string()
@@ -309,10 +316,34 @@ async fn diagnose_cmd(url: &str) -> Result<(), Box<dyn std::error::Error>> {
          Accept: */*\r\n\
          Connection: close\r\n\r\n"
     );
-    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-    tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await?;
+    const STEP: Duration = Duration::from_secs(10);
+    let mut stream = tokio::time::timeout(
+        STEP,
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "diagnose: TCP connect to {host}:{port} timed out after 10s — admin \
+             endpoint not reachable (binary down? wrong port?)"
+        )
+    })??;
+    tokio::time::timeout(
+        STEP,
+        tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()),
+    )
+    .await
+    .map_err(|_| "diagnose: HTTP write timed out")??;
     let mut buf = Vec::with_capacity(16 * 1024);
-    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
+    tokio::time::timeout(
+        STEP,
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf),
+    )
+    .await
+    .map_err(|_| {
+        "diagnose: HTTP read timed out after 10s — admin endpoint accepted but \
+         never sent response (wedged handler?)"
+    })??;
     let s = std::str::from_utf8(&buf).map_err(|e| format!("non-UTF8 response: {e}"))?;
     let (status_line, body) = split_http_response(s)?;
     if !status_line.starts_with("HTTP/1.1 200") {
@@ -349,10 +380,38 @@ async fn status_cmd(url: &str, format: &str) -> Result<(), Box<dyn std::error::E
          Accept: */*\r\n\
          Connection: close\r\n\r\n"
     );
-    let mut stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
-    tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()).await?;
+    // Iter-112: wrap connect + write + read in hard timeouts
+    // (same shape as diagnose_cmd). A wedged admin endpoint
+    // pre-iter-112 pinned the CLI tool forever.
+    use std::time::Duration;
+    const STEP: Duration = Duration::from_secs(10);
+    let mut stream = tokio::time::timeout(
+        STEP,
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "status: TCP connect to {host}:{port} timed out after 10s — admin \
+             endpoint not reachable (binary down? wrong port?)"
+        )
+    })??;
+    tokio::time::timeout(
+        STEP,
+        tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()),
+    )
+    .await
+    .map_err(|_| "status: HTTP write timed out")??;
     let mut buf = Vec::with_capacity(4096);
-    tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf).await?;
+    tokio::time::timeout(
+        STEP,
+        tokio::io::AsyncReadExt::read_to_end(&mut stream, &mut buf),
+    )
+    .await
+    .map_err(|_| {
+        "status: HTTP read timed out after 10s — admin endpoint accepted but \
+         never sent response (wedged handler?)"
+    })??;
     // Split off the headers; print only the body so a `--format json`
     // call yields parseable JSON straight to stdout.
     let s = std::str::from_utf8(&buf).map_err(|e| format!("non-UTF8 response: {e}"))?;
