@@ -957,6 +957,157 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-71: socks_listen open-proxy detection ----------
+
+/// Operator-trap: socks_listen on 0.0.0.0 makes the entire
+/// internet (cloud VPS) or LAN (home) a free open-proxy relay
+/// targeting the operator's egress IP. FAIL because SOCKS5
+/// has no authentication.
+#[tokio::test]
+async fn iter71_socks_listen_wildcard_fails() {
+    let dir = tempdir("socks-wildcard");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"0.0.0.0:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    eprintln!("socks-wildcard report:\n{report}");
+    assert!(
+        report.has_failures(),
+        "socks_listen=0.0.0.0 MUST FAIL: {report}"
+    );
+    let open_proxy_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => {
+            s.contains("socks_listen") && s.contains("open-proxy")
+        }
+        _ => false,
+    });
+    assert!(
+        open_proxy_fail,
+        "FAIL must name 'open-proxy': {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-71: IPv6 wildcard `[::]` also FAILs.
+#[tokio::test]
+async fn iter71_socks_listen_ipv6_wildcard_fails() {
+    let dir = tempdir("socks-v6-wildcard");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"[::]:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "socks_listen=[::]:1080 MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-71: non-loopback non-wildcard → WARN (operator may
+/// deliberately bind a tunnel interface, but flag the trust
+/// assumption).
+#[tokio::test]
+async fn iter71_socks_listen_lan_bind_warns_not_fails() {
+    let dir = tempdir("socks-lan");
+    let mlkem_pk = write_mlkem_pk(&dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"192.168.1.100:1080\"\n\
+             user_id: \"alice\"\n\
+             keys:\n  \
+                 server_mlkem_pk: {}\n  \
+                 server_x25519_pk: {}\n  \
+                 server_pq_fingerprint: {}\n  \
+                 client_ed25519_sk: {}\n",
+            mlkem_pk.display(),
+            x25519_pk.display(),
+            fp.display(),
+            ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("socks_listen") && s.contains("non-loopback") && s.contains("authentication")
+        }
+        _ => false,
+    });
+    assert!(warn, "LAN bind must WARN: {report}");
+    // WARN-not-FAIL.
+    assert!(
+        !report.has_failures(),
+        "LAN bind must NOT escalate to FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-71: 127.0.0.1 → no warn (canonical safe bind).
+#[tokio::test]
+async fn iter71_socks_listen_loopback_no_warn() {
+    let dir = tempdir("socks-loopback");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("socks_listen") && s.contains("non-loopback"),
+        _ => false,
+    });
+    assert!(
+        !warn,
+        "loopback bind must NOT trigger iter-71 warn: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-70: bootstrap_dns.direct_ip private-IP detection ----------
 
 /// Operator-trap: `bootstrap_dns.direct_ip: 192.168.1.100` —

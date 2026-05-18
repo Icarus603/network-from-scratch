@@ -303,8 +303,66 @@ pub async fn run(path: &Path) -> PreflightReport {
 
     if cfg.socks_listen.is_empty() {
         r.push_fail("socks_listen is empty");
-    } else if parse_host_port(&cfg.socks_listen).is_some() {
+    } else if let Some((socks_host, _)) = parse_host_port(&cfg.socks_listen) {
         r.push_pass(format!("socks_listen = {}", cfg.socks_listen));
+        // Iter-71: non-loopback socks_listen is an open-proxy
+        // amplifier.
+        //
+        // The Proteus SOCKS5 inbound implements RFC 1928 with
+        // NO authentication (method 0x00). When socks_listen
+        // binds to 0.0.0.0 / :: / a LAN IP, ANY device that can
+        // reach the address can route arbitrary traffic through
+        // the operator's Proteus tunnel. Three failure modes:
+        //
+        //   1. LAN-share unintended: operator binds 0.0.0.0 to
+        //      let their phone use the tunnel, doesn't realize
+        //      their neighbor's compromised IoT box on the same
+        //      WiFi gets free relay too.
+        //   2. Cloud-VPS bind: operator runs proteus-client on a
+        //      cloud VPS for "always-on" tunneling, accidentally
+        //      binds 0.0.0.0 — now the entire internet has free
+        //      Proteus relay. The VPS's egress IP becomes the
+        //      attribution target for whatever traffic flows.
+        //   3. WireGuard/Tailscale interface: operator binds the
+        //      tunnel interface IP for cross-device sharing. This
+        //      is legitimate IF the operator trusts every peer on
+        //      the tunnel, but worth flagging because the trust
+        //      assumption is non-obvious.
+        //
+        // FAIL on 0.0.0.0/:: (public wildcard); WARN on any other
+        // non-loopback bind (operator may have chosen this
+        // deliberately for tunnel-mesh sharing).
+        let unbracketed = socks_host
+            .strip_prefix('[')
+            .and_then(|s| s.strip_suffix(']'))
+            .unwrap_or(socks_host);
+        let is_loopback = unbracketed
+            .parse::<std::net::IpAddr>()
+            .map(|ip| ip.is_loopback())
+            .unwrap_or_else(|_| unbracketed.eq_ignore_ascii_case("localhost"));
+        if !is_loopback {
+            let is_wildcard = matches!(unbracketed, "0.0.0.0" | "::" | "");
+            if is_wildcard {
+                r.push_fail(format!(
+                    "socks_listen = {} binds the SOCKS5 inbound to the wildcard \
+                     interface. SOCKS5 has NO authentication (RFC 1928 method 0x00); \
+                     anyone who can reach this address gets free relay through your \
+                     Proteus tunnel. On a cloud VPS this makes the entire internet \
+                     an open-proxy amplifier targeting your egress IP. Bind 127.0.0.1 \
+                     (or an explicit tunnel-interface IP if you want LAN sharing).",
+                    cfg.socks_listen,
+                ));
+            } else {
+                r.push_warn(format!(
+                    "socks_listen = {} is non-loopback. SOCKS5 has NO authentication \
+                     (RFC 1928 method 0x00); any device that can reach this address \
+                     gets free relay through your Proteus tunnel. If this is a trusted \
+                     tunnel interface (WireGuard / Tailscale), fine; otherwise bind \
+                     127.0.0.1.",
+                    cfg.socks_listen,
+                ));
+            }
+        }
     } else {
         r.push_fail(format!(
             "socks_listen does not parse as host:port: {:?}",
