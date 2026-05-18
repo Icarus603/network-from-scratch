@@ -406,11 +406,39 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                 dupes.push(raw.as_str());
             }
         }
+        // Iter-68: apply the iter-67 private-IP check to every
+        // pool entry. The pool has the same exposure: ANY
+        // entry in private space leaks unauth probes into the
+        // operator's LAN. We check ALL entries (not just the
+        // first that's bad) so the operator gets one fix-cycle.
+        let mut private_entries: Vec<String> = Vec::new();
+        for raw in &cfg.cover_endpoints {
+            let host = raw.rsplit_once(':').map_or(raw.as_str(), |(h, _)| h);
+            let unbracketed = host
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .unwrap_or(host);
+            if let Ok(ip) = unbracketed.parse::<std::net::IpAddr>() {
+                if is_private_or_special_use(ip) {
+                    private_entries.push(raw.clone());
+                }
+            }
+        }
+        if !private_entries.is_empty() {
+            r.push_fail(format!(
+                "cover_endpoints contains entries in private / special-use IP ranges: \
+                 {private_entries:?}. Same trap as cover_endpoint (iter-67): forwarding \
+                 unauthenticated internet traffic to internal addresses is a privacy/\
+                 security leak. Use publicly-routable cover hosts only. Note: the \
+                 169.254.169.254 cloud-metadata-IP foot-gun applies to every cloud VPS \
+                 — pointing cover there lets every probe fetch IAM credentials.",
+            ));
+        }
         if !dupes.is_empty() {
             r.push_warn(format!(
                 "cover_endpoints contains duplicate entries: {dupes:?}. Per-/24 source-IP \
                  affinity routing puts traffic on the same upstream twice, reducing \
-                 effective pool diversity. An active prober can correlate two 'different' \
+                 effective pool diversity. An active prober can correlate two 'different'\
                  entries' upstream behavior to prove they're the same host (defeats the \
                  threat-intel main line 4 defense the pool was added for). Replace \
                  duplicates with distinct cover destinations.",
@@ -1495,6 +1523,76 @@ mod tests {
         cfg.metrics_token_file = Some(token_path);
         let report = preflight(&cfg);
         assert!(!report.has_failures(), "got: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-68: same private-IP trap on cover_endpoints[] pool
+    /// entries — applies the iter-67 check to every entry. The
+    /// pool has the same exposure as the single endpoint.
+    #[test]
+    fn iter68_cover_endpoints_pool_with_private_entries_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https://microsoft.com:443/".to_string(),
+            "10.0.0.1:443".to_string(), // private — should FAIL
+            "https://apple.com:443/".to_string(),
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "private entry in cover_endpoints MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("cover_endpoints") && s.contains("private") && s.contains("10.0.0.1")
+            }
+            _ => false,
+        });
+        assert!(
+            fail,
+            "FAIL must list the offending private entry: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-68: cloud metadata IP in pool → FAIL (the worst case
+    /// — IAM credential exfiltration via cover-forward).
+    #[test]
+    fn iter68_cover_endpoints_cloud_metadata_ip_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https://cloudflare.com:443/".to_string(),
+            "169.254.169.254:80".to_string(), // AWS/GCP/Azure/DO metadata
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "cloud-metadata IP in pool MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-68: all-public pool entries → no private FAIL.
+    #[test]
+    fn iter68_cover_endpoints_pool_all_public_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https://microsoft.com:443/".to_string(),
+            "https://apple.com:443/".to_string(),
+            "198.51.100.1:443".to_string(), // TEST-NET-2, public-routable
+        ];
+        let report = preflight(&cfg);
+        let private_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("cover_endpoints") && s.contains("private"),
+            _ => false,
+        });
+        assert!(
+            !private_fail,
+            "all-public pool must NOT trigger iter-68 FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
