@@ -89,7 +89,7 @@ fn write_yaml(dir: &std::path::Path, cert: &std::path::Path, key: &std::path::Pa
     std::fs::write(
         &yaml,
         format!(
-            r#"listen_alpha: "0.0.0.0:8443"
+            r#"listen_alpha: "192.168.1.100:8443"
 keys:
   mlkem_pk: {}
   mlkem_sk: {}
@@ -189,7 +189,7 @@ async fn iter49_beta_cert_expired_fails_validate() {
     std::fs::write(
         &yaml,
         format!(
-            r#"listen_alpha: "0.0.0.0:8443"
+            r#"listen_alpha: "192.168.1.100:8443"
 listen_beta: "0.0.0.0:8443"
 beta_cert_chain: {}
 beta_private_key: {}

@@ -40,10 +40,15 @@ fn validate_passes_on_minimal_valid_yaml() {
     let x25519_pk = touch(&dir, "server_lt.x25519.pk");
     let x25519_sk = touch(&dir, "server_lt.x25519.sk");
     let yaml = dir.join("server.yaml");
+    // Iter-97: bind to a LAN address. The iter-97 catastrophic-
+    // open-relay coherence check (wildcard listen + empty
+    // allowlist + no firewall → FAIL) would otherwise trip on
+    // this minimal-valid fixture, which would defeat the test's
+    // intent of "the minimum config validates clean".
     std::fs::write(
         &yaml,
         format!(
-            r#"listen_alpha: "0.0.0.0:8443"
+            r#"listen_alpha: "192.168.1.100:8443"
 keys:
   mlkem_pk: {}
   mlkem_sk: {}

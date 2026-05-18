@@ -1187,6 +1187,41 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
 /// Mostly emits [`Check::Warn`] — these are *unlikely* misconfigurations
 /// but the operator should see them rather than discover in prod.
 fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
+    // Iter-97: CATASTROPHIC open-relay coherence.
+    //
+    // Empty client_allowlist (no auth gate) + non-loopback
+    // wildcard bind (publicly reachable) + no firewall allow
+    // list = the server accepts ANY client from ANY source. On
+    // a cloud VPS deploy this means the entire internet has
+    // free Proteus relay through the operator's egress IP. The
+    // VPS's egress becomes the attribution target for whatever
+    // traffic flows; TOS-violation notices from the cloud
+    // provider follow within hours.
+    //
+    // Individually each is documented WARN: empty allowlist is
+    // "testing only", wildcard bind is "production normal",
+    // no firewall is "no IP allowlist needed". The COMBINATION
+    // is the catastrophic case. FAIL with all three named.
+    let listen_host = extract_host(&cfg.listen_alpha);
+    let listen_is_wildcard = is_wildcard_host(listen_host);
+    let firewall_has_allow = cfg
+        .firewall
+        .as_ref()
+        .map(|fw| !fw.allow.is_empty())
+        .unwrap_or(false);
+    if cfg.client_allowlist.is_empty() && listen_is_wildcard && !firewall_has_allow {
+        r.push_fail(format!(
+            "CATASTROPHIC OPEN-RELAY: client_allowlist is empty (no auth) AND \
+             listen_alpha = {} is the wildcard interface (publicly reachable) AND \
+             firewall.allow is empty (no IP gate). The entire internet can route \
+             traffic through this server via your egress IP. Fix any one of: \
+             (a) populate client_allowlist with at least one ed25519_pk entry, \
+             (b) bind listen_alpha to 127.0.0.1 for testing OR an explicit \
+             interface IP, (c) populate firewall.allow with an IP allowlist.",
+            cfg.listen_alpha,
+        ));
+    }
+
     // 12. PoW difficulty × handshake deadline.
     //
     // Rough cost model: at difficulty d, the *expected* SHA-256 hash
@@ -1685,6 +1720,22 @@ fn is_private_or_special_use(ip: std::net::IpAddr) -> bool {
     }
 }
 
+/// Iter-97: extract the host portion of a `host:port` string,
+/// stripping IPv6 brackets if present.
+fn extract_host(addr: &str) -> &str {
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    host.strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .unwrap_or(host)
+}
+
+/// Iter-97: detect wildcard listen address. Returns true for
+/// `0.0.0.0`, `[::]`, and the empty string (which the OS treats
+/// as wildcard for some bind paths).
+fn is_wildcard_host(host: &str) -> bool {
+    matches!(host, "0.0.0.0" | "::" | "")
+}
+
 /// Helper: assert a file exists and is readable by the current
 /// process. Records [`Check::Fail`] otherwise.
 fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
@@ -1912,7 +1963,13 @@ mod tests {
             write(&dir.join(name), b"placeholder");
         }
         ServerConfig {
-            listen_alpha: "0.0.0.0:8443".to_string(),
+            // Iter-97: bind to a LAN address so the iter-97
+            // catastrophic-open-relay coherence check
+            // (wildcard listen + empty allowlist + no firewall
+            // → FAIL) doesn't fire on every minimal_cfg test.
+            // Tests that specifically exercise the wildcard
+            // path explicitly set listen_alpha to 0.0.0.0.
+            listen_alpha: "192.168.1.100:8443".to_string(),
             listen_beta: None,
             beta_cert_chain: None,
             beta_private_key: None,
@@ -2368,6 +2425,91 @@ mod tests {
             matches!(c, Check::Warn(s) if s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"))
         });
         assert!(warn, "ack=500 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-97: catastrophic open-relay coherence (wildcard +
+    /// empty allowlist + no firewall) → FAIL.
+    #[test]
+    fn iter97_catastrophic_open_relay_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        // Trip all three: wildcard listen + empty allowlist +
+        // no firewall.
+        cfg.listen_alpha = "0.0.0.0:8443".to_string();
+        assert!(cfg.client_allowlist.is_empty());
+        assert!(cfg.firewall.is_none());
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "wildcard + empty allowlist + no firewall MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY") && s.contains("0.0.0.0:8443"))
+        });
+        assert!(fail, "FAIL must call out CATASTROPHIC OPEN-RELAY + the wildcard addr: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-97: wildcard + ALLOWLIST → no FAIL.
+    #[test]
+    fn iter97_wildcard_plus_allowlist_no_fail() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        std::fs::write(&pk, b"some-non-zero-content").unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.listen_alpha = "0.0.0.0:8443".to_string();
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        let open_relay_fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
+        });
+        assert!(
+            !open_relay_fail,
+            "allowlist gates auth — must NOT trigger iter-97 FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-97: wildcard + empty-allowlist + FIREWALL.ALLOW → no FAIL.
+    #[test]
+    fn iter97_wildcard_plus_firewall_allow_no_fail() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.listen_alpha = "0.0.0.0:8443".to_string();
+        cfg.firewall = Some(FirewallCfg {
+            allow: vec!["192.168.0.0/16".to_string()],
+            deny: vec![],
+        });
+        let report = preflight(&cfg);
+        let open_relay_fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
+        });
+        assert!(
+            !open_relay_fail,
+            "firewall.allow gates the source — must NOT trigger iter-97 FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-97: LOOPBACK listen + empty-allowlist + no firewall
+    /// → no FAIL (testing config; not internet-reachable).
+    #[test]
+    fn iter97_loopback_listen_no_fail() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.listen_alpha = "127.0.0.1:8443".to_string();
+        let report = preflight(&cfg);
+        let open_relay_fail = report.checks.iter().any(|c| {
+            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
+        });
+        assert!(
+            !open_relay_fail,
+            "loopback listen is testing-only; must NOT trigger iter-97 FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
