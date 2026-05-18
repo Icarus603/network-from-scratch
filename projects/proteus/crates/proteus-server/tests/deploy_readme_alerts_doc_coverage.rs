@@ -280,3 +280,60 @@ fn readme_alerts_section_calls_out_headline_attack_signals() {
         );
     }
 }
+
+/// Iter-131: the README must document the iter-130 anti-clobber
+/// behavior + the rotation runbook for each key class. Without
+/// this section an operator who re-runs the bootstrap script
+/// hits an unexplained "refusing to overwrite" error with no
+/// idea what the right next step is.
+///
+/// The four runbooks (TLS cert / knock PSK / server identity /
+/// client identity) each have DIFFERENT blast radii, so each
+/// gets its own walkthrough — a single "use --force" sentence
+/// would hide the real complexity (e.g. server identity rotation
+/// requires pre-distributing the new fingerprint to every client
+/// BEFORE swapping).
+#[test]
+fn iter131_readme_documents_key_rotation_runbooks() {
+    let body = read_readme();
+    assert!(
+        body.contains("## Key rotation"),
+        "deploy/README.md must have a Key rotation section"
+    );
+    // The four runbook subsections must all be present.
+    for runbook in [
+        "### Rotation runbook: TLS cert",
+        "### Rotation runbook: knock PSK",
+        "### Rotation runbook: long-term server identity",
+        "### Rotation runbook: client identity",
+    ] {
+        assert!(
+            body.contains(runbook),
+            "must have {runbook:?} subsection — each key class has a \
+             different blast radius and rotation procedure"
+        );
+    }
+    // Anti-clobber rationale must be stated up-front. Match the
+    // key phrase as two parts so a line-wrap between "refuse to"
+    // and "overwrite" doesn't break the test (markdown wraps the
+    // line for readability but the semantic phrase is preserved).
+    assert!(
+        body.contains("refuse to") && body.contains("overwrite existing files"),
+        "must explain the anti-clobber default before the runbooks"
+    );
+    // The --force flag must be documented as the explicit opt-in.
+    assert!(
+        body.contains("`--force`"),
+        "must document --force as the explicit rotation opt-in"
+    );
+    // The server-identity runbook must explain the pre-distribute
+    // requirement — silently rotating the bundle would break every
+    // client.
+    assert!(
+        body.contains("Pre-distribute the new server_lt.*.pk")
+            || body.contains("pre-distribute the new")
+            || body.contains("Pre-distribute"),
+        "server-identity runbook must explain the client-side \
+         coordination requirement"
+    );
+}

@@ -645,6 +645,126 @@ Reload semantics:
   followed by SIGHUP clears the rules — the next accept admits
   everything subject only to rate-limit / max-connections.
 
+## Key rotation (anti-clobber by default; `--force` to opt in)
+
+All four key-emitting subcommands (`proteus-server keygen` /
+`gencert` / `knock-keygen` / `proteus-client keygen`) **refuse to
+overwrite existing files by default**. This protects you from
+re-running the bootstrap script on a deployed server and silently
+clobbering the production keys (which would break every active
+session AND every future connect — see the rotation runbooks
+below for what actually has to happen).
+
+A refused run prints exactly what would break and exits 1 without
+touching any file:
+
+```text
+Error: refusing to overwrite existing key file /etc/proteus/keys/server_lt.mlkem768.pk.
+The current server identity bundle is in active use — every client's
+`server.pq.fingerprint` pin would mismatch the new mlkem768.pk and reject
+the handshake with 'fingerprint mismatch' on the very next connect.
+If you ARE deliberately rotating: 1) pre-distribute the new fingerprint
+to every client (out-of-band), 2) re-run with `--force` to overwrite,
+3) restart the server.
+```
+
+### Rotation runbook: TLS cert (`gencert --force` or just Let's Encrypt)
+
+```bash
+# Option A: regenerate the self-signed cert in place. The SIGHUP
+# handler (see TLS hot-reload section above) hot-swaps without
+# dropping in-flight sessions.
+sudo -u proteus proteus-server gencert \
+    --dns-name vps.example.com \
+    --out /etc/proteus/keys/tls \
+    --force
+sudo systemctl kill --signal=HUP proteus-server
+
+# Option B: just use Let's Encrypt + the certbot deploy hook above.
+# The hook already does in-place file replacement + SIGHUP — no
+# `--force` needed because certbot writes to a different path
+# and the operator's hook is the one that copies into /etc/proteus.
+```
+
+### Rotation runbook: knock PSK (`knock-keygen --force`)
+
+```bash
+# 1. Mint the new PSK to a STAGING path (does not affect the live
+#    server yet — the live server is still using the old PSK).
+sudo -u proteus proteus-server knock-keygen \
+    --out /etc/proteus/keys/server.knock_psk.NEW
+
+# 2. Distribute the new PSK to EVERY client out-of-band BEFORE you
+#    cut the server over. Any client not pre-staged with the new
+#    PSK will fail the knock and see only the cover-site response.
+
+# 3. Cut over the server to the new PSK by replacing in place.
+sudo mv /etc/proteus/keys/server.knock_psk.NEW \
+        /etc/proteus/keys/server.knock_psk
+# (mv overwrites the old file; the binary will pick up the new
+# PSK on its NEXT load — restart or SIGHUP.)
+sudo systemctl restart proteus-server
+
+# OR if you'd rather use --force in one step (no staging):
+sudo -u proteus proteus-server knock-keygen \
+    --out /etc/proteus/keys/server.knock_psk \
+    --force
+# But the staging variant lets you abort cleanly mid-rotation.
+```
+
+### Rotation runbook: long-term server identity (`keygen --force`)
+
+The full ML-KEM-768 + X25519 + fingerprint bundle. **This is the
+most disruptive rotation** because every client's
+`server.pq.fingerprint` pin must be re-distributed before they
+can reconnect. Only do this if you have reason to believe the
+long-term secret was compromised, or as a planned annual rotation.
+
+```bash
+# 1. Mint a fresh bundle to a side dir.
+sudo -u proteus proteus-server keygen --out /etc/proteus/keys-NEW
+
+# 2. Pre-distribute the new server_lt.*.pk + server_lt.pq.fingerprint
+#    files to EVERY client out-of-band.
+
+# 3. Swap atomically. Old keys go to keys-OLD/ as recovery insurance.
+sudo mv /etc/proteus/keys /etc/proteus/keys-OLD
+sudo mv /etc/proteus/keys-NEW /etc/proteus/keys
+sudo systemctl restart proteus-server
+
+# 4. After ~24h with no client breakage, remove the recovery dir.
+sudo rm -rf /etc/proteus/keys-OLD
+```
+
+The `keygen --force` form (in place, no staging dir) is supported
+but NOT recommended for this bundle — there's no way back to the
+old keys once `--force` writes over them, so the staging-dir +
+atomic-mv recipe above gives you a recovery escape hatch.
+
+### Rotation runbook: client identity (`client keygen --force`)
+
+Same idea but coordinated with the server admin:
+
+```bash
+# 1. Mint a new bundle to a side dir.
+proteus-client keygen --out ./new-client-keys
+
+# 2. Send new-client-keys/client.ed25519.pk to server admin.
+
+# 3. WAIT for confirmation it's been added to the server allowlist.
+
+# 4. Swap. The old identity stops working the moment ~/.proteus.yaml
+#    points at the new SK.
+mv ./keys/client ./keys/client-OLD
+mv ./new-client-keys ./keys/client
+# Edit ~/.proteus.yaml if the path changed; restart proteus-client.
+```
+
+`client keygen --force` (overwrite in place) is supported for the
+"I haven't deployed yet, I'm just iterating on local config"
+workflow — but ONCE you've shared your `client.ed25519.pk` with
+the server admin, always use the staging recipe instead.
+
 ## Deployment topology — direct-dial vs. relay (2026 GFW reality check)
 
 The single biggest deployment decision that affects Proteus's

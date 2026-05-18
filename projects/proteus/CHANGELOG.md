@@ -15,6 +15,46 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Added — Key rotation runbooks for the iter-130 anti-clobber behavior (iter-131)
+
+Iter-130 made all key-emitting CLIs refuse to overwrite by default,
+but without a corresponding section in `deploy/README.md` an
+operator who re-runs the bootstrap script (or any operator who
+WANTS to deliberately rotate) hits an unexplained "refusing to
+overwrite" error with no clear next step.
+
+Iter-131 adds a "Key rotation (anti-clobber by default; `--force`
+to opt in)" section to `deploy/README.md` with FOUR distinct
+runbooks — one per key class — because each has a different
+blast radius and rotation procedure:
+
+- **TLS cert** (`gencert --force` or just Let's Encrypt deploy
+  hook): zero-downtime via the iter-129-era SIGHUP hot-reload.
+- **knock PSK** (`knock-keygen --force` with staging recipe):
+  must pre-distribute to every client out-of-band before cutover
+  or every client fails the knock + sees only the cover-site
+  response.
+- **Long-term server identity** (`keygen --force` with mv-staging
+  recipe): the most disruptive — every client's
+  `server.pq.fingerprint` pin must be re-distributed before
+  reconnect. Includes the keys-OLD/ recovery-insurance pattern
+  so a botched rotation has an escape hatch.
+- **Client identity** (`client keygen --force` with mv-staging
+  recipe): coordinated with the server admin to add the new
+  public key to the allowlist BEFORE the client cuts over (else
+  "unknown client_id" with no way back).
+
+A new contract test
+(`iter131_readme_documents_key_rotation_runbooks`) pins the
+section heading + all 4 runbook subsections + the `--force` flag
+documentation + the pre-distribute requirement; so a future
+refactor can't drop any of the runbooks without breaking CI.
+The executable-contract test
+(`iter123_every_readme_command_is_recognized_by_clap`) also
+re-validates every command line in the new bash blocks — proving
+that the operator-visible recipes actually parse, not just look
+nice in markdown.
+
 ### Fixed — every key-emitting CLI silently clobbered existing files (iter-130)
 
 Pre-iter-130 the four key-emitting subcommands (`proteus-server
