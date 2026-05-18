@@ -77,6 +77,36 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — speed (Hy2 / TUIC5-grade data plane) iter 61-63
+
+Three data-plane speed wins closing the remaining gap with
+Hy2 / TUIC5 single-stream throughput on long-fat-pipe paths:
+
+- **UDP socket buffer tuning to 7 MiB** (`SO_RCVBUF` +
+  `SO_SNDBUF`). Linux's `net.core.rmem_default` ≈ 212 KiB
+  capped β single-stream throughput well below Hy2 / TUIC5;
+  matching their 7 MiB target sustains 1 Gbit/s at ~500 ms
+  RTT. Wired at all 3 β socket bind sites (server, client
+  initial dial, client migration rebind). Best-effort: kernel
+  clamps above `net.core.rmem_max` are warn-logged with the
+  exact sysctl command operators run to raise the cap.
+- **BufWriter on the server-upstream relay leg**. Pre-iter-62
+  every inbound Proteus record became its own TCP write
+  syscall to the upstream server. 64 KiB BufWriter with
+  adaptive flush (flush on < capacity, coalesce at capacity)
+  collapses small-frame workloads (HTTP/2 control, gRPC) to
+  one syscall per batch boundary.
+- **BufWriter on the client-downstream SOCKS5 leg**. Sister
+  fix for the symmetric trap on the OTHER side of the relay
+  — pre-iter-63 every inbound Proteus record became its own
+  TCP write syscall to the local SOCKS5 client.
+
+Combined effect: with iter-61's UDP buffer headroom and
+iter-62/63's syscall-coalescing, the data-plane bottleneck
+shifts back to crypto throughput (AEAD seal+open) which the
+α profile already amortizes via 64 KiB BufWriter and the β
+profile via QUIC's stream send-buffer.
+
 ### Added — validate-time operator-trap detection (iter 46-57)
 
 Eleven new preflight checks in `proteus-server validate` /
