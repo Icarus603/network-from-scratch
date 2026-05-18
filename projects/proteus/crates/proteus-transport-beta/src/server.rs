@@ -134,7 +134,36 @@ pub fn make_endpoint_with_perf(
         .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
     crate::apply_perf_tuning_with(&mut transport, perf);
     server_cfg.transport_config(Arc::new(transport));
-    let endpoint = quinn::Endpoint::server(server_cfg, addr)?;
+
+    // Iter-61: bind UDP ourselves so we can tune SO_RCVBUF +
+    // SO_SNDBUF BEFORE quinn takes ownership. Pre-iter-61 we
+    // called quinn::Endpoint::server(cfg, addr) which used the
+    // OS default (~212 KiB on Linux) — caps single-stream
+    // throughput on long-fat-pipe paths well below Hy2 / TUIC5.
+    let std_sock = std::net::UdpSocket::bind(addr)?;
+    let buf_outcome = crate::apply_udp_socket_buffers(
+        &std_sock,
+        crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES,
+    )?;
+    if !buf_outcome.met_target {
+        tracing::warn!(
+            requested_bytes = buf_outcome.requested,
+            achieved_recv_bytes = buf_outcome.achieved_recv,
+            achieved_send_bytes = buf_outcome.achieved_send,
+            "β server UDP socket buffers were clamped by the kernel — \
+             single-stream throughput on long-fat-pipe paths may be capped \
+             below 1 Gbit/s. Raise `sysctl -w net.core.rmem_max=8388608 net.core.wmem_max=8388608` \
+             on Linux, or `sysctl -w kern.ipc.maxsockbuf=16777216` on macOS."
+        );
+    }
+    let runtime = quinn::default_runtime()
+        .ok_or_else(|| BetaError::Io(std::io::Error::other("no async runtime found")))?;
+    let endpoint = quinn::Endpoint::new(
+        quinn::EndpointConfig::default(),
+        Some(server_cfg),
+        std_sock,
+        runtime,
+    )?;
     Ok(endpoint)
 }
 

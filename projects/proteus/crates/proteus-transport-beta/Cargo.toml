@@ -32,6 +32,13 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
+# Iter-61: UDP socket buffer tuning (SO_RCVBUF / SO_SNDBUF).
+# Hy2 / TUIC5 explicitly bump these to ~7 MiB; the OS default
+# (Linux net.core.rmem_default ≈ 212 KiB) caps throughput on
+# long-fat-pipe paths. We use socket2 to set the option on the
+# std::net::UdpSocket BEFORE handing it to quinn::Endpoint::new.
+socket2 = { version = "0.6", features = ["all"] }
+
 [dev-dependencies]
 rcgen = "0.13"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }

@@ -221,6 +221,81 @@ impl Default for PerfProfile {
     }
 }
 
+/// Iter-61: target SO_RCVBUF / SO_SNDBUF for the QUIC UDP socket.
+/// 7 MiB matches Hy2 / TUIC5 defaults — enough to sustain
+/// 1 Gbit/s at ~500 ms RTT without OS-level UDP buffer drops.
+///
+/// Linux defaults: `net.core.rmem_default` and `wmem_default` are
+/// typically 212 992 bytes (~208 KiB). At line-rate the kernel
+/// drops UDP datagrams faster than quinn can drain — manifests as
+/// throughput cliff + retransmits + BBR bw estimate collapse.
+///
+/// macOS defaults: `kern.ipc.maxsockbuf` caps to ~8 MiB by
+/// default; our 7 MiB target fits under it.
+///
+/// The set is BEST-EFFORT: SO_RCVBUF/SO_SNDBUF requests above the
+/// system maximum are silently clamped by the kernel (not an
+/// error). The helper returns the actual achieved values so the
+/// caller can warn-log a too-low result.
+pub const DEFAULT_UDP_SOCKET_BUFFER_BYTES: usize = 7 * 1024 * 1024;
+
+/// Iter-61: outcome of [`apply_udp_socket_buffers`]. Per-direction
+/// pair so the caller can log "asked for 7 MiB, kernel gave us
+/// X MiB" diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct UdpBufferOutcome {
+    /// Bytes requested via SO_RCVBUF (`target` arg).
+    pub requested: usize,
+    /// Bytes the kernel actually allocated for the receive side.
+    /// Linux returns 2× the set value (kernel doubles for bookkeeping).
+    pub achieved_recv: usize,
+    /// Bytes the kernel actually allocated for the send side.
+    pub achieved_send: usize,
+    /// True iff both directions met or exceeded the requested
+    /// target. Operators can warn-log when false to surface
+    /// "kernel max is too low" before throughput degrades.
+    pub met_target: bool,
+}
+
+/// Iter-61: set SO_RCVBUF + SO_SNDBUF on a pre-bound UDP socket
+/// to `target` bytes (best-effort; kernel may clamp). Returns the
+/// achieved sizes so the caller can warn-log clamping.
+///
+/// This MUST be called before the socket is handed to
+/// `quinn::Endpoint::new` — quinn doesn't expose the underlying
+/// fd for runtime tuning. The convention in both server.rs
+/// (make_endpoint) and client.rs (connect) is:
+///   1. std::net::UdpSocket::bind(...)
+///   2. apply_udp_socket_buffers(&sock, DEFAULT_UDP_SOCKET_BUFFER_BYTES)
+///   3. quinn::Endpoint::new(cfg, server_cfg, sock, runtime)
+pub fn apply_udp_socket_buffers(
+    sock: &std::net::UdpSocket,
+    target: usize,
+) -> std::io::Result<UdpBufferOutcome> {
+    // Convert to socket2's Socket view via reference — no fd dup,
+    // no ownership transfer. Drops at end of scope without
+    // closing the underlying fd.
+    let s2 = socket2::SockRef::from(sock);
+    // Best-effort sets. Errors here mean the OS rejected the
+    // request outright (very rare on Linux/macOS for sub-system-
+    // max values).
+    s2.set_recv_buffer_size(target)?;
+    s2.set_send_buffer_size(target)?;
+    let achieved_recv = s2.recv_buffer_size().unwrap_or(0);
+    let achieved_send = s2.send_buffer_size().unwrap_or(0);
+    // Linux kernel returns 2× the set value from getsockopt
+    // (kernel-side bookkeeping). Compare against `target` (not
+    // 2× target) — meeting the user-visible target counts as a
+    // win even if Linux halves the reported number.
+    let met_target = achieved_recv >= target && achieved_send >= target;
+    Ok(UdpBufferOutcome {
+        requested: target,
+        achieved_recv,
+        achieved_send,
+        met_target,
+    })
+}
+
 /// Apply the production performance tuning with an explicit
 /// `PerfProfile`. Public + idempotent.
 pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: PerfProfile) {
@@ -375,5 +450,83 @@ mod perf_profile_defaults {
     fn pad_to_mtu_default_is_off() {
         let p = PerfProfile::default();
         assert!(!p.pad_quic_datagrams_to_mtu);
+    }
+}
+
+#[cfg(test)]
+mod udp_socket_buffer_tests {
+    use super::*;
+
+    /// Iter-61: requesting a sensible buffer size against a fresh
+    /// loopback UDP socket should succeed AND report achieved >=
+    /// requested (or the kernel-clamped value, whichever is
+    /// smaller). On all mainstream kernels at the 256 KiB target
+    /// we use here, the request is well below the configured
+    /// system maximum, so met_target = true.
+    #[test]
+    fn apply_udp_socket_buffers_sets_and_reports_achieved() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind loopback");
+        // Use a modest target (256 KiB) so the test passes on
+        // stock Linux + macOS without sysctl tweaks. The
+        // DEFAULT_UDP_SOCKET_BUFFER_BYTES production target (7 MiB)
+        // requires raised rmem_max on some systems and would
+        // make this test flaky in restricted-CI environments.
+        let target = 256 * 1024;
+        let outcome = apply_udp_socket_buffers(&sock, target).expect("set succeeded");
+        assert_eq!(outcome.requested, target);
+        // Linux returns 2× the set value; macOS returns the value
+        // unchanged. Either way achieved should be >= target.
+        assert!(
+            outcome.achieved_recv >= target,
+            "achieved_recv ({} bytes) should be >= target ({target} bytes); \
+             kernel may have clamped",
+            outcome.achieved_recv,
+        );
+        assert!(
+            outcome.achieved_send >= target,
+            "achieved_send ({} bytes) should be >= target ({target} bytes)",
+            outcome.achieved_send,
+        );
+        assert!(
+            outcome.met_target,
+            "256 KiB target should be met on every reasonable system"
+        );
+    }
+
+    /// Buffer values much larger than the kernel allows are
+    /// silently clamped (this is the documented best-effort
+    /// behavior). The outcome reports met_target=false so the
+    /// caller can warn-log. We pick an absurdly-large value
+    /// (1 GiB) that no default kernel allows.
+    #[test]
+    fn apply_udp_socket_buffers_reports_kernel_clamp_via_met_target_false() {
+        let sock = std::net::UdpSocket::bind("127.0.0.1:0").expect("bind loopback");
+        let absurd = 1024 * 1024 * 1024;
+        let outcome = match apply_udp_socket_buffers(&sock, absurd) {
+            Ok(o) => o,
+            Err(_) => {
+                // On some kernels setsockopt itself errors on
+                // out-of-range. Either outcome is correct
+                // (clamp-or-error); the test's intent is "the
+                // helper does NOT panic AND the operator gets
+                // some signal".
+                return;
+            }
+        };
+        assert_eq!(outcome.requested, absurd);
+        // Kernel clamps to maxsockbuf / net.core.rmem_max;
+        // achieved will be << absurd. met_target must reflect that.
+        assert!(
+            !outcome.met_target,
+            "1 GiB request must NOT report met_target=true (kernel clamps); \
+             achieved_recv={}, achieved_send={}",
+            outcome.achieved_recv, outcome.achieved_send,
+        );
+    }
+
+    /// Default target is 7 MiB — matches Hy2 / TUIC5.
+    #[test]
+    fn default_udp_buffer_target_matches_hy2_tuic5() {
+        assert_eq!(DEFAULT_UDP_SOCKET_BUFFER_BYTES, 7 * 1024 * 1024);
     }
 }
