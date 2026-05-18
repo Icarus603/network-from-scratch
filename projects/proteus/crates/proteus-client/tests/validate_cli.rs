@@ -957,6 +957,100 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-92: beta_mtu_upper_bound + beta_ack_eliciting_threshold ----------
+
+/// Iter-92: server_endpoint_beta must be set for these β-knobs
+/// to take effect, but the validation should fire regardless of
+/// whether β is used (the operator's typo is a typo).
+#[tokio::test]
+async fn iter92_beta_mtu_upper_bound_below_minimum_fails() {
+    let dir = tempdir("mtu-ub-low");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_mtu_upper_bound: 1000\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(report.has_failures(), "MTU upper < 1200 MUST FAIL: {report}");
+    let fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("beta_mtu_upper_bound = 1000") && s.contains("QUIC v1 minimum"),
+        _ => false,
+    });
+    assert!(fail, "FAIL must call out QUIC minimum: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter92_beta_mtu_upper_bound_excessive_warns() {
+    let dir = tempdir("mtu-ub-high");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_mtu_upper_bound: 10000\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("beta_mtu_upper_bound = 10000") && s.contains("9216"),
+        _ => false,
+    });
+    assert!(warn, "MTU > 9216 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter92_beta_mtu_upper_below_initial_fails() {
+    let dir = tempdir("mtu-ub-vs-init");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_initial_mtu: 1450\n\
+         beta_mtu_upper_bound: 1300\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(report.has_failures(), "upper < initial MUST FAIL: {report}");
+    let fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("beta_mtu_upper_bound = 1300") && s.contains("LESS than"),
+        _ => false,
+    });
+    assert!(fail, "FAIL must call out the relationship: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter92_beta_ack_threshold_zero_fails() {
+    let dir = tempdir("ack-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_ack_eliciting_threshold: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(report.has_failures(), "ack_threshold=0 MUST FAIL: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter92_beta_ack_threshold_extreme_warns() {
+    let dir = tempdir("ack-extreme");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_ack_eliciting_threshold: 500\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"),
+        _ => false,
+    });
+    assert!(warn, "ack=500 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-91: tcp_keepalive_secs / alpha_dial_timeout_secs / healthz_staleness_secs ----------
 
 #[tokio::test]

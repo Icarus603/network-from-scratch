@@ -579,6 +579,65 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        // Iter-92: beta_mtu_upper_bound sanity.
+        //
+        // The MTU discovery upper bound caps how aggressively
+        // quinn probes for jumbo frames. Valid range matches
+        // initial_mtu's [1200, 9000] (jumbo-frame paths cap
+        // at 9000 by convention; some 10G NICs allow up to
+        // 9216 but quinn-udp doesn't probe past 9000).
+        if let Some(ub) = cfg.beta_mtu_upper_bound {
+            if ub < 1200 {
+                r.push_fail(format!(
+                    "beta_mtu_upper_bound = {ub} < 1200 (QUIC v1 minimum). MTU \
+                     discovery will fail every probe attempt. Recommended: 1452 \
+                     (Ethernet under v6+UDP overhead) or 9000 for jumbo-frame paths."
+                ));
+            } else if ub > 9216 {
+                r.push_warn(format!(
+                    "beta_mtu_upper_bound = {ub} > 9216 (10G NIC jumbo-frame max). \
+                     quinn-udp won't probe past 9000 by default; the value is \
+                     accepted but discovery caps below it."
+                ));
+            } else if let Some(initial) = cfg.beta_initial_mtu {
+                if ub < initial {
+                    r.push_fail(format!(
+                        "beta_mtu_upper_bound = {ub} is LESS than beta_initial_mtu = \
+                         {initial}. The probe ceiling is below the starting MTU; \
+                         discovery cannot widen and starts above its own cap. Either \
+                         raise upper_bound or lower initial_mtu.",
+                    ));
+                }
+            }
+        }
+        // Iter-92: beta_ack_eliciting_threshold sanity.
+        //
+        // RFC 9802 ACK frequency reduction. quinn's default is 1
+        // (every ack-eliciting packet → ACK). >1 = bunch up N
+        // packets per ACK frame. Operator must opt in
+        // explicitly because tight loopback/LAN paths see BBR
+        // bandwidth-estimator collapse (107 MiB/s → 0.5 MiB/s
+        // measured) when ACKs are held back.
+        //
+        // 0 is reserved/invalid (would mean "never ACK"). Very
+        // high values starve BBR's bandwidth estimator on any
+        // path.
+        if let Some(thr) = cfg.beta_ack_eliciting_threshold {
+            if thr == 0 {
+                r.push_fail(
+                    "beta_ack_eliciting_threshold = 0 is invalid (would mean 'never \
+                     ACK'). Valid values: 1 (default, quinn upstream behavior — every \
+                     packet acked) or 2-10 for long-fat-pipe RTT × bandwidth paths \
+                     where ACK overhead is meaningful."
+                );
+            } else if thr > 100 {
+                r.push_warn(format!(
+                    "beta_ack_eliciting_threshold = {thr} (>100) is extreme; BBR's \
+                     bandwidth estimator may not converge if ACKs are bunched this \
+                     much. Recommended: 2-10 for measured long-fat-pipe paths only."
+                ));
+            }
+        }
     }
 
     // ----- Bootstrap-DNS posture -----
