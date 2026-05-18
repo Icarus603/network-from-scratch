@@ -873,9 +873,48 @@ paid for; losing the record means re-paying.
   pairs rejects retransmitted ClientHellos.
 - **Wire-format fuzzing**: invalid-length / non-zero-reserved /
   bad-profile-hint ClientHellos route to the cover-forward path.
+- **SSRF / internal-network probing via the proxy**: the
+  `OutboundFilter` blocks RFC 1918 / RFC 4193 ULA / link-local /
+  loopback / cloud-metadata (`169.254.169.254`) by default; an
+  attacker holding a stolen credential can't use the proxy as a
+  gateway to map / probe the operator's LAN OR steal cloud IAM
+  credentials. `validate` gates the three foot-guns at preflight:
+  `disabled: true`, `replace_default_blocklist: true`, and bad
+  CIDR entries. Runtime rate of rejections is alerted via
+  `ProteusSsrfAttempts{Observed,Catastrophic}` + dashboarded.
+- **Active MITM tampering** (bit-flipping records): AEAD-decryption
+  rejection is counted on `proteus_aead_drops_total` and alerted
+  via `ProteusAeadDropsCatastrophic` (>1/sec for 2 min = page-
+  grade). Cross-references `proteus_ratchets_total` to distinguish
+  key-rotation race from genuine tampering.
+- **Operator-config-induced public open-relay**: empty
+  `client_allowlist` + wildcard `listen_alpha` + no firewall =
+  the whole internet relays through the operator's egress IP.
+  `validate`'s catastrophic-open-relay coherence check (iter-97)
+  FAILs the combination at preflight with three documented
+  recovery paths.
+- **Catastrophic config foot-guns (zero-value safety disable)**:
+  every numeric knob with a `=0` "disable" path is gated at
+  preflight (`max_inflight_sessions: 0` → local OOM,
+  `socks_request_timeout_secs: 0` → slow-loris, `period_secs: 0`
+  → quota collapse, `handshake_deadline_secs: 0` → every dial
+  fails). 130+ checks across both binaries.
+- **TLS cert expiry / rotation**: cert lifetime is checked at
+  preflight (iter-46/iter-47) AND continuously via the
+  `proteus_tls_cert_not_after_unix_seconds` gauge +
+  `ProteusTlsCert{Expired,ExpiringSoon}` alerts + the file-mtime
+  watcher (`tls_cert_watcher_interval_secs`) auto-reloads without
+  SIGHUP.
+- **Catastrophic admin endpoint exposure**: wildcard bind on the
+  unauthenticated `admin_listen` (client) / `metrics_listen`
+  (server, without token) is FAILed at preflight (iter-71/iter-73)
+  — operators can't accidentally ship an internet-reachable
+  HA-topology inventory.
 
 Not yet defended in this M1 release:
 - Multipath / blanket-port-block fallback (M4).
 - Active shape-shifting / cover-IAT online learning (M3).
 - Real TLS 1.3 outer record layer (M2 — current build uses a typed
   framing shim directly over TCP).
+- 0-RTT QUIC resumption (M3 — α profile is 1.5-RTT, β is 1-RTT
+  after handshake).

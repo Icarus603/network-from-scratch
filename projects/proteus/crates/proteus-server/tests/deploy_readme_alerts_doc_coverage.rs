@@ -75,6 +75,48 @@ fn readme_documents_alerts_check_evaluator() {
     );
 }
 
+/// Iter-121: threat-surface section must enumerate the
+/// post-iter-67 attack-class defenses (SSRF, AEAD-tampering,
+/// open-relay coherence, zero-value foot-guns, cert expiry,
+/// admin endpoint exposure). Pre-iter-121 the threat-surface
+/// section listed only the M1 baseline (6 defenses); 120+
+/// iterations of operator-trap and attack-detection work were
+/// undocumented as operator-facing security guarantees.
+#[test]
+fn iter121_threat_surface_lists_operator_trap_class_defenses() {
+    let body = read_readme();
+    // SSRF / cloud metadata.
+    assert!(
+        body.contains("SSRF") && body.contains("169.254.169.254"),
+        "threat surface must call out SSRF + cloud-metadata defense"
+    );
+    // AEAD tampering / MITM signal.
+    assert!(
+        body.contains("MITM tampering") && body.contains("proteus_aead_drops_total"),
+        "must call out AEAD tampering detection"
+    );
+    // Catastrophic open-relay coherence.
+    assert!(
+        body.contains("open-relay") && body.contains("client_allowlist"),
+        "must call out the iter-97 catastrophic-open-relay check"
+    );
+    // Zero-value foot-gun gates.
+    assert!(
+        body.contains("zero-value safety disable"),
+        "must call out the ~130 zero-value-disable preflight gates"
+    );
+    // Cert-expiry preflight + runtime coverage.
+    assert!(
+        body.contains("TLS cert expiry") && body.contains("ProteusTlsCert"),
+        "must call out cert-expiry preflight + runtime defenses"
+    );
+    // Admin endpoint wildcard-bind FAIL.
+    assert!(
+        body.contains("admin endpoint exposure"),
+        "must call out the iter-71/73 admin-endpoint wildcard-bind FAIL"
+    );
+}
+
 /// Iter-120: host-preflight + connect-test must be documented
 /// alongside validate so operators know the full pre-deploy
 /// smoke checklist.
