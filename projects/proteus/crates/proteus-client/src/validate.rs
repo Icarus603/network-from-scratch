@@ -692,6 +692,43 @@ pub async fn run(path: &Path) -> PreflightReport {
                          remove it for clarity if desired)",
                     );
                 }
+
+                // Iter-107: direct_ip + multi-VPS pool of hostnames
+                // = HA defeat.
+                //
+                // bootstrap_dns.direct_ip forces ALL hostname dials
+                // to the same IP. If the operator configures
+                // `server_endpoints: [vps1.example.com:443,
+                // vps2.example.com:443, vps3.example.com:443]` AND
+                // pins direct_ip, all three pool entries resolve
+                // to the same IP — the EndpointPool's per-entry
+                // health tracking still works (TCP connect to a
+                // single IP), but when vps1's box goes down ALL
+                // three entries fail because they're literally the
+                // same box. No HA achieved.
+                //
+                // Detect: pool has ≥2 hostname entries (not IP
+                // literals) AND direct_ip is set → WARN.
+                let hostname_pool_entries: Vec<&str> = cfg
+                    .server_endpoints
+                    .iter()
+                    .map(String::as_str)
+                    .filter(|ep| !endpoint_is_ip_literal(ep))
+                    .collect();
+                if hostname_pool_entries.len() >= 2 {
+                    r.push_warn(format!(
+                        "bootstrap_dns.direct_ip is set AND server_endpoints contains \
+                         {} hostname entries: {hostname_pool_entries:?}. The direct_ip \
+                         pin forces ALL hostname dials to the same IP — the pool \
+                         entries become aliases for the same VPS. When that VPS goes \
+                         down EVERY pool entry fails together (no HA). Either: (a) use \
+                         IP literals in server_endpoints so each entry pins its own IP, \
+                         OR (b) remove bootstrap_dns.direct_ip and rely on per-hostname \
+                         OS-resolver lookups (re-enables the 2026 GFW DoH-leak risk \
+                         iter-70 documents).",
+                        hostname_pool_entries.len(),
+                    ));
+                }
             }
 
             // Iter-70: bootstrap_dns.direct_ip in private / special-

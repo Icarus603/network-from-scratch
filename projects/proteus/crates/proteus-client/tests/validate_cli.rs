@@ -957,6 +957,87 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-107: bootstrap direct_ip + hostname-pool HA-defeat ----------
+
+#[tokio::test]
+async fn iter107_direct_ip_with_multi_hostname_pool_warns() {
+    let dir = tempdir("direct-ip-pool");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps1.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps1.example.com:8443\"\n  \
+             - \"vps2.example.com:8443\"\n  \
+             - \"vps3.example.com:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 198.51.100.42\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip")
+                && s.contains("server_endpoints contains")
+                && s.contains("hostname")
+                && s.contains("no HA")
+        }
+        _ => false,
+    });
+    assert!(warn, "direct_ip + multi-hostname pool MUST WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-107: direct_ip + single-hostname endpoint (no pool) → no warn
+/// (single endpoint with direct_ip is the recommended posture).
+#[tokio::test]
+async fn iter107_direct_ip_with_single_hostname_no_warn() {
+    let dir = tempdir("direct-ip-single");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 198.51.100.42\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip") && s.contains("no HA")
+        }
+        _ => false,
+    });
+    assert!(
+        !warn,
+        "direct_ip + single endpoint must NOT trigger iter-107 warn: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Iter-107: direct_ip + pool of IP literals → no warn (each entry
+/// pins its own IP via the IP-literal-in-endpoint route, direct_ip
+/// pin is dead-letter).
+#[tokio::test]
+async fn iter107_direct_ip_with_ip_literal_pool_no_warn() {
+    let dir = tempdir("direct-ip-literals");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoints:\n  \
+             - \"vps.example.com:8443\"\n  \
+             - \"198.51.100.10:8443\"\n  \
+             - \"198.51.100.20:8443\"\n\
+         bootstrap_dns:\n  direct_ip: 198.51.100.42\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("bootstrap_dns.direct_ip") && s.contains("no HA")
+        }
+        _ => false,
+    });
+    assert!(
+        !warn,
+        "IP-literal pool entries must NOT trigger iter-107 warn (only 1 hostname): {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-94: client drain_secs zero ----------
 
 #[tokio::test]
