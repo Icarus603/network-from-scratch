@@ -410,6 +410,29 @@ groups:
         rate_limit / bandwidth_rate trip). Audit access_log
         + decide credential rotation.
 
+  # Iter-105: per-user quota admission rejections. Fires when
+  # a user_id has consumed their full period_bytes cap and
+  # NEW sessions for that user are admission-rejected. WARN-
+  # grade because this is the QUOTA SYSTEM WORKING — the
+  # operator just wants visibility on which user is at cap.
+  - alert: ProteusUserQuotaAdmissionRejecting
+    expr: rate(proteus_user_quota_admission_rejected_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: per-user quota cap rejecting new sessions"
+      description: |
+        {{ printf "%.3f" $value }} quota admission rejections/sec
+        on {{ $labels.instance }} for 5+ min. One or more
+        user_ids have consumed their full period_bytes cap;
+        new sessions for those users are immediately
+        rejected at admission. Either expected (user hit
+        their quota — surface to them via the application
+        layer if desired) OR the operator's quota is too
+        tight for legitimate use. Audit access_log + adjust
+        per-user override OR raise default_period_bytes.
+
 - name: proteus-aead-integrity
   interval: 30s
   rules:

@@ -207,6 +207,9 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         // (gauge that goes 0 on SIGTERM). Pre-iter-102 the
         // signal was undocumented in any alert.
         "proteus_ready",
+        // Iter-105: per-user quota admission rejections —
+        // visibility into "who hit their cap".
+        "proteus_user_quota_admission_rejected_total",
     ]
     .into_iter()
     .collect();

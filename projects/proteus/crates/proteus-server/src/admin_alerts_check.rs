@@ -405,6 +405,11 @@ pub fn evaluate(body: &str) -> Report {
             "proteus_user_quarantine_rejected_total",
             "auto-quarantine rejections (user previously marked for ban)",
         ),
+        (
+            "ProteusUserQuotaAdmissionRejecting",
+            "proteus_user_quota_admission_rejected_total",
+            "per-user quota cap hit (user consumed period_bytes; raise override or default)",
+        ),
     ] {
         if let Some(v) = g(metric) {
             if v > 0.0 {
@@ -1380,6 +1385,45 @@ mod tests {
         let r = evaluate(&body);
         let any = r.checks.iter().any(|c| c.rule_name == "ProteusServerDrainStuck");
         assert!(!any, "up=0 must NOT fire DrainStuck");
+    }
+
+    // ──── iter-105: user_quota admission rejection ────
+
+    #[test]
+    fn iter105_quota_admission_zero_passes() {
+        let body = body_with("proteus_user_quota_admission_rejected_total 0");
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusUserQuotaAdmissionRejecting")
+            .expect("rule must fire when metric present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    #[test]
+    fn iter105_quota_admission_nonzero_warns() {
+        let body = body_with("proteus_user_quota_admission_rejected_total 12");
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusUserQuotaAdmissionRejecting")
+            .expect("rule must fire");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("12"));
+        assert!(warn.message.contains("period_bytes"));
+    }
+
+    #[test]
+    fn iter105_quota_admission_absent_suppresses() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name == "ProteusUserQuotaAdmissionRejecting");
+        assert!(!any);
     }
 
     // ──── iter-99: rejection-counter checks ────
