@@ -346,6 +346,67 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusHandshakeLatencyHigh / Catastrophic ────
+    //
+    // Iter-74: point-in-time approximation of the Prometheus
+    // `histogram_quantile(0.99, rate(... [5m]))` rule. We
+    // can't compute a true p99 without the full bucket array
+    // (the in-process evaluator runs one /metrics scrape, not a
+    // TSDB query), so we approximate via `sum / count` (mean)
+    // with a generous threshold ratio: if mean > 50 ms, the
+    // p99 is almost certainly > 200 ms. If mean > 200 ms, the
+    // p99 is almost certainly > 1 s.
+    //
+    // This catches the CPU-exhaustion attack signal (PoW-
+    // bypass flooding ML-KEM Decap) without needing a real
+    // Prometheus deployment.
+    let hs_sum = g("proteus_handshake_duration_seconds_sum").unwrap_or(0.0);
+    let hs_count = g("proteus_handshake_duration_seconds_count").unwrap_or(0.0);
+    if hs_count > 0.0 {
+        let mean_s = hs_sum / hs_count;
+        let mean_ms = mean_s * 1000.0;
+        // Catastrophic first — same metric, higher threshold.
+        if mean_s > 0.2 {
+            r.push(Check {
+                rule_name: "ProteusHandshakeLatencyP99Catastrophic",
+                severity: CheckSeverity::Crit,
+                message: format!(
+                    "handshake mean latency = {mean_ms:.1}ms (over {} handshakes); p99 \
+                     is almost certainly above the 1 s catastrophic threshold. Clients \
+                     with default ~10 s timeouts will start failing. Likely a CPU-\
+                     exhaustion attack — raise pow_difficulty + SIGHUP",
+                    hs_count as u64,
+                ),
+                equivalent_promql:
+                    "histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m])) > 1.0",
+            });
+        } else if mean_s > 0.05 {
+            r.push(Check {
+                rule_name: "ProteusHandshakeLatencyP99High",
+                severity: CheckSeverity::Warn,
+                message: format!(
+                    "handshake mean latency = {mean_ms:.1}ms (over {} handshakes); p99 \
+                     likely above the 200 ms watch threshold. Investigate: (a) PoW-bypass \
+                     attack flooding ML-KEM Decap, (b) slow cover endpoint dragging \
+                     auth-fail histogram, (c) VPS CPU/disk pressure",
+                    hs_count as u64,
+                ),
+                equivalent_promql:
+                    "histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m])) > 0.2",
+            });
+        } else {
+            r.push(Check {
+                rule_name: "ProteusHandshakeLatencyP99High",
+                severity: CheckSeverity::Pass,
+                message: format!(
+                    "handshake mean latency = {mean_ms:.1}ms (over {} handshakes); healthy",
+                    hs_count as u64,
+                ),
+                equivalent_promql: "",
+            });
+        }
+    }
+
     // ──── ProteusPanic ────
     if let Some(v) = g("proteus_panics_total") {
         let sev = if v > 0.0 {
@@ -990,5 +1051,75 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-74: handshake latency check ────
+
+    /// Healthy mean latency (10 ms over 100 handshakes) → PASS.
+    #[test]
+    fn iter74_handshake_latency_healthy_passes() {
+        // sum/count = 1.0 / 100 = 10 ms mean.
+        let body = body_with(
+            "proteus_handshake_duration_seconds_sum 1.0\nproteus_handshake_duration_seconds_count 100",
+        );
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeLatencyP99High")
+            .expect("rule must fire when handshake count > 0");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+        assert!(pass.message.contains("10.0ms"));
+    }
+
+    /// Mean 80 ms (= 8 / 100) → WARN (p99 likely above 200 ms).
+    #[test]
+    fn iter74_handshake_latency_warns_on_creep() {
+        let body = body_with(
+            "proteus_handshake_duration_seconds_sum 8.0\nproteus_handshake_duration_seconds_count 100",
+        );
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeLatencyP99High")
+            .expect("rule must fire");
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("80.0ms"));
+        assert!(warn.message.contains("PoW-bypass"));
+    }
+
+    /// Mean 500 ms → CRIT (catastrophic). Operator wakes up.
+    #[test]
+    fn iter74_handshake_latency_catastrophic_crits() {
+        let body = body_with(
+            "proteus_handshake_duration_seconds_sum 50.0\nproteus_handshake_duration_seconds_count 100",
+        );
+        let r = evaluate(&body);
+        let crit = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusHandshakeLatencyP99Catastrophic")
+            .expect("catastrophic rule must fire on >200ms mean");
+        assert_eq!(crit.severity, CheckSeverity::Crit);
+        assert!(crit.message.contains("500.0ms"));
+        assert!(crit.message.contains("attack"));
+    }
+
+    /// Zero handshakes → check suppressed entirely (no signal
+    /// to evaluate). Same convention as
+    /// ProteusClientNoRecentDialSuccess when attempts == 0.
+    #[test]
+    fn iter74_handshake_latency_no_handshakes_suppresses() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| {
+            c.rule_name == "ProteusHandshakeLatencyP99High"
+                || c.rule_name == "ProteusHandshakeLatencyP99Catastrophic"
+        });
+        assert!(
+            !any,
+            "no handshakes → no latency check should fire"
+        );
     }
 }

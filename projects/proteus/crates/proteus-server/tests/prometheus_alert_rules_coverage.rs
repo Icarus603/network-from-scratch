@@ -163,6 +163,12 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         "proteus_user_rate_limit_reload_succeeded_total",
         "proteus_handshake_budget_reload_attempts_total",
         "proteus_handshake_budget_reload_succeeded_total",
+        // Iter-74: handshake latency alerts on the histogram.
+        // Pre-iter-74 the metric existed + dashboard panel
+        // referenced it but no alert fired on creep —
+        // CPU-exhaustion attacks (PoW-bypass) were invisible
+        // outside the dashboard.
+        "proteus_handshake_duration_seconds_bucket",
     ]
     .into_iter()
     .collect();

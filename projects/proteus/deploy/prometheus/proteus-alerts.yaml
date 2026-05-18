@@ -187,6 +187,66 @@ groups:
         succeed. Pre-SIGHUP budget is still in effect. Check
         journalctl for the parse error.
 
+- name: proteus-handshake-latency
+  interval: 30s
+  rules:
+
+  # Iter-74: handshake p99 latency creep.
+  #
+  # The Proteus handshake runs ML-KEM Decap (~70 µs on a modern
+  # server core) + Ed25519 sig verify + Finished MAC computation
+  # + AEAD key derivation. Steady-state p99 should be < 50 ms on
+  # any reasonable hardware (the bulk is TLS handshake roundtrip
+  # over the network, not crypto).
+  #
+  # A sustained p99 > 200 ms is the operator-facing signal of:
+  #   (a) CPU exhaustion attack — attacker bypasses PoW gate
+  #       somehow (PoW disabled, or attacker has compute budget)
+  #       and floods ML-KEM Decap calls
+  #   (b) the cover endpoint is slow and cover-forward latency
+  #       (which feeds into the handshake measurement on auth-
+  #       fail paths) is dragging the histogram
+  #   (c) VPS noisy neighbor / disk swap pressure
+  #
+  # Warning-grade because the binary still serves traffic; the
+  # operator should investigate within the hour, not page at 3 AM.
+  - alert: ProteusHandshakeLatencyP99High
+    expr: |
+      histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m])) > 0.2
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server handshake p99 latency exceeded 200ms"
+      description: |
+        p99 handshake latency on {{ $labels.instance }} is
+        {{ printf "%.3f" $value }}s — above the 200ms threshold
+        for 10+ minutes. Likely causes: (a) PoW-bypass attack
+        flooding ML-KEM Decap, (b) slow cover endpoint, (c) VPS
+        CPU/disk pressure. Cross-reference proteus_panics_total
+        + proteus_cover_forwards_total + the VPS host's loadavg.
+
+  # Iter-74: handshake p99 latency CATASTROPHIC.
+  #
+  # Sustained p99 > 1 second means crypto is the bottleneck
+  # in every handshake; clients see browser timeouts; the
+  # server is effectively DoS'd. Page immediately.
+  - alert: ProteusHandshakeLatencyP99Catastrophic
+    expr: |
+      histogram_quantile(0.99, rate(proteus_handshake_duration_seconds_bucket[5m])) > 1.0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-server handshake p99 latency exceeded 1s — clients timing out"
+      description: |
+        p99 handshake latency on {{ $labels.instance }} is
+        {{ printf "%.3f" $value }}s — clients with default
+        ~10s timeouts will start failing dial. Likely an
+        active CPU-exhaustion attack. Raise pow_difficulty
+        in server.yaml + SIGHUP, OR restart-with-firewall to
+        block the offending source range.
+
 - name: proteus-runtime-health
   interval: 30s
   rules:
