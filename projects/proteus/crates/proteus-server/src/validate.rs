@@ -892,6 +892,75 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
         }
     }
 
+    // Iter-75: outbound_filter SSRF policy sanity.
+    //
+    // The OutboundFilter sits between the client's CONNECT and
+    // the actual upstream dial; it blocks SSRF-class destinations
+    // (RFC 1918 / link-local / loopback / IPv6 ULA / cloud
+    // metadata 169.254.169.254) by default. Three operator
+    // foot-guns we surface at validate time:
+    //
+    //   1. `disabled: true` — the operator explicitly turned the
+    //      filter OFF. Catastrophic on a public-internet deploy:
+    //      any allowlist'd client can CONNECT into the operator's
+    //      LAN / cloud metadata service / loopback / etc.
+    //      FAIL — operator must intentionally opt in to risk.
+    //   2. `replace_default_blocklist: true` WITHOUT a credible
+    //      `extra_blocked_cidrs` set. This blanket-removes SSRF
+    //      defaults; nearly always a typo for "I want to ADD
+    //      blocks, not REPLACE them". FAIL with the recommended
+    //      alternative (extra_blocked_cidrs instead).
+    //   3. `extra_blocked_cidrs` entries that don't parse as
+    //      CIDR. Runtime would log and ignore; validate surfaces
+    //      so the operator catches typos at deploy time. FAIL.
+    if let Some(of) = cfg.outbound_filter.as_ref() {
+        if of.disabled {
+            r.push_fail(
+                "outbound_filter.disabled = true — SSRF defense is OFF. Any allowlist'd \
+                 client can CONNECT into your LAN / cloud-metadata-service \
+                 (169.254.169.254 → IAM credentials) / loopback. On a public deploy this \
+                 is a catastrophic privilege-escalation surface. If you genuinely run \
+                 trusted-LAN-only AND need the filter off (e.g., relaying to internal \
+                 services intentionally), set `outbound_filter:` with explicit allowlist \
+                 + tight extra_blocked_cidrs instead of the blanket disable.",
+            );
+        }
+        if of.replace_default_blocklist {
+            r.push_fail(
+                "outbound_filter.replace_default_blocklist = true — the SSRF default \
+                 blocklist (RFC 1918 / link-local / cloud-metadata / loopback) is \
+                 REPLACED, not ADDED. Almost always a typo for 'I want to add blocks'. \
+                 Use `extra_blocked_cidrs` instead (the defaults stay; your entries are \
+                 appended). If you genuinely intend to replace, double-check \
+                 extra_blocked_cidrs covers every SSRF range.",
+            );
+        }
+        // CIDR parse check — same custom Cidr type used elsewhere
+        // in the crate (ip_reputation.rs). Catches typos at deploy
+        // time so the runtime doesn't silently ignore them.
+        for cidr in &of.extra_blocked_cidrs {
+            if cidr.parse::<crate::ip_reputation::Cidr>().is_err() {
+                r.push_fail(format!(
+                    "outbound_filter.extra_blocked_cidrs has an entry that doesn't parse \
+                     as CIDR: {cidr:?}. Runtime ignores unparseable entries silently — \
+                     your intended block doesn't apply.",
+                ));
+            }
+        }
+        // Sanity: when allowed_hostnames is non-empty, the operator
+        // is operating in deny-by-default-allow-listed mode. WARN
+        // if `extra_blocked_cidrs` is ALSO non-empty (likely
+        // double-config; allowlist is the primary gate).
+        if !of.allowed_hostnames.is_empty() && !of.extra_blocked_cidrs.is_empty() {
+            r.push_warn(
+                "outbound_filter: allowed_hostnames AND extra_blocked_cidrs are BOTH set \
+                 — likely double-configuration. The allow_hostnames gate is the primary \
+                 deny-by-default surface; CIDR blocks are typically redundant under it. \
+                 If you genuinely need both, the order is: hostname-allow → CIDR-block.",
+            );
+        }
+    }
+
     // Iter-66: cover-forward unboundedness check.
     //
     // The cover-forward path opens a TCP connection to the
@@ -1711,6 +1780,103 @@ mod tests {
         assert!(
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-75: outbound_filter.disabled = true → FAIL.
+    /// Operator must intentionally opt in to SSRF risk.
+    #[test]
+    fn iter75_outbound_filter_disabled_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.outbound_filter = Some(crate::config::OutboundFilterCfg {
+            disabled: true,
+            ..Default::default()
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "outbound_filter.disabled MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("outbound_filter.disabled") && s.contains("SSRF")
+            }
+            _ => false,
+        });
+        assert!(
+            fail,
+            "FAIL message must call out SSRF + IAM creds: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-75: replace_default_blocklist = true → FAIL with
+    /// recommendation to use extra_blocked_cidrs instead.
+    #[test]
+    fn iter75_outbound_filter_replace_blocklist_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.outbound_filter = Some(crate::config::OutboundFilterCfg {
+            replace_default_blocklist: true,
+            ..Default::default()
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "replace_default_blocklist MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-75: bad CIDR in extra_blocked_cidrs → FAIL.
+    #[test]
+    fn iter75_outbound_filter_bad_cidr_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.outbound_filter = Some(crate::config::OutboundFilterCfg {
+            extra_blocked_cidrs: vec![
+                "10.0.0.0/8".to_string(), // valid
+                "this is not a cidr".to_string(), // bad
+            ],
+            ..Default::default()
+        });
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "bad CIDR MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("outbound_filter.extra_blocked_cidrs")
+                    && s.contains("this is not a cidr")
+            }
+            _ => false,
+        });
+        assert!(fail, "FAIL must name the bad entry: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-75: legitimate outbound_filter config (just extra
+    /// ports / extra blocks) → no FAIL.
+    #[test]
+    fn iter75_outbound_filter_safe_config_passes() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.outbound_filter = Some(crate::config::OutboundFilterCfg {
+            extra_ports: vec![853, 993], // DoT, IMAPS
+            extra_blocked_cidrs: vec!["203.0.113.0/24".to_string()],
+            ..Default::default()
+        });
+        let report = preflight(&cfg);
+        let any_ssrf_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("outbound_filter"),
+            _ => false,
+        });
+        assert!(
+            !any_ssrf_fail,
+            "safe outbound_filter config must NOT trigger iter-75 FAIL: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
