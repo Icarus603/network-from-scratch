@@ -77,6 +77,31 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — security observability gates (iter 78-81)
+
+Three more security-observability pentads + one runtime alert:
+
+- **SSRF rejection dashboard panel** (iter-78): completes the
+  4-surface pentad for SSRF (validate iter-75 + Prometheus
+  iter-76 + alerts-check iter-76 + dashboard iter-78).
+  Operators see credential-compromise + attacker-mapping-
+  internal-network attempts BEFORE the alert pages.
+- **Per-user abuse-fires alerts + check** (iter-79):
+  three new Prometheus alerts + matching in-process
+  alerts-check loop covering byte_budget / rate_limit /
+  per_user_bandwidth abuse-detectors. Pre-iter-79 the metrics
+  existed but no alert fired — credential-compromise +
+  attacker-scripting-heavy-use was invisible.
+- **Per-user abuse-fires dashboard panel** (iter-80): closes
+  the visual surface for the iter-79 alerts. Three-series
+  stacked timeseries lets operators see the building trend.
+- **Probe-anomaly pentad** (iter-81): full 4-surface coverage
+  for the per-/24 source-IP probe-anomaly detector (2 alerts +
+  check + dashboard panel in one commit). Pre-iter-81 the
+  metric was emitted but no alert fired directly; operators
+  had to grep for the per-/24 breakdown manually after seeing
+  the broader cover-storm alert.
+
 ### Added — security observability gates (iter 73-76)
 
 Four more layers closing security blind-spots, each pairing
