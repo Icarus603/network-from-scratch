@@ -229,6 +229,42 @@ pub fn evaluate(body: &str) -> Report {
         });
     }
 
+    // ──── ProteusClientPanic ────
+    //
+    // Iter-101: cumulative-counter check on proteus_panics_total.
+    // Any non-zero count = the panic-hook captured at least one
+    // panic since process start. CRIT severity matches the
+    // server-side ProteusPanic alert (and the Prometheus
+    // ProteusClientPanic alert).
+    if let Some(v) = g("proteus_panics_total") {
+        let sev = if v > 0.0 {
+            CheckSeverity::Crit
+        } else {
+            CheckSeverity::Pass
+        };
+        let msg = if v > 0.0 {
+            format!(
+                "{v} panic(s) captured since process start — `journalctl --user -u \
+                 proteus-client -o json | jq 'select(.target==\"proteus_panic\")'`. \
+                 The panic-unwind workspace profile keeps the binary running, but \
+                 each captured panic is investigation-worthy."
+            )
+        } else {
+            "no panics captured".to_string()
+        };
+        r.push(Check {
+            rule_name: "ProteusClientPanic",
+            severity: sev,
+            message: msg,
+        });
+    }
+
+    // Note: ProteusClientUncleanShutdown is NOT added on the
+    // client side because the client currently doesn't ship
+    // restart_tracker (server-only feature). If client-side
+    // restart tracking lands in a future iteration, the check
+    // can be added symmetric with the server-side one.
+
     // ──── ProteusClientBetaCarrierSuppressed ────
     if let Some(supp) = g("proteus_client_carrier_suppressed") {
         let sev = if supp >= 1.0 {
@@ -557,6 +593,43 @@ mod tests {
             .find(|c| c.rule_name == "ProteusClientNotAlive")
             .unwrap();
         assert_eq!(c.severity, CheckSeverity::Pass);
+    }
+
+    /// Iter-101: client panic counter zero → PASS.
+    #[test]
+    fn iter101_client_panic_zero_passes() {
+        let body = body_with("proteus_panics_total 0");
+        let r = evaluate(&body);
+        let pass = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusClientPanic")
+            .expect("rule must fire when metric present");
+        assert_eq!(pass.severity, CheckSeverity::Pass);
+    }
+
+    /// Iter-101: client panic counter nonzero → CRIT.
+    #[test]
+    fn iter101_client_panic_nonzero_crits() {
+        let body = body_with("proteus_panics_total 3");
+        let r = evaluate(&body);
+        let crit = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusClientPanic")
+            .expect("rule must fire");
+        assert_eq!(crit.severity, CheckSeverity::Crit);
+        assert!(crit.message.contains("3"));
+        assert!(crit.message.contains("journalctl"));
+    }
+
+    /// Iter-101: metric absent → suppressed.
+    #[test]
+    fn iter101_client_panic_metric_absent_suppresses() {
+        let body = body_with("proteus_client_up 1");
+        let r = evaluate(&body);
+        let any = r.checks.iter().any(|c| c.rule_name == "ProteusClientPanic");
+        assert!(!any);
     }
 
     #[test]

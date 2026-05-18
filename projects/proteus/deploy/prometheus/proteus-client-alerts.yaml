@@ -159,6 +159,32 @@ groups:
         `bootstrap_dns: { direct_ip: <ip> }` in client.yaml or
         use an IP-literal server_endpoint.
 
+- name: proteus-client-runtime-health
+  interval: 30s
+  rules:
+
+  # Iter-101: proteus-client panic captured. Same shape as the
+  # server-side ProteusPanic alert but on the client surface.
+  # Tokio absorbs spawned-task panics silently; the
+  # `proteus_panics_total` series surfaces each one + the
+  # structured tracing line lets operators diagnose.
+  - alert: ProteusClientPanic
+    expr: rate(proteus_panics_total{job="proteus-client"}[5m]) > 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "proteus-client panic captured"
+      description: |
+        {{ $value }} panic(s)/sec on {{ $labels.instance }}.
+        Tokio absorbs spawned-task panics silently — the
+        panic_hook surfaces them. Check
+        `journalctl --user -u proteus-client -o json |
+        jq 'select(.target=="proteus_panic")'` for the
+        thread/location/message. The panic-unwind workspace
+        profile (iter-24) keeps the binary running, but each
+        captured panic is investigation-worthy.
+
 - name: proteus-client-pool-reload
   interval: 1m
   rules:
