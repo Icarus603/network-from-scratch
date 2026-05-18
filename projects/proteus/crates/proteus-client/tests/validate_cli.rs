@@ -957,6 +957,27 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-94: client drain_secs zero ----------
+
+#[tokio::test]
+async fn iter94_client_drain_zero_warns() {
+    let dir = tempdir("drain-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         drain_secs: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("drain_secs = 0") && s.contains("connection reset")
+        }
+        _ => false,
+    });
+    assert!(warn, "client drain=0 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-92: beta_mtu_upper_bound + beta_ack_eliciting_threshold ----------
 
 /// Iter-92: server_endpoint_beta must be set for these β-knobs

@@ -767,7 +767,17 @@ pub async fn run(path: &Path) -> PreflightReport {
         }
     }
     if let Some(d) = cfg.drain_secs {
-        if d > 120 {
+        if d == 0 {
+            // Iter-94: client drain_secs = 0 → WARN. SIGTERM tears
+            // down in-flight SOCKS5 sessions immediately; the
+            // browser/curl waiting on a long-poll sees connection
+            // reset mid-stream. Mirror of server iter-88.
+            r.push_warn(
+                "drain_secs = 0 — graceful drain is disabled. SIGTERM immediately \
+                 tears down in-flight SOCKS5 sessions; the local app waiting on \
+                 the tunnel sees connection reset mid-stream. Recommended: 5-30s.",
+            );
+        } else if d > 120 {
             r.push_warn(format!(
                 "drain_secs = {d} is high; systemd TimeoutStopSec must be larger"
             ));
