@@ -77,6 +77,56 @@ below are organised by concern.
   positive. Fix: bump succeeded on every non-parse-failure
   outcome — section-absent counts as "reload completed (no-op)".
 
+### Added — config-knob sanity + attack-detection observability (iter 83-99)
+
+The validate surface now catches **every documented
+`= 0` / absurd-value foot-gun** on both server and client
+config, plus closes the alert/check gap on every attack-
+detection counter that was previously exposed but unalerted:
+
+**Config-knob sanity (iter 83-89, iter 91-96)**:
+  - client: max_inflight_sessions, socks_request_timeout, drain_secs,
+    tcp_keepalive_secs, alpha_dial_timeout_secs, healthz_staleness_secs,
+    beta_mtu_upper_bound, beta_ack_eliciting_threshold
+  - server: handshake_deadline_secs, max_connections, tcp_keepalive_secs,
+    user_quotas (period_secs, max_entries, override dupes/orphans),
+    user_quarantine (ttl_secs, max_entries), per_user_bandwidth_rate
+    (window_secs, max_users, exit_factor, threshold_mb_per_sec),
+    per_user_conn_limit, abuse_detector (byte_budget + rate_limit),
+    pad_quantum, drain_secs, session_idle_secs, max_session_bytes,
+    startup_self_test_timeout_secs, periodic_self_test_interval_secs,
+    periodic_self_test_failure_threshold, tls_cert_watcher_interval_secs,
+    beta_initial_mtu/mtu_upper_bound/ack_eliciting_threshold
+
+Each knob's three-state pattern: `=0` typically FAIL or
+WARN-with-observability-only-note, absurd-value WARN,
+sensible-value PASS. Operators can no longer ship a config
+that silently disables safety surfaces.
+
+**Catastrophic open-relay coherence (iter 97)**: pre-iter-97
+the operator could ship `client_allowlist: []` + wildcard
+`listen_alpha` + no firewall — three documented WARN signals
+that COMBINE into an unauthenticated public open-relay. The
+combination is now a FAIL with three documented recovery paths.
+
+**Attack-detection observability (iter 98-99)**: 7 metrics
+that existed but had no alert/check/dashboard coverage:
+  - AEAD drops (active MITM tampering signal — page-grade at
+    >1/sec)
+  - handshake failure ratio (credential bruteforce / GFW
+    probing signal)
+  - firewall denials (active scanning from blocked ranges)
+  - handshake budget exhausted (DDoS OR legitimate burst)
+  - max_connections cap hit (FD ceiling)
+  - per-user rate rejected (credential compromise)
+  - user-quarantine rejected (previously-banned user)
+
+Each gets the 4-surface pentad (validate + Prometheus alert +
+in-process alerts-check + Grafana dashboard panel where
+appropriate). Pre-iter-99 active MITM tampering on the data
+plane was COMPLETELY invisible outside the dashboard — no
+alert ever fired. Now AEAD drops > 1/sec page within 2 min.
+
 ### Added — security observability gates (iter 78-81)
 
 Three more security-observability pentads + one runtime alert:
