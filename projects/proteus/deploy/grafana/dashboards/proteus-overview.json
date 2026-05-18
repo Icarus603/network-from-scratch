@@ -577,6 +577,23 @@
       }
     },
     {
+      "id": 101,
+      "type": "timeseries",
+      "title": "Top-5 per-user bandwidth (server)",
+      "description": "topk(5, rate(proteus_per_user_bytes_sent_total[1m])) — top 5 user_ids by 1-min outbound rate. Lets the operator see who's actually using the proxy + spot abuse-by-credential cases visually before the per-user-bandwidth abuse alert fires. The per-user accumulator is sampled every drop; one series per user.",
+      "gridPos": {"x": 0, "y": 116, "w": 24, "h": 8},
+      "targets": [
+        {
+          "expr": "topk(5, rate(proteus_per_user_bytes_sent_total[1m]))",
+          "refId": "top5",
+          "legendFormat": "{{user_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "Bps"}
+      }
+    },
+    {
       "id": 100,
       "type": "timeseries",
       "title": "Session lifecycle reaps (server)",

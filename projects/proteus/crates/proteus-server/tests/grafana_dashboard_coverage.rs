@@ -131,6 +131,9 @@ fn known_metric_names() -> HashSet<&'static str> {
         // capacity planning.
         "proteus_session_idle_reaped_total",
         "proteus_session_byte_budget_exhausted_total",
+        // Iter-104: top-5-per-user-bandwidth panel via topk()
+        // on the per-user-labelled counter.
+        "proteus_per_user_bytes_sent_total",
         // DNS
         "proteus_dns_lookups_total",
         // Log throttling
