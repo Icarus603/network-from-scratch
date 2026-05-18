@@ -271,6 +271,154 @@ struct BetaClientArgs {
     runs: u32,
 }
 
+/// Iter-126: shared validator for `--*-secs` / `--runs` /
+/// `--payload-mib` style numeric arguments that must be positive.
+/// Pre-iter-126 the bench accepted `--connect-timeout-secs 0` /
+/// `--total-timeout-secs 0` and ran through to produce
+/// `Error: Connect("handshake timed out after 0ns")` —
+/// useless deadline-exceeded output that hides the operator
+/// error. Symmetric fix with iter-108/109/110/111/117 on the
+/// other binaries: reject zero-valued positive-required args
+/// at parse time with exit 2 + a clean stderr message.
+///
+/// `f64` variant for `--min-success-rate` style fractions (0.0,
+/// 1.0] is intentionally NOT covered here — soak's `0.0` means
+/// "any success rate passes" and is occasionally useful for
+/// regression-baseline runs that just want to fail on spawn-leak.
+fn reject_zero_u64(name: &str, value: u64, hint: &str) -> Result<(), String> {
+    if value == 0 {
+        return Err(format!(
+            "{name} = 0 is not a useful bench value — {hint}. \
+             Re-run with a positive value (or omit the flag to use the default)."
+        ));
+    }
+    Ok(())
+}
+
+fn reject_zero_u32(name: &str, value: u32, hint: &str) -> Result<(), String> {
+    if value == 0 {
+        return Err(format!(
+            "{name} = 0 is not a useful bench value — {hint}. \
+             Re-run with a positive value (or omit the flag to use the default)."
+        ));
+    }
+    Ok(())
+}
+
+fn reject_zero_usize(name: &str, value: usize, hint: &str) -> Result<(), String> {
+    if value == 0 {
+        return Err(format!(
+            "{name} = 0 is not a useful bench value — {hint}. \
+             Re-run with a positive value (or omit the flag to use the default)."
+        ));
+    }
+    Ok(())
+}
+
+fn validate_soak_args(a: &SoakArgs) -> Result<(), String> {
+    reject_zero_usize(
+        "--clients",
+        a.clients,
+        "0 concurrent clients = nothing to soak, summary would be a no-op",
+    )?;
+    reject_zero_u64(
+        "--duration-secs",
+        a.duration_secs,
+        "0-second soak terminates before any dial completes — \
+         the summary would always be empty",
+    )?;
+    reject_zero_u64(
+        "--per-session-kib",
+        a.per_session_kib,
+        "0 KiB payload skips the bandwidth path entirely; \
+         this isn't a bench, it's a handshake-only smoke",
+    )?;
+    reject_zero_u64(
+        "--report-interval-secs",
+        a.report_interval_secs,
+        "0-second reporter would spin the CPU emitting JSON \
+         lines as fast as it could",
+    )?;
+    reject_zero_usize(
+        "--users",
+        a.users,
+        "0 users = no user_id to assign sessions to, soak \
+         would panic on the first round-robin",
+    )?;
+    if let Some(mcd) = a.max_concurrent_dials {
+        reject_zero_usize(
+            "--max-concurrent-dials",
+            mcd,
+            "0 dial concurrency = no dials can fire, summary \
+             would always read 0 dials attempted",
+        )?;
+    }
+    Ok(())
+}
+
+fn validate_beta_args(a: &BetaArgs) -> Result<(), String> {
+    reject_zero_u64(
+        "--payload-mib",
+        a.payload_mib,
+        "0 MiB payload measures nothing — bench would emit \
+         a degenerate report",
+    )?;
+    reject_zero_u64(
+        "--chunk-kib",
+        a.chunk_kib,
+        "0 KiB chunk size = infinite send loop OR div-by-zero \
+         in the per-record accounting",
+    )?;
+    reject_zero_u32(
+        "--runs",
+        a.runs,
+        "0 runs = bench main loop iterates zero times, no \
+         output emitted",
+    )?;
+    reject_zero_u64(
+        "--connect-timeout-secs",
+        a.connect_timeout_secs,
+        "0-second handshake deadline = instant timeout, every \
+         run fails with 'handshake timed out after 0ns'",
+    )?;
+    reject_zero_u64(
+        "--total-timeout-secs",
+        a.total_timeout_secs,
+        "0-second total deadline = run aborts before any data \
+         can flow",
+    )?;
+    Ok(())
+}
+
+fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
+    reject_zero_u64(
+        "--payload-mib",
+        a.payload_mib,
+        "0 MiB payload measures nothing",
+    )?;
+    reject_zero_u64(
+        "--chunk-kib",
+        a.chunk_kib,
+        "0 KiB chunk size = infinite send loop OR div-by-zero",
+    )?;
+    reject_zero_u32(
+        "--runs",
+        a.runs,
+        "0 runs = bench main loop iterates zero times",
+    )?;
+    reject_zero_u64(
+        "--connect-timeout-secs",
+        a.connect_timeout_secs,
+        "0-second handshake deadline = instant timeout",
+    )?;
+    reject_zero_u64(
+        "--total-timeout-secs",
+        a.total_timeout_secs,
+        "0-second total deadline = run aborts before any data can flow",
+    )?;
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RUST_LOG=proteus_bench=info,info by default — bench output is
@@ -284,6 +432,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .init();
 
     let cli = Cli::parse();
+    // Iter-126: gate zero-valued numeric args BEFORE we run any
+    // bench setup. Exit 2 = clap-style usage error so the operator
+    // immediately recognises "I passed a bad flag" rather than
+    // "the bench failed to run for some mysterious reason".
+    let validate_result = match &cli.cmd {
+        Cmd::Soak(args) => validate_soak_args(args),
+        Cmd::Beta(args) => validate_beta_args(args),
+        Cmd::BetaServer(_) => Ok(()), // no positive-required numeric args
+        Cmd::BetaClient(args) => validate_beta_client_args(args),
+    };
+    if let Err(msg) = validate_result {
+        eprintln!("error: {msg}");
+        std::process::exit(2);
+    }
     match cli.cmd {
         Cmd::Soak(args) => run_soak_cmd(args).await?,
         Cmd::Beta(args) => run_beta(args).await?,

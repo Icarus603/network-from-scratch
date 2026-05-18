@@ -15,6 +15,38 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-bench` accepted zero-valued args, ran through, then failed mysteriously (iter-126)
+
+Pre-iter-126 `proteus-bench beta --connect-timeout-secs 0` ran
+through bench setup and then died with the cryptic
+`Error: Connect("handshake timed out after 0ns")`. Same trap on
+`--total-timeout-secs 0` (instant abort), `--runs 0` (silent zero-
+iteration loop), `--payload-mib 0` (degenerate empty report),
+`--chunk-kib 0` (div-by-zero risk in per-record accounting),
+`--clients 0` (no-op soak summary), `--users 0` (round-robin
+panic), `--duration-secs 0` (empty soak summary).
+
+This is operationally dangerous because bench scripts get plumbed
+into CI gates: `proteus-bench soak --min-success-rate 0.99 ...` is
+the standard "did this commit regress?" check. A soak with
+`--duration-secs 0` would exit 0 with an empty summary, silently
+passing the gate while measuring nothing.
+
+Iter-126 adds a unified `validate_*_args()` pass that runs BEFORE
+any bench setup. Every numeric arg that must be positive is gated
+at parse time with exit 2 + a clean stderr message naming the bad
+flag AND explaining WHY zero is wrong (so the operator who tried
+`--foo 0` understands and doesn't just retry with a different
+bad value). Symmetric with iter-108/109/110/111/117 on the other
+binaries.
+
+Covered subcommands: `beta` (5 args), `soak` (6 args),
+`beta-client` (5 args). `beta-server` has no positive-required
+numeric args. 14 new integration tests in
+`tests/iter126_zero_arg_rejection.rs` pin every gate; the final
+test exercises the positive-arg happy path so the gate can't
+regress to "reject everything".
+
 ### Fixed — `check-host` silently emitted PASS for audits it didn't run (iter-125)
 
 Pre-iter-125 `proteus-server preflight check-host` and
