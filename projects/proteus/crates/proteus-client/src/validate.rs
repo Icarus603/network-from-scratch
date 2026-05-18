@@ -715,6 +715,69 @@ pub async fn run(path: &Path) -> PreflightReport {
         }
     }
 
+    // Iter-91: tcp_keepalive_secs sanity. Same shape as server
+    // iter-84. = 0 disables NAT-survival keepalive on outbound
+    // client → server dials → long-idle sessions silently die
+    // in mid-path NAT translators (returns the iter-14 fix
+    // class). WARN-not-FAIL (operator may legitimately disable
+    // for a measurement experiment).
+    if cfg.tcp_keepalive_secs == Some(0) {
+        r.push_warn(
+            "tcp_keepalive_secs = 0 disables TCP keepalive on outbound client → server \
+             dials. Long-idle Proteus sessions will silently die in mid-path NAT \
+             translators (returns the iter-14 silent-NAT-death class). If unset, \
+             runtime defaults to 30s.",
+        );
+    } else if let Some(secs) = cfg.tcp_keepalive_secs {
+        if secs > 3600 {
+            r.push_warn(format!(
+                "tcp_keepalive_secs = {secs} (>1h) is longer than typical NAT idle \
+                 timers (300-1800s); the keepalive may not fire often enough to \
+                 keep the NAT mapping alive. Recommended: 30-120s.",
+            ));
+        }
+    }
+
+    // Iter-91: alpha_dial_timeout_secs sanity.
+    if let Some(secs) = cfg.alpha_dial_timeout_secs {
+        if secs == 0 {
+            r.push_fail(
+                "alpha_dial_timeout_secs = 0 means the α dial returns instantly with \
+                 a timeout error. Every CONNECT fails before the TCP handshake even \
+                 starts. Recommended: leave unset (defaults to 10s).",
+            );
+        } else if secs > 60 {
+            r.push_warn(format!(
+                "alpha_dial_timeout_secs = {secs} (>60s) is high; a single slow dial \
+                 holds a max_inflight_sessions slot for {secs}s before reclaim. The \
+                 CarrierHealth back-off caps the impact, but the first few CONNECTs \
+                 of any burst pay the full timeout. Recommended: ≤30s.",
+            ));
+        }
+    }
+
+    // Iter-91: healthz_staleness_secs sanity. The healthz path
+    // reports stale if no successful dial within N seconds.
+    // 0 means "never stale" (always reports healthy → useless
+    // health check). Very high value misses real outages.
+    if let Some(secs) = cfg.healthz_staleness_secs {
+        if secs == 0 {
+            r.push_warn(
+                "healthz_staleness_secs = 0 means the health endpoint never reports \
+                 stale — always 200 OK regardless of actual connectivity. The \
+                 endpoint becomes useless as a health check. If you want a tight \
+                 check, set 30-300s; if you want to disable staleness gating, \
+                 remove the field entirely (the runtime default is reasonable).",
+            );
+        } else if secs > 86400 {
+            r.push_warn(format!(
+                "healthz_staleness_secs = {secs} (>24h) is excessive — the binary \
+                 could be silently broken for an entire day before health flags \
+                 stale. Recommended: 60-600s.",
+            ));
+        }
+    }
+
     // Iter-83: max_inflight_sessions = 0 disables the per-session
     // semaphore (runtime says "not recommended" + warn-logs at
     // startup). FAIL because the consequence is real: on a

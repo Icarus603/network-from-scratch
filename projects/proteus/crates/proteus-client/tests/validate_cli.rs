@@ -957,6 +957,119 @@ async fn iter48_base64_encoded_all_zero_key_fails_validate() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ---------- iter-91: tcp_keepalive_secs / alpha_dial_timeout_secs / healthz_staleness_secs ----------
+
+#[tokio::test]
+async fn iter91_tcp_keepalive_zero_warns() {
+    let dir = tempdir("keepalive-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         tcp_keepalive_secs: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("tcp_keepalive_secs = 0") && s.contains("NAT")
+        }
+        _ => false,
+    });
+    assert!(warn, "keepalive=0 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter91_tcp_keepalive_excessive_warns() {
+    let dir = tempdir("keepalive-high");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         tcp_keepalive_secs: 7200\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("tcp_keepalive_secs = 7200") && s.contains("NAT idle timers")
+        }
+        _ => false,
+    });
+    assert!(warn, "keepalive=7200 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter91_alpha_dial_timeout_zero_fails() {
+    let dir = tempdir("dial-timeout-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         alpha_dial_timeout_secs: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "alpha_dial_timeout=0 MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter91_alpha_dial_timeout_excessive_warns() {
+    let dir = tempdir("dial-timeout-high");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         alpha_dial_timeout_secs: 120\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("alpha_dial_timeout_secs = 120") && s.contains("max_inflight")
+        }
+        _ => false,
+    });
+    assert!(warn, "alpha_dial_timeout=120 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter91_healthz_staleness_zero_warns() {
+    let dir = tempdir("healthz-zero");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         healthz_staleness_secs: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("healthz_staleness_secs = 0") && s.contains("useless")
+        }
+        _ => false,
+    });
+    assert!(warn, "healthz=0 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn iter91_healthz_staleness_excessive_warns() {
+    let dir = tempdir("healthz-high");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         healthz_staleness_secs: 100000\n",
+    );
+    let report = validate::run(&yaml).await;
+    let warn = report.checks.iter().any(|c| match c {
+        validate::Check::Warn(s) => {
+            s.contains("healthz_staleness_secs = 100000") && s.contains("excessive")
+        }
+        _ => false,
+    });
+    assert!(warn, "healthz=100000 must WARN: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-83: max_inflight_sessions / socks_request_timeout sanity ----------
 
 #[tokio::test]
