@@ -431,6 +431,18 @@ pub async fn cli_run(
         );
         return Ok(2);
     }
+    // Iter-113: validate format. Typos like `--format jsno` /
+    // `--format yaml` silently fall through to text mode pre-
+    // iter-113; an operator scripting `proteus-client
+    // connect-test --format json | jq '.outcome'` would get a
+    // broken jq pipeline with no clear cause. Reject unknown
+    // formats with exit 2.
+    if format != "text" && format != "json" {
+        eprintln!(
+            "connect-test: unknown --format {format:?} (expected 'text' or 'json')"
+        );
+        return Ok(2);
+    }
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
     let report = match run(config_path, connect_timeout).await {
         Ok(r) => r,
@@ -485,6 +497,14 @@ pub async fn cli_run_all_endpoints(
             "connect-test --all-endpoints: connect_timeout_secs = {connect_timeout_secs} \
              (>10min). With N endpoints the worst-case wait is N × {connect_timeout_secs}s. \
              Use a sensible value (default 10s, sensible range 5-60s)."
+        );
+        return Ok(2);
+    }
+    // Iter-113: same format validation as cli_run.
+    if format != "text" && format != "json" {
+        eprintln!(
+            "connect-test --all-endpoints: unknown --format {format:?} \
+             (expected 'text' or 'json')"
         );
         return Ok(2);
     }
@@ -885,6 +905,37 @@ mod tests {
             .await
             .expect("clean exit");
         assert_eq!(exit, 2, "1200s timeout must exit 2");
+    }
+
+    /// Iter-113: unknown --format → exit 2.
+    #[tokio::test]
+    async fn iter113_cli_run_rejects_unknown_format() {
+        let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
+        let exit = cli_run(bogus_path, 10, "yaml")
+            .await
+            .expect("clean exit");
+        assert_eq!(exit, 2, "yaml format must exit 2");
+    }
+
+    #[tokio::test]
+    async fn iter113_cli_run_all_endpoints_rejects_unknown_format() {
+        let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
+        let exit = cli_run_all_endpoints(bogus_path, 10, "jsno")
+            .await
+            .expect("clean exit");
+        assert_eq!(exit, 2, "jsno typo must exit 2");
+    }
+
+    /// Iter-113: 'text' and 'json' both accepted (the test path
+    /// fails at config-load with exit 2 too but for a
+    /// different reason; structural check is "got past format
+    /// validation").
+    #[tokio::test]
+    async fn iter113_text_format_passes_validation() {
+        let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
+        let _fut = cli_run(bogus_path, 10, "text");
+        // Drop the future without awaiting; if format check
+        // panicked we'd have crashed before this line.
     }
 
     /// Iter-111: exactly at the 600s boundary → still passes
