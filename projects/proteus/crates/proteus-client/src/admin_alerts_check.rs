@@ -510,6 +510,15 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), AlertsCheckError> 
 /// evaluates rules, prints in the requested format, returns
 /// exit code.
 pub async fn cli_run(url: &str, timeout: Duration, format: &str) -> Result<i32, AlertsCheckError> {
+    // Iter-114: validate format string before any network I/O.
+    // Mirror of iter-113 connect-test format validation. Same
+    // trap class — typos silently fell through to text mode,
+    // breaking scripted jq pipelines.
+    if format != "text" && format != "json" {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "unknown --format {format:?} (expected 'text' or 'json')"
+        )));
+    }
     let body = http_get_async(url, timeout).await?;
     let report = evaluate(&body);
     let stdout = std::io::stdout();
@@ -846,5 +855,26 @@ mod tests {
         let s = format!("{r}");
         assert!(s.contains("summary:"));
         assert!(s.contains("exit"));
+    }
+
+    /// Iter-114: unknown --format errors BEFORE any network I/O.
+    /// We use a bogus URL to prove the early-return path: if
+    /// format validation happened AFTER the network attempt,
+    /// the test would either succeed (network down on bogus
+    /// URL → some other error) or hang.
+    #[tokio::test]
+    async fn iter114_alerts_check_rejects_unknown_format() {
+        let result = cli_run(
+            "http://127.0.0.1:1",
+            std::time::Duration::from_secs(1),
+            "yaml",
+        )
+        .await;
+        let err = result.expect_err("must error on bad format");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("yaml") && msg.contains("text") && msg.contains("json"),
+            "error must name the bad format + valid alternatives: {msg}"
+        );
     }
 }

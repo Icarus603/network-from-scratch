@@ -900,6 +900,13 @@ pub fn cli_run(
     timeout: Duration,
     format: &str,
 ) -> Result<i32, AdminError> {
+    // Iter-114: validate format string before any network I/O.
+    // Mirror of iter-113 connect-test format validation.
+    if format != "text" && format != "json" {
+        return Err(AdminError::BadUrl(format!(
+            "unknown --format {format:?} (expected 'text' or 'json')"
+        )));
+    }
     let body = http_get(url, token, timeout)?;
     let report = evaluate(&body);
     let stdout = std::io::stdout();
@@ -1904,6 +1911,24 @@ mod tests {
         assert!(
             !any,
             "no handshakes → no latency check should fire"
+        );
+    }
+
+    /// Iter-114: server-side alerts-check rejects unknown format
+    /// BEFORE network I/O. Same shape as the client-side test.
+    #[test]
+    fn iter114_server_alerts_check_rejects_unknown_format() {
+        let result = cli_run(
+            "http://127.0.0.1:1",
+            None,
+            std::time::Duration::from_secs(1),
+            "yaml",
+        );
+        let err = result.expect_err("must error on bad format");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("yaml") && msg.contains("text") && msg.contains("json"),
+            "error must name bad format + valid alternatives: {msg}"
         );
     }
 }
