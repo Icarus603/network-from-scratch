@@ -187,6 +187,70 @@ groups:
         succeed. Pre-SIGHUP budget is still in effect. Check
         journalctl for the parse error.
 
+- name: proteus-abuse-alerts
+  interval: 30s
+  rules:
+
+  # Iter-79: per-user abuse fires (byte budget / rate limit /
+  # bandwidth cap).
+  #
+  # The per-user abuse detectors trip when the SAME user_id
+  # exceeds a quota multiple times within a sliding window:
+  #   - byte_budget: session_byte_budget_exhausted bursts
+  #   - rate_limit: token-bucket exhaustion bursts
+  #   - per_user_bandwidth: byte-rate cap violations
+  #
+  # Each surface ships a counter; pre-iter-79 no alert fired
+  # on the cumulative tally. An attacker holding a credential
+  # and scripting heavy use was invisible outside the
+  # access_log audit path.
+  - alert: ProteusAbuseAlertsByteBudget
+    expr: rate(proteus_abuse_alerts_byte_budget_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: per-user byte-budget abuse fires observed"
+      description: |
+        {{ printf "%.3f" $value }} byte-budget abuse fire(s)/sec
+        on {{ $labels.instance }} for 5+ min. The per-user
+        byte-budget detector fires when the SAME user_id hits
+        the session-bytes cap repeatedly within the sliding
+        window. Likely an attacker scripting bulk transfers
+        with a single credential. Audit access_log for the
+        offending user_id; consider per-user quota tightening
+        or credential rotation.
+
+  - alert: ProteusAbuseAlertsRateLimit
+    expr: rate(proteus_abuse_alerts_rate_limit_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: per-user rate-limit abuse fires observed"
+      description: |
+        {{ printf "%.3f" $value }} rate-limit abuse fire(s)/sec
+        on {{ $labels.instance }} for 5+ min. The per-user
+        rate-limit detector fires when one user_id sustains
+        token-bucket exhaustion. Likely an attacker hammering
+        connections with a single credential. Audit
+        access_log for the offending user_id + consider
+        credential rotation.
+
+  - alert: ProteusAbuseAlertsBandwidth
+    expr: rate(proteus_abuse_alerts_per_user_bandwidth_total[5m]) > 0
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "proteus-server: per-user bandwidth-rate abuse fires observed"
+      description: |
+        {{ printf "%.3f" $value }} bandwidth-rate abuse fire(s)/sec
+        on {{ $labels.instance }} for 5+ min. The per-user
+        bandwidth-rate cap was exceeded multiple times. Likely
+        an attacker downloading bulk content on stolen
+        credentials. Audit + rotate as above.
+
 - name: proteus-ssrf-attempts
   interval: 30s
   rules:

@@ -174,6 +174,14 @@ fn every_documented_metric_is_referenced_by_at_least_one_alert() {
         // compromise + internal-network-probing attacks were
         // visible only via manual access_log audit.
         "proteus_outbound_blocked_total",
+        // Iter-79: per-user abuse-detector alerts (three
+        // surfaces). Each fires when the same user_id trips
+        // a quota repeatedly within the sliding window —
+        // operator-facing signal of credential compromise +
+        // attacker scripting heavy use.
+        "proteus_abuse_alerts_byte_budget_total",
+        "proteus_abuse_alerts_rate_limit_total",
+        "proteus_abuse_alerts_per_user_bandwidth_total",
     ]
     .into_iter()
     .collect();

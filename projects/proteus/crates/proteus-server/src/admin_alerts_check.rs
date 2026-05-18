@@ -346,6 +346,53 @@ pub fn evaluate(body: &str) -> Report {
         }
     }
 
+    // ──── ProteusAbuseAlerts{ByteBudget,RateLimit,Bandwidth} ────
+    //
+    // Iter-79: per-user abuse-detector fires. Each surface ships
+    // a cumulative counter; the in-process check surfaces ANY
+    // non-zero as WARN (operator-facing signal of "investigate
+    // user_id X" via access_log).
+    for (rule_name, metric, friendly) in [
+        (
+            "ProteusAbuseAlertsByteBudget",
+            "proteus_abuse_alerts_byte_budget_total",
+            "byte-budget",
+        ),
+        (
+            "ProteusAbuseAlertsRateLimit",
+            "proteus_abuse_alerts_rate_limit_total",
+            "rate-limit",
+        ),
+        (
+            "ProteusAbuseAlertsBandwidth",
+            "proteus_abuse_alerts_per_user_bandwidth_total",
+            "bandwidth-rate",
+        ),
+    ] {
+        if let Some(v) = g(metric) {
+            if v > 0.0 {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Warn,
+                    message: format!(
+                        "{v} {friendly} abuse fire(s) since process start — the per-user \
+                         {friendly} detector tripped repeatedly within its sliding window. \
+                         Audit access_log for the offending user_id; rotate credential if \
+                         compromise suspected."
+                    ),
+                    equivalent_promql: "rate({metric}[5m]) > 0",
+                });
+            } else {
+                r.push(Check {
+                    rule_name,
+                    severity: CheckSeverity::Pass,
+                    message: format!("no {friendly} abuse fires observed"),
+                    equivalent_promql: "",
+                });
+            }
+        }
+    }
+
     // ──── ProteusSsrfAttemptsObserved / Catastrophic ────
     //
     // Iter-76: point-in-time approximation. We can't compute
@@ -1094,6 +1141,94 @@ mod tests {
         let (_, w, cr) = r.counts();
         assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
         assert_eq!(cr, 0);
+    }
+
+    // ──── iter-79: per-user abuse-alerts checks ────
+
+    /// Each surface independently: 0 → PASS.
+    #[test]
+    fn iter79_no_abuse_fires_passes_all_three() {
+        let body = body_with(
+            "proteus_abuse_alerts_byte_budget_total 0\n\
+             proteus_abuse_alerts_rate_limit_total 0\n\
+             proteus_abuse_alerts_per_user_bandwidth_total 0",
+        );
+        let r = evaluate(&body);
+        for rule_name in [
+            "ProteusAbuseAlertsByteBudget",
+            "ProteusAbuseAlertsRateLimit",
+            "ProteusAbuseAlertsBandwidth",
+        ] {
+            let check = r
+                .checks
+                .iter()
+                .find(|c| c.rule_name == rule_name)
+                .unwrap_or_else(|| panic!("{rule_name} check must fire"));
+            assert_eq!(check.severity, CheckSeverity::Pass, "{rule_name}");
+        }
+    }
+
+    /// Non-zero byte_budget fires → WARN for that surface only.
+    #[test]
+    fn iter79_byte_budget_fires_warns() {
+        let body = body_with(
+            "proteus_abuse_alerts_byte_budget_total 7\n\
+             proteus_abuse_alerts_rate_limit_total 0\n\
+             proteus_abuse_alerts_per_user_bandwidth_total 0",
+        );
+        let r = evaluate(&body);
+        let warn = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAbuseAlertsByteBudget")
+            .unwrap();
+        assert_eq!(warn.severity, CheckSeverity::Warn);
+        assert!(warn.message.contains("7"));
+        assert!(warn.message.contains("byte-budget"));
+        // Rate-limit + bandwidth should still PASS.
+        let rl = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAbuseAlertsRateLimit")
+            .unwrap();
+        assert_eq!(rl.severity, CheckSeverity::Pass);
+        let bw = r
+            .checks
+            .iter()
+            .find(|c| c.rule_name == "ProteusAbuseAlertsBandwidth")
+            .unwrap();
+        assert_eq!(bw.severity, CheckSeverity::Pass);
+    }
+
+    /// All three firing → 3 WARN checks.
+    #[test]
+    fn iter79_all_three_surfaces_warn_independently() {
+        let body = body_with(
+            "proteus_abuse_alerts_byte_budget_total 3\n\
+             proteus_abuse_alerts_rate_limit_total 5\n\
+             proteus_abuse_alerts_per_user_bandwidth_total 1",
+        );
+        let r = evaluate(&body);
+        let warns: Vec<_> = r
+            .checks
+            .iter()
+            .filter(|c| {
+                c.rule_name.starts_with("ProteusAbuseAlerts") && c.severity == CheckSeverity::Warn
+            })
+            .collect();
+        assert_eq!(warns.len(), 3, "all three surfaces must WARN independently");
+    }
+
+    /// Metrics absent → checks suppressed.
+    #[test]
+    fn iter79_missing_metrics_suppress() {
+        let body = body_with("proteus_up 1");
+        let r = evaluate(&body);
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name.starts_with("ProteusAbuseAlerts"));
+        assert!(!any, "no abuse metrics → no checks");
     }
 
     // ──── iter-76: SSRF / outbound-filter rejections ────
