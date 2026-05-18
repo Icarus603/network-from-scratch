@@ -75,6 +75,41 @@ fn readme_documents_alerts_check_evaluator() {
     );
 }
 
+/// Iter-122: security checklist must promote the 5-command
+/// preflight gate to the top and reference the iter-118+/120
+/// commands explicitly. Pre-iter-122 the checklist had 9 ad-
+/// hoc items but no canonical preflight sequence; operators
+/// had to thread the deploy guide manually.
+#[test]
+fn iter122_security_checklist_promotes_preflight_gate() {
+    let body = read_readme();
+    assert!(
+        body.contains("### Mandatory preflight gate"),
+        "security checklist must have a Mandatory preflight gate section"
+    );
+    // The 5 canonical commands must all appear in the gate
+    // sequence so an operator running `cat README.md | grep
+    // proteus-` gets a copy-pasteable recipe.
+    for cmd in [
+        "proteus-server validate",
+        "proteus-server host-preflight",
+        "proteus-client validate",
+        "proteus-client host-preflight",
+        "proteus-client connect-test --all-endpoints",
+    ] {
+        assert!(
+            body.contains(cmd),
+            "Mandatory preflight gate must include {cmd:?}"
+        );
+    }
+    // Must reference the ~130 trap-class count so operators
+    // know the preflight isn't decorative.
+    assert!(
+        body.contains("130 documented operator-trap classes"),
+        "checklist must call out the trap-class scale (130 checks)"
+    );
+}
+
 /// Iter-121: threat-surface section must enumerate the
 /// post-iter-67 attack-class defenses (SSRF, AEAD-tampering,
 /// open-relay coherence, zero-value foot-guns, cert expiry,

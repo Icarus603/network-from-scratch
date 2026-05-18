@@ -827,20 +827,39 @@ paid for; losing the record means re-paying.
 
 ## Security checklist before going live
 
+### Mandatory preflight gate (5 commands, all must exit 0)
+
+The single canonical gate that subsumes most of the items
+below. Run on every deploy + every config edit:
+
+```bash
+proteus-server validate --config /etc/proteus/server.yaml
+proteus-server host-preflight --config /etc/proteus/server.yaml
+# (on the client laptop, AFTER the server is up:)
+proteus-client validate --config ~/.proteus/client.yaml
+proteus-client host-preflight --config ~/.proteus/client.yaml
+proteus-client connect-test --all-endpoints --config ~/.proteus/client.yaml
+```
+
+The preflight gates catch ~130 documented operator-trap classes
+including: cert expiry, all-zero placeholder keys,
+SOCKS5 open-proxy binds, admin-endpoint wildcard exposure,
+catastrophic open-relay coherence (empty allowlist + wildcard
++ no firewall), SSRF defense disabled, cloud-metadata IP
+exposure, DoH-leak via system resolver, key file mode 0644,
+HA pool entries with hostname-divergent SNI, etc.
+
+### Items not covered by the preflight gates
+
+Operator-judgment items the binary can't verify automatically:
+
 - [ ] `proteus-server keygen` ran on the **server itself** (never copy
       `*.sk` files between hosts).
-- [ ] `/etc/proteus/keys/*.sk` are mode `0600`, owned by `proteus`.
-- [ ] `client_allowlist` is **non-empty**. An empty allowlist accepts any
-      client — only acceptable for testing.
-- [ ] `cover_endpoint` is configured to a real, popular HTTPS site you
-      do **not** operate. Cloudflare, Microsoft, Apple are good choices.
-      Crucially, the cover server MUST NOT be your own — that would be a
-      first-party fingerprint.
-- [ ] Firewall: only the listen port (`8443` or `443`) is exposed; key
-      files are not on a shared filesystem.
-- [ ] NTP is running. Spec §8.2 rejects timestamps skewed > 90 s.
-- [ ] Logs at `/var/log/proteus/*` are rotated (use `logrotate` or
-      `journald` retention policy).
+- [ ] `cover_endpoint` is a real, popular HTTPS site you do **not**
+      operate. Cloudflare, Microsoft, Apple are good choices. The
+      cover server MUST NOT be your own — that would be a first-party
+      fingerprint. (`validate` catches private-IP / loopback / self-
+      reference but can't verify "the operator doesn't own this domain".)
 - [ ] **Topology is direct-dial offshore VPS** (see `## Deployment
       topology` above). NOT a domestic relay (wiped 2026-04), NOT a
       shared-IP commercial proxy farm (Tiangou shared-blocklist
@@ -849,10 +868,11 @@ paid for; losing the record means re-paying.
       WARN** for the VPS's actual outbound IP. A WARN with an
       acknowledged provider name is acceptable for a freshly-rented
       VPS; a FAIL is not.
-- [ ] **Client-side bootstrap DNS is pinned**: either `server_endpoint`
-      contains a literal IP, OR `bootstrap_dns: { direct_ip: <vps-ip> }`
-      is set in `client.yaml`. `proteus-client validate ~/.proteus.yaml`
-      should print PASS for the bootstrap row, not WARN.
+- [ ] Logs at `/var/log/proteus/*` are rotated (use `logrotate` or
+      `journald` retention policy).
+- [ ] Prometheus alerts are loaded (or `alerts-check` is wired into
+      cron / supervisor) — see `### Prometheus alerts` /
+      `### In-process alerts-check` above.
 
 ## Threat surface (what this build actually defends)
 
