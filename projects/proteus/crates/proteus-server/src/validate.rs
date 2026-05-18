@@ -758,6 +758,54 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    // Iter-90: self-test knobs sanity.
+    //
+    // The startup self-test exercises crypto + relay paths
+    // synthetically at boot; the periodic self-test runs the
+    // same check on a timer. Misconfiguration silently breaks
+    // health-check coverage:
+    //
+    //   startup_self_test_timeout_secs = 0  → boot self-test
+    //     skipped entirely (no signal at startup)
+    //   startup_self_test_timeout_secs > 60 → bootstrap stalls
+    //     in front of systemd's watchdog
+    //   periodic_self_test_interval_secs = 0 → periodic check
+    //     disabled (operator loses the "binary still alive +
+    //     functional" signal between handshakes)
+    //   periodic_self_test_interval_secs < 5 → check runs so
+    //     often it becomes its own load
+    if let Some(t) = cfg.startup_self_test_timeout_secs {
+        if t == 0 {
+            r.push_warn(
+                "startup_self_test_timeout_secs = 0 → boot self-test is skipped \
+                 entirely. The 'binary boots and crypto works' confirmation never \
+                 fires. If you want to disable, remove the field; if you want a \
+                 valid timeout, set 5-30s.",
+            );
+        } else if t > 60 {
+            r.push_warn(format!(
+                "startup_self_test_timeout_secs = {t} (>60s) is excessive; systemd's \
+                 default TimeoutStartSec is 90s — boot self-test holding for {t}s \
+                 leaves only {} seconds for the rest of startup. Recommended: ≤30s.",
+                90_i64.saturating_sub(t as i64),
+            ));
+        }
+    }
+    if let Some(t) = cfg.periodic_self_test_interval_secs {
+        if t == 0 {
+            r.push_warn(
+                "periodic_self_test_interval_secs = 0 → periodic check disabled. The \
+                 'binary still alive + functional between handshakes' signal never \
+                 fires; observability blind-spot during low-traffic windows.",
+            );
+        } else if t < 5 {
+            r.push_warn(format!(
+                "periodic_self_test_interval_secs = {t} (<5s) is very tight; the \
+                 self-test itself adds load every {t}s. Recommended: 30-300s."
+            ));
+        }
+    }
+
     // Iter-88: pad_quantum sanity. Mirror of the client-side
     // check. Pre-iter-88 a typo like `pad_quantum: 1300` (the
     // operator meant 1280) silently shipped — the runtime
@@ -2106,6 +2154,62 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-90: startup_self_test_timeout_secs = 0 → WARN.
+    #[test]
+    fn iter90_startup_self_test_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.startup_self_test_timeout_secs = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("startup_self_test_timeout_secs = 0") && s.contains("skipped"))
+        });
+        assert!(warn, "startup self-test=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-90: startup_self_test_timeout_secs > 60 → WARN.
+    #[test]
+    fn iter90_startup_self_test_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.startup_self_test_timeout_secs = Some(120);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("startup_self_test_timeout_secs = 120") && s.contains("TimeoutStartSec"))
+        });
+        assert!(warn, "startup=120 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-90: periodic_self_test_interval_secs = 0 → WARN.
+    #[test]
+    fn iter90_periodic_self_test_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.periodic_self_test_interval_secs = Some(0);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("periodic_self_test_interval_secs = 0") && s.contains("disabled"))
+        });
+        assert!(warn, "periodic self-test=0 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-90: periodic_self_test_interval_secs < 5 → WARN.
+    #[test]
+    fn iter90_periodic_self_test_too_tight_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.periodic_self_test_interval_secs = Some(2);
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("periodic_self_test_interval_secs = 2") && s.contains("tight"))
+        });
+        assert!(warn, "periodic=2 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
