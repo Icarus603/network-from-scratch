@@ -758,6 +758,63 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    // Iter-86: per_user_bandwidth_rate sanity.
+    //
+    // Each knob has a runtime default; explicit zero/absurd
+    // values silently degrade the detector.
+    if let Some(bw) = cfg.per_user_bandwidth_rate.as_ref() {
+        if bw.window_secs == 0 {
+            r.push_fail(
+                "per_user_bandwidth_rate.window_secs = 0 collapses the sliding-window \
+                 average to division-by-zero; every check produces a degenerate value. \
+                 Remove the field entirely to inherit the 30s default.",
+            );
+        } else if bw.window_secs > 3600 {
+            r.push_warn(format!(
+                "per_user_bandwidth_rate.window_secs = {} (>1h) is unusual; sustained \
+                 abuse over a 1+ hour window means the operator's reaction time is \
+                 already too late. Recommended: 30-300s.",
+                bw.window_secs,
+            ));
+        }
+        if bw.max_users == 0 {
+            r.push_fail(
+                "per_user_bandwidth_rate.max_users = 0 disables the detector entirely \
+                 (every user is silently dropped from sampling). If you want to \
+                 disable, remove the per_user_bandwidth_rate block.",
+            );
+        }
+        if !bw.exit_factor.is_finite() || bw.exit_factor < 0.0 || bw.exit_factor > 1.0 {
+            r.push_fail(format!(
+                "per_user_bandwidth_rate.exit_factor = {} must be in [0.0, 1.0]; the \
+                 hysteresis exit factor controls re-arm threshold. Default 0.5.",
+                bw.exit_factor,
+            ));
+        } else if bw.exit_factor > 0.99 {
+            r.push_warn(format!(
+                "per_user_bandwidth_rate.exit_factor = {} is very close to 1.0 — alert \
+                 will flap on tiny rate variations at the threshold boundary. \
+                 Recommended: 0.3-0.7.",
+                bw.exit_factor,
+            ));
+        }
+    }
+
+    // Iter-86: per_user_conn_limit.max_per_user = 0 is the
+    // documented "wired but disabled" mode (no rejection ever
+    // happens). WARN-not-FAIL because some operators
+    // legitimately use this for SIGHUP-swap observability.
+    if let Some(cl) = cfg.per_user_conn_limit.as_ref() {
+        if cl.max_per_user == 0 {
+            r.push_warn(
+                "per_user_conn_limit.max_per_user = 0 — the limiter is wired (gauges \
+                 emit) but no session is ever rejected. This is the documented \
+                 'observability-only' mode. If you want enforcement, set a positive \
+                 value (typical: 4-16 for personal, 100+ for shared deploys).",
+            );
+        }
+    }
+
     if let Some(uq) = cfg.user_quarantine.as_ref() {
         if let Some(path) = uq.persistence_path.as_ref() {
             check_parent_writable(&mut r, "user_quarantine.persistence_path", path);
@@ -1942,6 +1999,93 @@ mod tests {
             !any_private_fail,
             "public IP cover_endpoint must NOT trigger the iter-67 FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: per_user_bandwidth_rate.window_secs = 0 → FAIL.
+    #[test]
+    fn iter86_bw_window_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 0\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "window_secs=0 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: per_user_bandwidth_rate.window_secs > 1h → WARN.
+    #[test]
+    fn iter86_bw_window_excessive_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 7200\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("per_user_bandwidth_rate.window_secs") && s.contains("7200"))
+        });
+        assert!(warn, "window_secs=7200 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: per_user_bandwidth_rate.max_users = 0 → FAIL.
+    #[test]
+    fn iter86_bw_max_users_zero_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 10\nmax_users: 0\nexit_factor: 0.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "max_users=0 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: exit_factor out-of-range (1.5) → FAIL.
+    #[test]
+    fn iter86_bw_exit_factor_out_of_range_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 1.5\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        assert!(report.has_failures(), "exit_factor=1.5 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: exit_factor near 1.0 → WARN (flap).
+    #[test]
+    fn iter86_bw_exit_factor_near_one_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.995\n";
+        cfg.per_user_bandwidth_rate =
+            Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("exit_factor") && s.contains("flap"))
+        });
+        assert!(warn, "exit_factor=0.995 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-86: per_user_conn_limit.max_per_user = 0 → WARN
+    /// (legit observability-only).
+    #[test]
+    fn iter86_conn_limit_zero_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.per_user_conn_limit =
+            Some(crate::config::PerUserConnLimitCfg { max_per_user: 0 });
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| {
+            matches!(c, Check::Warn(s) if s.contains("per_user_conn_limit.max_per_user") && s.contains("observability-only"))
+        });
+        assert!(warn, "max_per_user=0 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
