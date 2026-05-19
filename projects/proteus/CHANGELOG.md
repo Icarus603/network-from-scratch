@@ -15,6 +15,47 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `parse_host_port` rejects port 0 in client endpoint configs (iter-153)
+
+Symmetric with the iter-146 (server-side `parse_connect`) and
+iter-151 (SOCKS5-boundary) gates. Pre-iter-153 the client's two
+`parse_host_port` helpers (`bootstrap::parse_host_port` for
+endpoint resolution + `validate::parse_host_port` for config
+validation) accepted port 0 cleanly:
+
+- `server_endpoint: "vps.example.com:0"` parsed → dial attempt
+  later fails with `EADDRNOTAVAIL` (an OS-layer error that
+  doesn't name the configuration field).
+- Same shape for `socks_listen: "127.0.0.1:0"` (which has its
+  own bind-side semantics where 0 means "kernel picks
+  ephemeral" — but for the SOCKS5 listener we WANT operator
+  intent of a specific port).
+- Same shape for `admin_listen` + `metrics_listen` + every
+  `server_endpoints[*]` pool entry.
+
+Iter-153 closes the gate at the parser layer so every consumer
+of `parse_host_port` benefits without duplicating the check.
+The operator sees a clean `bad host:port` FAIL row at validate
+time + early dial failures stop happening.
+
+3 new tests in `bootstrap::tests` pin both directions:
+- `iter153_parse_host_port_rejects_port_zero_v4`: IPv4
+  hostname / literal with `:0` → None.
+- `iter153_parse_host_port_rejects_port_zero_v6`: IPv6
+  bracket literal `[::1]:0` → None.
+- `iter153_common_ports_still_parse`: 443 / 8443 / 9090 on
+  every endpoint shape (v4 hostname, v4 literal, v6 literal,
+  v6 loopback) still parse cleanly.
+
+Same gate applied to the `validate::parse_host_port` private
+helper. No new tests needed there — the validate-time gates
+that consume `parse_host_port` (`server_endpoint`,
+`socks_listen`, `admin_listen`, etc.) already FAIL on `None`,
+so the iter-153 rejection propagates correctly through every
+caller.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Security — keygen / gencert / knock-keygen / client-keygen close mode-0600 race (iter-152)
 
 Four key-emitting CLI paths (`proteus-server keygen`,

@@ -187,12 +187,26 @@ pub async fn resolve_for_client(
 }
 
 /// Best-effort `host:port` splitter that handles IPv6 bracket form.
+///
+/// Iter-153: reject `port == 0` at the parser layer. Port 0 is not
+/// a connectable TCP destination (it has special meaning in
+/// `bind()` — "pick a random ephemeral" — but as a `connect()`
+/// destination it surfaces a confusing `EADDRNOTAVAIL` from the
+/// socket layer). The pre-iter-153 parser would accept
+/// `vps.example.com:0` cleanly, then the dial would fail
+/// 5 seconds later with a misleading "network unreachable"
+/// error and no hint that the `client.yaml`'s port field is the
+/// root cause. Symmetric with the iter-146 server-side
+/// `parse_connect` gate and the iter-151 SOCKS5-boundary gate.
 pub fn parse_host_port(s: &str) -> Option<(&str, u16)> {
     if let Some(stripped) = s.strip_prefix('[') {
         if let Some(end) = stripped.find(']') {
             let host = &stripped[..end];
             let rest = &stripped[end + 1..];
             if let Some(port) = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok()) {
+                if port == 0 || host.is_empty() {
+                    return None;
+                }
                 return Some((host, port));
             }
         }
@@ -200,7 +214,7 @@ pub fn parse_host_port(s: &str) -> Option<(&str, u16)> {
     }
     let (host, port) = s.rsplit_once(':')?;
     let port = port.parse::<u16>().ok()?;
-    if host.is_empty() {
+    if host.is_empty() || port == 0 {
         return None;
     }
     Some((host, port))
@@ -345,6 +359,37 @@ mod tests {
         match cfg.pinned_ip() {
             Some(IpAddr::V6(_)) => (),
             other => panic!("expected IPv6 pinned_ip, got {other:?}"),
+        }
+    }
+
+    // ---- iter-153: parse_host_port rejects port 0 ----
+
+    #[test]
+    fn iter153_parse_host_port_rejects_port_zero_v4() {
+        assert!(parse_host_port("vps.example.com:0").is_none());
+        assert!(parse_host_port("198.51.100.42:0").is_none());
+    }
+
+    #[test]
+    fn iter153_parse_host_port_rejects_port_zero_v6() {
+        assert!(parse_host_port("[2001:db8::1]:0").is_none());
+    }
+
+    /// Iter-153: positive cases still parse. Quick smoke test that
+    /// the port-0 gate didn't accidentally reject common-port shapes.
+    #[test]
+    fn iter153_common_ports_still_parse() {
+        for ep in [
+            "vps.example.com:443",
+            "vps.example.com:8443",
+            "198.51.100.42:443",
+            "[2001:db8::1]:443",
+            "[::1]:9090",
+        ] {
+            assert!(
+                parse_host_port(ep).is_some(),
+                "iter-153: well-formed endpoint {ep:?} must still parse"
+            );
         }
     }
 }

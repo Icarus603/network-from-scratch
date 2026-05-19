@@ -1155,12 +1155,20 @@ fn base64_or_raw(input: &[u8]) -> Vec<u8> {
 }
 
 fn parse_host_port(s: &str) -> Option<(&str, u16)> {
+    // Iter-153: reject port == 0 (mirror of the
+    // bootstrap::parse_host_port gate). Port 0 isn't a connectable
+    // TCP destination; rejecting at the validate layer surfaces the
+    // operator's `vps:0` typo as a clean FAIL row instead of a
+    // confusing runtime dial failure.
     // IPv6 literal: `[addr]:port`.
     if let Some(stripped) = s.strip_prefix('[') {
         if let Some(end) = stripped.find(']') {
             let host = &stripped[..end];
             let rest = &stripped[end + 1..];
             if let Some(port) = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok()) {
+                if port == 0 || host.is_empty() {
+                    return None;
+                }
                 return Some((host, port));
             }
         }
@@ -1168,7 +1176,7 @@ fn parse_host_port(s: &str) -> Option<(&str, u16)> {
     }
     let (host, port) = s.rsplit_once(':')?;
     let port = port.parse::<u16>().ok()?;
-    if host.is_empty() {
+    if host.is_empty() || port == 0 {
         return None;
     }
     Some((host, port))
