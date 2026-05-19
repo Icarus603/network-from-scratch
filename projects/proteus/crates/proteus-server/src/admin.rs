@@ -1009,6 +1009,28 @@ pub fn read_token_file(path: &Path) -> Result<String, AdminError> {
             ),
         ));
     }
+    // Iter-155: reject control bytes embedded inside the token
+    // (after trim already stripped leading/trailing whitespace).
+    // Belt-and-braces with the iter-154 `http_get` runtime gate +
+    // the iter-154 validate-time gate. Catches the case where a
+    // caller (future / third-party) reads the token via this
+    // helper but DOES NOT pipe it through `http_get` (e.g. a new
+    // RPC mechanism). Centralizes the "tokens never contain
+    // control bytes" invariant at the single I/O surface.
+    if token
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return Err(AdminError::Token(
+            path.display().to_string(),
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "token contains a control byte (NUL / CR / LF / TAB) — \
+                 HTTP request smuggling defense-in-depth. Regenerate \
+                 with `openssl rand -base64 24 > {path}`.",
+            ),
+        ));
+    }
     Ok(token)
 }
 
@@ -2585,6 +2607,61 @@ proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 30\n";
         std::fs::write(&p, b"abcdef0123\n").unwrap();
         let t = read_token_file(&p).unwrap();
         assert_eq!(t, "abcdef0123");
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// Iter-155: tokens with an *embedded* control byte (NUL/CR/LF/
+    /// TAB) — not just leading/trailing whitespace that `trim()`
+    /// strips — must be rejected at the I/O boundary. This is
+    /// belt-and-braces for HTTP request smuggling: if a future
+    /// non-HTTP caller (e.g. a new RPC transport) reads the token
+    /// via `read_token_file` and does **not** route it through
+    /// `http_get`, the iter-154 gate inside `http_get` wouldn't
+    /// fire, so the invariant must also live at the file-read
+    /// site.
+    #[test]
+    fn read_token_file_rejects_embedded_control_bytes() {
+        for (label, payload) in [
+            ("CRLF", b"abc\r\ndef".as_slice()),
+            ("LF", b"abc\ndef".as_slice()),
+            ("CR", b"abc\rdef".as_slice()),
+            ("TAB", b"abc\tdef".as_slice()),
+            ("NUL", b"abc\0def".as_slice()),
+        ] {
+            let p = std::env::temp_dir().join(format!(
+                "proteus-admin-bad-token-{}-{}",
+                std::process::id(),
+                label
+            ));
+            std::fs::write(&p, payload).unwrap();
+            let r = read_token_file(&p);
+            let _ = std::fs::remove_file(&p);
+            let err = r.unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("control byte"),
+                "iter-155: {label} payload must hit the control-byte gate, got: {msg}"
+            );
+        }
+    }
+
+    /// Iter-155: a token whose only "whitespace" is the trailing
+    /// newline `trim()` already strips must NOT trigger the new
+    /// embedded-control-byte gate. This pins the regression: the
+    /// gate must run on the *trimmed* string, not the raw bytes,
+    /// otherwise every well-formed `openssl rand -base64 24 >
+    /// token` would fail.
+    #[test]
+    fn read_token_file_accepts_trailing_lf_only() {
+        let p = std::env::temp_dir().join(format!(
+            "proteus-admin-lf-only-token-{}",
+            std::process::id()
+        ));
+        // base64-ish payload + trailing newline, no internal control
+        // bytes — the canonical shape `openssl rand -base64` writes.
+        std::fs::write(&p, b"X9k+Lq3pZv2nT0wB8sR4aQ==\n").unwrap();
+        let t = read_token_file(&p).unwrap();
+        assert_eq!(t, "X9k+Lq3pZv2nT0wB8sR4aQ==");
         let _ = std::fs::remove_file(&p);
     }
 
