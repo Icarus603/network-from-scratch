@@ -15,6 +15,59 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server validate` detects duplicate ed25519_pk bytes across allowlist user_ids (iter-142)
+
+Pre-iter-142 the validate path checked for duplicate `user_id`
+**strings** in `client_allowlist` (iter-57) but did NOT check for
+duplicate `ed25519_pk` **bytes** across different user_ids. Two
+distinct user_ids sharing the same pubkey content is the
+**worst-case form** of allowlist typo because every existing
+gate passes:
+
+- Each file exists.
+- Each parses as a valid ed25519 verifying key.
+- The user_id strings differ, so the iter-57 dup-check passes.
+
+But at runtime, ONE client SK can authenticate as EITHER user_id —
+the server's allowlist iteration returns whichever entry sorted
+first. Per-user accounting (`proteus_per_user_bytes_*`), per-user
+quotas (`user_quotas.overrides`), per-user concurrent-session caps
+(`per_user_conn_limit`), and the iter-quarantine list all silently
+mis-attribute traffic to the first-matching user_id. Operators see
+"alice's monthly quota is being consumed by bob's traffic" with no
+hint that the underlying allowlist has the same pubkey twice.
+
+Iter-142 adds a third allowlist gate alongside the iter-55
+(file modes) + iter-57 (user_id duplication) checks:
+
+- Read each `ed25519_pk` file (raw or base64-armored).
+- Skip empty/zero/wrong-length entries (FAILED by other gates).
+- HashMap-bucket the decoded 32-byte content; any bucket with >1
+  user_id emits a FAIL listing all the colliding user_ids and the
+  first 8 bytes of the shared pubkey as a triage hint.
+
+FAIL message includes:
+- The operator-actionable remediation tree: "(a) re-issue ONE of
+  the user_ids with a fresh keypair (recommended; the original
+  keypair was probably copied by accident), or (b) consolidate
+  into a single user_id entry."
+
+3 new tests in `validate::tests`:
+- `iter142_duplicate_ed25519_pk_bytes_across_user_ids_fails`:
+  two user_ids sharing the same pubkey → FAIL naming both
+  user_ids.
+- `iter142_distinct_ed25519_pk_bytes_do_not_fail`: distinct
+  pubkeys → no false positive.
+- `iter142_three_way_shared_pk_lists_all_users`: three-way
+  share → FAIL must enumerate all three colliding user_ids.
+
+The existing iter-57 tests still pass (they use short non-32-byte
+files which the iter-142 check correctly skips, so no spurious
+overlapping FAILs).
+
+All 126 server validate tests + workspace tests green. clippy + fmt
+clean.
+
 ### Fixed — `proteus-server validate` catches cover-endpoint non-TLS port footgun (iter-141)
 
 The cover-forward path (spec §7.5) splices the raw inbound TLS

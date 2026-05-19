@@ -384,6 +384,85 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                 dupes.join("; ")
             ));
         }
+
+        // Iter-142: detect duplicate ed25519_pk BYTES across distinct
+        // user_ids. Two user_ids sharing the same pubkey = ONE client
+        // SK can authenticate as EITHER user, breaking per-user
+        // accounting / quotas / quarantine. This is the worst-case
+        // form of operator typo because every check up to runtime
+        // passes — the runtime even loads both VerifyingKeys cleanly
+        // — but the per-user bandwidth + per-user conn-limit + quota
+        // surfaces all silently mis-attribute traffic to whichever
+        // user_id sorted first in the allowlist Vec. Validate-time
+        // detection catches the typo before operators wonder why
+        // alice's quota is being consumed by bob.
+        //
+        // The check reads every ed25519_pk file (it's a 32-byte
+        // public-key file, fine to slurp at validate time) and
+        // hashes the bytes into a HashMap keyed on the decoded
+        // bytes. Files that already failed `check_file` above
+        // (missing, all-zero) get skipped here so we don't emit a
+        // spurious duplicate WARN for two missing files.
+        let mut pk_bytes_to_users: std::collections::HashMap<Vec<u8>, Vec<&str>> =
+            std::collections::HashMap::new();
+        for client in &cfg.client_allowlist {
+            match std::fs::read(&client.ed25519_pk) {
+                Ok(raw) => {
+                    // The on-disk file might be either raw 32 bytes
+                    // OR base64-armored. Try both: prefer the
+                    // base64-decoded form when it's exactly 32 bytes
+                    // (operator stored an armored key); otherwise fall
+                    // back to the raw on-disk bytes when those are 32
+                    // (operator stored raw). Empty/zero/wrong-length
+                    // entries get skipped (they're FAILED by other
+                    // gates; double-failing here just adds noise).
+                    let decoded = base64_or_raw_bytes(&raw);
+                    let candidate: Vec<u8> = if decoded.len() == 32 {
+                        decoded
+                    } else if raw.len() == 32 {
+                        raw
+                    } else {
+                        continue;
+                    };
+                    if candidate.iter().all(|&b| b == 0) {
+                        continue;
+                    }
+                    pk_bytes_to_users
+                        .entry(candidate)
+                        .or_default()
+                        .push(client.user_id.as_str());
+                }
+                Err(_) => continue,
+            }
+        }
+        let pk_dupes: Vec<String> = pk_bytes_to_users
+            .into_iter()
+            .filter_map(|(pk, users)| {
+                if users.len() > 1 {
+                    let pk_short = pk
+                        .iter()
+                        .take(8)
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>();
+                    Some(format!(
+                        "users {users:?} share ed25519_pk (pk[..8]={pk_short}…)"
+                    ))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if !pk_dupes.is_empty() {
+            r.push_fail(format!(
+                "client_allowlist has duplicate ed25519_pk bytes across distinct user_ids: {}. \
+                 ONE client SK can authenticate as EITHER user_id — per-user accounting / \
+                 quotas / quarantine all silently mis-attribute traffic to whichever user_id \
+                 sorted first in the allowlist. Either (a) re-issue ONE of the user_ids with \
+                 a fresh keypair (recommended; the original keypair was probably copied by \
+                 accident), or (b) consolidate into a single user_id entry.",
+                pk_dupes.join("; ")
+            ));
+        }
     }
 
     // 5. Cover endpoint parses (single OR pool — pool wins when set).
@@ -4461,6 +4540,129 @@ mod tests {
         assert!(
             warn,
             "iter-141: unusual cover_endpoint port MUST WARN: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- iter-142: duplicate ed25519_pk-bytes across user_ids ----
+
+    /// Two distinct user_ids sharing the SAME 32-byte ed25519_pk
+    /// content → FAIL. One client SK can authenticate as either
+    /// user_id; per-user accounting / quotas / quarantine all
+    /// silently mis-attribute traffic.
+    #[test]
+    fn iter142_duplicate_ed25519_pk_bytes_across_user_ids_fails() {
+        let dir = tmpdir();
+        let shared_pk_bytes: [u8; 32] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(1));
+        let pk1 = dir.join("alice.pk");
+        let pk2 = dir.join("bob.pk");
+        std::fs::write(&pk1, shared_pk_bytes).unwrap();
+        std::fs::write(&pk2, shared_pk_bytes).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![
+            ClientCfg {
+                user_id: "alice".to_string(),
+                ed25519_pk: pk1,
+            },
+            ClientCfg {
+                user_id: "bob".to_string(),
+                ed25519_pk: pk2,
+            },
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-142: shared ed25519_pk MUST FAIL: {report}"
+        );
+        let dup_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("duplicate ed25519_pk") && s.contains("alice") && s.contains("bob")
+            }
+            _ => false,
+        });
+        assert!(dup_fail, "iter-142: FAIL must list both user_ids: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-142: distinct ed25519_pk bytes → no false positive.
+    #[test]
+    fn iter142_distinct_ed25519_pk_bytes_do_not_fail() {
+        let dir = tmpdir();
+        let pk1_bytes: [u8; 32] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(7).wrapping_add(1));
+        let pk2_bytes: [u8; 32] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(11).wrapping_add(3));
+        let pk1 = dir.join("alice.pk");
+        let pk2 = dir.join("bob.pk");
+        std::fs::write(&pk1, pk1_bytes).unwrap();
+        std::fs::write(&pk2, pk2_bytes).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![
+            ClientCfg {
+                user_id: "alice".to_string(),
+                ed25519_pk: pk1,
+            },
+            ClientCfg {
+                user_id: "bob".to_string(),
+                ed25519_pk: pk2,
+            },
+        ];
+        let report = preflight(&cfg);
+        let dup_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("duplicate ed25519_pk"),
+            _ => false,
+        });
+        assert!(
+            !dup_fail,
+            "iter-142: distinct pubkeys MUST NOT trigger FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-142: three-way share → FAIL must name ALL THREE users.
+    #[test]
+    fn iter142_three_way_shared_pk_lists_all_users() {
+        let dir = tmpdir();
+        let shared_bytes: [u8; 32] = [0x42u8; 32];
+        let pk1 = dir.join("a.pk");
+        let pk2 = dir.join("b.pk");
+        let pk3 = dir.join("c.pk");
+        std::fs::write(&pk1, shared_bytes).unwrap();
+        std::fs::write(&pk2, shared_bytes).unwrap();
+        std::fs::write(&pk3, shared_bytes).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![
+            ClientCfg {
+                user_id: "alice".to_string(),
+                ed25519_pk: pk1,
+            },
+            ClientCfg {
+                user_id: "bob".to_string(),
+                ed25519_pk: pk2,
+            },
+            ClientCfg {
+                user_id: "carol".to_string(),
+                ed25519_pk: pk3,
+            },
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-142 three-way share must FAIL: {report}"
+        );
+        let dup_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("duplicate ed25519_pk")
+                    && s.contains("alice")
+                    && s.contains("bob")
+                    && s.contains("carol")
+            }
+            _ => false,
+        });
+        assert!(
+            dup_fail,
+            "iter-142: three-way share must list all three: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
