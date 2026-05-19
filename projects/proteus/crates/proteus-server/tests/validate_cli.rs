@@ -29,13 +29,18 @@ fn tmpdir(tag: &str) -> PathBuf {
 fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
     let p = dir.join(name);
     // Iter-140: ML-KEM EK/DK length is now gated by validate
-    // (FIPS-203 §6.1 → 1184 / 2400 bytes). Pad to the correct
-    // size for ML-KEM files so the green-validate test still
-    // passes; other files keep the small placeholder.
+    // (FIPS-203 §6.1 → 1184 / 2400 bytes).
+    // Iter-144: X25519 key files are now gated to 32 bytes
+    // (RFC 7748 §5).
+    // Pad to the correct size for each key type so the green-
+    // validate fixture still passes; non-key files keep the
+    // small placeholder.
     let bytes: Vec<u8> = if name.contains(".mlkem768.pk") {
         vec![0x42u8; 1184]
     } else if name.contains(".mlkem768.sk") {
         vec![0x42u8; 2400]
+    } else if name.contains(".x25519.pk") || name.contains(".x25519.sk") {
+        vec![0x42u8; 32]
     } else {
         b"placeholder".to_vec()
     };

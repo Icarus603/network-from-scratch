@@ -15,6 +15,50 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server validate` length-gates server X25519 key files (iter-144)
+
+Completing the server-side key-bytes integrity check arc started
+in iter-140 (ML-KEM) and continued in iter-143 (ed25519_pk). The
+last unprotected key file on the server side was the static
+X25519 keypair (`keys.x25519_pk` + `keys.x25519_sk`):
+
+- **`x25519_sk` truncated** → server panics on `StaticSecret::from`
+  during startup. systemd restart loop, opaque crash signal.
+- **`x25519_pk` truncated** → the bytes load successfully (any
+  32-byte slice is a "valid" X25519 public key from the parser's
+  POV — RFC 7748 doesn't validate subgroup membership at the
+  type level), but the DH output mismatches what the client
+  computes. The server runs fine but **every client handshake
+  fails the Finished MAC**. This is even harder to diagnose than
+  the panic case because the server appears healthy.
+
+Iter-144 adds `check_x25519_key_len` and wires it for both files.
+Requires `raw.len() == 32` OR `base64_decode(raw).len() == 32`
+(RFC 7748 §5). FAIL message names the field, both length numbers,
+and the actionable remediation (`proteus-server keygen`).
+
+4 new tests in `validate::tests`:
+- `iter144_truncated_x25519_pk_fails`: 10-byte file → FAIL.
+- `iter144_truncated_x25519_sk_fails`: same gate on the SK side.
+- `iter144_oversized_x25519_pk_fails`: 64-byte file (operator
+  copied an ed25519 keypair into the slot) → FAIL.
+- `iter144_correct_length_x25519_passes_length_gate`: 32-byte
+  file → no length FAIL.
+
+Two test fixtures updated to the new gate
+(`tests/validate_cli.rs::touch`,
+`tests/validate_cert_expiry.rs::touch`) so the cert-expiry +
+green-yaml-validates tests don't accidentally trip iter-144 with
+their placeholder x25519 key files.
+
+The server-side key-bytes integrity story is now complete: all 4
+key file types (ML-KEM EK/DK + X25519 PK/SK + allowlist ed25519
+PKs) have length + non-zero + (where applicable) duplicate-bytes
+gates. Same coverage shape as the client side (iter-139).
+
+All 133 server validate unit tests + workspace tests green.
+clippy + fmt clean.
+
 ### Fixed — `proteus-server validate` length-gates allowlist ed25519_pk files (iter-143)
 
 Sibling to iter-140 (ML-KEM key files) and iter-142 (duplicate

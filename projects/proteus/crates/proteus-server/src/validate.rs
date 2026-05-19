@@ -207,6 +207,18 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
     check_file(&mut r, "keys.x25519_pk", &cfg.keys.x25519_pk);
     check_file(&mut r, "keys.x25519_sk", &cfg.keys.x25519_sk);
 
+    // Iter-144: length-gate the X25519 keys (32 bytes each per
+    // RFC 7748 §5). Same defect class as iter-140 (ML-KEM) +
+    // iter-143 (ed25519): pre-iter-144 a truncated x25519_sk
+    // panicked the server on `StaticSecret::from(arr)` at startup;
+    // a truncated x25519_pk loaded successfully but generated
+    // wrong DH output, manifesting as "every client handshake
+    // fails the Finished MAC" — even harder to diagnose than the
+    // ML-KEM case because the server runs fine, it just rejects
+    // every client.
+    check_x25519_key_len(&mut r, "keys.x25519_pk", &cfg.keys.x25519_pk);
+    check_x25519_key_len(&mut r, "keys.x25519_sk", &cfg.keys.x25519_sk);
+
     // Iter-140: length-gate the ML-KEM-768 keys. FIPS-203 §6.1:
     //   * EK (`mlkem_pk`) = 1184 bytes raw
     //   * DK (`mlkem_sk`) = 2400 bytes raw
@@ -2070,6 +2082,29 @@ fn check_parent_writable(report: &mut PreflightReport, label: &str, path: &Path)
         }
         Err(e) => report.push_fail(format!("{label} parent {parent:?}: {e}")),
     }
+}
+
+/// Iter-144: enforce exact length of an X25519 key file (32 bytes
+/// raw OR 44 bytes base64-armored per RFC 7748 §5). Used for both
+/// the server's static `x25519_pk` and `x25519_sk`. Skips the
+/// check when the file is absent or empty — those already FAILED
+/// via check_file's existing checks.
+fn check_x25519_key_len(report: &mut PreflightReport, label: &str, path: &Path) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) if !b.is_empty() => b,
+        _ => return,
+    };
+    let decoded = base64_or_raw_bytes(&bytes);
+    if decoded.len() == 32 || bytes.len() == 32 {
+        return; // pass — no need for a second OK row
+    }
+    report.push_fail(format!(
+        "{label} {path:?}: X25519 key length wrong (got {} bytes raw / {} bytes \
+         after base64-decode; expected exactly 32 per RFC 7748 §5). Truncated key \
+         file or wrong-file copy-paste. Re-issue with `proteus-server keygen`.",
+        bytes.len(),
+        decoded.len()
+    ));
 }
 
 /// Iter-140: enforce exact length of an ML-KEM-768 key file on the
@@ -4781,6 +4816,91 @@ mod tests {
         assert!(
             !length_fail,
             "iter-143: 32-byte pubkey MUST NOT trip the iter-143 length gate: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- iter-144: X25519 key length gates ----
+
+    /// Iter-144: a truncated `x25519_pk` (RFC 7748 §5 → 32 bytes)
+    /// MUST FAIL. Pre-iter-144 the validate path only checked
+    /// existence + non-all-zero; the runtime would load the wrong
+    /// bytes and silently produce mis-matched DH output on every
+    /// client handshake. The server runs fine but rejects every
+    /// client — even harder to diagnose than a startup-panic.
+    #[test]
+    fn iter144_truncated_x25519_pk_fails() {
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        // Overwrite the pk file with a 10-byte truncated blob.
+        std::fs::write(&cfg.keys.x25519_pk, [0x55u8; 10]).unwrap();
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-144: truncated x25519_pk MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("keys.x25519_pk") && s.contains("expected exactly 32"),
+            _ => false,
+        });
+        assert!(
+            fail,
+            "iter-144: FAIL must name the field AND the expected length: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-144: same gate on the secret-key side.
+    #[test]
+    fn iter144_truncated_x25519_sk_fails() {
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        std::fs::write(&cfg.keys.x25519_sk, [0x55u8; 10]).unwrap();
+        let report = preflight(&cfg);
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("keys.x25519_sk") && s.contains("expected exactly 32"),
+            _ => false,
+        });
+        assert!(
+            fail,
+            "iter-144: truncated x25519_sk MUST FAIL with field-named message: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-144: an oversized x25519 key (e.g. 64 bytes — operator
+    /// copied an ed25519 keypair into the slot) → FAIL.
+    #[test]
+    fn iter144_oversized_x25519_pk_fails() {
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        std::fs::write(&cfg.keys.x25519_pk, [0x55u8; 64]).unwrap();
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-144: oversized x25519_pk MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-144: correct 32-byte key file → no iter-144 FAIL.
+    #[test]
+    fn iter144_correct_length_x25519_passes_length_gate() {
+        let dir = tmpdir();
+        let cfg = minimal_cfg(&dir);
+        // minimal_cfg already writes 32-byte all-0x42 keys; assert
+        // they don't trip iter-144's length gate.
+        let report = preflight(&cfg);
+        let length_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                (s.contains("keys.x25519_pk") || s.contains("keys.x25519_sk"))
+                    && s.contains("expected exactly 32")
+            }
+            _ => false,
+        });
+        assert!(
+            !length_fail,
+            "iter-144: 32-byte x25519 key MUST NOT trip the length gate: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
