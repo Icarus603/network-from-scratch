@@ -490,6 +490,65 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         }
     }
 
+    // Iter-141: cover endpoint port sanity. The cover-forward
+    // protocol spec §7.5 forwards the raw TLS ClientHello bytes
+    // verbatim to the cover endpoint; the cover MUST be an HTTPS
+    // (port 443) endpoint OR another TLS-speaking port (8443 etc.)
+    // for the bytes to make any sense. Pointing cover at port 80
+    // (plaintext HTTP) is a known operator footgun:
+    //
+    //   * Operator types `www.cloudflare.com` thinking that's
+    //     enough; runtime tries to splice the TLS ClientHello to
+    //     port 80; the HTTP server returns garbage (it can't parse
+    //     TLS bytes as HTTP); the probe sees an immediate non-TLS
+    //     response on what should be an HTTPS-looking endpoint;
+    //     **THE COVER ARM IS DEFEATED** — the prober immediately
+    //     knows this isn't a real HTTPS server.
+    //   * Same trap on port 22 / 25 / any non-TLS protocol port.
+    //
+    // We FAIL on the common-mistake set (80, 21, 22, 23, 25) and
+    // WARN on every other non-TLS-canonical port (anything other
+    // than 443, 8443, 9443). Operators running real custom-port
+    // TLS deployments can ignore the WARN; the FAIL list covers
+    // the obvious-mistake set that's never legitimate cover.
+    let check_cover_port = |r: &mut PreflightReport, label: &str, endpoint: &str| {
+        let port_str = match endpoint.rsplit_once(':') {
+            Some((_, p)) => p,
+            None => return,
+        };
+        let port: u16 = match port_str.parse() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        const HARD_FAIL_PORTS: &[u16] = &[21, 22, 23, 25, 80];
+        const CANONICAL_TLS_PORTS: &[u16] = &[443, 8443, 9443];
+        if HARD_FAIL_PORTS.contains(&port) {
+            r.push_fail(format!(
+                "{label} ({endpoint:?}) targets port {port} — a well-known \
+                 non-TLS service port (HTTP/FTP/SSH/Telnet/SMTP). The \
+                 cover-forward path splices raw TLS ClientHello bytes to \
+                 this endpoint; a plaintext-protocol server returns garbage, \
+                 which any active prober immediately classifies as 'not a \
+                 real HTTPS server' — DEFEATING the entire cover arm. \
+                 Point cover_endpoint at an HTTPS endpoint (port 443)."
+            ));
+        } else if !CANONICAL_TLS_PORTS.contains(&port) {
+            r.push_warn(format!(
+                "{label} ({endpoint:?}) targets port {port} — not a canonical TLS \
+                 port (443/8443/9443). If the cover service speaks TLS on this \
+                 port, ignore this WARN. If not, the cover arm is defeated — \
+                 raw TLS ClientHello bytes splice to a non-TLS server, and \
+                 any active prober classifies the response shape immediately."
+            ));
+        }
+    };
+    if let Some(c) = cfg.cover_endpoint.as_deref() {
+        check_cover_port(&mut r, "cover_endpoint", c);
+    }
+    for (idx, raw) in cfg.cover_endpoints.iter().enumerate() {
+        check_cover_port(&mut r, &format!("cover_endpoints[{idx}]"), raw);
+    }
+
     // 5b. Probe-anomaly detector config sanity.
     if let Some(pa) = cfg.probe_anomaly.as_ref() {
         if pa.window_secs == 0 {
@@ -4313,6 +4372,121 @@ mod tests {
         assert!(rendered.contains(&format!("{p} passed")));
         assert!(rendered.contains(&format!("{w} warnings")));
         assert!(rendered.contains(&format!("{f} failed")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- iter-141: cover endpoint port sanity ----
+
+    /// `cover_endpoint` pointing at port 80 → FAIL. Plaintext HTTP
+    /// can't be a cover for raw TLS ClientHello bytes; an active
+    /// prober gets immediate confirmation that the proxy is fake.
+    #[test]
+    fn iter141_cover_endpoint_port_80_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoint = Some("www.example.com:80".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-141: cover_endpoint:80 MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("cover_endpoint") && s.contains("port 80"),
+            _ => false,
+        });
+        assert!(
+            fail,
+            "iter-141: FAIL must name the field AND the port: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-141: every common-mistake non-TLS port should FAIL.
+    #[test]
+    fn iter141_cover_endpoint_other_plaintext_ports_fail() {
+        for victim_port in [21u16, 22, 23, 25, 80] {
+            let dir = tmpdir();
+            let mut cfg = minimal_cfg(&dir);
+            cfg.cover_endpoint = Some(format!("www.example.com:{victim_port}"));
+            let report = preflight(&cfg);
+            assert!(
+                report.has_failures(),
+                "iter-141: cover_endpoint port {victim_port} MUST FAIL: {report}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Iter-141: canonical TLS ports (443, 8443, 9443) pass without
+    /// triggering the iter-141 port-sanity FAIL.
+    #[test]
+    fn iter141_cover_endpoint_canonical_tls_ports_pass() {
+        for port in [443u16, 8443, 9443] {
+            let dir = tmpdir();
+            let mut cfg = minimal_cfg(&dir);
+            cfg.cover_endpoint = Some(format!("www.example.com:{port}"));
+            let report = preflight(&cfg);
+            let port_fail = report.checks.iter().any(|c| match c {
+                Check::Fail(s) => {
+                    s.contains("cover_endpoint")
+                        && (s.contains("port 21")
+                            || s.contains("port 22")
+                            || s.contains("port 23")
+                            || s.contains("port 25")
+                            || s.contains("port 80"))
+                }
+                _ => false,
+            });
+            assert!(
+                !port_fail,
+                "iter-141: cover_endpoint:{port} MUST NOT trigger iter-141 port FAIL: {report}"
+            );
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Iter-141: non-canonical-but-not-blacklisted port produces WARN
+    /// (the operator might run TLS on a custom port; we don't have
+    /// the info to know for sure).
+    #[test]
+    fn iter141_cover_endpoint_unusual_port_warns() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoint = Some("www.example.com:7777".to_string());
+        let report = preflight(&cfg);
+        let warn = report.checks.iter().any(|c| match c {
+            Check::Warn(s) => s.contains("cover_endpoint") && s.contains("port 7777"),
+            _ => false,
+        });
+        assert!(
+            warn,
+            "iter-141: unusual cover_endpoint port MUST WARN: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-141: pool entries hit the same gate.
+    #[test]
+    fn iter141_cover_endpoints_pool_port_80_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.cover_endpoints = vec![
+            "https-host.example.com:443".to_string(),
+            "broken.example.com:80".to_string(),
+        ];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-141: pool with port:80 entry MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => s.contains("cover_endpoints[1]") && s.contains("port 80"),
+            _ => false,
+        });
+        assert!(
+            fail,
+            "iter-141: pool FAIL must index the bad entry: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

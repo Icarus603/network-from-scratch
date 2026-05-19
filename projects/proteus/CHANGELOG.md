@@ -15,6 +15,57 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server validate` catches cover-endpoint non-TLS port footgun (iter-141)
+
+The cover-forward path (spec §7.5) splices the raw inbound TLS
+ClientHello bytes verbatim to the configured cover endpoint. The
+cover endpoint MUST therefore be a TLS-speaking endpoint
+(typically `:443`); pointing it at a plaintext-HTTP server
+catastrophically defeats the cover arm. Active prober view:
+
+1. Send a real-looking TLS ClientHello to the Proteus server.
+2. Auth fails → cover-forward kicks in.
+3. Proteus splices the ClientHello bytes to `cover_endpoint:80`.
+4. The HTTP server on port 80 can't parse those bytes as HTTP →
+   immediate error response with a non-TLS shape (likely
+   `HTTP/1.1 400 Bad Request` + `Connection: close` or a
+   malformed-byte-stream RST).
+5. The prober compares the response shape against a real
+   `curl https://www.example.com/`: doesn't match → **THIS IS
+   NOT A REAL HTTPS SERVER**.
+
+The entire REALITY/cover-passthrough defense collapses to "not
+even trying". Pre-iter-141 nothing in the validate path flagged
+this — operators copying `www.example.com` from a tutorial and
+forgetting the `:443` got a silently-broken deploy.
+
+Iter-141 adds port-sanity to both `cover_endpoint` and every
+entry in `cover_endpoints[]`:
+
+- **FAIL** on any of `{21, 22, 23, 25, 80}` — well-known
+  plaintext-protocol ports (FTP/SSH/Telnet/SMTP/HTTP).
+  Operator-actionable message: "DEFEATING the entire cover arm.
+  Point cover_endpoint at an HTTPS endpoint (port 443)."
+- **WARN** on any port outside `{443, 8443, 9443}` —
+  acknowledges that custom-port TLS deploys exist, but flags
+  the unusual choice so operators verify intent.
+- **PASS** on the canonical TLS ports.
+
+5 new tests in `validate::tests`:
+- `iter141_cover_endpoint_port_80_fails`: the canonical case.
+- `iter141_cover_endpoint_other_plaintext_ports_fail`: all of
+  `{21, 22, 23, 25, 80}` hit the hard-fail branch.
+- `iter141_cover_endpoint_canonical_tls_ports_pass`: 443 /
+  8443 / 9443 don't trip the gate.
+- `iter141_cover_endpoint_unusual_port_warns`: unusual port
+  produces WARN with the field + port both named.
+- `iter141_cover_endpoints_pool_port_80_fails`: pool entries
+  hit the same gate; FAIL message indexes the bad entry
+  (`cover_endpoints[1]`).
+
+All 118 server validate unit tests + 5 new iter-141 tests pass.
+Full workspace test suite green; clippy clean; fmt clean.
+
 ### Fixed — `proteus-server validate` tightens ML-KEM EK + DK length gates (iter-140)
 
 Server-side sibling to iter-139 (which tightened the client's
