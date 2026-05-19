@@ -324,11 +324,39 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         );
     } else {
         for client in &cfg.client_allowlist {
-            check_file(
-                &mut r,
-                &format!("client_allowlist[{}].ed25519_pk", client.user_id),
-                &client.ed25519_pk,
-            );
+            let pk_label = format!("client_allowlist[{}].ed25519_pk", client.user_id);
+            check_file(&mut r, &pk_label, &client.ed25519_pk);
+            // Iter-143: enforce ed25519 public-key length (= 32 bytes
+            // raw OR ~44 bytes base64). Pre-iter-143 the server's
+            // check_file only verified existence + non-all-zero; a
+            // truncated pubkey passed validate cleanly and then the
+            // server panicked / refused to start at runtime when
+            // `ed25519_dalek::VerifyingKey::from_bytes` rejected the
+            // malformed key. Surfaces the failure at preflight time
+            // with the actionable field name.
+            //
+            // Skip the check when the file is absent OR empty — those
+            // already FAILED via check_file above; double-failing
+            // just adds noise.
+            if let Ok(raw) = std::fs::read(&client.ed25519_pk) {
+                if !raw.is_empty() {
+                    let decoded = base64_or_raw_bytes(&raw);
+                    let raw_ok = raw.len() == 32;
+                    let decoded_ok = decoded.len() == 32;
+                    if !raw_ok && !decoded_ok {
+                        r.push_fail(format!(
+                            "{pk_label}: ed25519 public-key length wrong (got {} bytes \
+                             raw / {} bytes after base64-decode; expected exactly 32). \
+                             A truncated or wrong-format pubkey causes the server to \
+                             reject the key on startup and refuse to bind the listener. \
+                             Re-issue with `proteus-client keygen --out keys/` and \
+                             copy the resulting `client.ed25519.pk` into place.",
+                            raw.len(),
+                            decoded.len()
+                        ));
+                    }
+                }
+            }
             if client.user_id.is_empty() || client.user_id.len() > 8 {
                 r.push_fail(format!(
                     "client_allowlist[{}].user_id must be 1..=8 chars, got len={}",
@@ -4663,6 +4691,96 @@ mod tests {
         assert!(
             dup_fail,
             "iter-142: three-way share must list all three: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- iter-143: ed25519_pk length gate in allowlist ----
+
+    /// Iter-143: an allowlist entry whose pubkey file is shorter
+    /// than 32 bytes (truncation, base64-partial, wrong file copied)
+    /// MUST FAIL validate. Pre-iter-143 the file passed existence
+    /// AND non-all-zero checks; the server then refused to start at
+    /// runtime when `VerifyingKey::from_bytes` rejected the malformed
+    /// key, leaving operators no actionable preflight signal.
+    #[test]
+    fn iter143_truncated_allowlist_pk_fails() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        std::fs::write(&pk, [0x42u8; 10]).unwrap(); // 10 bytes, well below 32
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-143: truncated allowlist pk MUST FAIL: {report}"
+        );
+        let fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("client_allowlist[alice].ed25519_pk")
+                    && s.contains("expected exactly 32")
+            }
+            _ => false,
+        });
+        assert!(
+            fail,
+            "iter-143: FAIL must name the field + the expected length: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-143: an oversized pubkey (e.g. ed25519 SK leaked into
+    /// the slot — 64 bytes for the dalek private-key wire form)
+    /// MUST also FAIL. This is the worst-case "operator copied the
+    /// wrong file" trap.
+    #[test]
+    fn iter143_oversized_allowlist_pk_fails() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        std::fs::write(&pk, [0x42u8; 64]).unwrap(); // 64 bytes
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "iter-143: oversized allowlist pk MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Iter-143: a real 32-byte pubkey passes the length gate.
+    /// (May still fail other gates — we just verify the iter-143
+    /// gate doesn't fire on a correctly-sized file.)
+    #[test]
+    fn iter143_correct_length_allowlist_pk_passes_length_gate() {
+        let dir = tmpdir();
+        let pk = dir.join("alice.pk");
+        let pk_bytes: [u8; 32] =
+            std::array::from_fn(|i| (i as u8).wrapping_mul(13).wrapping_add(5));
+        std::fs::write(&pk, pk_bytes).unwrap();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.client_allowlist = vec![ClientCfg {
+            user_id: "alice".to_string(),
+            ed25519_pk: pk,
+        }];
+        let report = preflight(&cfg);
+        // No FAIL row for iter-143's length gate.
+        let length_fail = report.checks.iter().any(|c| match c {
+            Check::Fail(s) => {
+                s.contains("client_allowlist[alice].ed25519_pk")
+                    && s.contains("expected exactly 32")
+            }
+            _ => false,
+        });
+        assert!(
+            !length_fail,
+            "iter-143: 32-byte pubkey MUST NOT trip the iter-143 length gate: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

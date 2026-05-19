@@ -15,6 +15,49 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server validate` length-gates allowlist ed25519_pk files (iter-143)
+
+Sibling to iter-140 (ML-KEM key files) and iter-142 (duplicate
+pubkey bytes). The third "wrong-key-bytes-passed-validate" trap
+on the server side was the allowlist's `client_allowlist[*].ed25519_pk`:
+the `check_file` gate only verified existence + non-all-zero, so
+a truncated pubkey (operator scp-copied a partial file, base64
+fragment from a half-paste, ed25519 SK accidentally copied into
+the PK slot) passed validate clean.
+
+Then at server startup, `ServerKeys::from_config` calls
+`VerifyingKey::from_bytes(&pk_arr)` on the loaded bytes, which
+returns `BadKey("ed25519_pk must be 32 bytes")` or
+`BadKey("invalid ed25519_pk")`. The server's main fn surfaces
+the error and exits non-zero. To the operator this looked like
+"the server won't start, error mentions ed25519_pk" with no
+hint that running validate first would have caught this AND
+named the offending user_id.
+
+Iter-143 inserts a length gate inline in the allowlist loop:
+
+- Read each entry's `ed25519_pk` file (raw or base64-armored).
+- Require EITHER `raw.len() == 32` OR `base64_decode(raw).len() == 32`.
+- FAIL with both length numbers + the user_id in the message
+  + an actionable remediation: "Re-issue with
+  `proteus-client keygen --out keys/` and copy the resulting
+  `client.ed25519.pk` into place."
+
+Skip the gate when the file is absent or empty — those already
+FAILED via check_file's existing checks; double-failing just
+adds noise.
+
+3 new tests in `validate::tests`:
+- `iter143_truncated_allowlist_pk_fails`: 10-byte file → FAIL
+  that names both the field AND the expected length.
+- `iter143_oversized_allowlist_pk_fails`: 64-byte file (would
+  be a leaked ed25519 SK in the worst case) → FAIL.
+- `iter143_correct_length_allowlist_pk_passes_length_gate`:
+  32-byte file → no length FAIL.
+
+All 129 server validate unit tests + workspace tests green.
+clippy + fmt clean.
+
 ### Fixed — `proteus-server validate` detects duplicate ed25519_pk bytes across allowlist user_ids (iter-142)
 
 Pre-iter-142 the validate path checked for duplicate `user_id`
