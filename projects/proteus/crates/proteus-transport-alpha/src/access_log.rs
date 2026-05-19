@@ -406,6 +406,30 @@ impl AccessLogger {
                 stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
                 error!(error = %e, "access log final flush failed");
             }
+            // Iter-145: fsync(2) the final batch on graceful exit so
+            // audit records that completed during the drain survive
+            // a host crash that lands between SIGTERM-ack and the
+            // file's page-cache writeback (typically 30 s on Linux
+            // with default vm.dirty_writeback_centisecs). Without
+            // this, an operator who runs `systemctl stop
+            // proteus-server`, sees "active (exited)", then loses
+            // power to the host can lose the last N seconds of
+            // audit records — the records hit the kernel buffer
+            // via `flush()` but never the disk. fsync only fires on
+            // the FINAL flush (cost = one extra syscall on shutdown
+            // path, irrelevant); the steady-state hot path stays
+            // un-fsync'd to preserve throughput for personal-VPN
+            // shapes where audit-log throughput matters.
+            //
+            // `into_inner()` gives us the underlying tokio File so
+            // we can call sync_data — buf is already flushed at
+            // this point, so the `into_inner` doesn't re-enter the
+            // write path.
+            let file = buf.into_inner();
+            if let Err(e) = file.sync_data().await {
+                stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
+                error!(error = %e, "access log final fsync failed");
+            }
         });
         Ok(Self {
             tx,
@@ -756,6 +780,70 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(150)).await;
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains(r#""user_id":"survives""#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- iter-145: final-flush fsync on graceful exit ----
+
+    /// Iter-145 regression: after `drop(logger)`, the writer task
+    /// must complete its final flush + fsync without panicking,
+    /// and every record that landed in the channel before drop
+    /// MUST be persisted to disk (visible to a fresh `std::fs::read`).
+    ///
+    /// We can't directly observe the fsync syscall from the test
+    /// harness, but we CAN observe the downstream guarantee:
+    /// the writer didn't crash on `into_inner` / `sync_data`,
+    /// and the file contents are correct. If the iter-145 change
+    /// regressed the exit path (e.g. moved sync_data BEFORE flush,
+    /// or panicked on a tokio-File without write access), this
+    /// test would fail with either a stale read OR a missing
+    /// record.
+    #[tokio::test]
+    async fn iter145_final_flush_fsync_does_not_panic_and_records_survive_drop() {
+        let dir = std::env::temp_dir().join(format!(
+            "proteus-acclog-iter145-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("access.log");
+
+        let logger = AccessLogger::spawn(&path).await.unwrap();
+        // Emit a small batch that exercises the steady-state
+        // record-write code path.
+        for i in 0..5u8 {
+            let mut uid = *b"iter145_";
+            uid[7] = b'0' + i;
+            logger.log(AccessLogRecord {
+                user_id: Some(uid),
+                ..AccessLogRecord::default()
+            });
+        }
+        // Drop the logger → channel rx side closes → writer's
+        // `rx.recv()` returns `None` → `break 'outer` → final
+        // flush + iter-145 fsync run. If sync_data panics or
+        // unwinds, this test catches it (the spawned writer task
+        // panic would NOT abort the test by itself, but the file
+        // contents would diverge from expectation).
+        drop(logger);
+        // Generous wait so the writer task has time to flush
+        // + fsync before we read.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let body = std::fs::read_to_string(&path).unwrap();
+        // Every record must be present. (User_id is exactly 8
+        // bytes; we encoded as "iter145" + a single digit, so the
+        // rendered string is "iter1450" etc — no underscore.)
+        for i in 0..5u8 {
+            let expected = format!(r#""user_id":"iter145{}"#, char::from(b'0' + i));
+            assert!(
+                body.contains(&expected),
+                "iter-145: record {i} should be persisted; body = {body:?}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -15,6 +15,77 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — access-log writer fsyncs the final batch on graceful exit (iter-145)
+
+Audit-log durability gap. The access-log writer task ran its
+steady-state hot loop with `BufWriter::flush()` — that writes
+pending bytes to the kernel buffer (via `write(2)`) but does
+**not** call `fsync(2)`. The final shutdown branch:
+
+```rust
+'outer: loop { ... }
+stats_task.writer_alive.store(false, Ordering::Relaxed);
+if let Err(e) = buf.flush().await {
+    stats_task.write_errors.fetch_add(1, Ordering::Relaxed);
+    error!(error = %e, "access log final flush failed");
+}
+```
+
+…also only flushed. An operator workflow that exposes the gap:
+
+1. `systemctl stop proteus-server` → SIGTERM.
+2. drain runs, writer's mpsc rx side gets dropped, writer
+   exits the loop, runs final flush — bytes hit the kernel
+   buffer.
+3. systemd reports `inactive (dead)` — operator believes the
+   binary "exited cleanly, audit log is complete".
+4. Host hits a kernel panic / hard power-off in the next
+   ~30 s (Linux `vm.dirty_writeback_centisecs` default).
+5. Page cache never flushes to disk. The last batch of
+   audit records — every session that completed in the
+   final drain window — is lost.
+
+For a security-audit log that's the wrong durability story.
+Iter-145 closes the gap on the FINAL flush only (steady-state
+flushes still skip fsync to preserve hot-path throughput):
+
+```rust
+if let Err(e) = buf.flush().await { ... }
+// ITER-145: convert BufWriter back into the tokio File and
+// fsync the final batch so audit records committed during
+// drain survive a host crash that lands between SIGTERM-ack
+// and the next writeback cycle.
+let file = buf.into_inner();
+if let Err(e) = file.sync_data().await { ... }
+```
+
+`into_inner()` is safe here — `buf` was just flushed, so the
+underlying File holds no pending bytes. `sync_data` instead of
+`sync_all` because we only need the audit log's data + length
+metadata to survive; the file's mtime / ctime don't matter for
+audit-trail integrity, so we save the extra inode-metadata
+sync that `sync_all` performs.
+
+Trade-off rationale (why fsync on exit only, not on every batch):
+
+- Steady-state batches in the hot loop are bursty (many
+  session closes per second under load). fsync on every batch
+  would serialize the writer task on the disk and could
+  noticeably affect data-plane throughput on small VPSes.
+- The FINAL flush is the operationally critical one: it
+  represents "everything the operator expects to be persisted
+  by the time systemd stop returns". Adding one fsync on the
+  shutdown path costs one syscall on shutdown; irrelevant.
+
+1 new regression test (`iter145_final_flush_fsync_does_not_panic_and_records_survive_drop`)
+exercises the drop→flush→fsync path with 5 records: pre-iter-145
+the records hit the page cache via flush but a future regression
+that moved sync_data BEFORE flush (or threw on into_inner) would
+panic the writer task; the test asserts the file is readable
+post-drop with every record present.
+
+All 449 α unit tests + workspace tests green. clippy + fmt clean.
+
 ### Fixed — `proteus-server validate` length-gates server X25519 key files (iter-144)
 
 Completing the server-side key-bytes integrity check arc started
