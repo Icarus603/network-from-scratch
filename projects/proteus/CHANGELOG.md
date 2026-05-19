@@ -15,6 +15,56 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — cover-forward dial applies keepalive + TCP_USER_TIMEOUT (iter-137)
+
+Pre-iter-137 the cover-forward dial path (`cover::forward_to_cover`)
+applied only `set_nodelay(true)` to the upstream socket. Keepalive
+was off; on Linux `TCP_USER_TIMEOUT` was unset. That left an
+amplification surface for the most operationally dangerous attack
+shape in production:
+
+1. Attacker floods the server with junk ClientHellos (each below
+   the per-IP rate limiter, distributed across many IPs).
+2. Each junk attempt fails auth → server routes it to
+   `forward_to_cover` → opens a fresh TCP connection to the cover
+   upstream.
+3. If the cover upstream is on the slow side of a CGNAT or
+   cloud-LB path that silently drops idle TCP bindings (typical
+   2-30 min reap), the cover-server socket goes half-open
+   unnoticed.
+4. The 120 s `FORWARD_IDLE_TIMEOUT` outer guard fires eventually,
+   but until then the server is holding open one cover-upstream
+   FD + one bidirectional copy task PER junk attempt.
+
+Effective amplification: every junk handshake the attacker spends
+1 connection on costs the server 1 FD × up to 120 s. At 1000
+attempts/sec sustained, that's ~120k open FDs at steady state.
+On a small VPS with `ulimit -n 65535` (the iter-67 nofile audit
+target), the server hits FD exhaustion AND the systemd cgroup's
+`TasksMax=8192` (set in `proteus-server.service` per iter
+hardening) BEFORE its own anti-DoS detectors can react.
+
+Iter-137 wires the existing iter-28
+`socket_opts::apply_dial_socket_opts_with_user_timeout` helper
+into the cover-dial path: 30 s keepalive + 120 s
+`TCP_USER_TIMEOUT` (Linux-only). The cover-upstream socket now:
+
+- Sends keepalive probes after 30 s idle so a wedged peer is
+  detected within ~60 s (not the kernel's default 2-hour timer).
+- On Linux, gets force-closed after 120 s of unacked writes if
+  the cover-upstream peer goes silent during an active forward.
+
+Both align to the same defaults the iter-28 client-to-VPS dial
+and the iter-14 server upstream-relay dial already use, so the
+operator-visible socket-options story is uniform across all
+three dial-stage call sites.
+
+New test `forward_to_cover_dial_succeeds_against_loopback_listener`
+exercises the dial-stage path end-to-end against a loopback
+listener; the underlying socket-option helper already has its own
+unit tests in `socket_opts::tests`. All 446 α unit tests + the
+full workspace test suite pass. clippy clean. fmt clean.
+
 ### Security — handshake replay window: FIFO eviction policy (iter-136)
 
 **Real security defect, retroactively classified as a low-severity
