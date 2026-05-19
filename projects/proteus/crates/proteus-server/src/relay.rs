@@ -769,9 +769,179 @@ fn parse_connect(buf: &[u8]) -> Result<(String, u16), Box<dyn std::error::Error 
     if buf.len() < 1 + host_len + 2 {
         return Err("connect request truncated".into());
     }
+    // Iter-146: defensive validation BEFORE handing the host string
+    // to lookup_host / outbound_filter / TcpStream::connect.
+    //
+    // Pre-iter-146 a malformed CONNECT could:
+    //   * `host_len = 0`: parses cleanly, then `lookup_host("":port)`
+    //     wastes a 5 s timeout window per request — a malicious
+    //     authenticated client could DoS the relay's DNS bound.
+    //   * `host` containing NUL bytes: some libcs treat as a
+    //     C-string and TRUNCATE at the first `\0`; the outbound
+    //     filter sees one hostname, the resolver sees a shorter
+    //     one. Classic time-of-check vs time-of-use vulnerability
+    //     class (CWE-367).
+    //   * `host` containing `\r\n`: when the upstream destination
+    //     is an HTTP server, the CRLF in the Host header allows
+    //     HTTP request smuggling. Not Proteus's bug per se but
+    //     defense-in-depth.
+    //   * `port == 0`: not a connectable TCP port. The connect
+    //     would fail at the socket layer with a confusing error;
+    //     reject at parse time for a clearer diagnostic.
+    if host_len == 0 {
+        return Err("connect host is empty".into());
+    }
+    if host_len > 255 {
+        // u8 length prefix caps at 255, but be defensive — a
+        // future protocol change that widens the field shouldn't
+        // accidentally accept multi-KB hostnames here.
+        return Err("connect host too long".into());
+    }
     let host = std::str::from_utf8(&buf[1..1 + host_len])
         .map_err(|_| "host not valid utf-8")?
         .to_string();
+    // Reject control / whitespace bytes that have no legitimate
+    // role in DNS names or IP literals. RFC 1035 §2.3.1 LDH +
+    // dot + brackets-for-v6 cover every legit byte; anything else
+    // is operator-error OR an attempt to exploit the downstream.
+    if host
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return Err("connect host contains forbidden control byte".into());
+    }
     let port = u16::from_be_bytes([buf[1 + host_len], buf[1 + host_len + 1]]);
+    if port == 0 {
+        return Err("connect port == 0 (not a valid TCP destination)".into());
+    }
     Ok((host, port))
+}
+
+#[cfg(test)]
+mod parse_connect_tests {
+    //! Iter-146: defensive validation of the inner CONNECT
+    //! request. The relay forwards the parsed `(host, port)`
+    //! straight to lookup_host / outbound_filter / TcpStream::connect;
+    //! a malformed host/port can DoS the resolver or smuggle
+    //! attacker-controlled bytes into HTTP-layer header injection
+    //! at the downstream.
+    use super::parse_connect;
+
+    fn frame(host: &str, port: u16) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(1 + host.len() + 2);
+        buf.push(host.len() as u8);
+        buf.extend_from_slice(host.as_bytes());
+        buf.extend_from_slice(&port.to_be_bytes());
+        buf
+    }
+
+    /// Sanity: a well-formed CONNECT parses cleanly.
+    #[test]
+    fn well_formed_connect_parses() {
+        let buf = frame("www.example.com", 443);
+        let (h, p) = parse_connect(&buf).unwrap();
+        assert_eq!(h, "www.example.com");
+        assert_eq!(p, 443);
+    }
+
+    /// Empty buffer rejected.
+    #[test]
+    fn empty_buf_rejected() {
+        assert!(parse_connect(&[]).is_err());
+    }
+
+    /// `host_len = 0` → reject. Pre-iter-146 the parser returned
+    /// `("", port)` and the upstream-dial layer wasted a DNS
+    /// timeout on the empty hostname.
+    #[test]
+    fn empty_host_rejected() {
+        let mut buf = vec![0u8]; // host_len = 0
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        let err = parse_connect(&buf).unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "error must name 'empty': {err}"
+        );
+    }
+
+    /// `port = 0` → reject. Pre-iter-146 the parser passed 0
+    /// through to TcpStream::connect, which fails with a
+    /// confusing OS error.
+    #[test]
+    fn port_zero_rejected() {
+        let buf = frame("www.example.com", 0);
+        let err = parse_connect(&buf).unwrap_err();
+        assert!(
+            err.to_string().contains("port == 0"),
+            "error must name 'port == 0': {err}"
+        );
+    }
+
+    /// NUL byte in hostname → reject. Classic CWE-367 style
+    /// (some libcs truncate at \0; outbound_filter sees one
+    /// host, resolver sees another).
+    #[test]
+    fn nul_in_host_rejected() {
+        let buf = frame("evil.com\0safe.local", 443);
+        let err = parse_connect(&buf).unwrap_err();
+        assert!(
+            err.to_string().contains("forbidden control byte"),
+            "error must name 'forbidden control byte': {err}"
+        );
+    }
+
+    /// CR / LF in hostname → reject. HTTP request smuggling
+    /// defense-in-depth if the downstream destination is an
+    /// HTTP server that uses the supplied hostname in headers.
+    #[test]
+    fn crlf_in_host_rejected() {
+        for c in ['\r', '\n', '\t'] {
+            let payload = format!("evil.com{c}safe.local");
+            let buf = frame(&payload, 443);
+            let err = parse_connect(&buf).unwrap_err();
+            assert!(
+                err.to_string().contains("forbidden control byte"),
+                "error must name 'forbidden control byte' for {c:?}: {err}"
+            );
+        }
+    }
+
+    /// Truncated buffer (header says 16-byte host but only 5 are
+    /// present) → reject.
+    #[test]
+    fn truncated_buf_rejected() {
+        let mut buf = vec![16u8]; // host_len = 16
+        buf.extend_from_slice(b"only5");
+        let err = parse_connect(&buf).unwrap_err();
+        assert!(err.to_string().contains("truncated"), "{err}");
+    }
+
+    /// Non-UTF-8 hostname (random binary bytes) → reject.
+    #[test]
+    fn non_utf8_host_rejected() {
+        let mut buf = vec![3u8];
+        buf.extend_from_slice(&[0xff, 0xfe, 0xfd]);
+        buf.extend_from_slice(&443u16.to_be_bytes());
+        let err = parse_connect(&buf).unwrap_err();
+        assert!(err.to_string().contains("utf-8"), "{err}");
+    }
+
+    /// Common ports (80/443/8443/22) and IPv4-literal-as-string
+    /// hostnames pass cleanly.
+    #[test]
+    fn common_legit_destinations_pass() {
+        for (host, port) in [
+            ("8.8.8.8", 53),
+            ("example.com", 80),
+            ("example.com", 443),
+            ("[::1]", 22), // IPv6 literal in bracket form
+            ("vps.example.org", 8443),
+        ] {
+            let buf = frame(host, port);
+            let (h, p) = parse_connect(&buf)
+                .unwrap_or_else(|e| panic!("legit destination ({host}, {port}) rejected: {e}"));
+            assert_eq!(h, host);
+            assert_eq!(p, port);
+        }
+    }
 }

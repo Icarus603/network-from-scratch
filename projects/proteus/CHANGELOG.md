@@ -15,6 +15,61 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — `parse_connect` validates inner CONNECT host + port (iter-146)
+
+The server's inner-protocol CONNECT request (parsed by
+`relay::parse_connect` after the Proteus handshake authenticates)
+flows directly into `tokio::net::lookup_host` →
+`OutboundPolicy::check` → `TcpStream::connect`. Pre-iter-146 the
+parser only validated UTF-8 + buffer length; it accepted
+several malformed shapes that lead to real production issues:
+
+- **`host_len = 0`** → empty hostname passes through to
+  `lookup_host("":port)`, which wastes the full 5-second
+  DNS-bound-timeout window. A malicious authenticated client
+  could DoS the relay's resolver budget by spraying empty-host
+  CONNECTs.
+- **NUL byte in hostname** (`evil.com\0safe.local`) → classic
+  CWE-367 (time-of-check vs time-of-use). Some libcs treat
+  hostnames as C-strings and TRUNCATE at the first `\0`; the
+  outbound_filter sees the full `evil.com\0safe.local` string,
+  but the system resolver only sees `evil.com`. Operator's
+  SSRF policy that blocks `evil.com` would still permit the
+  dial through this confusion.
+- **CR / LF / TAB in hostname** → HTTP request smuggling
+  defense-in-depth. If the downstream destination is an HTTP
+  server that uses the hostname in a header (most do —
+  reverse-proxy Host:), the CRLF allows a malicious client to
+  inject arbitrary headers into the upstream request.
+- **`port = 0`** → not a connectable TCP port. The connect
+  fails at the socket layer with `EADDRNOTAVAIL` or similar;
+  rejecting at parse time gives a clearer diagnostic.
+
+Iter-146 adds the validation pass:
+
+- Reject `host_len == 0` with "connect host is empty".
+- Defensively reject `host_len > 255` (currently impossible
+  given the u8 prefix, but defense-in-depth for future
+  protocol changes).
+- Reject any host containing `\0` / `\r` / `\n` / `\t` with
+  "connect host contains forbidden control byte".
+- Reject `port == 0`.
+
+9 new tests in `parse_connect_tests`:
+- `well_formed_connect_parses` — sanity baseline.
+- `empty_buf_rejected` — preserved legacy behavior.
+- `empty_host_rejected` — new iter-146 gate.
+- `port_zero_rejected` — new iter-146 gate.
+- `nul_in_host_rejected` — CWE-367 defense.
+- `crlf_in_host_rejected` — three variants (CR / LF / TAB).
+- `truncated_buf_rejected` — preserved legacy behavior.
+- `non_utf8_host_rejected` — preserved legacy behavior.
+- `common_legit_destinations_pass` — IPv4 literal, IPv6
+  bracket literal, common-port domain names; the positive
+  side of the new gate.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Fixed — access-log writer fsyncs the final batch on graceful exit (iter-145)
 
 Audit-log durability gap. The access-log writer task ran its
