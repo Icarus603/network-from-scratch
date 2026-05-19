@@ -15,6 +15,85 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — handshake replay window: FIFO eviction policy (iter-136)
+
+**Real security defect, retroactively classified as a low-severity
+DoS-with-replay-amplification class.**
+
+The reference replay-window implementation
+(`proteus-handshake::replay::ReplayWindow`) stored
+`(client_nonce, timestamp)` pairs in a `BTreeSet`. On capacity
+overflow it called `seen.iter().next()` and removed the
+lexicographically-smallest entry. That eviction policy is
+exploitable:
+
+1. Attacker captures a legitimate ClientHello on the wire.
+2. Attacker waits for the legitimate handshake to complete and
+   land in the server's replay window.
+3. Attacker submits handshake attempts with attacker-chosen
+   nonces that sort BELOW the captured legitimate nonce (e.g.
+   `[0x00; 16]`, `[0x00; 16] | i.to_be_bytes()`, etc.). Each
+   submission needs only to pass the timestamp window (90 s) —
+   it fails the ML-KEM decap or the auth_tag check immediately
+   AFTER, but the replay-window check fires BEFORE those, so
+   even invalid attempts land in the set.
+4. Once `REFERENCE_SET_CAPACITY` (65536) low-sorting nonces
+   are seeded, the next insertion evicts an entry — but since
+   `BTreeSet` picks the lex-smallest, the legitimate captured
+   record (with its naturally-distributed nonce) gets evicted
+   ahead of the attacker-controlled low-nonce flood.
+5. Attacker replays the captured ClientHello. The replay
+   window has forgotten it → `Verdict::Accept` → the server
+   pays full ML-KEM cost AND, if the handshake was captured
+   close enough to its original timestamp to still pass the
+   90 s window, the server re-runs the handshake and the
+   attacker gets a fresh authenticated session under the
+   victim's `client_id` (no — auth still requires the
+   victim's Ed25519 sig over a fresh transcript; but the
+   replay arm of the defense is broken).
+
+Mitigating factors that kept this from being P0:
+
+- The per-IP `RateLimiter` (`rate_limit.rs`) caps the rate of
+  attempts a single attacker can submit, throttling the flood
+  to well below the time-to-rotate the cap.
+- The 90 s `TIMESTAMP_WINDOW_SECS` bounds the replay validity
+  window — an attacker who captures a record and floods the
+  cap typically can't do it within 90 s on a small VPS.
+- The captured ClientHello also requires the attacker to be
+  on-path between the client and the server at the moment of
+  capture, since the X25519 outer + TLS-1.3 outer encrypt
+  the inner Proteus handshake. A pure observer cannot
+  capture the inner bytes.
+
+Even so, the eviction policy was wrong on principle: an
+attacker should not be able to influence which entries get
+evicted via attacker-chosen key material.
+
+**Fix**: switch from `BTreeSet` + lex-eviction to
+`HashSet` + `VecDeque` insertion-order FIFO. New entries
+push to the tail; on overflow we pop the head. An attacker
+cannot evict any record that landed AFTER theirs. To evict
+a captured record, the attacker would need to submit
+`capacity` MORE handshakes AFTER the capture — at which
+point both the per-IP rate limiter and the wall clock
+(TIMESTAMP_WINDOW_SECS) defeat them.
+
+Two new tests in `replay.rs`:
+- `fifo_eviction_protects_legitimate_record_from_low_nonce_flood`
+  pins the exact pre-iter-136 attack: insert a legitimate
+  record with the lex-MAX nonce, flood `capacity - 1` lower-
+  sorting nonces, assert the legitimate record still fires
+  `Replay`. Under the old BTreeSet code this test would
+  return `Accept` (successful replay).
+- `fifo_eviction_evicts_oldest_first` confirms the
+  positive semantic: at `capacity + 1` inserts, the FIRST
+  record is the one that gets evicted, not whichever
+  happens to sort lowest.
+
+All 43 handshake-crate tests pass + the full workspace test
+suite is green. clippy clean. fmt clean.
+
 ### Changed — α receiver hot path: cursor-based rx_buf consume + scratch zeroize on drop (iter-135)
 
 Two tightly-coupled changes on the α-profile `AlphaReceiver`,
