@@ -15,6 +15,45 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-client validate` tightens ML-KEM EK length gate (iter-139)
+
+Sibling to iter-138 on the validate-time defense layer. Pre-iter-139
+the client validate path checked the `server_mlkem_pk` file with
+the permissive predicate `|n| n >= 32` ("≥32 bytes"). That gate
+passed every truncated EK an operator might have produced (typo
+in `scp`, base64 partial paste, wrong file extension copied from
+the deploy guide, etc.). The first signal of trouble was the
+runtime BadServerKey error iter-138 added — same operator-actionable
+information, but deferred from "validate says no" to "first dial
+fails".
+
+Iter-139 tightens the validate-time gate to "exactly 1184 bytes
+raw OR ~1580-1592 bytes base64 (ML-KEM-768 EK; FIPS-203 §6.1)".
+Operators editing `client.yaml` then running
+`proteus-client validate --config ~/.proteus/client.yaml`
+(the iter-122 mandatory preflight gate) now learn the EK is
+wrong BEFORE any wire I/O — exit 1 with a FAIL row that names
+the field. Symmetric with the iter-122/123/132 contract that
+the preflight gate is authoritative for "is this deploy
+fixable without rolling back".
+
+The base64 range is `(EK_bytes × 4 + 3) / 3` rounded up plus
+slack for trailing newlines, so 1580-1592 bytes covers
+canonical-encoded EKs (`1184 * 4 / 3 = 1579`, plus one or two
+trailing `\n` / `=` chars depending on encoder). The file is
+decoded via the existing `decode_b64_or_raw` at runtime, so
+either form on disk works.
+
+2 new tests in `validate_cli.rs`:
+- `truncated_mlkem_ek_fails_validate`: 64-byte file →
+  FAIL row that names `server_mlkem_pk`.
+- `correct_1184_mlkem_ek_passes_validate_length_gate`: green
+  YAML's existing 1184-byte EK → no FAIL row mentions
+  `server_mlkem_pk`.
+
+All client tests green + full workspace test suite green +
+workspace clippy clean. fmt clean.
+
 ### Fixed — client handshake panicked on malformed ML-KEM EK config (iter-138)
 
 Pre-iter-138 the α client handshake (`client::handshake_over_split_bound`)

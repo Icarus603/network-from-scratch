@@ -22,7 +22,10 @@
 //!     would silently drop the rest — operator must shorten).
 //!
 //! Key file accessibility + length:
-//!   - `keys.server_mlkem_pk` exists, decodes to ≥ 32 bytes.
+//!   - `keys.server_mlkem_pk` exists, decodes to exactly 1184 bytes
+//!     raw OR ~1580-1592 bytes base64 (FIPS-203 §6.1; tightened in
+//!     iter-139 — pre-iter-139 the gate was the permissive
+//!     "≥ 32 bytes" which let any truncated EK pass validate).
 //!   - `keys.server_x25519_pk` exists, decodes to exactly 32 bytes.
 //!   - `keys.server_pq_fingerprint` exists, decodes to exactly 32 bytes.
 //!   - `keys.client_ed25519_sk` exists, decodes to exactly 32 bytes.
@@ -472,12 +475,32 @@ pub async fn run(path: &Path) -> PreflightReport {
     }
 
     // ----- Key files -----
+    //
+    // Iter-139: tighten the ML-KEM EK length gate from "≥32 bytes" to
+    // "exactly 1184 bytes" (FIPS-203 §6.1). Pre-iter-139 the
+    // permissive ≥32-byte check passed validate cleanly even when the
+    // operator's `server_mlkem_pk` file was truncated, the wrong
+    // file, or a base64 fragment from a half-completed copy-paste.
+    // The runtime would then panic on first dial (pre-iter-138) or
+    // surface `AlphaError::BadServerKey` (post-iter-138). Either way,
+    // the operator-actionable signal was deferred from "validate
+    // says no" to "first dial fails" — exactly the trap iter-127 /
+    // iter-128 chose to close on the other binaries.
+    //
+    // Note the file may be base64-encoded on disk (we accept either
+    // base64 or raw bytes via decode_b64_or_raw at runtime). The
+    // raw-bytes path is 1184; the base64 path is ~1580 chars. We
+    // gate on raw-bytes-after-decode below; a base64 file passes
+    // the raw-size check trivially because we read the file bytes
+    // before decoding. The simpler approach: accept either 1184
+    // (raw) OR something that base64-decodes to 1184. We push the
+    // logic into `check_key_file` via a tighter predicate.
     check_key_file(
         &mut r,
         "server_mlkem_pk",
         &cfg.keys.server_mlkem_pk,
-        |n| n >= 32,
-        "≥32 bytes (ML-KEM-768 EK)",
+        |n| n == 1184 || (1580..=1592).contains(&n),
+        "exactly 1184 bytes raw OR ~1580-1592 bytes base64 (ML-KEM-768 EK; FIPS-203 §6.1)",
     );
     check_key_file(
         &mut r,

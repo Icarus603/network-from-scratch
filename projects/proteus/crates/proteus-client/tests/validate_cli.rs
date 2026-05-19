@@ -1697,3 +1697,82 @@ async fn server_endpoints_bad_entry_fails() {
     assert!(bad_fail, "FAIL row for bad entry missing: {report}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- iter-139: ML-KEM EK length gate ----
+
+/// Pre-iter-139 a truncated ML-KEM EK (≥32 bytes but ≠ 1184)
+/// passed validate clean — the operator's first signal of trouble
+/// was the runtime BadServerKey error on first dial. Iter-139
+/// tightens the gate so validate FAILS immediately, before
+/// deployment.
+#[tokio::test]
+async fn truncated_mlkem_ek_fails_validate() {
+    let dir = tempdir("truncated_ek");
+    // Write a 64-byte file — passes pre-iter-139's ≥32 gate but
+    // is nowhere near the 1184-byte FIPS-203 requirement.
+    let mlkem_pk = dir.join("server.mlkem.pk");
+    std::fs::write(&mlkem_pk, [0u8; 64]).unwrap();
+    let x25519_pk = write_32b_key(&dir, "server.x25519.pk");
+    let fp = write_32b_key(&dir, "server.fp");
+    let ed_sk = write_32b_key(&dir, "client.ed25519.sk");
+
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"vps.example.com:8443\"\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice001\"\n\
+             tls:\n  server_name: vps.example.com\n\
+             keys:\n  \
+                 server_mlkem_pk: {mlkem}\n  \
+                 server_x25519_pk: {x25519}\n  \
+                 server_pq_fingerprint: {fp}\n  \
+                 client_ed25519_sk: {ed}\n",
+            mlkem = mlkem_pk.display(),
+            x25519 = x25519_pk.display(),
+            fp = fp.display(),
+            ed = ed_sk.display(),
+        ),
+    )
+    .unwrap();
+
+    let report = validate::run(&yaml).await;
+    eprintln!("iter-139 truncated-EK report:\n{report}");
+    assert!(
+        report.has_failures(),
+        "iter-139: truncated ML-KEM EK (64 bytes) MUST fail validate, got: {report}"
+    );
+    let names_mlkem = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("server_mlkem_pk"),
+        _ => false,
+    });
+    assert!(
+        names_mlkem,
+        "iter-139: FAIL message MUST name `server_mlkem_pk` so operators \
+         know which field is wrong, got: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Sanity: the existing 1184-byte EK path still passes (smoke
+/// test against the green-YAML helper).
+#[tokio::test]
+async fn correct_1184_mlkem_ek_passes_validate_length_gate() {
+    let dir = tempdir("ek_1184");
+    let yaml = write_minimal_green_yaml(&dir, "server_endpoint: \"vps.example.com:8443\"\n");
+    let report = validate::run(&yaml).await;
+    eprintln!("iter-139 green-EK report:\n{report}");
+    // The 1184-byte EK ought NOT produce any FAIL whose message
+    // mentions `server_mlkem_pk`. (Other rows may still fail in
+    // other tests — we scope the assertion to the iter-139 gate.)
+    let any_mlkem_fail = report.checks.iter().any(|c| match c {
+        validate::Check::Fail(s) => s.contains("server_mlkem_pk"),
+        _ => false,
+    });
+    assert!(
+        !any_mlkem_fail,
+        "iter-139: correctly-sized ML-KEM EK must NOT fail the length gate, got: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
