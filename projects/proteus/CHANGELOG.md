@@ -15,6 +15,58 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — `proteus-server validate` tightens ML-KEM EK + DK length gates (iter-140)
+
+Server-side sibling to iter-139 (which tightened the client's
+`server_mlkem_pk` gate). The server has two ML-KEM key files to
+worry about: the EK (`mlkem_pk`, 1184 bytes raw, published to
+clients) and the DK (`mlkem_sk`, 2400 bytes raw, kept secret).
+Pre-iter-140 the validate path only checked "file exists +
+readable + not all-zero" — a truncated DK passed validate and
+then either:
+
+1. **Crashed the server on startup** when
+   `DecapsulationKey::from_bytes` panicked on the malformed
+   key. systemd restart loop, same opaque "server keeps
+   crashing" symptom the iter-138 client fix targets on the
+   other end.
+2. **Generated a fingerprint that mismatched every client's
+   pinned `server.pq.fingerprint`** if the EK was truncated
+   but happened to parse cleanly (the keygen tool writes
+   raw bytes; partial-write scenarios where the file is
+   shorter than 1184 are the realistic failure mode).
+
+Iter-140 adds `check_mlkem_key_len` and wires it for both
+`keys.mlkem_pk` (1184 bytes) and `keys.mlkem_sk` (2400 bytes).
+Accepts either raw bytes on disk OR base64-armored bytes
+(decode via the existing `base64_or_raw_bytes`). FAIL message
+names BOTH the field path AND the expected length AND the
+likely operator action ("Regenerate with
+`proteus-server keygen`"), so the operator running the
+iter-122 mandatory preflight gate gets an immediately
+actionable signal.
+
+2 new tests in `validate_cli.rs`:
+- `validate_fails_on_truncated_mlkem_ek`: 100-byte EK file →
+  exit non-zero + stdout contains the field name `keys.mlkem_pk`
+  + the expected length `1184`.
+- `validate_fails_on_truncated_mlkem_dk`: same shape for the
+  DK side.
+
+Two existing test fixtures had to be updated to use realistic
+key sizes:
+
+- `validate.rs::tests::minimal_cfg` now writes 1184/2400-byte
+  buffers (was `b"placeholder"` = 11 bytes).
+- `tests/validate_cli.rs::touch` size-dispatches on the file
+  name suffix.
+- `tests/validate_cert_expiry.rs::touch` does the same so the
+  cert-expiry tests don't accidentally trip the iter-140 gate.
+
+All 118 server validate unit tests + 6 validate_cli integration
+tests + the cert-expiry integration tests pass. Full workspace
+test suite green; clippy clean; fmt clean.
+
 ### Fixed — `proteus-client validate` tightens ML-KEM EK length gate (iter-139)
 
 Sibling to iter-138 on the validate-time defense layer. Pre-iter-139

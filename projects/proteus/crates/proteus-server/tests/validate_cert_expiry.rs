@@ -47,7 +47,17 @@ fn tmpdir(tag: &str) -> PathBuf {
 
 fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
     let p = dir.join(name);
-    std::fs::write(&p, b"placeholder").unwrap();
+    // Iter-140: ML-KEM EK/DK length is now gated by validate
+    // (FIPS-203 §6.1 → 1184 / 2400 bytes). For test fixtures that
+    // only care about file EXISTENCE (cert-expiry tests don't
+    // exercise the key path), pad to the correct size for ML-KEM
+    // files; other key files keep the small placeholder.
+    let bytes: Vec<u8> = match name {
+        "mlkem.pk" => vec![0x42u8; 1184],
+        "mlkem.sk" => vec![0x42u8; 2400],
+        _ => b"placeholder".to_vec(),
+    };
+    std::fs::write(&p, bytes).unwrap();
     p
 }
 

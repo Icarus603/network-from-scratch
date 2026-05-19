@@ -207,6 +207,35 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
     check_file(&mut r, "keys.x25519_pk", &cfg.keys.x25519_pk);
     check_file(&mut r, "keys.x25519_sk", &cfg.keys.x25519_sk);
 
+    // Iter-140: length-gate the ML-KEM-768 keys. FIPS-203 §6.1:
+    //   * EK (`mlkem_pk`) = 1184 bytes raw
+    //   * DK (`mlkem_sk`) = 2400 bytes raw
+    // Mirrors the iter-139 client-side validate gate. Pre-iter-140
+    // the server's `check_file` only verified the file existed +
+    // wasn't all-zero — a truncated EK or DK passed validate clean,
+    // then the server would either fail to start (DK parse panics)
+    // or generate a fingerprint that mismatches every client's
+    // pinned `server.pq.fingerprint` (silent connectivity loss).
+    // Operators running the iter-122 mandatory preflight gate now
+    // catch this before deploy.
+    //
+    // Accept either raw bytes or base64-armored bytes — same
+    // decode_b64_or_raw discipline as runtime.
+    check_mlkem_key_len(
+        &mut r,
+        "keys.mlkem_pk",
+        &cfg.keys.mlkem_pk,
+        1184,
+        "ML-KEM-768 EK (FIPS-203 §6.1)",
+    );
+    check_mlkem_key_len(
+        &mut r,
+        "keys.mlkem_sk",
+        &cfg.keys.mlkem_sk,
+        2400,
+        "ML-KEM-768 DK (FIPS-203 §6.1)",
+    );
+
     // 3. TLS cert chain + key parse via the actual rustls parser
     //    (catches expired chains, mismatched key types, malformed PEM).
     match cfg.tls.as_ref() {
@@ -1877,6 +1906,58 @@ fn check_parent_writable(report: &mut PreflightReport, label: &str, path: &Path)
     }
 }
 
+/// Iter-140: enforce exact length of an ML-KEM-768 key file on the
+/// server side. Mirrors the iter-139 client-side gate. Accepts
+/// either raw bytes or base64-armored bytes (`base64_or_raw_bytes`
+/// handles both).
+///
+/// `expected_raw_len` is the FIPS-203 §6.1 length of the raw bytes
+/// (1184 for EK, 2400 for DK). `description` is the human label
+/// embedded in any FAIL message so operators know which spec
+/// section to cross-reference.
+fn check_mlkem_key_len(
+    report: &mut PreflightReport,
+    label: &str,
+    path: &Path,
+    expected_raw_len: usize,
+    description: &str,
+) {
+    let bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(_) => {
+            // The check_file call above already pushed a FAIL with
+            // the underlying io::Error. Don't double-fail.
+            return;
+        }
+    };
+    let decoded = base64_or_raw_bytes(&bytes);
+    let raw_len = decoded.len();
+    if raw_len == expected_raw_len {
+        report.push_pass(format!(
+            "{label} length OK ({raw_len} bytes raw, matches {description})"
+        ));
+        return;
+    }
+    // Fall back to checking the on-disk raw length (catches the case
+    // where the file is raw bytes but base64-decoding produced
+    // something else — base64_or_raw_bytes returns the raw bytes
+    // when the input doesn't look like base64).
+    if bytes.len() == expected_raw_len {
+        report.push_pass(format!(
+            "{label} length OK ({} bytes raw, matches {description})",
+            bytes.len()
+        ));
+        return;
+    }
+    report.push_fail(format!(
+        "{label} {path:?}: length {raw_len} bytes (after base64 decode if applicable) \
+         does NOT match expected {expected_raw_len} for {description}. Operator likely \
+         supplied a truncated key, a wrong-file copy-paste, or a key for the wrong \
+         ML-KEM variant. Regenerate with `proteus-server keygen` (or copy the original \
+         key file from the issuing operator)."
+    ));
+}
+
 fn base64_or_raw_bytes(input: &[u8]) -> Vec<u8> {
     use base64::Engine;
     let trimmed: Vec<u8> = input
@@ -1954,9 +2035,16 @@ mod tests {
     }
 
     fn minimal_cfg(dir: &Path) -> ServerConfig {
-        for name in ["mlkem.pk", "mlkem.sk", "x25519.pk", "x25519.sk"] {
-            write(&dir.join(name), b"placeholder");
-        }
+        // Iter-140: ML-KEM key files must be the exact FIPS-203
+        // sizes (1184 / 2400 bytes) since the new length gate
+        // rejects anything else. Tests that previously used
+        // `b"placeholder"` (11 bytes) now use random-byte buffers
+        // of the right length. The all-zeros gate still applies —
+        // we fill with `0x42` to avoid the iter-48 sentinel.
+        write(&dir.join("mlkem.pk"), &vec![0x42u8; 1184]);
+        write(&dir.join("mlkem.sk"), &vec![0x42u8; 2400]);
+        write(&dir.join("x25519.pk"), &[0x42u8; 32]);
+        write(&dir.join("x25519.sk"), &[0x42u8; 32]);
         ServerConfig {
             // Iter-97: bind to a LAN address so the iter-97
             // catastrophic-open-relay coherence check
