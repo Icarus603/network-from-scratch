@@ -15,6 +15,100 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Added — `proteus-bench alpha` / `alpha-server-tls` / `alpha-client-tls` (iter-134)
+
+Pre-iter-134 `proteus-bench` only exposed the β (QUIC) carrier;
+operators asking the **decision-grade** question — "is α (TCP +
+TLS 1.3) faster than my current VLESS+REALITY setup on this VPS?"
+— had no reproducible same-tool number. The α throughput-smoke
+test in `proteus-transport-alpha/tests` produces a number but is
+locked to raw-TCP (no outer TLS), so even running it manually
+doesn't answer the production-shape question.
+
+Iter-134 closes the gap with three new subcommands sharing the
+β bench's identity-banner protocol so operators with muscle
+memory for `bench beta-server` / `beta-client` get the same
+shape for α:
+
+- **`proteus-bench alpha [--tls]`**: same-host α bench. Default
+  is `raw-tcp` (mirrors the in-tree throughput_smoke test —
+  closest direct comparison to a regression-floor number);
+  `--tls` runs the **production-shape** variant (TLS 1.3 +
+  ALPN h2/http/1.1 + RFC 5705 channel binding mixed into the
+  inner Finished MAC). Operators making real upgrade
+  decisions read the `--tls` number, not raw-tcp.
+- **`proteus-bench alpha-server-tls`**: cross-host α-TLS
+  bench server. Binds + echoes + prints the same 5-line
+  `BENCH_SERVER_*_HEX=` identity banner as `beta-server` plus
+  the leaf cert hex for client-side pinning.
+- **`proteus-bench alpha-client-tls`**: cross-host α-TLS
+  bench client. Consumes the banner via `--server-*-hex`
+  flags. Same `pq_fingerprint` copy-paste-typo guard as the
+  β client — a mismatched fingerprint fails with a clear
+  "supplied X vs computed Y" message at the boundary instead
+  of an opaque "α handshake failed" 30s later.
+
+Loopback baseline (Apple Silicon M-series, 16 MiB payload,
+release):
+- α raw-TCP: ~244 MiB/s (~2.05 Gbps)
+- α-TLS:     ~212-248 MiB/s (~1.78-2.08 Gbps)
+- β QUIC:    ~40-52 MiB/s (~0.34-0.44 Gbps)
+
+The α-TLS number is the headline for operators choosing
+between Proteus α and VLESS+REALITY — same TCP+TLS 1.3
+substrate, same loopback machine, head-to-head reproducible.
+
+Code: a new `crate::beta::blast_drain_concurrent_once` was
+factored out alongside the existing `blast_drain_once` because
+α (raw TCP / TLS) deadlocks under sequential blast-then-drain
+when the kernel sndbuf fills (the local client task isn't
+servicing the echo) — the concurrent variant runs send + recv
+as joined futures on the same task. β stays on the sequential
+variant because quinn's per-stream send window (64 MiB default)
+buffers the whole multi-MiB payload internally.
+
+Test coverage: 3 new unit tests pin the path (raw-TCP runs,
+TLS runs, pq_fingerprint mismatch is rejected with both
+fingerprints in the error). Workspace test count goes from
+1683 → 1686 passing.
+
+Two stale doc-comments in `proteus-bench/src/main.rs` and
+`proteus-bench/src/beta.rs` claimed the cross-host bench
+identity export was "not yet wired / next iteration"; those
+already-landed and the comments were misleading future
+operators reading the source. Rewritten to describe the
+shipped behaviour. The `proteus-bench/src/lib.rs` "α NOT
+wired" line is now updated to describe iter-134's two
+variants.
+
+### Changed — deploy/server.example.yaml ships `probe_anomaly` enabled by default (iter-133)
+
+Pre-iter-133 the `probe_anomaly:` stanza in
+`deploy/server.example.yaml` was commented out. Operators
+copy-pasting the example then deploying with `cover_endpoint:`
+set would see the validate WARN ("cover endpoint is configured
+but probe_anomaly is unset — cover-forward bursts will not
+surface as alerts"), but if they ignored the WARN (operators
+do, even after iter-122's mandatory preflight gate makes them
+hard to ignore), every cover-forward storm — including real
+attack attempts — would go to /dev/null.
+
+Iter-133 ships the example with `probe_anomaly:` enabled by
+default. Safe-for-production settings:
+`autodeny_minutes: 0` (ALERT-ONLY, no automatic blackhole until
+the operator has watched the alerts for a week + confirmed no
+false positives on their specific deploy), `window_secs: 300`
+(5 min sliding), `threshold: 8` cover-forwards per /24,
+`max_prefixes: 16384` (~1 MiB bookkeeping cap),
+`autodeny_max_entries: 4096` (~128 KiB deny-list cap).
+
+The validate WARN about `autodeny_minutes = 0` still fires —
+that's intentional, it tells the operator the next step on the
+deploy maturity curve ("now watch for a week then bump
+autodeny_minutes to 15-60"). The DEFAULT pre-iter-133 left
+operators with no probe-burst signal at all; post-iter-133 they
+get the signal AND a guided next step.
+
 ### Fixed — `proteus-client validate` rejected the canonical `--config` form (iter-132)
 
 The iter-122 deploy/README.md mandatory preflight gate calls

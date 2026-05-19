@@ -301,6 +301,16 @@ pub async fn run_cross_host_bench(
 /// the wall-clock elapsed between first send and last received byte.
 /// Factored out so `run_same_host_bench` and `run_cross_host_bench`
 /// can't drift apart in what they measure.
+///
+/// **Sequential variant** — send everything, THEN drain. Safe for β
+/// because quinn's per-stream send window (64 MiB default, raised
+/// up to 256 MiB by the bench knobs) buffers the whole payload
+/// internally, so `send_record` never blocks waiting for the peer
+/// to drain. For α (raw TCP / TLS), the kernel sndbuf is much
+/// smaller (~128 KiB on macOS, 4-16 MiB on tuned Linux); sending
+/// a multi-MiB payload sequentially deadlocks because the client
+/// task can't service the echoed bytes coming back. α bench paths
+/// use [`blast_drain_concurrent_once`] instead.
 async fn blast_drain_once<S, R>(
     sender: &mut S,
     receiver: &mut R,
@@ -357,6 +367,89 @@ where
         got += rec.len();
     }
     Ok(start.elapsed())
+}
+
+/// Concurrent variant of [`blast_drain_once`] — owns sender + receiver
+/// outright, spawns them onto independent futures, and joins. Required
+/// for α-profile bench runs because raw TCP / TLS pumps deadlock when
+/// the sender fills the kernel sndbuf and the receiver isn't being
+/// serviced concurrently.
+///
+/// Generic over `Send` to allow a future `tokio::spawn` switch if we
+/// want true parallel CPU execution; today both futures run on the
+/// same task via `tokio::join!` which is enough to avoid the deadlock
+/// (the kernel drains the receive path whenever the sender blocks
+/// on sndbuf).
+pub(crate) async fn blast_drain_concurrent_once<S, R>(
+    mut sender: S,
+    mut receiver: R,
+    payload_bytes: usize,
+    chunk_bytes: usize,
+    total_timeout: Duration,
+) -> Result<(S, R, Duration), BenchError>
+where
+    S: SenderLike + Send + 'static,
+    R: ReceiverLike + Send + 'static,
+{
+    let payload_template_send: Vec<u8> = {
+        let mut v = vec![0u8; payload_bytes];
+        for (i, b) in v.iter_mut().enumerate() {
+            *b = (i & 0xff) as u8;
+        }
+        v
+    };
+    let chunk_bytes_for_send = chunk_bytes;
+
+    let start = Instant::now();
+    let send_fut = async move {
+        for chunk in payload_template_send.chunks(chunk_bytes_for_send) {
+            tokio::time::timeout(total_timeout, sender.send_record(chunk))
+                .await
+                .map_err(|_| {
+                    BenchError::Send(format!("send stalled past total_timeout {total_timeout:?}"))
+                })?
+                .map_err(|e| BenchError::Send(e.to_string()))?;
+        }
+        tokio::time::timeout(total_timeout, sender.flush())
+            .await
+            .map_err(|_| {
+                BenchError::Send(format!(
+                    "flush stalled past total_timeout {total_timeout:?}"
+                ))
+            })?
+            .map_err(|e| BenchError::Send(e.to_string()))?;
+        Ok::<S, BenchError>(sender)
+    };
+    let recv_fut = async move {
+        let mut got = 0usize;
+        while got < payload_bytes {
+            let rec = tokio::time::timeout(total_timeout, receiver.recv_record())
+                .await
+                .map_err(|_| {
+                    BenchError::Recv(format!("recv stalled past total_timeout {total_timeout:?}"))
+                })?
+                .map_err(|e| BenchError::Recv(e.to_string()))?
+                .ok_or_else(|| {
+                    BenchError::Recv("session closed before payload fully echoed".into())
+                })?;
+            for (i, b) in rec.iter().enumerate() {
+                let idx = got + i;
+                if *b != (idx & 0xff) as u8 {
+                    return Err(BenchError::Recv(format!(
+                        "byte mismatch at offset {idx}: expected {:#x}, got {:#x}",
+                        idx & 0xff,
+                        *b
+                    )));
+                }
+            }
+            got += rec.len();
+        }
+        Ok::<R, BenchError>(receiver)
+    };
+    let (send_res, recv_res) = tokio::join!(send_fut, recv_fut);
+    let sender_back = send_res?;
+    let receiver_back = recv_res?;
+    Ok((sender_back, receiver_back, start.elapsed()))
 }
 
 /// Boxed-future return type for the `SenderLike` trait. Aliased to
@@ -425,9 +518,10 @@ where
 // pointing to this slot. Implemented above as `run_cross_host_bench`.
 
 /// Single-host bench run (server + client share the in-process
-/// `ServerKeys`). This is the variant that actually works end-to-end
-/// today; the cross-host variant requires server-identity export
-/// which is the next iteration.
+/// `ServerKeys`). The matching cross-host variant lives in
+/// `run_cross_host_bench` above — it consumes the [`ExportedServerIdentity`]
+/// banner the `bench beta-server` subcommand emits and is fully
+/// wired end-to-end.
 ///
 /// Use this when the operator wants to measure raw Proteus β
 /// throughput on a single dev box (e.g. confirm a `PerfProfile` tweak

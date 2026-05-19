@@ -6,12 +6,16 @@
 //!     runs server + client in one process, emits one JSON-line report.
 //!     This is the variant that works end-to-end today.
 //!   - `bench beta-server` — cross-host bench server (binds, accepts
-//!     forever, echos). Prints the leaf cert hex + the listen address
-//!     so the operator can copy them to the `beta-client` invocation.
-//!     **NOTE**: cross-host needs server-identity export which is not
-//!     yet wired; today `beta-server` runs but the matching
-//!     `beta-client` will fail handshake until the operator brings the
-//!     two together with a key-export flag (next iteration).
+//!     forever, echos). Prints a 5-line identity banner — listen addr,
+//!     leaf cert DER hex, ML-KEM-768 EK hex, X25519 pub hex, PQ
+//!     fingerprint hex — that the operator copy-pastes into the
+//!     matching `beta-client --server-*-hex` flags. The client
+//!     re-derives `SHA-256(mlkem_pk)` and refuses the dial if the
+//!     supplied fingerprint disagrees, catching copy-paste typos at
+//!     parse time instead of an opaque handshake failure 30 s later.
+//!   - `bench beta-client` — cross-host bench client. Consumes the
+//!     banner emitted by `bench beta-server`, runs the throughput
+//!     blast, emits one JSON-line report.
 //!
 //! Usage examples:
 //!
@@ -37,7 +41,7 @@
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use proteus_bench::beta;
+use proteus_bench::{alpha, beta};
 use proteus_transport_beta::PerfProfile;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -69,6 +73,21 @@ enum Cmd {
     /// Identity fields are copy-pasted verbatim from the server's
     /// banner.
     BetaClient(BetaClientArgs),
+    /// Same-host α profile bench (raw TCP **or** TLS-wrapped). The
+    /// `--tls` switch picks the production-shape variant; default is
+    /// raw-TCP (matches the in-tree throughput_smoke test, which is
+    /// the closest direct comparison to a regression-floor number).
+    /// Operators asking "is α faster than my current REALITY setup
+    /// on this VPS?" should pass `--tls`.
+    Alpha(AlphaArgs),
+    /// Cross-host α-TLS bench server. Binds + echoes + prints the
+    /// same 5-line identity banner as `beta-server` (plus the leaf
+    /// cert hex for the operator to pin client-side). Production-
+    /// shape: TLS 1.3 + ALPN h2/http/1.1 + RFC 5705 channel binding.
+    AlphaServerTls(AlphaServerTlsArgs),
+    /// Cross-host α-TLS bench client. Consumes the
+    /// `AlphaServerTls` banner via `--server-*-hex` flags.
+    AlphaClientTls(AlphaClientTlsArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -184,6 +203,80 @@ struct BetaArgs {
     /// 200 (satellite).
     #[arg(long, default_value = "0")]
     delay_ms: u64,
+}
+
+#[derive(clap::Args, Debug)]
+struct AlphaArgs {
+    /// Payload size in MiB. Same semantics as `beta`.
+    #[arg(long, default_value = "16")]
+    payload_mib: u64,
+    /// Per-`send_record` chunk size in KiB.
+    #[arg(long, default_value = "64")]
+    chunk_kib: u64,
+    /// Number of runs to repeat back-to-back.
+    #[arg(long, default_value = "1")]
+    runs: u32,
+    /// Connect timeout in seconds.
+    #[arg(long, default_value = "30")]
+    connect_timeout_secs: u64,
+    /// Total per-run timeout in seconds.
+    #[arg(long, default_value = "120")]
+    total_timeout_secs: u64,
+    /// Run the TLS-wrapped variant (production shape). Default is
+    /// raw-TCP which mirrors the in-tree throughput_smoke test —
+    /// useful for regression hunting. Operators wanting an
+    /// honest "vs REALITY" speed number pass `--tls`.
+    #[arg(long, default_value = "false")]
+    tls: bool,
+}
+
+#[derive(clap::Args, Debug)]
+struct AlphaServerTlsArgs {
+    /// Address to bind the TCP listener on.
+    #[arg(long, default_value = "127.0.0.1:0")]
+    bind: String,
+    /// Extra SAN to bake into the self-signed cert beyond
+    /// `localhost`. Set to the hostname/IP the client will dial
+    /// or TLS handshake fails with `NotValidForName`.
+    #[arg(long)]
+    extra_san: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
+struct AlphaClientTlsArgs {
+    /// Peer's `host:port`. Same as the server's banner.
+    #[arg(long)]
+    server_addr: String,
+    /// SNI string the TLS handshake presents.
+    #[arg(long, default_value = "localhost")]
+    server_name: String,
+    /// Server's leaf cert DER as hex.
+    #[arg(long)]
+    server_leaf_cert_hex: String,
+    /// Server's ML-KEM-768 EK as hex.
+    #[arg(long)]
+    server_mlkem_pk_hex: String,
+    /// Server's X25519 public key as hex.
+    #[arg(long)]
+    server_x25519_pub_hex: String,
+    /// Server's PQ fingerprint as hex.
+    #[arg(long)]
+    server_pq_fingerprint_hex: String,
+    /// Payload size in MiB.
+    #[arg(long, default_value = "16")]
+    payload_mib: u64,
+    /// Per-`send_record` chunk size in KiB.
+    #[arg(long, default_value = "64")]
+    chunk_kib: u64,
+    /// Connect timeout in seconds.
+    #[arg(long, default_value = "30")]
+    connect_timeout_secs: u64,
+    /// Total per-run timeout in seconds.
+    #[arg(long, default_value = "120")]
+    total_timeout_secs: u64,
+    /// Number of runs to repeat back-to-back.
+    #[arg(long, default_value = "1")]
+    runs: u32,
 }
 
 #[derive(clap::Args, Debug)]
@@ -538,6 +631,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Beta(args) => validate_beta_args(args),
         Cmd::BetaServer(_) => Ok(()), // no positive-required numeric args
         Cmd::BetaClient(args) => validate_beta_client_args(args),
+        Cmd::Alpha(args) => validate_alpha_args(args),
+        Cmd::AlphaServerTls(_) => Ok(()),
+        Cmd::AlphaClientTls(args) => validate_alpha_client_tls_args(args),
     };
     if let Err(msg) = validate_result {
         eprintln!("error: {msg}");
@@ -548,6 +644,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Beta(args) => run_beta(args).await?,
         Cmd::BetaServer(args) => run_beta_server(args).await?,
         Cmd::BetaClient(args) => run_beta_client(args).await?,
+        Cmd::Alpha(args) => run_alpha(args).await?,
+        Cmd::AlphaServerTls(args) => run_alpha_server_tls(args).await?,
+        Cmd::AlphaClientTls(args) => run_alpha_client_tls(args).await?,
     }
     Ok(())
 }
@@ -728,6 +827,178 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
             gbps = report.gbps,
             elapsed_secs = report.elapsed_secs,
             "cross-host bench run completed"
+        );
+    }
+    Ok(())
+}
+
+fn validate_alpha_args(a: &AlphaArgs) -> Result<(), String> {
+    reject_zero_u64(
+        "--payload-mib",
+        a.payload_mib,
+        "0 MiB payload measures nothing",
+    )?;
+    reject_zero_u64(
+        "--chunk-kib",
+        a.chunk_kib,
+        "0 KiB chunk size = infinite send loop OR div-by-zero",
+    )?;
+    reject_zero_u32(
+        "--runs",
+        a.runs,
+        "0 runs = bench main loop iterates zero times",
+    )?;
+    reject_zero_u64(
+        "--connect-timeout-secs",
+        a.connect_timeout_secs,
+        "0-second handshake deadline = instant timeout",
+    )?;
+    reject_zero_u64(
+        "--total-timeout-secs",
+        a.total_timeout_secs,
+        "0-second total deadline = run aborts before any data can flow",
+    )?;
+    Ok(())
+}
+
+fn validate_alpha_client_tls_args(a: &AlphaClientTlsArgs) -> Result<(), String> {
+    reject_zero_u64(
+        "--payload-mib",
+        a.payload_mib,
+        "0 MiB payload measures nothing",
+    )?;
+    reject_zero_u64(
+        "--chunk-kib",
+        a.chunk_kib,
+        "0 KiB chunk size = infinite send loop OR div-by-zero",
+    )?;
+    reject_zero_u32(
+        "--runs",
+        a.runs,
+        "0 runs = bench main loop iterates zero times",
+    )?;
+    reject_zero_u64(
+        "--connect-timeout-secs",
+        a.connect_timeout_secs,
+        "0-second handshake deadline = instant timeout",
+    )?;
+    reject_zero_u64(
+        "--total-timeout-secs",
+        a.total_timeout_secs,
+        "0-second total deadline = run aborts before any data can flow",
+    )?;
+    Ok(())
+}
+
+async fn run_alpha(args: AlphaArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let payload_bytes = (args.payload_mib as usize) * 1024 * 1024;
+    let chunk_bytes = (args.chunk_kib as usize) * 1024;
+    let connect_timeout = Duration::from_secs(args.connect_timeout_secs);
+    let total_timeout = Duration::from_secs(args.total_timeout_secs);
+
+    for run_ix in 0..args.runs {
+        info!(
+            run = run_ix + 1,
+            of = args.runs,
+            payload_mib = args.payload_mib,
+            chunk_kib = args.chunk_kib,
+            tls = args.tls,
+            "α bench run starting"
+        );
+        let report = if args.tls {
+            alpha::run_same_host_tls_bench(
+                payload_bytes,
+                chunk_bytes,
+                connect_timeout,
+                total_timeout,
+            )
+            .await?
+        } else {
+            alpha::run_same_host_raw_tcp_bench(
+                payload_bytes,
+                chunk_bytes,
+                connect_timeout,
+                total_timeout,
+            )
+            .await?
+        };
+        print!("{}", report.to_json());
+        info!(
+            mib_per_sec = report.mib_per_sec,
+            gbps = report.gbps,
+            elapsed_secs = report.elapsed_secs,
+            "α bench run completed"
+        );
+    }
+    Ok(())
+}
+
+async fn run_alpha_server_tls(args: AlphaServerTlsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let cert = beta::mint_self_signed(args.extra_san.as_deref())?;
+    let bind: std::net::SocketAddr = args.bind.parse()?;
+    let (local, identity, leaf_hex, serve_fut) =
+        alpha::spawn_alpha_tls_echo_server(bind, cert).await?;
+    info!(addr = %local, "bench α-TLS server bound");
+    // Mirror β's banner shape exactly so a single operator workflow
+    // works for both profiles.
+    print!("{}", identity.banner(local, &leaf_hex));
+    serve_fut.await?;
+    Ok(())
+}
+
+async fn run_alpha_client_tls(args: AlphaClientTlsArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let server_addr: std::net::SocketAddr = args.server_addr.parse()?;
+    let pinned_leaf = beta::decode_pinned_cert(&args.server_leaf_cert_hex)?;
+    let mlkem_pk = hex::decode(&args.server_mlkem_pk_hex)
+        .map_err(|e| format!("server_mlkem_pk_hex decode: {e}"))?;
+    let x25519_pub_bytes = hex::decode(&args.server_x25519_pub_hex)
+        .map_err(|e| format!("server_x25519_pub_hex decode: {e}"))?;
+    let pq_fp_bytes = hex::decode(&args.server_pq_fingerprint_hex)
+        .map_err(|e| format!("server_pq_fingerprint_hex decode: {e}"))?;
+    let x25519_pub: [u8; 32] = x25519_pub_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "server_x25519_pub_hex must decode to exactly 32 bytes, got {}",
+            x25519_pub_bytes.len()
+        )
+    })?;
+    let pq_fingerprint: [u8; 32] = pq_fp_bytes.as_slice().try_into().map_err(|_| {
+        format!(
+            "server_pq_fingerprint_hex must decode to exactly 32 bytes, got {}",
+            pq_fp_bytes.len()
+        )
+    })?;
+
+    let payload_bytes = (args.payload_mib as usize) * 1024 * 1024;
+    let chunk_bytes = (args.chunk_kib as usize) * 1024;
+    let connect_timeout = Duration::from_secs(args.connect_timeout_secs);
+    let total_timeout = Duration::from_secs(args.total_timeout_secs);
+
+    for run_ix in 0..args.runs {
+        info!(
+            run = run_ix + 1,
+            of = args.runs,
+            server_addr = %server_addr,
+            "cross-host α-TLS bench run starting"
+        );
+        let report = alpha::run_cross_host_tls_bench(
+            &args.server_name,
+            server_addr,
+            pinned_leaf.clone(),
+            mlkem_pk.clone(),
+            x25519_pub,
+            pq_fingerprint,
+            payload_bytes,
+            chunk_bytes,
+            connect_timeout,
+            total_timeout,
+        )
+        .await?;
+        print!("{}", report.to_json());
+        info!(
+            mib_per_sec = report.mib_per_sec,
+            gbps = report.gbps,
+            elapsed_secs = report.elapsed_secs,
+            "cross-host α-TLS bench run completed"
         );
     }
     Ok(())

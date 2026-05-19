@@ -42,15 +42,18 @@
 //!
 //! ## Profile coverage
 //!
-//! - **α** (TCP + TLS 1.3 + Proteus framing): currently NOT wired in
-//!   bench. The α throughput-smoke test in `proteus-transport-alpha`
-//!   uses the raw-TCP variant (no TLS); a TLS-wrapped α bench needs a
-//!   cert provisioning UX similar to β which is the next iteration.
+//! - **α** (TCP + TLS 1.3 + Proteus framing): full support in two
+//!   variants — `raw-tcp` (no outer TLS, mirrors the in-tree
+//!   `throughput_smoke` test) and `tls` (production-shape, TLS 1.3 +
+//!   ALPN h2/http/1.1 + RFC 5705 channel binding). Cross-host TLS
+//!   bench uses the same 5-line identity banner as β plus the
+//!   leaf cert hex pinned by `--server-leaf-cert-hex`.
 //! - **β** (QUIC + BBR + perf-profile): full support. Operators can
 //!   sweep `PerfProfile` knobs (`pad_quic_datagrams_to_mtu`,
 //!   `initial_mtu`) to compare configurations on the same physical
 //!   path.
 
+pub mod alpha;
 pub mod beta;
 pub mod netem;
 pub mod report;
