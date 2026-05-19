@@ -15,6 +15,56 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — `user_quota` + `user_quarantine` persist files: fsync + mode 0600 (iter-148)
+
+Two durability + privacy gaps on the per-user state persistence
+paths (`user_quota::persist`, `user_quarantine::persist`). Both
+use the temp-file-then-rename pattern for atomicity, but
+pre-iter-148:
+
+- **No fsync between write and rename.** POSIX rename is atomic
+  at the directory-entry layer but the file's DATA pages aren't
+  guaranteed to be on disk. A host crash between the write and
+  the kernel's writeback can leave a directory entry pointing
+  at an empty file. On reload the operator sees empty quota /
+  empty quarantine state → every user gets a fresh allotment
+  AND every quarantine ban evaporates. The latter is worse:
+  the iter-quarantine list is designed to survive process
+  restarts specifically so a stolen credential can't bypass
+  the ban via a forced systemd cycle.
+- **Mode 0644 (world-readable) on the final file.** The temp
+  file inherits the operator's umask (0022 typical → 0644
+  final). The persisted state contains operator-chosen
+  `user_id` strings (`"alice001"`, `"bob_finance_team"`,
+  `"company-eu-team"`) — on a multi-tenant / shared host these
+  are PII the operator wouldn't want any local user to read.
+  Per-user bandwidth + cap_override + ban-trigger metadata
+  is also leaked.
+
+Iter-148 closes both gaps on BOTH persist paths via the same
+sequence: write tmp → re-open + `sync_all()` → chmod 0600 →
+rename → parent-dir `sync_all()`.
+
+The chmod runs BEFORE rename so a concurrent reader of the
+final path never sees a 0644 atomicity window. Same pattern
+SQLite uses for its commit machinery.
+
+All four operations are best-effort: errors get logged at
+WARN but don't fail the persist. The in-memory state remains
+authoritative; a missing fsync just narrows the durability
+window, and a chmod failure just lifts the privacy gate (still
+safer than refusing to persist at all).
+
+2 new tests pin the mode-0600 invariant:
+- `user_quota::tests::iter148_persist_file_is_mode_0600`
+- `user_quarantine::tests::iter148_persist_file_is_mode_0600`
+
+We can't directly observe fsync from the test harness, but the
+existing persist + reload tests confirm the write + rename
+sequence still produces a readable file post-rename.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Security — `parse_http_url` rejects control bytes in host + path (iter-147)
 
 Defense-in-depth on the three `parse_http_url` parsers that the

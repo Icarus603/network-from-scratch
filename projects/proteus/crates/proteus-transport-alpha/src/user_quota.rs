@@ -535,16 +535,70 @@ impl PerUserQuotaTracker {
                 .unwrap_or_else(|| "user_quota.jsonl".to_string());
             parent.join(format!(".{}.{}.tmp", stem, std::process::id()))
         };
+        // Iter-148: write the temp file, fsync, chmod 0600, THEN
+        // rename. Three independent durability + privacy fixes:
+        //
+        //   1. fsync before rename. POSIX rename is atomic at the
+        //      directory-entry level but does NOT guarantee the
+        //      file's DATA pages are on disk. Without fsync(2)
+        //      between write and rename, a host crash can leave
+        //      a directory entry pointing at an empty file (the
+        //      kernel reordered the writeback). On reload the
+        //      operator sees an empty quota state → every user
+        //      gets a fresh allotment until the next persist runs.
+        //   2. chmod 0600 BEFORE rename. The tmp file is created
+        //      via std::fs::write with the default umask (typically
+        //      0644 = world-readable). The quota state includes
+        //      operator-chosen user_id strings ("alice001",
+        //      "bob_finance"); on a shared/multi-tenant host those
+        //      strings are PII the operator wouldn't want any
+        //      local user to read. We chmod the tmp BEFORE rename
+        //      so a concurrent reader of the final path always
+        //      sees mode 0600 (no atomicity gap where it's 0644).
+        //   3. Best-effort fsync on the parent directory after
+        //      rename. Same durability argument — the rename's
+        //      directory-entry change needs its own fsync to
+        //      survive a crash. fsync on the parent dir is a
+        //      well-known POSIX pattern for atomic-rename-with-
+        //      durability (cf. SQLite's commit machinery).
+        //
+        // None of these change behavior under "normal" non-
+        // crashing operation; they pay the syscall cost only on
+        // the persist path (called on quota changes, low rate).
         if let Err(e) = std::fs::write(&tmp, body.as_bytes()) {
             self.persist_failed_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(path = ?tmp, error = %e, "user_quota: temp write failed");
             return Err(e);
+        }
+        // fsync the data file before rename.
+        match std::fs::File::open(&tmp) {
+            Ok(f) => {
+                if let Err(e) = f.sync_all() {
+                    tracing::warn!(path = ?tmp, error = %e, "user_quota: tmp fsync failed (non-fatal; rename will still proceed)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(path = ?tmp, error = %e, "user_quota: re-open for fsync failed (non-fatal)");
+            }
+        }
+        // chmod 0600 on Unix so the final file is operator-only.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+                tracing::warn!(path = ?tmp, error = %e, "user_quota: chmod 0600 failed (non-fatal; default umask applies)");
+            }
         }
         if let Err(e) = std::fs::rename(&tmp, &path) {
             self.persist_failed_total.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(from = ?tmp, to = ?path, error = %e, "user_quota: atomic rename failed");
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
+        }
+        // Best-effort parent-dir fsync to make the rename durable
+        // across a kernel-level page-cache flush race.
+        if let Ok(parent_f) = std::fs::File::open(parent) {
+            let _ = parent_f.sync_all();
         }
         Ok(())
     }
@@ -1049,6 +1103,28 @@ mod tests {
         assert!(body.contains(r#""kind":"header""#));
         assert!(body.contains(r#""user_id":"alice001""#));
         assert!(body.contains(r#""cap_override":5000"#));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Iter-148: the persisted file MUST be mode 0600 on Unix.
+    /// Pre-iter-148 the temp file inherited the operator's umask
+    /// (0022 typical → 0644 final), so the user_id strings + per-
+    /// user bandwidth state could be read by any local user on a
+    /// shared host.
+    #[cfg(unix)]
+    #[test]
+    fn iter148_persist_file_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmpfile("iter148_mode");
+        let q = PerUserQuotaTracker::new(secs(3600), 1000, 4096).with_persistence(path.clone());
+        // Drive at least one persist by mutating state.
+        q.set_user_cap(*b"alice001", 5000);
+        q.record(*b"alice001", 100);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "iter-148: persisted file must be mode 0600 (operator-only); got 0o{mode:o}"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

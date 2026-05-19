@@ -482,6 +482,29 @@ impl UserQuarantineList {
             tracing::warn!(path = ?tmp, error = %e, "user_quarantine: temp write failed");
             return Err(e);
         }
+        // Iter-148: fsync + chmod 0600 before rename. Same
+        // rationale as user_quota::persist — POSIX rename is
+        // atomic at the directory-entry layer but NOT at the
+        // data-page layer; the quarantine state contains
+        // operator-chosen user_id strings which on a multi-tenant
+        // host are PII; both fixes pay only on the persist path.
+        match std::fs::File::open(&tmp) {
+            Ok(f) => {
+                if let Err(e) = f.sync_all() {
+                    tracing::warn!(path = ?tmp, error = %e, "user_quarantine: tmp fsync failed (non-fatal)");
+                }
+            }
+            Err(e) => {
+                tracing::warn!(path = ?tmp, error = %e, "user_quarantine: re-open for fsync failed (non-fatal)");
+            }
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+                tracing::warn!(path = ?tmp, error = %e, "user_quarantine: chmod 0600 failed (non-fatal)");
+            }
+        }
         if let Err(e) = std::fs::rename(&tmp, &path) {
             self.persist_failed_total
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -493,6 +516,9 @@ impl UserQuarantineList {
             );
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
+        }
+        if let Ok(parent_f) = std::fs::File::open(parent) {
+            let _ = parent_f.sync_all();
         }
         Ok(())
     }
@@ -1681,6 +1707,25 @@ mod tests {
         assert!(
             body.contains(r#""triggered_by":"per_user_bandwidth_rate""#),
             "trigger missing: {body}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Iter-148: persisted user_quarantine file MUST be mode 0600
+    /// on Unix. Mirror of the user_quota iter-148 gate; same
+    /// rationale (operator-chosen user_id strings are PII on
+    /// multi-tenant hosts).
+    #[cfg(unix)]
+    #[test]
+    fn iter148_persist_file_is_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let path = tmpfile("iter148_mode");
+        let q = UserQuarantineList::new(secs(600), 4096).with_persistence(path.clone());
+        q.insert(*b"alice001", "per_user_bandwidth_rate");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "iter-148: persisted file must be mode 0600 (operator-only); got 0o{mode:o}"
         );
         let _ = std::fs::remove_file(&path);
     }
