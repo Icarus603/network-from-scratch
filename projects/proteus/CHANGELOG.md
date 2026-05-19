@@ -15,6 +15,58 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — SOCKS5 inbound rejects empty / control-byte hostname + port-0 (iter-151)
+
+Sibling on the SOCKS5 boundary of the iter-146 server-side
+`parse_connect` gate. Pre-iter-151 the client-side SOCKS5 parser
+accepted:
+
+- **ATYP=0x03 + length=0** → empty hostname propagates through
+  to the Proteus tunnel; server-side iter-146 now rejects it
+  but the client wastes one round-trip + a Proteus handshake.
+- **Control bytes (\0 / \r / \n / \t) in the ATYP=0x03
+  hostname** → CWE-367 / HTTP-smuggling-grade injection.
+  Server-side iter-146 catches it but again at the cost of one
+  wasted round-trip; surfacing at the SOCKS5 boundary returns
+  a clean `0x08 ATYP unsupported` SOCKS5 reply so the
+  downstream browser/cURL gets an actionable error.
+- **port == 0** → not a connectable TCP port. Pre-iter-151 the
+  port-0 case fell through to `target_bytes` construction +
+  Proteus dial + server-side relay's `TcpStream::connect`
+  which fails with a confusing OS error. iter-151 now returns
+  a SOCKS5 `0x08` reply with a clear "destination port == 0"
+  diagnostic.
+
+Three new gates inserted inline in the SOCKS5 ATYP=0x03 branch
++ post-parse-future port check:
+
+```rust
+if len[0] == 0 {
+    sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    return Err(SocksError::Socks("empty SOCKS5 domain name"));
+}
+// ...read name + parse UTF-8...
+if host.bytes().any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t') {
+    sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await?;
+    return Err(SocksError::Socks("SOCKS5 domain name contains forbidden control byte"));
+}
+// ...post-parse:
+if port == 0 {
+    let _ = sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]).await;
+    return Err(SocksError::Socks("SOCKS5 destination port == 0 ..."));
+}
+```
+
+Each rejection sends a SOCKS5 `0x08` (Address type not supported
+/ general failure) reply before closing — downstream apps get
+a SOCKS5-protocol-conformant error instead of a TCP RST.
+
+All workspace tests green. clippy + fmt clean. No new tests
+were added — the SOCKS5 parsing module is exercised via
+integration tests in `proteus-client/tests/` which already
+cover the happy path; the iter-151 gates are simple early
+returns whose correctness is obvious from the source.
+
 ### Changed — α cell-split send path: skip zero-fill on non-terminal cells (iter-150)
 
 Micro-optimization on the α cell-padded send path. Pre-iter-150

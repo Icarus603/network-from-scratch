@@ -319,16 +319,47 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
                 // domain name
                 let mut len = [0u8; 1];
                 sock.read_exact(&mut len).await?;
+                // Iter-151: reject zero-length domain at the SOCKS5
+                // boundary. A misbehaving app sending ATYP=0x03 +
+                // length=0 + 2 port bytes parses to ("", port),
+                // which later wastes a DNS bound-timeout on the
+                // empty hostname (symmetric with the iter-146
+                // server-side gate, but caught one hop earlier so
+                // the user sees a meaningful SOCKS5 error instead
+                // of a Proteus tunnel failure).
+                if len[0] == 0 {
+                    sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                        .await?;
+                    return Err(SocksError::Socks("empty SOCKS5 domain name"));
+                }
                 let mut name = vec![0u8; len[0] as usize];
                 sock.read_exact(&mut name).await?;
                 let mut port_b = [0u8; 2];
                 sock.read_exact(&mut port_b).await?;
-                (
-                    std::str::from_utf8(&name)
-                        .map_err(|_| SocksError::Socks("invalid hostname"))?
-                        .to_string(),
-                    u16::from_be_bytes(port_b),
-                )
+                let host = std::str::from_utf8(&name)
+                    .map_err(|_| SocksError::Socks("invalid hostname"))?
+                    .to_string();
+                // Iter-151: reject control bytes in the domain name.
+                // Symmetric with the iter-146 server-side
+                // parse_connect gate. A malicious downstream app
+                // (or a misconfigured one) embedding \0 / \r / \n /
+                // \t in the SOCKS5 ATYP=0x03 hostname would smuggle
+                // those bytes through to the server's CONNECT path.
+                // Server-side iter-146 already rejects them, but
+                // catching at the SOCKS5 boundary avoids the
+                // pointless wire round-trip + surfaces a
+                // SOCKS5-protocol error code to the downstream app.
+                if host
+                    .bytes()
+                    .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+                {
+                    sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                        .await?;
+                    return Err(SocksError::Socks(
+                        "SOCKS5 domain name contains forbidden control byte",
+                    ));
+                }
+                (host, u16::from_be_bytes(port_b))
             }
             0x04 => {
                 // IPv6
@@ -363,6 +394,23 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             return Err(SocksError::Socks("socks5 greeting/request timeout"));
         }
     };
+    // Iter-151: port == 0 is not a valid TCP destination. Reject at
+    // the SOCKS5 boundary (symmetric with iter-146 server-side
+    // gate). A SOCKS5 connect to port 0 then over the Proteus
+    // tunnel would fail at the relay's TcpStream::connect with a
+    // confusing OS error; surfacing 0x08 (Address type not
+    // supported / general failure) here gives the downstream app
+    // a clear "this isn't a valid destination" signal.
+    if port == 0 {
+        // Best-effort reply — even if the write fails, the err
+        // surfaces upstream cleanly.
+        let _ = sock
+            .write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+            .await;
+        return Err(SocksError::Socks(
+            "SOCKS5 destination port == 0 (not a valid TCP destination)",
+        ));
+    }
 
     // ----- Open Proteus session (β-first dual-stack, fallback to α) -----
     let target_bytes = {
