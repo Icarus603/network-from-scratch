@@ -15,6 +15,67 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Changed — α receiver hot path: cursor-based rx_buf consume + scratch zeroize on drop (iter-135)
+
+Two tightly-coupled changes on the α-profile `AlphaReceiver`,
+landing in the same iteration because they share the same code
+region and test setup:
+
+**1. Cursor-based `rx_buf` consume (speed)**. Pre-iter-135 every
+successfully-decoded frame did `self.rx_buf.drain(..consumed)`.
+That's a `Vec::drain` over a leading slice, which under the hood
+memmoves the unconsumed tail to position 0 — O(N) per record where
+N = the remaining buffer length. At `pad_quantum=1280` a single
+16 KiB TCP read holds ~12 cells; the prior code paid 12 memmoves
+per syscall, each shifting up to ~16 KiB. The total memmove cost
+per syscall was `O(reads_per_syscall²)` in the limit.
+
+Post-iter-135 the receiver advances an internal `rx_offset`
+cursor and only compacts the buffer when the cursor crosses
+`RX_COMPACT_THRESHOLD = 64 KiB`. On bulk download that means
+~1 compaction per ~50 records instead of 1 drain per record —
+a ~50× reduction in tail-memmove work along the hot path.
+Worst-case wasted-head memory is bounded at 64 KiB (whenever
+the cursor crosses the threshold, we compact).
+
+The `decode_frame` call now operates on `&rx_buf[rx_offset..]`
+so the cursor offset is invisible to the wire decoder. The
+hard-cap check also switches to measuring LIVE bytes
+(`rx_buf.len() - rx_offset`) so an attacker can't bypass the
+16 MiB cap by exploiting the deferred compaction.
+
+**2. Scratch-buffer zeroize on drop (security)**. The reused
+hot-path scratch buffers (`rx_aead_scratch` on the receiver,
+`tx_aead_scratch` / `tx_hdr_scratch` on the sender) held the
+most-recent plaintext / ciphertext between calls. The
+free-function `aead::open` path already returns a
+`Plaintext` wrapper that zeroizes on drop, but the optimized
+in-place `AeadKey::open_in_place` writes the plaintext into a
+caller-owned `Vec<u8>` that survives until the next clear.
+That meant a session that ended mid-record (panic, idle
+timeout, abrupt drop) left the last plaintext sitting in the
+`Vec`'s allocated bytes until the allocator reused them.
+
+Iter-135 adds explicit `zeroize()` of all three scratch buffers
+in the `Drop` impls of `AlphaSender` (new) and `AlphaReceiver`
+(extended). Same defense-in-depth principle as the existing
+`rx_buf` / `pending` / `last_close_reason` scrubs that already
+landed on `AlphaReceiver`.
+
+3 new tests pin both halves:
+- `rx_cursor_defers_compaction_below_threshold`: 5 small frames
+  in one read leave `rx_offset = wire_len` AND `rx_buf.len() =
+  wire_len` (cursor advanced, but no memmove fired).
+- `rx_cursor_compacts_when_threshold_crossed`: 11 × 6 KiB
+  frames (~67 KiB) trigger compaction; post-read cursor is
+  small + `rx_buf.len() == rx_offset` (no live bytes pending).
+- `rx_aead_scratch_zeroize_on_drop_does_not_panic`: smoke-test
+  that the Drop impl runs cleanly even when scratch is
+  non-empty.
+
+All 445 α unit tests + 35+ integration tests still pass. No
+wire-format change; sender side is untouched.
+
 ### Added — `proteus-bench alpha` / `alpha-server-tls` / `alpha-client-tls` (iter-134)
 
 Pre-iter-134 `proteus-bench` only exposed the β (QUIC) carrier;

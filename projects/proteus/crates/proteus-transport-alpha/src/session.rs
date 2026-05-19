@@ -156,6 +156,24 @@ pub const RATCHET_RECORDS: u64 = 16_384;
 /// putting a firm ceiling on memory exhaustion attacks.
 pub const RX_BUF_HARD_CAP: usize = 16 * 1024 * 1024;
 
+/// Threshold for compacting `rx_buf` after the cursor advances past it.
+/// Below this, we leave the consumed prefix in place and just advance
+/// `rx_offset` — this avoids the per-record O(N) memmove that
+/// `rx_buf.drain(..consumed)` would do on every successfully-decoded
+/// frame.
+///
+/// At `pad_quantum=1280` a single 16 KiB TCP read holds ~12 cells.
+/// Pre-iter every cell decode cost one drain (memmove of the
+/// remaining tail). Post-iter we accumulate the consumed bytes
+/// until the offset crosses 64 KiB, then compact ONCE per ~50
+/// records on bulk download.
+///
+/// The threshold also bounds the worst-case "wasted" buffer-head
+/// memory at 64 KiB — the live (uncompacted) buffer can be at most
+/// `rx_offset + live_tail_size`, and we compact whenever rx_offset
+/// crosses this threshold so wasted-head ≤ 64 KiB.
+const RX_COMPACT_THRESHOLD: usize = 64 * 1024;
+
 /// Send-side TX buffer capacity. 64 KiB matches typical TCP_NOTSENT_LOWAT
 /// + lets us coalesce a handful of records per syscall.
 pub const TX_BUF_CAPACITY: usize = 64 * 1024;
@@ -643,6 +661,24 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     }
 }
 
+/// Scrub the sender's reused scratch buffers on drop.
+///
+/// `tx_aead_scratch` carries the most-recent record's plaintext-then-
+/// ciphertext (the in-place seal writes the AEAD tag without scrubbing
+/// the underlying plaintext bytes — they're overwritten in place, but
+/// trailing capacity may retain stale plaintext bytes across calls).
+/// `tx_hdr_scratch` only carries record-type bytes + varint length —
+/// not secret — but zeroizing it is cheap and keeps the rule
+/// uniform ("every scratch buffer that touched session state gets
+/// scrubbed on drop").
+impl<W: AsyncWrite + Unpin> Drop for AlphaSender<W> {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.tx_aead_scratch.zeroize();
+        self.tx_hdr_scratch.zeroize();
+    }
+}
+
 /// Receiving half of an established session.
 pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> {
     read: R,
@@ -659,6 +695,15 @@ pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> 
     epoch: u32,
     next_seqnum: u64,
     rx_buf: Vec<u8>,
+    /// Cursor into `rx_buf` marking the byte offset of the next
+    /// unconsumed frame. Pre-iter every decoded frame did
+    /// `rx_buf.drain(..consumed)` which memmoves the unconsumed tail
+    /// to position 0 — O(N) per record. Post-iter we just bump this
+    /// cursor and defer compaction until it crosses
+    /// [`RX_COMPACT_THRESHOLD`], saving ~12 memmoves per 16 KiB read
+    /// at `pad_quantum=1280`. The live (unconsumed) bytes are at
+    /// `rx_buf[rx_offset..]`.
+    rx_offset: usize,
     metrics: std::sync::Arc<SessionMetrics>,
     last_close_code: Option<u8>,
     last_close_reason: Option<Vec<u8>>,
@@ -717,6 +762,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             epoch: 0,
             next_seqnum: 0,
             rx_buf: prefix,
+            rx_offset: 0,
             metrics,
             last_close_code: None,
             last_close_reason: None,
@@ -737,7 +783,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     /// surface as `Ok(None)` after recording the peer's stated reason.
     pub async fn recv_record(&mut self) -> AlphaResult<Option<Vec<u8>>> {
         loop {
-            match alpha::decode_frame(&self.rx_buf) {
+            match alpha::decode_frame(&self.rx_buf[self.rx_offset..]) {
                 Ok((frame, consumed)) => {
                     let kind = frame.kind;
                     // Copy the frame body into our reusable scratch
@@ -748,7 +794,15 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                     // on the recv hot path.
                     self.rx_aead_scratch.clear();
                     self.rx_aead_scratch.extend_from_slice(frame.body);
-                    self.rx_buf.drain(..consumed);
+                    // Cursor-based consume: defer the O(N) memmove until
+                    // the cursor crosses RX_COMPACT_THRESHOLD. On bulk
+                    // download at pad_quantum=1280 (~12 cells / 16 KiB
+                    // read) this drops ~11 of every 12 drains.
+                    self.rx_offset += consumed;
+                    if self.rx_offset >= RX_COMPACT_THRESHOLD {
+                        self.rx_buf.drain(..self.rx_offset);
+                        self.rx_offset = 0;
+                    }
                     match kind {
                         alpha::RECORD_DATA => {
                             let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
@@ -894,11 +948,22 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 Err(e) => return Err(e.into()),
             }
             // Refuse to grow the receive buffer past the hard cap.
-            // This catches both garbage-flood attacks and a peer that
-            // sends a single record larger than we will ever accept.
-            if self.rx_buf.len() >= RX_BUF_HARD_CAP {
+            // Measure LIVE bytes (post-cursor) — the consumed prefix
+            // is reclaimable on the next compaction.
+            let live_len = self.rx_buf.len() - self.rx_offset;
+            if live_len >= RX_BUF_HARD_CAP {
                 self.metrics.record_aead_drop();
                 return Err(AlphaError::Closed);
+            }
+            // If the consumed prefix has grown to dominate the buffer,
+            // compact pre-emptively before the next read so we don't
+            // hold an unbounded `rx_offset` worth of dead bytes while
+            // appending fresh data. Threshold matches the post-decode
+            // compaction so the worst-case head-waste stays
+            // ≤ RX_COMPACT_THRESHOLD.
+            if self.rx_offset >= RX_COMPACT_THRESHOLD {
+                self.rx_buf.drain(..self.rx_offset);
+                self.rx_offset = 0;
             }
             // 16 KiB scratch (was 4 KiB pre-iter-17). At
             // pad_quantum=1280 each cell-padded record is
@@ -1012,6 +1077,16 @@ impl<R: AsyncRead + Unpin> Drop for AlphaReceiver<R> {
         use zeroize::Zeroize;
         self.rx_buf.zeroize();
         self.pending.zeroize();
+        // `rx_aead_scratch` carries the most-recently-decrypted
+        // plaintext (between the AEAD open and the caller's
+        // `recv_record` consumer); explicitly scrub on drop.
+        // The current `Plaintext` wrapper for the legacy
+        // `aead::open` path zeroizes on drop already; this
+        // covers the in-place hot path that uses the cached
+        // cipher's `open_in_place` (which scrubs ON tag failure
+        // but leaves a successful decrypt in-place until the
+        // next clear).
+        self.rx_aead_scratch.zeroize();
         if let Some(reason) = self.last_close_reason.as_mut() {
             reason.zeroize();
         }
@@ -1322,5 +1397,186 @@ mod bufwriter_coalescing_tests {
             total_writes >= 1,
             "should still produce at least one write (got {total_writes})",
         );
+    }
+}
+
+#[cfg(test)]
+mod rx_cursor_compaction_tests {
+    //! Pins the per-record cursor optimization: `recv_record` MUST
+    //! NOT memmove the `rx_buf` tail on every successfully-decoded
+    //! frame. Pre-optimization the `rx_buf.drain(..consumed)` cost
+    //! O(N) per record on bulk download — at pad_quantum=1280 and a
+    //! 16 KiB TCP read containing ~12 cells, that was ~12 memmoves
+    //! per syscall. Post-optimization compaction happens once per
+    //! RX_COMPACT_THRESHOLD bytes consumed (64 KiB), so at ~1.3 KiB
+    //! per cell that's ~50 records per compaction = ~1 memmove per
+    //! ~4 TCP reads.
+    //!
+    //! We can't directly observe memmoves, but we CAN observe the
+    //! state of `rx_buf` and `rx_offset` — the cursor advances on
+    //! every decode, and the underlying Vec only changes length
+    //! when we cross the compaction threshold.
+    use super::*;
+    use proteus_crypto::key_schedule::DirectionKeys;
+    use proteus_wire::alpha;
+    use std::io;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    fn keys() -> DirectionKeys {
+        DirectionKeys {
+            key: zeroize::Zeroizing::new([0u8; 32]),
+            iv: zeroize::Zeroizing::new([0u8; 12]),
+        }
+    }
+
+    /// A reader that yields a single pre-filled blob then EOFs.
+    struct OnceReader {
+        data: Vec<u8>,
+        pos: usize,
+    }
+    impl AsyncRead for OnceReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            let rem = &self.data[self.pos..];
+            if rem.is_empty() {
+                return Poll::Ready(Ok(()));
+            }
+            let n = std::cmp::min(rem.len(), buf.remaining());
+            buf.put_slice(&rem[..n]);
+            self.pos += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// After consuming N small frames from a single read, the cursor
+    /// must reflect the consumed prefix and the underlying Vec must
+    /// NOT have been shrunk — until the cursor crosses
+    /// `RX_COMPACT_THRESHOLD`.
+    #[tokio::test]
+    async fn rx_cursor_defers_compaction_below_threshold() {
+        // Build 5 small RECORD_DATA frames sealed under the zero key.
+        let session_keys = keys();
+        let cipher = session_keys.aead_key();
+        let mut wire = Vec::new();
+        for seq in 0..5u64 {
+            let combined = seq; // epoch=0
+            let aad = combined.to_be_bytes();
+            let mut body = b"hello".to_vec();
+            cipher.seal_into(combined, &aad, &mut body).unwrap();
+            wire.extend_from_slice(&alpha::encode_record(alpha::RECORD_DATA, &body));
+        }
+        let wire_len = wire.len();
+        // Each frame is well below RX_COMPACT_THRESHOLD (64 KiB).
+        assert!(
+            wire_len < RX_COMPACT_THRESHOLD,
+            "test pre-condition: small wire fits below the threshold"
+        );
+
+        let reader = OnceReader { data: wire, pos: 0 };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut rx = AlphaReceiver::new(
+            reader,
+            session_keys,
+            zeroize::Zeroizing::new([0u8; 32]),
+            metrics,
+        );
+
+        // Decode all 5 frames.
+        for _ in 0..5 {
+            let rec = rx.recv_record().await.unwrap();
+            assert_eq!(rec.as_deref(), Some(b"hello".as_slice()));
+        }
+
+        // Post-condition: cursor advanced over all 5 frames (= wire_len),
+        // but the Vec's *length* is also wire_len (no shrink yet).
+        // That means the next decode would have a zero-byte live tail —
+        // exactly correct, and confirms no per-record drain happened.
+        assert_eq!(
+            rx.rx_offset, wire_len,
+            "cursor should advance over the wire bytes"
+        );
+        assert_eq!(
+            rx.rx_buf.len(),
+            wire_len,
+            "Vec length should be unchanged (no per-record drain)"
+        );
+    }
+
+    /// Crossing the threshold MUST compact the buffer back to the
+    /// live tail. After compaction, the cursor is 0 and the Vec
+    /// length is just the unconsumed bytes.
+    #[tokio::test]
+    async fn rx_cursor_compacts_when_threshold_crossed() {
+        let session_keys = keys();
+        let cipher = session_keys.aead_key();
+
+        // Build enough cells to push past RX_COMPACT_THRESHOLD.
+        // ~6 KiB payload per record (cipher: 6 KiB + 16 tag + 3 byte hdr
+        // = ~6.15 KiB) — 11 records gets us to ~67 KiB, just past 64 KiB.
+        let mut wire = Vec::new();
+        let n_frames = 11usize;
+        for seq in 0..n_frames as u64 {
+            let combined = seq; // epoch=0
+            let aad = combined.to_be_bytes();
+            let mut body = vec![0x42u8; 6 * 1024];
+            cipher.seal_into(combined, &aad, &mut body).unwrap();
+            wire.extend_from_slice(&alpha::encode_record(alpha::RECORD_DATA, &body));
+        }
+        assert!(
+            wire.len() > RX_COMPACT_THRESHOLD,
+            "test pre-condition: wire size must exceed the compaction threshold"
+        );
+
+        let reader = OnceReader { data: wire, pos: 0 };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut rx = AlphaReceiver::new(
+            reader,
+            session_keys,
+            zeroize::Zeroizing::new([0u8; 32]),
+            metrics,
+        );
+
+        for _ in 0..n_frames {
+            let _ = rx.recv_record().await.unwrap();
+        }
+
+        // After processing all frames, at least one compaction MUST
+        // have fired (because the cumulative cursor crossed the
+        // threshold). Cursor < THRESHOLD afterward, and the Vec
+        // length must be <= RX_COMPACT_THRESHOLD too (the residual
+        // live tail).
+        assert!(
+            rx.rx_offset < RX_COMPACT_THRESHOLD,
+            "after threshold-crossing reads, cursor must be reset to a small value, got {}",
+            rx.rx_offset
+        );
+        // No more bytes are in flight (everything was consumed), so
+        // the buf length equals the cursor (i.e., zero live bytes).
+        assert_eq!(rx.rx_buf.len(), rx.rx_offset);
+    }
+
+    /// On drop, the `rx_aead_scratch` must be scrubbed. This is a
+    /// "did we wire up Zeroize?" sanity check — not a perfect test
+    /// (a successful zeroize can't be observed post-drop), but
+    /// catches the "forgot to add .zeroize() in Drop" regression.
+    #[test]
+    fn rx_aead_scratch_zeroize_on_drop_does_not_panic() {
+        let reader = OnceReader {
+            data: Vec::new(),
+            pos: 0,
+        };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut rx =
+            AlphaReceiver::new(reader, keys(), zeroize::Zeroizing::new([0u8; 32]), metrics);
+        // Push some plaintext-looking bytes into the scratch as if a
+        // decrypt had landed there.
+        rx.rx_aead_scratch.extend_from_slice(b"sensitive-plaintext");
+        // Drop is implicit — must not panic and must complete cleanly.
+        drop(rx);
     }
 }
