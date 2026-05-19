@@ -1190,6 +1190,23 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String), AdminError> {
 /// request from inside a CLI.
 pub fn http_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<String, AdminError> {
     let (host, port, path) = parse_http_url(url)?;
+    // Iter-154: validate the token BEFORE any network I/O so a
+    // CRLF-tainted token gets surfaced as a config error, not a
+    // connect-refused error. The pre-iter-154 order put this
+    // check AFTER TcpStream::connect, which masked the iter-154
+    // signal whenever the target host happened to be down.
+    if let Some(t) = token {
+        if t.bytes().any(|b| b == 0 || b == b'\r' || b == b'\n') {
+            return Err(AdminError::BadUrl(
+                "supplied admin token contains a control byte (NUL / CR / LF). \
+                 The token is embedded into the HTTP Authorization header; a control \
+                 byte would smuggle attacker-chosen headers into the request. \
+                 Strip the offending byte from the token source (env var / \
+                 metrics_token_file / CLI flag)."
+                    .to_string(),
+            ));
+        }
+    }
     let addrs = (host.as_str(), port)
         .to_socket_addrs()
         .map_err(|e| AdminError::Resolve(host.clone(), e))?
@@ -1975,6 +1992,55 @@ proteus_some_future_counter_total 43
                 "iter-147: legit URL {url:?} must still parse cleanly"
             );
         }
+    }
+
+    // ---- iter-154: control-byte rejection on the bearer token ----
+
+    /// Iter-154 runtime gate: http_get must reject a token
+    /// containing CR / LF / NUL with a clear error. Pre-iter-154
+    /// the token was embedded into `Authorization: Bearer {t}\r\n`
+    /// verbatim, enabling HTTP request smuggling via the token
+    /// source (operator config / env var / k8s ConfigMap).
+    #[test]
+    fn iter154_http_get_rejects_token_with_crlf() {
+        // We don't need an actual server — the iter-154 gate fires
+        // before any socket activity. Use a localhost URL that
+        // would otherwise fail at connect (no listener).
+        for bad in [
+            "good-token\r\nX-Smuggle: yes",
+            "good-token\nX-Smuggle: yes",
+            "good-token\0X-Smuggle: yes",
+        ] {
+            let err = http_get(
+                "http://127.0.0.1:9090/metrics",
+                Some(bad),
+                Duration::from_millis(100),
+            )
+            .unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("control byte"),
+                "iter-154: token {bad:?} must be rejected with 'control byte' message: {msg}"
+            );
+        }
+    }
+
+    /// Iter-154 sanity: a well-formed token doesn't trigger the
+    /// gate. We'll get a connect error (no listener) but it must
+    /// NOT be the iter-154 control-byte error.
+    #[test]
+    fn iter154_http_get_accepts_clean_token() {
+        let err = http_get(
+            "http://127.0.0.1:9090/metrics",
+            Some("legitimate-bearer-token-xyz123"),
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            !msg.contains("control byte"),
+            "iter-154: clean token must not trigger the gate: {msg}"
+        );
     }
 
     #[test]

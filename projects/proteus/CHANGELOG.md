@@ -15,6 +15,58 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — admin bearer-token control-byte gate (validate + runtime) (iter-154)
+
+Two-layer defense-in-depth on the metrics-endpoint bearer token.
+The token gets embedded into the HTTP request line via
+`write!(req, "Authorization: Bearer {t}\r\n")` in
+`http_get`. Pre-iter-154 the token bytes were trusted; a token
+containing CR / LF / NUL would smuggle attacker-chosen headers
+into every admin request.
+
+Threat model: the token is operator-supplied, mostly "attack
+self". But config-templating tools (Ansible, k8s ConfigMap)
+pulling from untrusted sources OR an operator copy-paste from
+a poisoned wiki page could turn this into a smuggling vector.
+
+Iter-154 closes both layers:
+
+- **Validate-time** (`validate.rs::preflight`): the existing
+  `metrics_token_file` check now ALSO scans the file content
+  for `\0` / `\r` / `\n` / `\t` and emits a FAIL row with
+  actionable remediation
+  (`openssl rand -base64 24 > {path:?}`).
+- **Runtime** (`admin.rs::http_get`): defensive gate that
+  fires BEFORE any network I/O. Tokens from env vars / CLI
+  flags / programmatic callers (paths that don't go through
+  validate) get the same rejection. Surfaces as
+  `AdminError::BadUrl` with the same actionable message.
+
+The runtime gate runs BEFORE `to_socket_addrs` + `connect_timeout`
+specifically so a CRLF-tainted token gets surfaced as a config
+error, not masked by a "connection refused" from an unrelated
+unreachable host. (Test scenario hit this: a pre-fix gate AFTER
+connect returned "Connection refused" on localhost:9090 because
+the test had no listener; moving the gate to first-priority
+made the iter-154 signal authoritative regardless of network
+state.)
+
+2 new tests in `admin::tests`:
+- `iter154_http_get_rejects_token_with_crlf` — exercises
+  the runtime gate with `\r\n`, `\n`, `\0` token variants.
+- `iter154_http_get_accepts_clean_token` — positive case
+  confirms a well-formed token doesn't trip the gate (the
+  test sees a connect error because there's no listener,
+  but it must NOT be the iter-154 control-byte error).
+
+The validate-time gate doesn't have a dedicated iter-154 test
+because the existing metrics_token_file tests already exercise
+the validate path; adding a specific control-byte fixture would
+duplicate the iter-147 parse_http_url tests on a different
+field.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Fixed — `parse_host_port` rejects port 0 in client endpoint configs (iter-153)
 
 Symmetric with the iter-146 (server-side `parse_connect`) and

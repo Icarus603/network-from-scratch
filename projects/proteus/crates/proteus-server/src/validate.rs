@@ -792,6 +792,26 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             }
             Ok(s) => {
                 let token = s.trim();
+                // Iter-154: reject control bytes anywhere in the token.
+                // The token gets embedded into the HTTP request line
+                // as `Authorization: Bearer {token}\r\n`; any CRLF /
+                // NUL / TAB inside would smuggle attacker-chosen
+                // headers. Defense-in-depth — operator-supplied
+                // content, but config-templating tools (Ansible,
+                // k8s ConfigMap) could pull from untrusted sources.
+                // Symmetric with iter-147's parse_http_url gate.
+                if token
+                    .bytes()
+                    .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+                {
+                    r.push_fail(format!(
+                        "metrics_token_file {path:?} contains a control byte (NUL / CR / LF / \
+                         TAB). The runtime embeds the token into the HTTP Authorization \
+                         header; a control byte would smuggle attacker-chosen headers into \
+                         every admin request. Replace with a clean printable secret: \
+                         `openssl rand -base64 24 > {path:?}`."
+                    ));
+                }
                 if token.len() < 32 {
                     r.push_warn(format!(
                         "metrics_token_file {path:?} contains a {}-char token; <32 chars is \
