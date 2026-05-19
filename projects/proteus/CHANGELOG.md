@@ -15,6 +15,79 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Changed — α cell-split send path: skip zero-fill on non-terminal cells (iter-150)
+
+Micro-optimization on the α cell-padded send path. Pre-iter-150
+EVERY cell did `tx_aead_scratch.resize(quantum, 0)` to zero-fill
+the scratch buffer to `quantum` bytes before writing the cell's
+prefix + chunk. For NON-terminal cells this zero-fill was pure
+waste: `chunk.len() == chunk_max` always, so the layout is
+exactly `[4-byte sentinel | chunk_max bytes] = quantum bytes` —
+every byte gets overwritten by the `copy_from_slice` calls
+immediately after.
+
+Iter-150 splits the branches:
+
+- **Non-terminal cells**: build via `extend_from_slice(sentinel)
+  + extend_from_slice(chunk)`. Two appends, zero pre-fill,
+  total length lands at `quantum` exactly. Debug-assert pins
+  the length invariant.
+- **Terminal cells**: keep the existing `resize(quantum, 0) +
+  targeted overwrites` pattern since the post-chunk region
+  must be zero-padded.
+
+Win scales linearly with `quantum`. At `pad_quantum = 1280` on
+a bulk-download workload (16 KiB logical payload → ~12-13
+non-terminal cells + 1 terminal), this saves:
+
+- 12 memsets × 1280 bytes ≈ 15 KiB of memset work PER record
+- 12 cache-line evictions PER record (each memset touches
+  20+ cache lines)
+
+AEAD encrypt remains the dominant cost on the cell path (~80%
+of CPU time per cell), but every saved memset is a free
+L1-cache cycle that the bench's "MiB/s" number will reflect
+under sustained load.
+
+Wire format is byte-identical (the AEAD inputs — key, nonce,
+AAD, plaintext — are unchanged; only the SCRATCH initialization
+strategy changed). The existing
+`cell_split_padding::multi_cell_payload_splits_and_reassembles_correctly`
+integration test covers end-to-end byte equivalence and still
+passes — no regression test specifically for iter-150 needed
+because the wire-format contract IS the regression test.
+
+All 452 α unit tests + workspace tests green. clippy + fmt clean.
+
+### Changed — `restart_tracker::save` adds fsync for crash durability (iter-149)
+
+Sibling to iter-148. The server's restart-tracker persists
+`(restart_count, first_start_unix, last_clean_shutdown_unix,
+previous_start_unix, previous_end_reason)` to a JSON file so
+operators see `proteus_restarts_total` survive across systemd
+restarts — the bedrock for the
+`rate(proteus_restarts_total[1h]) > 1` crash-loop alert.
+
+Pre-iter-149 `save` used the standard temp-file-then-rename
+pattern but, like the iter-148 user_quota / user_quarantine
+paths, lacked fsync between write and rename + lacked
+parent-dir fsync after rename. POSIX rename atomicity is at
+the directory-entry layer; the file's data pages can still be
+unwritten when a crash happens. Reload then sees a
+default-everything tracker → `restart_count = 0` permanently,
+defeating the crash-loop alert.
+
+Iter-149 adds the same sequence the iter-148 modules use:
+write tmp → `tmp.sync_all()` → rename → `parent.sync_all()`.
+Best-effort throughout (errors log at WARN; in-memory state
+stays authoritative).
+
+Deliberately does NOT chmod the file — restart state contains
+no PII (just counters + unix timestamps); operators reading
+`/var/lib/proteus/restart_state.json` expect it to be readable.
+
+All 10 restart_tracker tests + workspace tests green.
+
 ### Security — `user_quota` + `user_quarantine` persist files: fsync + mode 0600 (iter-148)
 
 Two durability + privacy gaps on the per-user state persistence

@@ -309,6 +309,24 @@ fn load(path: &Path) -> Result<StateFile, std::io::Error> {
 
 /// Atomic write via tempfile + rename. Operator can `cat` the
 /// file at any time — it's always a well-formed JSON object.
+///
+/// Iter-149: durability hardening matching the iter-148 user_quota
+/// / user_quarantine persist paths. POSIX rename is atomic at
+/// the directory-entry layer but not at the data-page layer; a
+/// host crash between `write` and the kernel's writeback can
+/// leave a directory entry pointing at an empty file. Reload
+/// then sees `default::default()` → `restart_count = 0`
+/// permanently, defeating the
+/// `rate(proteus_restarts_total[1h]) > 1` crash-loop alert.
+///
+/// Sequence: write tmp → fsync(tmp) → rename → fsync(parent
+/// dir). All best-effort: fsync errors get logged at WARN but
+/// don't fail the save (the in-memory tracker is still
+/// authoritative; a missed fsync just narrows the crash
+/// window). We deliberately do NOT chmod the file — restart
+/// state contains no PII (just counters + unix timestamps),
+/// and operators reading from `/var/lib/proteus/restart_state.json`
+/// expect the file to be readable.
 fn save(path: &Path, s: &StateFile) -> Result<(), std::io::Error> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -317,7 +335,20 @@ fn save(path: &Path, s: &StateFile) -> Result<(), std::io::Error> {
     }
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, serialize(s).as_bytes())?;
+    // fsync the data file before rename.
+    if let Ok(f) = std::fs::File::open(&tmp) {
+        let _ = f.sync_all();
+    }
     std::fs::rename(&tmp, path)?;
+    // Best-effort parent-dir fsync to make the rename durable
+    // across a kernel-level page-cache flush race.
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(parent_f) = std::fs::File::open(parent) {
+                let _ = parent_f.sync_all();
+            }
+        }
+    }
     Ok(())
 }
 

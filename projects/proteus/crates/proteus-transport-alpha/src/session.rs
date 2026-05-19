@@ -420,17 +420,45 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
                 &payload[offset..offset + chunk_max]
             };
             // Build the cell plaintext into the reused scratch buffer:
-            // [len_prefix | chunk | zero-pad]. Reset to `quantum`
-            // zeros (resize is no-alloc when capacity ≥ quantum,
-            // which we hold via 2 KiB tx_aead_scratch capacity).
+            // [len_prefix | chunk | zero-pad-to-quantum].
+            //
+            // Iter-150: skip the zero-fill on non-terminal cells.
+            // A non-terminal cell ALWAYS has chunk.len() == chunk_max,
+            // so the layout is `[4-byte sentinel | chunk_max bytes] =
+            // quantum bytes` — every byte gets written by the
+            // copy_from_slice calls below, so a pre-fill is pure
+            // waste. Terminal cells still need zero-padding from
+            // `4 + chunk.len()` to `quantum`.
+            //
+            // Win scales with `quantum`: at pad_quantum=1280, every
+            // non-terminal cell saves one 1280-byte memset. On bulk
+            // download where the payload is 16 KiB and chunk_max =
+            // 1276, that's ~12 saved memsets per logical record →
+            // ~15 KiB of saved memset work per record. AEAD encrypt
+            // remains the dominant cost, but every saved memset is
+            // a free L1-cache cycle.
             self.tx_aead_scratch.clear();
-            self.tx_aead_scratch.resize(quantum, 0);
             if is_last {
+                // Terminal cell: build [real_len | chunk | zero-pad].
+                // Resize-to-zero + targeted overwrites is the simplest
+                // way to express "zero the tail" — capacity sticks so
+                // resize is a memset, not a realloc.
+                self.tx_aead_scratch.resize(quantum, 0);
                 self.tx_aead_scratch[..4].copy_from_slice(&(chunk.len() as u32).to_be_bytes());
+                self.tx_aead_scratch[4..4 + chunk.len()].copy_from_slice(chunk);
             } else {
-                self.tx_aead_scratch[..4].copy_from_slice(&CONTINUATION_SENTINEL.to_be_bytes());
+                // Non-terminal cell: build [sentinel | chunk_max bytes]
+                // = quantum bytes, no padding region. extend_from_slice
+                // appends without a pre-zero, saving the memset.
+                self.tx_aead_scratch
+                    .extend_from_slice(&CONTINUATION_SENTINEL.to_be_bytes());
+                self.tx_aead_scratch.extend_from_slice(chunk);
+                debug_assert_eq!(
+                    self.tx_aead_scratch.len(),
+                    quantum,
+                    "non-terminal cell must be exactly quantum bytes pre-AEAD"
+                );
             }
-            self.tx_aead_scratch[4..4 + chunk.len()].copy_from_slice(chunk);
 
             let combined = self.combined();
             let aad = combined.to_be_bytes();
