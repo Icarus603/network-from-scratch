@@ -61,13 +61,36 @@ pub fn run_with_force(out_dir: &Path, force: bool) -> Result<(), Box<dyn std::er
 
 fn write_b64(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    fs::write(path, format!("{b64}\n"))?;
+    let body = format!("{b64}\n");
+    // Iter-152: atomic-mode-0600 + fsync — mirror of the
+    // server-side `proteus_server::keygen::write_b64` fix. The
+    // client's ed25519 secret-key file is the long-term identity
+    // material; a write-then-chmod race window on a shared host
+    // is a real identity-compromise vector. Same fsync rationale
+    // as the iter-148 / iter-149 persist paths.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(path)?.permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(path, perm)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, body)?;
+    }
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(parent_f) = fs::File::open(parent) {
+                let _ = parent_f.sync_all();
+            }
+        }
     }
     Ok(())
 }

@@ -104,13 +104,52 @@ pub fn run_with_force(out_dir: &Path, force: bool) -> Result<(), Box<dyn std::er
 
 fn write_b64(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
-    fs::write(path, format!("{b64}\n"))?;
+    let body = format!("{b64}\n");
+
+    // Iter-152: atomically create the file with mode 0600 on Unix
+    // (closes the umask-window race between fs::write at 0644 and
+    // the subsequent set_permissions). Even though this is a CLI
+    // path that runs interactively, a malicious local user
+    // sniffing the keygen directory could open the new file via
+    // `inotifywait` + `cat` between the file's creation and the
+    // chmod — for an SK file that's a full identity compromise.
+    //
+    // Also: fsync the file BEFORE the function returns so the
+    // bytes survive a host crash (an operator who runs keygen +
+    // immediately reboots would otherwise lose the keys to
+    // unwritten page cache; same defect class as iter-148 /
+    // iter-149).
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(path)?.permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(path, perm)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        // No atomic-mode-0600 on Windows; fall back to the
+        // legacy pattern. Production Proteus deploys are Linux;
+        // Windows builds are dev-only and won't run keygen for
+        // real keys.
+        fs::write(path, body)?;
+    }
+    // Best-effort parent-dir fsync so the inode's directory entry
+    // is durable too. Same pattern iter-148 uses on the persist
+    // path; tolerates non-existent parent (caller validated
+    // out_dir via create_dir_all).
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(parent_f) = fs::File::open(parent) {
+                let _ = parent_f.sync_all();
+            }
+        }
     }
     Ok(())
 }
@@ -163,6 +202,44 @@ mod tests {
             .unwrap();
         let expected = key_schedule::sha256(&pk);
         assert_eq!(&fp[..], &expected[..]);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Iter-152: every key file MUST land on disk with mode 0600
+    /// atomically — no umask race window between write and chmod.
+    /// Pre-iter-152 the file appeared briefly at 0644 (default
+    /// umask) before being chmod'd; a malicious local user on a
+    /// shared host could `inotifywait` + `cat` the SK file in
+    /// that window. Iter-152 uses OpenOptions::mode(0o600) so
+    /// the file is created at 0600 atomically.
+    #[cfg(unix)]
+    #[test]
+    fn iter152_keygen_files_are_atomically_mode_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = std::env::temp_dir().join(format!(
+            "proteus_keygen_iter152_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        run(&tmp).unwrap();
+        for name in [
+            "server_lt.mlkem768.pk",
+            "server_lt.mlkem768.sk",
+            "server_lt.pq.fingerprint",
+            "server_lt.x25519.pk",
+            "server_lt.x25519.sk",
+        ] {
+            let p = tmp.join(name);
+            let mode = std::fs::metadata(&p).unwrap().permissions().mode() & 0o777;
+            assert_eq!(
+                mode, 0o600,
+                "iter-152: {name} must be created at mode 0600 atomically; got 0o{mode:o}"
+            );
+        }
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

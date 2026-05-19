@@ -149,17 +149,41 @@ pub fn run_with_force(
     let ck = rcgen::generate_simple_self_signed(vec![dns_name.to_string()])?;
     let cert_pem = ck.cert.pem();
     let key_pem = ck.key_pair.serialize_pem();
+    // Iter-152: atomic-mode-0600 + fsync for the SK (private key).
+    // The cert is public so 0644 is fine; we keep the cert path
+    // on the legacy fs::write path. The SK is the same compromise
+    // category as the iter-152 keygen / knock_keygen SKs — a
+    // write-then-chmod race window is a real exfil vector on
+    // shared hosts.
     fs::write(&cert_path, cert_pem)?;
-    fs::write(&key_path, key_pem)?;
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(&key_path)?.permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(&key_path, perm)?;
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&key_path)?;
+        f.write_all(key_pem.as_bytes())?;
+        f.sync_all()?;
+        // Cert path: legacy chmod 0644 (the cert is public, the
+        // race window doesn't leak anything sensitive — but we
+        // also want the explicit mode for consistency with
+        // operator-deployed Let's Encrypt files).
         let mut cperm = fs::metadata(&cert_path)?.permissions();
         cperm.set_mode(0o644);
         fs::set_permissions(&cert_path, cperm)?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(&key_path, key_pem)?;
+    }
+    // Parent-dir fsync (best-effort) so the directory entries
+    // for BOTH files are durable.
+    if let Ok(parent_f) = fs::File::open(out_dir) {
+        let _ = parent_f.sync_all();
     }
     println!("✓ TLS cert written to {}", cert_path.display());
     println!("✓ TLS key  written to {}", key_path.display());

@@ -120,13 +120,34 @@ pub fn run_with_force(
          # 32 bytes (256 bits) of OsRng. KEEP SECRET. chmod 0600.\n\
          {b64}\n"
     );
-    fs::write(out_path, body)?;
+    // Iter-152: same atomic-mode-0600 + fsync pattern as
+    // `keygen::write_b64`. The knock PSK is a 32-byte server
+    // secret in the same compromise category as the ML-KEM /
+    // X25519 SK files; a write-then-chmod race window is a real
+    // exfil vector on a shared host.
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        let mut perm = fs::metadata(out_path)?.permissions();
-        perm.set_mode(0o600);
-        fs::set_permissions(out_path, perm)?;
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(out_path)?;
+        f.write_all(body.as_bytes())?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(out_path, body)?;
+    }
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Ok(parent_f) = fs::File::open(parent) {
+                let _ = parent_f.sync_all();
+            }
+        }
     }
     println!(
         "✓ knock PSK ({KNOCK_PSK_LEN} bytes) written to {}",

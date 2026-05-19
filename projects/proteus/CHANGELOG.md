@@ -15,6 +15,59 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — keygen / gencert / knock-keygen / client-keygen close mode-0600 race (iter-152)
+
+Four key-emitting CLI paths (`proteus-server keygen`,
+`proteus-server gencert`, `proteus-server knock-keygen`,
+`proteus-client keygen`) shared the same pattern:
+
+```rust
+fs::write(path, body)?;              // file created at umask (0644)
+let mut perm = metadata(path)?.permissions();
+perm.set_mode(0o600);
+fs::set_permissions(path, perm)?;    // chmod (0600)
+```
+
+There's a real race window between `fs::write` and
+`fs::set_permissions` where the SK file exists on disk at mode
+0644 (world-readable on typical umask 0022). On a shared host
+a malicious local user running `inotifywait /etc/proteus/keys/`
++ `cat` could exfiltrate the SK in that window. Single-shot
+attack — no replay needed, the SK is permanent compromise.
+
+Iter-152 closes the race on all four paths by switching to
+`OpenOptions::new().create(true).mode(0o600).open(path)`
+which is atomic at the syscall layer (Linux `open(O_CREAT,
+0o600)` opens the file with mode 0600 set in the inode before
+any other process can stat/open it).
+
+While there:
+- Add `f.sync_all()` before close — mirror of the iter-148 /
+  iter-149 / iter-150 durability story. An operator who runs
+  keygen + immediately reboots would otherwise lose the keys
+  to unwritten page cache.
+- Add parent-dir `sync_all()` for the directory entry's
+  durability. Same SQLite-commit pattern as iter-148.
+- gencert: same fix on the **private key path only** (the cert
+  is public; 0644 is fine; race window doesn't leak anything).
+
+Sites fixed:
+
+- `proteus-server::keygen::write_b64` — all 5 of the
+  server bundle files (mlkem768.pk/sk, x25519.pk/sk,
+  pq.fingerprint)
+- `proteus-server::knock_keygen::run` — the knock PSK
+- `proteus-server::gencert::run_with_force` — TLS private key
+- `proteus-client::keygen::write_b64` — client ed25519 SK
+
+1 new test in `proteus-server::keygen::tests::iter152_keygen_files_are_atomically_mode_0600`
+exercises the keygen path end-to-end and asserts every output
+file lands at mode 0600 immediately. The existing
+`knock_keygen::run_sets_file_mode_0600_on_unix` covers the
+knock-keygen path on the same invariant.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Security — SOCKS5 inbound rejects empty / control-byte hostname + port-0 (iter-151)
 
 Sibling on the SOCKS5 boundary of the iter-146 server-side
