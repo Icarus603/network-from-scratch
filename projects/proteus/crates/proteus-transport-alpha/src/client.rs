@@ -183,8 +183,26 @@ where
     let mut rng = OsRng;
 
     // Parse the server's ML-KEM-768 EK into the in-memory type.
+    //
+    // Iter-138: surface a typed `BadServerKey` error instead of
+    // panicking. Pre-iter-138 a malformed `server_mlkem_pk_bytes`
+    // (operator typo in client.yaml, truncated key, base64 decode
+    // gone wrong) blew the client binary with
+    // `.expect("mlkem pk")` — systemd restart loop, no recoverable
+    // signal to the operator about WHAT was wrong with the
+    // configuration. ML-KEM-768 EK MUST be exactly 1184 bytes
+    // (FIPS-203 §6.1).
+    if config.server_mlkem_pk_bytes.len() != 1184 {
+        return Err(AlphaError::BadServerKey(
+            "ML-KEM-768 EK length mismatch (expected 1184 bytes; check `server.mlkem_pk` in client.yaml)",
+        ));
+    }
     let ek_array = ml_kem::array::Array::<u8, _>::try_from(&config.server_mlkem_pk_bytes[..])
-        .expect("mlkem pk");
+        .map_err(|_| {
+            AlphaError::BadServerKey(
+                "ML-KEM-768 EK bytes failed to parse into the in-memory key type",
+            )
+        })?;
     let server_mlkem_pk = EncapsulationKey::<MlKem768Params>::from_bytes(&ek_array);
 
     let client_eph = kex::client_ephemeral(&mut rng, &server_mlkem_pk)?;

@@ -15,6 +15,69 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Fixed — client handshake panicked on malformed ML-KEM EK config (iter-138)
+
+Pre-iter-138 the α client handshake (`client::handshake_over_split_bound`)
+parsed the configured server ML-KEM-768 EK with:
+
+```rust
+let ek_array = ml_kem::array::Array::<u8, _>::try_from(
+    &config.server_mlkem_pk_bytes[..]
+).expect("mlkem pk");
+```
+
+A malformed `server_mlkem_pk_bytes` — operator typo in
+`client.yaml`'s `server.mlkem_pk`, base64 decode dropping bytes,
+truncated copy-paste from the deploy guide, etc. — panicked the
+client binary. The panic hook caught it and bumped
+`proteus_panics_total`, then systemd restarted the binary, then
+the next dial attempt panicked again on the still-malformed
+config. To the operator this looked like "the client just keeps
+crashing" with no actionable signal pointing at the
+configuration as the root cause.
+
+Iter-138 surfaces a typed `AlphaError::BadServerKey(&'static str)`
+instead:
+
+- Length-gate first: ML-KEM-768 EK MUST be exactly 1184 bytes
+  (FIPS-203 §6.1). A length mismatch surfaces an actionable
+  error message naming both the expected length AND the
+  configuration field to check
+  (`"check `server.mlkem_pk` in client.yaml"`).
+- Belt-and-braces: even at the correct length, if the
+  underlying `Array::try_from` fails (which is impossible
+  given the length matches the slice type, but defense-in-
+  depth), the error is mapped into the same `BadServerKey`
+  variant instead of unwinding.
+
+The new error variant carries a `&'static str` detail string
+so the validate / status surfaces can render the specific
+failure (`"ML-KEM-768 EK length mismatch (expected 1184 bytes;
+check \`server.mlkem_pk\` in client.yaml)"`) instead of an
+opaque error code. Same shape as the existing
+`BadServerFinished` / `BadClientFinished` / `AuthTagInvalid`
+variants — operators get one place to look for handshake-
+phase errors.
+
+4 new integration tests in
+`tests/malformed_server_key.rs` pin every failure mode the
+EK parse can take:
+
+- `empty_mlkem_pk_bytes_returns_bad_server_key_not_panic`:
+  empty Vec → BadServerKey, NOT panic.
+- `truncated_mlkem_pk_bytes_returns_bad_server_key`: 100
+  bytes → BadServerKey.
+- `oversized_mlkem_pk_bytes_returns_bad_server_key`: 4096
+  bytes → BadServerKey.
+- `correct_length_garbage_mlkem_pk_bytes_returns_bad_server_key_or_handshake_failure`:
+  1184 bytes of zeros → the test's contract is "no panic",
+  any Err is acceptable (the EK parse passes the length gate
+  + the in-memory key parse succeeds; the failure surfaces
+  later as a handshake error).
+
+All 4 tests pass; full workspace test suite green. clippy
+clean. fmt clean.
+
 ### Fixed — cover-forward dial applies keepalive + TCP_USER_TIMEOUT (iter-137)
 
 Pre-iter-137 the cover-forward dial path (`cover::forward_to_cover`)

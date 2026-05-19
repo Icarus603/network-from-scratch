@@ -48,6 +48,21 @@ pub enum AlphaError {
     /// Sequence-number space exhausted (spec §4.5 — 40-bit seqnum, 2^40 packets).
     #[error("seqnum exhausted in current epoch")]
     SeqnumExhausted,
+
+    /// The configured server public-key material is malformed
+    /// (wrong length, garbage bytes, copy-paste error in
+    /// `client.yaml`). Surfaced as a fail-fast error from the
+    /// client handshake instead of a process panic. Pre-iter-138
+    /// the `EncapsulationKey` parse failed with `.expect("mlkem pk")`
+    /// — the whole binary aborted via the panic hook on a
+    /// configuration error, looking to operators like a "crashed
+    /// client" instead of "you wrote the key wrong".
+    ///
+    /// Includes the human-readable detail so the validate / status
+    /// surface can surface "ML-KEM EK was 1140 bytes, expected
+    /// 1184" instead of an opaque "BadServerKey".
+    #[error("server public-key material malformed: {0}")]
+    BadServerKey(&'static str),
 }
 
 /// Convenience alias.
