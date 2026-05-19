@@ -1151,6 +1151,36 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String), AdminError> {
             "{url:?}: host portion is empty (likely `http://:port` without a host)."
         )));
     }
+    // Iter-147: reject CRLF / NUL / TAB anywhere in host or path.
+    // The host and path get embedded verbatim into the HTTP
+    // request line + Host header in `http_get`; without this
+    // gate, an operator (or a config-templating tool) that pulls
+    // a URL from an untrusted source could inject arbitrary
+    // headers into the GET. Same defense-in-depth class as
+    // iter-146 on the inner CONNECT path. Probably never
+    // triggered in practice (operators hand-type the URL or
+    // copy it from the deploy guide) but the absence of any
+    // validation was wrong on principle.
+    if host
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t' || b == b' ')
+    {
+        return Err(AdminError::BadUrl(format!(
+            "{url:?}: host contains a forbidden control character (NUL / CR / LF / TAB / space). \
+             HTTP request smuggling defense-in-depth — the host is embedded into the \
+             Host: header. Strip the offending byte from the --url argument."
+        )));
+    }
+    if path
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return Err(AdminError::BadUrl(format!(
+            "{url:?}: path contains a forbidden control character (NUL / CR / LF / TAB). \
+             HTTP request smuggling defense-in-depth — the path is embedded into the \
+             GET request line. Strip the offending byte from the --url argument."
+        )));
+    }
     Ok((host, port, path.to_string()))
 }
 
@@ -1877,6 +1907,74 @@ proteus_some_future_counter_total 43
     fn parse_http_url_defaults_path_to_slash() {
         let (_, _, path) = parse_http_url("http://127.0.0.1:9090").unwrap();
         assert_eq!(path, "/");
+    }
+
+    // ---- iter-147: CRLF / NUL / TAB injection rejection ----
+
+    /// Pre-iter-147 the host portion was embedded verbatim into
+    /// the Host: header. A URL containing CR/LF in the host
+    /// (somehow — e.g. a config-templating tool pulling from an
+    /// untrusted source) would smuggle attacker-chosen HTTP
+    /// headers into the GET.
+    #[test]
+    fn iter147_parse_http_url_rejects_crlf_in_host() {
+        // We can't write a literal CRLF inside a Rust string
+        // literal alongside the prefix matcher, so build the URL
+        // by concatenation. host = "evil.com\r\nX-Smuggle: yes"
+        for ch in ['\r', '\n', '\t', '\0'] {
+            let url = format!("http://evil.com{ch}smuggle.com:9090/metrics");
+            let err = parse_http_url(&url).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("control character"),
+                "iter-147: host control byte {ch:?} must be rejected: {msg}"
+            );
+        }
+    }
+
+    /// Iter-147: path control bytes also get rejected (these go
+    /// onto the GET request line).
+    #[test]
+    fn iter147_parse_http_url_rejects_crlf_in_path() {
+        for ch in ['\r', '\n', '\t', '\0'] {
+            let url = format!("http://127.0.0.1:9090/metrics{ch}smuggle");
+            let err = parse_http_url(&url).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("control character"),
+                "iter-147: path control byte {ch:?} must be rejected: {msg}"
+            );
+        }
+    }
+
+    /// Iter-147: whitespace inside the host is also rejected
+    /// (a typo `http://example .com:443/` previously produced
+    /// confusing downstream behavior).
+    #[test]
+    fn iter147_parse_http_url_rejects_space_in_host() {
+        let err = parse_http_url("http://evil .com:9090/metrics").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("control character"),
+            "iter-147: space in host must be rejected: {msg}"
+        );
+    }
+
+    /// Iter-147: well-formed URLs still parse — make sure we
+    /// didn't accidentally break the positive case.
+    #[test]
+    fn iter147_well_formed_urls_still_parse_cleanly() {
+        for url in [
+            "http://127.0.0.1:9090/metrics",
+            "http://localhost:9091/healthz",
+            "http://[::1]:9090/diagnose",
+            "http://example.com:8443/admin/abuse-fires",
+        ] {
+            assert!(
+                parse_http_url(url).is_ok(),
+                "iter-147: legit URL {url:?} must still parse cleanly"
+            );
+        }
     }
 
     #[test]

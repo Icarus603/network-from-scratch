@@ -15,6 +15,68 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Security — `parse_http_url` rejects control bytes in host + path (iter-147)
+
+Defense-in-depth on the three `parse_http_url` parsers that the
+admin CLI surfaces use to build HTTP GET requests:
+
+- `proteus-server::admin::parse_http_url` (`admin status`,
+  `admin diff`, `admin abuse-fires`, `admin alerts-check`, etc.)
+- `proteus-client::admin_alerts_check::parse_http_url`
+  (`proteus-client alerts-check`)
+- `proteus-client::main::parse_http_url` (`proteus-client status`,
+  `diagnose`, `connect-test`)
+
+Pre-iter-147 each parser only validated the scheme prefix +
+port-as-u16. A `--url` argument containing CRLF / NUL / TAB
+anywhere in the host or path got embedded verbatim into the
+HTTP request line + Host: header in the subsequent `http_get`,
+enabling HTTP request smuggling via attacker-chosen headers:
+
+```
+proteus-server admin status \
+    --url 'http://127.0.0.1\r\nX-Smuggle: yes:9090/metrics'
+```
+
+would emit:
+
+```
+GET /metrics HTTP/1.1
+Host: 127.0.0.1
+X-Smuggle: yes:9090
+User-Agent: proteus-admin
+Connection: close
+```
+
+Threat model: the URL is operator-supplied, so this is mostly
+"attack self". But config-templating tools that pull URLs from
+untrusted sources (Ansible templates fetching from a misconfigured
+inventory, k8s ConfigMaps with operator-injected fields) could
+turn this into a remote-injection path. Closing the gate is
+correct defense-in-depth regardless.
+
+Iter-147 adds the same reject pattern to all three parsers:
+
+- Reject host containing NUL / CR / LF / TAB / space.
+- Reject path containing NUL / CR / LF / TAB.
+
+Error message names "forbidden control character" + the actionable
+remediation ("strip the offending byte from the --url argument").
+
+4 new tests in `proteus-server::admin::tests`:
+- `iter147_parse_http_url_rejects_crlf_in_host` (4 control bytes)
+- `iter147_parse_http_url_rejects_crlf_in_path` (4 control bytes)
+- `iter147_parse_http_url_rejects_space_in_host`
+- `iter147_well_formed_urls_still_parse_cleanly` (positive case
+  with 4 legit URL shapes)
+
+The two client-side parsers don't have dedicated iter-147 tests
+because the gate logic is byte-identical to the server-side and
+their `parse_http_url` is already covered by smoke tests that
+the well-formed `http://127.0.0.1:9091/...` form keeps parsing.
+
+All workspace tests green. clippy + fmt clean.
+
 ### Security — `parse_connect` validates inner CONNECT host + port (iter-146)
 
 The server's inner-protocol CONNECT request (parsed by

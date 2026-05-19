@@ -517,6 +517,30 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), AlertsCheckError> 
             "{url:?}: port {port:?} isn't a valid u16 (1-65535)"
         ))
     })?;
+    // Iter-147: reject CRLF / NUL / TAB / space in host or path —
+    // both get embedded verbatim into the HTTP GET request (host
+    // into Host:, path into the request line). Defense-in-depth
+    // against operator config-template tools pulling URLs from
+    // untrusted sources. Symmetric with the server-side
+    // `admin::parse_http_url` gate.
+    if host
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t' || b == b' ')
+    {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "{url:?}: host contains a forbidden control character (NUL / CR / LF / TAB / space). \
+             HTTP request smuggling defense-in-depth — strip the offending byte from the --url argument."
+        )));
+    }
+    if path
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "{url:?}: path contains a forbidden control character (NUL / CR / LF / TAB). \
+             HTTP request smuggling defense-in-depth — strip the offending byte from the --url argument."
+        )));
+    }
     Ok((host.to_string(), port, path))
 }
 

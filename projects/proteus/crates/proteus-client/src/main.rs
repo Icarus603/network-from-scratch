@@ -493,6 +493,29 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
             ));
         }
     };
+    // Iter-147: reject CRLF / NUL / TAB / space in host or path
+    // to prevent HTTP request smuggling via the --url argument.
+    // Symmetric with the iter-147 gates in
+    // proteus-server::admin::parse_http_url and
+    // proteus-client::admin_alerts_check::parse_http_url.
+    if host
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t' || b == b' ')
+    {
+        return Err(format!(
+            "{url:?}: host contains a forbidden control character (NUL / CR / LF / TAB / space). \
+             HTTP request smuggling defense-in-depth — strip the offending byte from the --url argument."
+        ));
+    }
+    if path
+        .bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return Err(format!(
+            "{url:?}: path contains a forbidden control character (NUL / CR / LF / TAB). \
+             HTTP request smuggling defense-in-depth — strip the offending byte from the --url argument."
+        ));
+    }
     Ok((host, port, path))
 }
 
