@@ -336,10 +336,7 @@ pub fn evaluate(body: &str) -> Report {
                 r.push(Check {
                     rule_name,
                     severity: CheckSeverity::Pass,
-                    message: format!(
-                        "all {} {friendly} reload attempt(s) succeeded",
-                        att as u64
-                    ),
+                    message: format!("all {} {friendly} reload attempt(s) succeeded", att as u64),
                     equivalent_promql: "",
                 });
             }
@@ -1354,7 +1351,10 @@ mod tests {
             "reload-failing is WARN-only; must not force exit=1"
         );
         let (_, w, cr) = r.counts();
-        assert!(w >= 2, "expected at least 2 WARN checks for 2 failing reloads");
+        assert!(
+            w >= 2,
+            "expected at least 2 WARN checks for 2 failing reloads"
+        );
         assert_eq!(cr, 0);
     }
 
@@ -1365,7 +1365,10 @@ mod tests {
     fn iter102_running_ready_no_drain_stuck() {
         let body = body_with("proteus_up 1\nproteus_ready 1");
         let r = evaluate(&body);
-        let any = r.checks.iter().any(|c| c.rule_name == "ProteusServerDrainStuck");
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name == "ProteusServerDrainStuck");
         assert!(!any, "ready=1 must NOT fire DrainStuck");
     }
 
@@ -1390,7 +1393,10 @@ mod tests {
     fn iter102_down_no_drain_stuck() {
         let body = body_with("proteus_up 0\nproteus_ready 0");
         let r = evaluate(&body);
-        let any = r.checks.iter().any(|c| c.rule_name == "ProteusServerDrainStuck");
+        let any = r
+            .checks
+            .iter()
+            .any(|c| c.rule_name == "ProteusServerDrainStuck");
         assert!(!any, "up=0 must NOT fire DrainStuck");
     }
 
@@ -1583,9 +1589,8 @@ mod tests {
     /// Handshake failure ratio < 10% → PASS.
     #[test]
     fn iter98_handshake_ratio_healthy_passes() {
-        let body = body_with(
-            "proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 5",
-        );
+        let body =
+            body_with("proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 5");
         let r = evaluate(&body);
         let pass = r
             .checks
@@ -1598,9 +1603,8 @@ mod tests {
     /// Handshake failure ratio > 10% → WARN.
     #[test]
     fn iter98_handshake_ratio_high_warns() {
-        let body = body_with(
-            "proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 25",
-        );
+        let body =
+            body_with("proteus_handshakes_succeeded_total 100\nproteus_handshakes_failed_total 25");
         let r = evaluate(&body);
         let warn = r
             .checks
@@ -1619,9 +1623,8 @@ mod tests {
     fn iter98_handshake_few_failures_no_warn_even_high_ratio() {
         // 1 fail vs 5 successes = 20% ratio, but fail count is
         // small enough to be noise.
-        let body = body_with(
-            "proteus_handshakes_succeeded_total 5\nproteus_handshakes_failed_total 1",
-        );
+        let body =
+            body_with("proteus_handshakes_succeeded_total 5\nproteus_handshakes_failed_total 1");
         let r = evaluate(&body);
         let pass = r
             .checks
@@ -1637,7 +1640,8 @@ mod tests {
         let body = body_with("proteus_up 1");
         let r = evaluate(&body);
         let any = r.checks.iter().any(|c| {
-            c.rule_name == "ProteusAeadDropsObserved" || c.rule_name == "ProteusAeadDropsCatastrophic"
+            c.rule_name == "ProteusAeadDropsObserved"
+                || c.rule_name == "ProteusAeadDropsCatastrophic"
         });
         assert!(!any);
     }
@@ -1838,10 +1842,7 @@ mod tests {
             c.rule_name == "ProteusSsrfAttemptsObserved"
                 || c.rule_name == "ProteusSsrfAttemptsCatastrophic"
         });
-        assert!(
-            !any,
-            "absent metric → no SSRF check should fire"
-        );
+        assert!(!any, "absent metric → no SSRF check should fire");
     }
 
     // ──── iter-74: handshake latency check ────
@@ -1908,10 +1909,7 @@ mod tests {
             c.rule_name == "ProteusHandshakeLatencyP99High"
                 || c.rule_name == "ProteusHandshakeLatencyP99Catastrophic"
         });
-        assert!(
-            !any,
-            "no handshakes → no latency check should fire"
-        );
+        assert!(!any, "no handshakes → no latency check should fire");
     }
 
     /// Iter-114: server-side alerts-check rejects unknown format

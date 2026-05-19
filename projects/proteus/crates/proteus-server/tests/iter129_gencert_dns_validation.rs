@@ -72,10 +72,7 @@ fn iter129_gencert_rejects_empty_dns_name() {
 
 #[test]
 fn iter129_gencert_rejects_consecutive_dots() {
-    expect_exit_2(
-        "vps.example..com",
-        &["empty label", "NotValidForName"],
-    );
+    expect_exit_2("vps.example..com", &["empty label", "NotValidForName"]);
 }
 
 #[test]
@@ -105,12 +102,7 @@ fn iter129_gencert_rejects_underscore() {
 fn iter129_gencert_accepts_valid_hostname_and_writes_files() {
     let out_dir = fresh_outdir("accepted");
     let output = Command::new(BIN)
-        .args([
-            "gencert",
-            "--dns-name",
-            "vps.example.com",
-            "--out",
-        ])
+        .args(["gencert", "--dns-name", "vps.example.com", "--out"])
         .arg(&out_dir)
         .output()
         .expect("spawn proteus-server");
@@ -120,8 +112,14 @@ fn iter129_gencert_accepts_valid_hostname_and_writes_files() {
         "valid --dns-name must exit 0; stderr={}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(out_dir.join("fullchain.pem").exists(), "cert file must be written");
-    assert!(out_dir.join("privkey.pem").exists(), "key file must be written");
+    assert!(
+        out_dir.join("fullchain.pem").exists(),
+        "cert file must be written"
+    );
+    assert!(
+        out_dir.join("privkey.pem").exists(),
+        "key file must be written"
+    );
     let _ = std::fs::remove_dir_all(&out_dir);
 }
 

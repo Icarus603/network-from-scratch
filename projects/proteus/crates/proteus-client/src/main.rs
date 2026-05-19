@@ -264,9 +264,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     );
                     std::process::exit(2);
                 }
-                (Some(_), Some(_)) => unreachable!(
-                    "clap conflicts_with should have rejected this combination"
-                ),
+                (Some(_), Some(_)) => {
+                    unreachable!("clap conflicts_with should have rejected this combination")
+                }
             };
             let code = proteus_client::validate::cli_run(&resolved).await?;
             std::process::exit(code);
@@ -299,12 +299,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 )
                 .await?
             } else {
-                proteus_client::connect_test::cli_run(
-                    &config,
-                    connect_timeout_secs,
-                    &format,
-                )
-                .await?
+                proteus_client::connect_test::cli_run(&config, connect_timeout_secs, &format)
+                    .await?
             };
             std::process::exit(code);
         }
@@ -358,17 +354,15 @@ async fn diagnose_cmd(url: &str) -> Result<(), Box<dyn std::error::Error>> {
          Connection: close\r\n\r\n"
     );
     const STEP: Duration = Duration::from_secs(10);
-    let mut stream = tokio::time::timeout(
-        STEP,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "diagnose: TCP connect to {host}:{port} timed out after 10s — admin \
+    let mut stream =
+        tokio::time::timeout(STEP, tokio::net::TcpStream::connect((host.as_str(), port)))
+            .await
+            .map_err(|_| {
+                format!(
+                    "diagnose: TCP connect to {host}:{port} timed out after 10s — admin \
              endpoint not reachable (binary down? wrong port?)"
-        )
-    })??;
+                )
+            })??;
     tokio::time::timeout(
         STEP,
         tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()),
@@ -426,17 +420,15 @@ async fn status_cmd(url: &str, format: &str) -> Result<(), Box<dyn std::error::E
     // pre-iter-112 pinned the CLI tool forever.
     use std::time::Duration;
     const STEP: Duration = Duration::from_secs(10);
-    let mut stream = tokio::time::timeout(
-        STEP,
-        tokio::net::TcpStream::connect((host.as_str(), port)),
-    )
-    .await
-    .map_err(|_| {
-        format!(
-            "status: TCP connect to {host}:{port} timed out after 10s — admin \
+    let mut stream =
+        tokio::time::timeout(STEP, tokio::net::TcpStream::connect((host.as_str(), port)))
+            .await
+            .map_err(|_| {
+                format!(
+                    "status: TCP connect to {host}:{port} timed out after 10s — admin \
              endpoint not reachable (binary down? wrong port?)"
-        )
-    })??;
+                )
+            })??;
     tokio::time::timeout(
         STEP,
         tokio::io::AsyncWriteExt::write_all(&mut stream, req.as_bytes()),
@@ -482,9 +474,7 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
         ));
     }
     let rest = url.strip_prefix("http://").ok_or_else(|| {
-        format!(
-            "{url:?}: missing `http://` scheme prefix. Expected `http://host:port[/path]`."
-        )
+        format!("{url:?}: missing `http://` scheme prefix. Expected `http://host:port[/path]`.")
     })?;
     let (authority, path) = match rest.find('/') {
         Some(ix) => (&rest[..ix], rest[ix..].to_string()),

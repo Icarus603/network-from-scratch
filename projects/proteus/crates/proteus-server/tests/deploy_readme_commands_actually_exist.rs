@@ -41,7 +41,9 @@ const SERVER_BIN: &str = env!("CARGO_BIN_EXE_proteus-server");
 /// produces for a workspace.
 fn client_bin_path() -> std::path::PathBuf {
     let server = std::path::PathBuf::from(SERVER_BIN);
-    let parent = server.parent().expect("CARGO_BIN_EXE_proteus-server has no parent");
+    let parent = server
+        .parent()
+        .expect("CARGO_BIN_EXE_proteus-server has no parent");
     let candidate = parent.join("proteus-client");
     assert!(
         candidate.exists(),
@@ -122,9 +124,10 @@ fn extract_documented_commands(body: &str) -> BTreeSet<(String, Vec<String>)> {
         if line.starts_with('#') {
             continue;
         }
-        for (bin_name, bin_tag) in
-            [("proteus-server", "proteus-server"), ("proteus-client", "proteus-client")]
-        {
+        for (bin_name, bin_tag) in [
+            ("proteus-server", "proteus-server"),
+            ("proteus-client", "proteus-client"),
+        ] {
             if let Some(idx) = line.find(bin_tag) {
                 // Require that the char before the binary name is
                 // a word boundary (start-of-line, whitespace, or
@@ -163,10 +166,7 @@ fn extract_documented_commands(body: &str) -> BTreeSet<(String, Vec<String>)> {
                     // it doesn't, we're in prose-disguised-as-code
                     // (rare in fenced bash but possible) and we
                     // skip the whole reference.
-                    if !tok
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c == '-')
-                    {
+                    if !tok.chars().all(|c| c.is_ascii_lowercase() || c == '-') {
                         break;
                     }
                     tokens.push(tok.to_string());

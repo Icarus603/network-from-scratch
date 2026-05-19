@@ -588,12 +588,23 @@ cover_endpoint: "www.cloudflare.com:443"
 # still route to the cover endpoint, preserving the
 # cover-server-pass-through fingerprint.
 #
-# probe_anomaly:
-#   window_secs: 300            # 5 min sliding window (default)
-#   threshold: 8                # 8 cover-forwards per /24 in window (default)
-#   max_prefixes: 16384         # memory cap on tracked prefixes (~1 MiB)
-#   autodeny_minutes: 0         # 0 = ALERT-ONLY (default). Set 15-60 for production.
-#   autodeny_max_entries: 4096  # cap on deny-list size (~128 KiB)
+# Iter-133: enabled by default (was commented out pre-iter-133).
+# `cover_endpoint:` is set above, so without this stanza the
+# `validate` preflight emits "cover endpoint is configured but
+# probe_anomaly is unset — cover-forward bursts will not surface
+# as alerts" — operators copy-pasting the example then deploying
+# would have their probe-burst signal go to /dev/null. The
+# defaults below are safe-for-production: ALERT-ONLY
+# (autodeny_minutes=0), 5-minute sliding window, threshold=8
+# cover-forwards per /24. Bump autodeny_minutes to 15-60 once
+# you've watched the alerts for a week and confirmed no false
+# positives on your specific deploy.
+probe_anomaly:
+  window_secs: 300            # 5 min sliding window (default)
+  threshold: 8                # 8 cover-forwards per /24 in window (default)
+  max_prefixes: 16384         # memory cap on tracked prefixes (~1 MiB)
+  autodeny_minutes: 0         # 0 = ALERT-ONLY (default). Set 15-60 for production after watching the alerts for a week.
+  autodeny_max_entries: 4096  # cap on deny-list size (~128 KiB)
 
 # Server long-term keys (generated via `proteus-server keygen`).
 keys:

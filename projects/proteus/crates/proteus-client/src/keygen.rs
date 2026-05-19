@@ -17,10 +17,7 @@ pub fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// the long-term identity the server allowlists by public key;
 /// overwriting it without coordinating with the server admin
 /// means the client immediately stops being able to authenticate.
-pub fn run_with_force(
-    out_dir: &Path,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_force(out_dir: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     let targets = [
         out_dir.join("client.ed25519.sk"),
         out_dir.join("client.ed25519.pk"),

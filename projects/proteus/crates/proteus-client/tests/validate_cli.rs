@@ -654,7 +654,11 @@ async fn iter43_server_endpoints_multiple_diverging_all_listed() {
         _ => None,
     });
     let msg = warn_msg.expect("SNI-divergence warn must fire");
-    for needle in ["a.bad.example.com", "b.bad.example.com", "c.bad.example.com"] {
+    for needle in [
+        "a.bad.example.com",
+        "b.bad.example.com",
+        "c.bad.example.com",
+    ] {
         assert!(
             msg.contains(needle),
             "all 3 divergent hostnames must be listed; missing {needle:?} in:\n{msg}"
@@ -724,9 +728,7 @@ async fn iter56_user_id_with_trailing_whitespace_fails() {
     let report = validate::run(&yaml).await;
     eprintln!("trailing-ws report:\n{report}");
     let ws_fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => {
-            s.contains("user_id") && s.contains("whitespace")
-        }
+        validate::Check::Fail(s) => s.contains("user_id") && s.contains("whitespace"),
         _ => false,
     });
     assert!(
@@ -862,9 +864,7 @@ async fn iter48_all_zero_client_sk_fails_validate() {
         "all-zero secret key MUST FAIL validate: {report}"
     );
     let zero_fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => {
-            s.contains("client_ed25519_sk") && s.contains("ALL-ZERO")
-        }
+        validate::Check::Fail(s) => s.contains("client_ed25519_sk") && s.contains("ALL-ZERO"),
         _ => false,
     });
     assert!(
@@ -997,9 +997,7 @@ async fn iter107_direct_ip_with_single_hostname_no_warn() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("bootstrap_dns.direct_ip") && s.contains("no HA")
-        }
+        validate::Check::Warn(s) => s.contains("bootstrap_dns.direct_ip") && s.contains("no HA"),
         _ => false,
     });
     assert!(
@@ -1026,9 +1024,7 @@ async fn iter107_direct_ip_with_ip_literal_pool_no_warn() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("bootstrap_dns.direct_ip") && s.contains("no HA")
-        }
+        validate::Check::Warn(s) => s.contains("bootstrap_dns.direct_ip") && s.contains("no HA"),
         _ => false,
     });
     assert!(
@@ -1050,9 +1046,7 @@ async fn iter94_client_drain_zero_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("drain_secs = 0") && s.contains("connection reset")
-        }
+        validate::Check::Warn(s) => s.contains("drain_secs = 0") && s.contains("connection reset"),
         _ => false,
     });
     assert!(warn, "client drain=0 must WARN: {report}");
@@ -1074,9 +1068,14 @@ async fn iter92_beta_mtu_upper_bound_below_minimum_fails() {
          beta_mtu_upper_bound: 1000\n",
     );
     let report = validate::run(&yaml).await;
-    assert!(report.has_failures(), "MTU upper < 1200 MUST FAIL: {report}");
+    assert!(
+        report.has_failures(),
+        "MTU upper < 1200 MUST FAIL: {report}"
+    );
     let fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => s.contains("beta_mtu_upper_bound = 1000") && s.contains("QUIC v1 minimum"),
+        validate::Check::Fail(s) => {
+            s.contains("beta_mtu_upper_bound = 1000") && s.contains("QUIC v1 minimum")
+        }
         _ => false,
     });
     assert!(fail, "FAIL must call out QUIC minimum: {report}");
@@ -1094,7 +1093,9 @@ async fn iter92_beta_mtu_upper_bound_excessive_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => s.contains("beta_mtu_upper_bound = 10000") && s.contains("9216"),
+        validate::Check::Warn(s) => {
+            s.contains("beta_mtu_upper_bound = 10000") && s.contains("9216")
+        }
         _ => false,
     });
     assert!(warn, "MTU > 9216 must WARN: {report}");
@@ -1114,7 +1115,9 @@ async fn iter92_beta_mtu_upper_below_initial_fails() {
     let report = validate::run(&yaml).await;
     assert!(report.has_failures(), "upper < initial MUST FAIL: {report}");
     let fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => s.contains("beta_mtu_upper_bound = 1300") && s.contains("LESS than"),
+        validate::Check::Fail(s) => {
+            s.contains("beta_mtu_upper_bound = 1300") && s.contains("LESS than")
+        }
         _ => false,
     });
     assert!(fail, "FAIL must call out the relationship: {report}");
@@ -1146,7 +1149,9 @@ async fn iter92_beta_ack_threshold_extreme_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"),
+        validate::Check::Warn(s) => {
+            s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR")
+        }
         _ => false,
     });
     assert!(warn, "ack=500 must WARN: {report}");
@@ -1165,9 +1170,7 @@ async fn iter91_tcp_keepalive_zero_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("tcp_keepalive_secs = 0") && s.contains("NAT")
-        }
+        validate::Check::Warn(s) => s.contains("tcp_keepalive_secs = 0") && s.contains("NAT"),
         _ => false,
     });
     assert!(warn, "keepalive=0 must WARN: {report}");
@@ -1282,9 +1285,7 @@ async fn iter83_max_inflight_zero_fails() {
         "max_inflight_sessions=0 MUST FAIL: {report}"
     );
     let fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => {
-            s.contains("max_inflight_sessions") && s.contains("OOM")
-        }
+        validate::Check::Fail(s) => s.contains("max_inflight_sessions") && s.contains("OOM"),
         _ => false,
     });
     assert!(fail, "FAIL must explain why 0 is bad: {report}");
@@ -1301,9 +1302,7 @@ async fn iter83_max_inflight_huge_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("max_inflight_sessions") && s.contains("100000")
-        }
+        validate::Check::Warn(s) => s.contains("max_inflight_sessions") && s.contains("100000"),
         _ => false,
     });
     assert!(warn, "huge max_inflight must WARN: {report}");
@@ -1328,9 +1327,7 @@ async fn iter83_socks_request_timeout_zero_fails() {
         "socks_request_timeout_secs=0 MUST FAIL: {report}"
     );
     let fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => {
-            s.contains("socks_request_timeout") && s.contains("slow-loris")
-        }
+        validate::Check::Fail(s) => s.contains("socks_request_timeout") && s.contains("slow-loris"),
         _ => false,
     });
     assert!(fail, "FAIL must call out slow-loris: {report}");
@@ -1347,9 +1344,7 @@ async fn iter83_socks_request_timeout_excessive_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("socks_request_timeout_secs") && s.contains("120")
-        }
+        validate::Check::Warn(s) => s.contains("socks_request_timeout_secs") && s.contains("120"),
         _ => false,
     });
     assert!(warn, "high socks_request_timeout must WARN: {report}");
@@ -1398,9 +1393,7 @@ async fn iter73_admin_listen_lan_bind_warns() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("admin_listen") && s.contains("NON-loopback")
-        }
+        validate::Check::Warn(s) => s.contains("admin_listen") && s.contains("NON-loopback"),
         _ => false,
     });
     assert!(warn, "LAN bind must WARN: {report}");
@@ -1450,15 +1443,10 @@ async fn iter71_socks_listen_wildcard_fails() {
         "socks_listen=0.0.0.0 MUST FAIL: {report}"
     );
     let open_proxy_fail = report.checks.iter().any(|c| match c {
-        validate::Check::Fail(s) => {
-            s.contains("socks_listen") && s.contains("open-proxy")
-        }
+        validate::Check::Fail(s) => s.contains("socks_listen") && s.contains("open-proxy"),
         _ => false,
     });
-    assert!(
-        open_proxy_fail,
-        "FAIL must name 'open-proxy': {report}"
-    );
+    assert!(open_proxy_fail, "FAIL must name 'open-proxy': {report}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1546,10 +1534,7 @@ async fn iter71_socks_listen_lan_bind_warns_not_fails() {
 #[tokio::test]
 async fn iter71_socks_listen_loopback_no_warn() {
     let dir = tempdir("socks-loopback");
-    let yaml = write_minimal_green_yaml(
-        &dir,
-        "server_endpoint: \"vps.example.com:8443\"\n",
-    );
+    let yaml = write_minimal_green_yaml(&dir, "server_endpoint: \"vps.example.com:8443\"\n");
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
         validate::Check::Warn(s) => s.contains("socks_listen") && s.contains("non-loopback"),
@@ -1579,15 +1564,10 @@ async fn iter70_bootstrap_direct_ip_rfc1918_warns() {
     let report = validate::run(&yaml).await;
     eprintln!("bootstrap-private report:\n{report}");
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("bootstrap_dns.direct_ip") && s.contains("private")
-        }
+        validate::Check::Warn(s) => s.contains("bootstrap_dns.direct_ip") && s.contains("private"),
         _ => false,
     });
-    assert!(
-        warn,
-        "RFC 1918 bootstrap direct_ip MUST WARN: {report}"
-    );
+    assert!(warn, "RFC 1918 bootstrap direct_ip MUST WARN: {report}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1625,9 +1605,7 @@ async fn iter70_bootstrap_direct_ip_public_no_warn() {
     );
     let report = validate::run(&yaml).await;
     let warn = report.checks.iter().any(|c| match c {
-        validate::Check::Warn(s) => {
-            s.contains("bootstrap_dns.direct_ip") && s.contains("private")
-        }
+        validate::Check::Warn(s) => s.contains("bootstrap_dns.direct_ip") && s.contains("private"),
         _ => false,
     });
     assert!(
@@ -1658,7 +1636,9 @@ async fn iter59_duplicate_server_endpoints_warns() {
     eprintln!("dupe-endpoints report:\n{report}");
     let dup_warn = report.checks.iter().any(|c| match c {
         validate::Check::Warn(s) => {
-            s.contains("server_endpoints") && s.contains("duplicate") && s.contains("vps.example.com:8443")
+            s.contains("server_endpoints")
+                && s.contains("duplicate")
+                && s.contains("vps.example.com:8443")
         }
         _ => false,
     });
@@ -1686,7 +1666,10 @@ async fn iter59_distinct_server_endpoints_no_dupe_warn() {
         validate::Check::Warn(s) => s.contains("server_endpoints") && s.contains("duplicate"),
         _ => false,
     });
-    assert!(!dup_warn, "distinct entries must NOT trigger dupe warn: {report}");
+    assert!(
+        !dup_warn,
+        "distinct entries must NOT trigger dupe warn: {report}"
+    );
     let _ = std::fs::remove_dir_all(&dir);
 }
 

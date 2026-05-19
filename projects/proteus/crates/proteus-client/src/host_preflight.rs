@@ -497,11 +497,13 @@ async fn check_endpoint_dns_resolution(cfg_path: &Path, r: &mut HostReport) {
         if in_endpoints_block {
             // List item like `  - "vps.example.com:8443"`?
             let dash_pos = line.find('-');
-            let is_list_item = dash_pos.map(|p| {
-                // Everything before the `-` must be whitespace (so a
-                // top-level key with a `-` in its NAME doesn't fool us).
-                line[..p].chars().all(|c| c.is_whitespace())
-            }).unwrap_or(false);
+            let is_list_item = dash_pos
+                .map(|p| {
+                    // Everything before the `-` must be whitespace (so a
+                    // top-level key with a `-` in its NAME doesn't fool us).
+                    line[..p].chars().all(|c| c.is_whitespace())
+                })
+                .unwrap_or(false);
             if is_list_item {
                 let after_dash = &line[dash_pos.unwrap() + 1..];
                 let val = after_dash
@@ -766,9 +768,7 @@ pub async fn cli_run(input: HostPreflightInput, format: &str) -> std::io::Result
     // `host_preflight` for symmetry with the server-side module
     // — see iter-123 in CHANGELOG for why these don't match.)
     if format != "text" && format != "json" {
-        eprintln!(
-            "host-preflight: unknown --format {format:?} (expected 'text' or 'json')"
-        );
+        eprintln!("host-preflight: unknown --format {format:?} (expected 'text' or 'json')");
         return Ok(2);
     }
     let report = run(input).await;
@@ -865,7 +865,10 @@ mod tests {
                 .iter()
                 .find(|f| f.check == name)
                 .unwrap_or_else(|| {
-                    panic!("{name} must appear even when --config absent: {:?}", r.findings)
+                    panic!(
+                        "{name} must appear even when --config absent: {:?}",
+                        r.findings
+                    )
                 });
             assert_eq!(
                 finding.severity,

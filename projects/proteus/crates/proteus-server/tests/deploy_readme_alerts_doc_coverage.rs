@@ -45,9 +45,7 @@ fn readme_documents_prometheus_alerts_section() {
     );
     // Must explain severity grammar.
     assert!(
-        body.contains("critical")
-            && body.contains("warning")
-            && body.contains("paging-grade"),
+        body.contains("critical") && body.contains("warning") && body.contains("paging-grade"),
         "must explain severity grammar (critical / warning + paging-grade)"
     );
 }

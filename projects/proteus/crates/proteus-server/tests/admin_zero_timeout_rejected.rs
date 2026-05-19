@@ -92,11 +92,7 @@ fn iter117_admin_diff_rejects_zero_interval() {
     std::fs::write(&before, "proteus_up 1\n").unwrap();
     std::fs::write(&after, "proteus_up 1\n").unwrap();
     let output = Command::new(BIN)
-        .args([
-            "admin",
-            "diff",
-            "--before",
-        ])
+        .args(["admin", "diff", "--before"])
         .arg(&before)
         .args(["--after"])
         .arg(&after)

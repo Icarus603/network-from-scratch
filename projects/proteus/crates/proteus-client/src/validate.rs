@@ -628,7 +628,7 @@ pub async fn run(path: &Path) -> PreflightReport {
                     "beta_ack_eliciting_threshold = 0 is invalid (would mean 'never \
                      ACK'). Valid values: 1 (default, quinn upstream behavior — every \
                      packet acked) or 2-10 for long-fat-pipe RTT × bandwidth paths \
-                     where ACK overhead is meaningful."
+                     where ACK overhead is meaningful.",
                 );
             } else if thr > 100 {
                 r.push_warn(format!(

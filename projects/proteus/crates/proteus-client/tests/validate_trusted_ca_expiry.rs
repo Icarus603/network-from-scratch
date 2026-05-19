@@ -172,7 +172,9 @@ async fn iter47_healthy_ca_passes_with_days_remaining() {
     eprintln!("healthy-ca report:\n{report}");
 
     let pass = report.checks.iter().any(|c| match c {
-        Check::Pass(s) => s.contains("tls.trusted_ca") && s.contains("valid for") && s.contains("day"),
+        Check::Pass(s) => {
+            s.contains("tls.trusted_ca") && s.contains("valid for") && s.contains("day")
+        }
         _ => false,
     });
     assert!(

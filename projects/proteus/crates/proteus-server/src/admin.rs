@@ -1135,9 +1135,7 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String), AdminError> {
     let (host, port) = match authority.rsplit_once(':') {
         Some((h, p)) => {
             let port: u16 = p.parse().map_err(|_| {
-                AdminError::BadUrl(format!(
-                    "{url:?}: port {p:?} isn't a valid u16 (1-65535)"
-                ))
+                AdminError::BadUrl(format!("{url:?}: port {p:?} isn't a valid u16 (1-65535)"))
             })?;
             (h.to_string(), port)
         }

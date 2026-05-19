@@ -50,11 +50,7 @@
 ///     true? (only meaningful if `section_present == true`)
 ///
 /// Output: `(attempts_delta, succeeded_delta)` for ONE SIGHUP.
-fn policy(
-    parse_ok: bool,
-    section_present: bool,
-    reload_fn_outcome: bool,
-) -> (u64, u64) {
+fn policy(parse_ok: bool, section_present: bool, reload_fn_outcome: bool) -> (u64, u64) {
     let attempts_delta = 1; // always bumped upfront
     if !parse_ok {
         // Parse failure → gap grows. Genuine "edit didn't apply".

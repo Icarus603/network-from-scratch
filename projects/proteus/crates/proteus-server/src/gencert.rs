@@ -219,7 +219,10 @@ mod tests {
     fn iter129_rejects_empty_string() {
         let e = validate_dns_name("").unwrap_err();
         assert!(e.contains("is empty"), "{e}");
-        assert!(e.contains("NotValidForName"), "must explain the failure mode: {e}");
+        assert!(
+            e.contains("NotValidForName"),
+            "must explain the failure mode: {e}"
+        );
     }
 
     #[test]
@@ -253,7 +256,10 @@ mod tests {
         assert!(e.contains("non-LDH"), "{e}");
         // Case-sensitive: validator says "Spaces" (the
         // operator-facing plural in the trailing examples list).
-        assert!(e.contains("Spaces"), "must call out spaces specifically: {e}");
+        assert!(
+            e.contains("Spaces"),
+            "must call out spaces specifically: {e}"
+        );
     }
 
     #[test]

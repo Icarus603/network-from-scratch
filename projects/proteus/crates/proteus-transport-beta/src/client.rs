@@ -212,10 +212,7 @@ impl BetaClientSession {
             // socket too. Without this, every migration would
             // silently collapse throughput back to the OS default.
             // Best-effort; on clamp we log but proceed.
-            let _ = crate::apply_udp_socket_buffers(
-                &s,
-                crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES,
-            );
+            let _ = crate::apply_udp_socket_buffers(&s, crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES);
             s.set_nonblocking(true)?;
             s
         };
@@ -520,10 +517,8 @@ pub async fn connect_with_timeout_perf_cached_crypto(
     // server.rs. The OS default (Linux ~212 KiB) caps single-
     // stream throughput on long-fat-pipe paths well below
     // Hy2 / TUIC5; 7 MiB sustains 1 Gbit/s at ~500 ms RTT.
-    let buf_outcome = crate::apply_udp_socket_buffers(
-        &std_socket,
-        crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES,
-    )?;
+    let buf_outcome =
+        crate::apply_udp_socket_buffers(&std_socket, crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES)?;
     if !buf_outcome.met_target {
         tracing::warn!(
             requested_bytes = buf_outcome.requested,

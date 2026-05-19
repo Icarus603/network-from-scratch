@@ -844,7 +844,11 @@ mod tests {
             "proteus_client_up 1\nproteus_client_pool_reload_attempts_total 3\nproteus_client_pool_reload_succeeded_total 1",
         );
         let r = evaluate(&body);
-        assert_eq!(r.exit_code(), 0, "warn-only rules must not escalate to exit 1");
+        assert_eq!(
+            r.exit_code(),
+            0,
+            "warn-only rules must not escalate to exit 1"
+        );
         let (_, w, cr) = r.counts();
         assert!(w >= 1);
         assert_eq!(cr, 0);

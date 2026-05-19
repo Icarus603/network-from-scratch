@@ -32,10 +32,7 @@ pub fn run(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
 /// set (mlkem_sk + mlkem_pk + fingerprint + x25519_sk + x25519_pk
 /// are cryptographically bound together) so even a partial
 /// overwrite of one file would corrupt the bundle.
-pub fn run_with_force(
-    out_dir: &Path,
-    force: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run_with_force(out_dir: &Path, force: bool) -> Result<(), Box<dyn std::error::Error>> {
     // Iter-130: pre-check all 6 target paths. If ANY exists and
     // !force, refuse before generating any new keys.
     let targets = [

@@ -414,7 +414,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Keygen { out, force } => keygen::run_with_force(&out, force)?,
-        Cmd::Gencert { dns_name, out, force } => {
+        Cmd::Gencert {
+            dns_name,
+            out,
+            force,
+        } => {
             // Iter-129: gate --dns-name at parse time + exit 2 on
             // operator error (not exit 1 = "the tool itself
             // failed"). exit 2 matches the clap-style "usage
@@ -2445,8 +2449,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         // 2d. Global handshake-budget hot-swap.
                         match fresh_cfg.handshake_budget.as_ref() {
                             Some(b) => {
-                                if ctx_for_reload
-                                    .reload_handshake_budget(b.burst, b.refill_per_sec)
+                                if ctx_for_reload.reload_handshake_budget(b.burst, b.refill_per_sec)
                                 {
                                     info!(
                                         burst = b.burst,

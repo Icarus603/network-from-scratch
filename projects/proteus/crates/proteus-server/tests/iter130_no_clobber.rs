@@ -213,12 +213,7 @@ fn iter130_keygen_force_overwrites_bundle() {
 fn iter130_gencert_refuses_to_clobber_tls_pair() {
     let dir = fresh_dir("gencert");
     let out1 = Command::new(SERVER_BIN)
-        .args([
-            "gencert",
-            "--dns-name",
-            "vps.example.com",
-            "--out",
-        ])
+        .args(["gencert", "--dns-name", "vps.example.com", "--out"])
         .arg(&dir)
         .output()
         .expect("spawn");
@@ -226,12 +221,7 @@ fn iter130_gencert_refuses_to_clobber_tls_pair() {
     let cert_before = std::fs::read(dir.join("fullchain.pem")).unwrap();
 
     let out2 = Command::new(SERVER_BIN)
-        .args([
-            "gencert",
-            "--dns-name",
-            "vps.example.com",
-            "--out",
-        ])
+        .args(["gencert", "--dns-name", "vps.example.com", "--out"])
         .arg(&dir)
         .output()
         .expect("spawn");
@@ -265,12 +255,7 @@ fn iter130_gencert_refuses_even_if_only_one_of_pair_exists() {
     // each other). Refuse on either-exists.
     let dir = fresh_dir("gencert-half");
     let out1 = Command::new(SERVER_BIN)
-        .args([
-            "gencert",
-            "--dns-name",
-            "vps.example.com",
-            "--out",
-        ])
+        .args(["gencert", "--dns-name", "vps.example.com", "--out"])
         .arg(&dir)
         .output()
         .expect("spawn");
@@ -279,12 +264,7 @@ fn iter130_gencert_refuses_even_if_only_one_of_pair_exists() {
     std::fs::remove_file(dir.join("fullchain.pem")).unwrap();
 
     let out2 = Command::new(SERVER_BIN)
-        .args([
-            "gencert",
-            "--dns-name",
-            "vps.example.com",
-            "--out",
-        ])
+        .args(["gencert", "--dns-name", "vps.example.com", "--out"])
         .arg(&dir)
         .output()
         .expect("spawn");

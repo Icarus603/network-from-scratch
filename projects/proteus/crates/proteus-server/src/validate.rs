@@ -155,11 +155,8 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                     // (operator explicitly split α/β cert paths
                     // via beta_cert_chain / beta_private_key) and
                     // we still want expiry coverage.
-                    let same_as_alpha = cfg
-                        .tls
-                        .as_ref()
-                        .map(|t| t.cert_chain == c)
-                        .unwrap_or(false);
+                    let same_as_alpha =
+                        cfg.tls.as_ref().map(|t| t.cert_chain == c).unwrap_or(false);
                     if !same_as_alpha {
                         match proteus_transport_alpha::tls::leaf_cert_not_after(&chain) {
                             Ok(not_after) => {
@@ -639,9 +636,7 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             // operational state. Other non-loopback binds stay
             // WARN (operator may have a deliberate
             // tunnel-interface monitoring setup).
-            let host = addr
-                .rsplit_once(':')
-                .map_or(addr.as_str(), |(h, _)| h);
+            let host = addr.rsplit_once(':').map_or(addr.as_str(), |(h, _)| h);
             let unbracketed = host
                 .strip_prefix('[')
                 .and_then(|s| s.strip_suffix(']'))
@@ -794,7 +789,7 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
         if thr == 0 {
             r.push_fail(
                 "beta_ack_eliciting_threshold = 0 is invalid (would mean 'never ACK'). \
-                 Valid: 1 (default) or 2-10 for measured long-fat-pipe paths."
+                 Valid: 1 (default) or 2-10 for measured long-fat-pipe paths.",
             );
         } else if thr > 100 {
             r.push_warn(format!(
@@ -1581,7 +1576,8 @@ fn coherence_checks(cfg: &ServerConfig, r: &mut PreflightReport) {
         // rules" when they have N-K. Surface so the per-list
         // counts in the config match the operator's intent.
         for (list_name, list) in [("firewall.allow", &fw.allow), ("firewall.deny", &fw.deny)] {
-            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(list.len());
+            let mut seen: std::collections::HashSet<&str> =
+                std::collections::HashSet::with_capacity(list.len());
             let mut dupes: Vec<&str> = Vec::new();
             for cidr in list {
                 if !seen.insert(cidr.as_str()) && !dupes.contains(&cidr.as_str()) {
@@ -1752,8 +1748,7 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
             // script crashed; any client presenting the zero key
             // (trivial to forge) would be auth'd, which is the
             // worst-case-equivalent to no allowlist at all.
-            let is_key_file = label.starts_with("keys.")
-                || label.starts_with("client_allowlist[");
+            let is_key_file = label.starts_with("keys.") || label.starts_with("client_allowlist[");
             if is_key_file && !bytes.is_empty() {
                 // Decode base64 if it looks like base64 to catch the
                 // case where the operator stored keys in armored form
@@ -2120,14 +2115,13 @@ mod tests {
         let report = preflight(&cfg);
         let warn = report.checks.iter().any(|c| match c {
             Check::Warn(s) => {
-                s.contains("cover_endpoints") && s.contains("duplicate") && s.contains("a.example.com")
+                s.contains("cover_endpoints")
+                    && s.contains("duplicate")
+                    && s.contains("a.example.com")
             }
             _ => false,
         });
-        assert!(
-            warn,
-            "duplicate cover_endpoints MUST WARN: {report}"
-        );
+        assert!(warn, "duplicate cover_endpoints MUST WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2146,7 +2140,10 @@ mod tests {
             Check::Warn(s) => s.contains("cover_endpoints") && s.contains("duplicate"),
             _ => false,
         });
-        assert!(!warn, "distinct cover_endpoints must NOT trigger dupe warn: {report}");
+        assert!(
+            !warn,
+            "distinct cover_endpoints must NOT trigger dupe warn: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2183,10 +2180,7 @@ mod tests {
         // Iter-65: bump fixture to a 32+ char value so the new
         // weak-token WARN doesn't fire on a test that wants to
         // assert "everything green".
-        write(
-            &token_path,
-            b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n",
-        );
+        write(&token_path, b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n");
         let mut cfg = minimal_cfg(&dir);
         cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
         cfg.metrics_token_file = Some(token_path);
@@ -2218,10 +2212,7 @@ mod tests {
             }
             _ => false,
         });
-        assert!(
-            fail,
-            "FAIL must list the offending private entry: {report}"
-        );
+        assert!(fail, "FAIL must list the offending private entry: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2273,8 +2264,8 @@ mod tests {
             "10.0.0.1:443",
             "192.168.1.1:443",
             "172.16.0.1:443",
-            "100.64.0.1:443",  // CGNAT
-            "169.254.169.254:80",  // link-local (cloud metadata!)
+            "100.64.0.1:443",     // CGNAT
+            "169.254.169.254:80", // link-local (cloud metadata!)
         ] {
             let dir = tmpdir();
             let mut cfg = minimal_cfg(&dir);
@@ -2285,9 +2276,7 @@ mod tests {
                 "cover_endpoint={victim} MUST FAIL: {report}"
             );
             let fail = report.checks.iter().any(|c| match c {
-                Check::Fail(s) => {
-                    s.contains("cover_endpoint") && s.contains("private")
-                }
+                Check::Fail(s) => s.contains("cover_endpoint") && s.contains("private"),
                 _ => false,
             });
             assert!(
@@ -2302,8 +2291,8 @@ mod tests {
     #[test]
     fn iter67_cover_endpoint_ipv6_private_fails() {
         for victim in [
-            "[fc00::1]:443",  // ULA
-            "[fe80::1]:443",  // link-local
+            "[fc00::1]:443", // ULA
+            "[fe80::1]:443", // link-local
         ] {
             let dir = tmpdir();
             let mut cfg = minimal_cfg(&dir);
@@ -2373,7 +2362,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.beta_mtu_upper_bound = Some(1000);
         let report = preflight(&cfg);
-        assert!(report.has_failures(), "MTU upper < 1200 MUST FAIL: {report}");
+        assert!(
+            report.has_failures(),
+            "MTU upper < 1200 MUST FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2384,9 +2376,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.beta_mtu_upper_bound = Some(10000);
         let report = preflight(&cfg);
-        let warn = report.checks.iter().any(|c| {
-            matches!(c, Check::Warn(s) if s.contains("beta_mtu_upper_bound = 10000"))
-        });
+        let warn = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Warn(s) if s.contains("beta_mtu_upper_bound = 10000")));
         assert!(warn, "MTU > 9216 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2447,7 +2440,10 @@ mod tests {
         let fail = report.checks.iter().any(|c| {
             matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY") && s.contains("0.0.0.0:8443"))
         });
-        assert!(fail, "FAIL must call out CATASTROPHIC OPEN-RELAY + the wildcard addr: {report}");
+        assert!(
+            fail,
+            "FAIL must call out CATASTROPHIC OPEN-RELAY + the wildcard addr: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2464,9 +2460,10 @@ mod tests {
             ed25519_pk: pk,
         }];
         let report = preflight(&cfg);
-        let open_relay_fail = report.checks.iter().any(|c| {
-            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
-        });
+        let open_relay_fail = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY")));
         assert!(
             !open_relay_fail,
             "allowlist gates auth — must NOT trigger iter-97 FAIL: {report}"
@@ -2485,9 +2482,10 @@ mod tests {
             deny: vec![],
         });
         let report = preflight(&cfg);
-        let open_relay_fail = report.checks.iter().any(|c| {
-            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
-        });
+        let open_relay_fail = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY")));
         assert!(
             !open_relay_fail,
             "firewall.allow gates the source — must NOT trigger iter-97 FAIL: {report}"
@@ -2503,9 +2501,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.listen_alpha = "127.0.0.1:8443".to_string();
         let report = preflight(&cfg);
-        let open_relay_fail = report.checks.iter().any(|c| {
-            matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY"))
-        });
+        let open_relay_fail = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Fail(s) if s.contains("CATASTROPHIC OPEN-RELAY")));
         assert!(
             !open_relay_fail,
             "loopback listen is testing-only; must NOT trigger iter-97 FAIL: {report}"
@@ -2688,9 +2687,9 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.pad_quantum = Some(1300); // typo for 1280
         let report = preflight(&cfg);
-        let warn = report.checks.iter().any(|c| {
-            matches!(c, Check::Warn(s) if s.contains("pad_quantum") && s.contains("1300"))
-        });
+        let warn = report.checks.iter().any(
+            |c| matches!(c, Check::Warn(s) if s.contains("pad_quantum") && s.contains("1300")),
+        );
         assert!(warn, "unusual pad_quantum must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2702,9 +2701,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.pad_quantum = Some(1280);
         let report = preflight(&cfg);
-        let pass = report.checks.iter().any(|c| {
-            matches!(c, Check::Pass(s) if s.contains("pad_quantum = 1280"))
-        });
+        let pass = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Pass(s) if s.contains("pad_quantum = 1280")));
         assert!(pass, "common pad_quantum must PASS: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2745,7 +2745,10 @@ mod tests {
         let yaml = "byte_budget:\n  window_secs: 0\n  threshold: 3\n";
         cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
         let report = preflight(&cfg);
-        assert!(report.has_failures(), "byte_budget.window_secs=0 MUST FAIL: {report}");
+        assert!(
+            report.has_failures(),
+            "byte_budget.window_secs=0 MUST FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2757,9 +2760,9 @@ mod tests {
         let yaml = "byte_budget:\n  window_secs: 172800\n  threshold: 3\n";
         cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
         let report = preflight(&cfg);
-        let warn = report.checks.iter().any(|c| {
-            matches!(c, Check::Warn(s) if s.contains("abuse_detector.byte_budget.window_secs"))
-        });
+        let warn = report.checks.iter().any(
+            |c| matches!(c, Check::Warn(s) if s.contains("abuse_detector.byte_budget.window_secs")),
+        );
         assert!(warn, "excessive window must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2772,7 +2775,10 @@ mod tests {
         let yaml = "rate_limit:\n  window_secs: 300\n  threshold: 0\n";
         cfg.abuse_detector = Some(serde_yaml::from_str(yaml).expect("AbuseDetectorCfg parse"));
         let report = preflight(&cfg);
-        assert!(report.has_failures(), "rate_limit.threshold=0 MUST FAIL: {report}");
+        assert!(
+            report.has_failures(),
+            "rate_limit.threshold=0 MUST FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2805,7 +2811,11 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, Check::Fail(s) if s.contains("abuse_detector")))
             .collect();
-        assert_eq!(fails.len(), 2, "both sub-blocks must fail independently: {report}");
+        assert_eq!(
+            fails.len(),
+            2,
+            "both sub-blocks must fail independently: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2848,7 +2858,8 @@ mod tests {
     fn iter95_bw_threshold_absurd_warns() {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
-        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 50000\nmax_users: 1000\nexit_factor: 0.5\n";
+        let yaml =
+            "window_secs: 30\nthreshold_mb_per_sec: 50000\nmax_users: 1000\nexit_factor: 0.5\n";
         cfg.per_user_bandwidth_rate =
             Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
         let report = preflight(&cfg);
@@ -2877,7 +2888,8 @@ mod tests {
     fn iter86_bw_window_excessive_warns() {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
-        let yaml = "window_secs: 7200\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.5\n";
+        let yaml =
+            "window_secs: 7200\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.5\n";
         cfg.per_user_bandwidth_rate =
             Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
         let report = preflight(&cfg);
@@ -2919,13 +2931,14 @@ mod tests {
     fn iter86_bw_exit_factor_near_one_warns() {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
-        let yaml = "window_secs: 30\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.995\n";
+        let yaml =
+            "window_secs: 30\nthreshold_mb_per_sec: 10\nmax_users: 1000\nexit_factor: 0.995\n";
         cfg.per_user_bandwidth_rate =
             Some(serde_yaml::from_str(yaml).expect("PerUserBandwidthRateCfg parse"));
         let report = preflight(&cfg);
-        let warn = report.checks.iter().any(|c| {
-            matches!(c, Check::Warn(s) if s.contains("exit_factor") && s.contains("flap"))
-        });
+        let warn = report.checks.iter().any(
+            |c| matches!(c, Check::Warn(s) if s.contains("exit_factor") && s.contains("flap")),
+        );
         assert!(warn, "exit_factor=0.995 must WARN: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2936,8 +2949,7 @@ mod tests {
     fn iter86_conn_limit_zero_warns() {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
-        cfg.per_user_conn_limit =
-            Some(crate::config::PerUserConnLimitCfg { max_per_user: 0 });
+        cfg.per_user_conn_limit = Some(crate::config::PerUserConnLimitCfg { max_per_user: 0 });
         let report = preflight(&cfg);
         let warn = report.checks.iter().any(|c| {
             matches!(c, Check::Warn(s) if s.contains("per_user_conn_limit.max_per_user") && s.contains("observability-only"))
@@ -2952,13 +2964,9 @@ mod tests {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
         let yaml = "period_secs: 0\nmax_entries: 100\ndefault_period_bytes: 0\n";
-        cfg.user_quotas =
-            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        cfg.user_quotas = Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
         let report = preflight(&cfg);
-        assert!(
-            report.has_failures(),
-            "period_secs=0 MUST FAIL: {report}"
-        );
+        assert!(report.has_failures(), "period_secs=0 MUST FAIL: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2968,13 +2976,9 @@ mod tests {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
         let yaml = "period_secs: 86400\nmax_entries: 0\ndefault_period_bytes: 0\n";
-        cfg.user_quotas =
-            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        cfg.user_quotas = Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
         let report = preflight(&cfg);
-        assert!(
-            report.has_failures(),
-            "max_entries=0 MUST FAIL: {report}"
-        );
+        assert!(report.has_failures(), "max_entries=0 MUST FAIL: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2987,8 +2991,7 @@ mod tests {
             overrides:\n  \
                 - {user_id: \"alice\", period_bytes: 100}\n  \
                 - {user_id: \"alice\", period_bytes: 200}\n";
-        cfg.user_quotas =
-            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        cfg.user_quotas = Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
         let report = preflight(&cfg);
         assert!(
             report.has_failures(),
@@ -3016,8 +3019,7 @@ mod tests {
             overrides:\n  \
                 - {user_id: \"alice\", period_bytes: 100}\n  \
                 - {user_id: \"orphan\", period_bytes: 200}\n";
-        cfg.user_quotas =
-            Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
+        cfg.user_quotas = Some(serde_yaml::from_str(yaml).expect("UserQuotasCfg parse"));
         let report = preflight(&cfg);
         let warn = report.checks.iter().any(|c| {
             matches!(c, Check::Warn(s) if s.contains("user_quotas.overrides") && s.contains("orphan"))
@@ -3034,8 +3036,7 @@ mod tests {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
         let yaml = "ttl_secs: 0\nmax_entries: 100\n";
-        cfg.user_quarantine =
-            Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
+        cfg.user_quarantine = Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
         let report = preflight(&cfg);
         let warn = report.checks.iter().any(|c| {
             matches!(c, Check::Warn(s) if s.contains("user_quarantine.ttl_secs") && s.contains("observability-only"))
@@ -3050,8 +3051,7 @@ mod tests {
         let dir = tmpdir();
         let mut cfg = minimal_cfg(&dir);
         let yaml = "ttl_secs: 600\nmax_entries: 0\n";
-        cfg.user_quarantine =
-            Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
+        cfg.user_quarantine = Some(serde_yaml::from_str(yaml).expect("UserQuarantineCfg parse"));
         let report = preflight(&cfg);
         assert!(
             report.has_failures(),
@@ -3165,9 +3165,7 @@ mod tests {
             "outbound_filter.disabled MUST FAIL: {report}"
         );
         let fail = report.checks.iter().any(|c| match c {
-            Check::Fail(s) => {
-                s.contains("outbound_filter.disabled") && s.contains("SSRF")
-            }
+            Check::Fail(s) => s.contains("outbound_filter.disabled") && s.contains("SSRF"),
             _ => false,
         });
         assert!(
@@ -3202,16 +3200,13 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.outbound_filter = Some(crate::config::OutboundFilterCfg {
             extra_blocked_cidrs: vec![
-                "10.0.0.0/8".to_string(), // valid
+                "10.0.0.0/8".to_string(),         // valid
                 "this is not a cidr".to_string(), // bad
             ],
             ..Default::default()
         });
         let report = preflight(&cfg);
-        assert!(
-            report.has_failures(),
-            "bad CIDR MUST FAIL: {report}"
-        );
+        assert!(report.has_failures(), "bad CIDR MUST FAIL: {report}");
         let fail = report.checks.iter().any(|c| match c {
             Check::Fail(s) => {
                 s.contains("outbound_filter.extra_blocked_cidrs")
@@ -3340,9 +3335,7 @@ mod tests {
             "short token must WARN not FAIL: {report}"
         );
         let warn = report.checks.iter().any(|c| match c {
-            Check::Warn(s) => {
-                s.contains("metrics_token_file") && s.contains("brute-forceable")
-            }
+            Check::Warn(s) => s.contains("metrics_token_file") && s.contains("brute-forceable"),
             _ => false,
         });
         assert!(
@@ -3363,10 +3356,7 @@ mod tests {
         cfg.metrics_listen = Some("127.0.0.1:9090".to_string());
         cfg.metrics_token_file = Some(token_path);
         let report = preflight(&cfg);
-        assert!(
-            report.has_failures(),
-            "trivial token MUST FAIL: {report}"
-        );
+        assert!(report.has_failures(), "trivial token MUST FAIL: {report}");
         let fail = report.checks.iter().any(|c| match c {
             Check::Fail(s) => s.contains("trivial") && s.contains("changeme"),
             _ => false,
@@ -3448,9 +3438,7 @@ mod tests {
             "wildcard metrics_listen w/o token MUST FAIL: {report}"
         );
         let fail = report.checks.iter().any(|c| match c {
-            Check::Fail(s) => {
-                s.contains("metrics_listen") && s.contains("wildcard")
-            }
+            Check::Fail(s) => s.contains("metrics_listen") && s.contains("wildcard"),
             _ => false,
         });
         assert!(
@@ -3467,10 +3455,7 @@ mod tests {
     fn iter73_wildcard_metrics_listen_with_token_no_fail() {
         let dir = tmpdir();
         let token_path = dir.join("metrics.token");
-        write(
-            &token_path,
-            b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n",
-        );
+        write(&token_path, b"k7nP2vQrL8xJ3hM5wY4zA6bE9cF1uD0i\n");
         let mut cfg = minimal_cfg(&dir);
         cfg.metrics_listen = Some("0.0.0.0:9090".to_string());
         cfg.metrics_token_file = Some(token_path);
@@ -3502,10 +3487,8 @@ mod tests {
         let report = preflight(&cfg);
         eprintln!("world-readable-sk report:\n{report}");
         // Cleanup so tmpdir delete works.
-        let _ = std::fs::set_permissions(
-            &cfg.keys.mlkem_sk,
-            std::fs::Permissions::from_mode(0o600),
-        );
+        let _ =
+            std::fs::set_permissions(&cfg.keys.mlkem_sk, std::fs::Permissions::from_mode(0o600));
         // Skip on root which ignores write/read bits.
         let is_root = std::env::var("USER").as_deref() == Ok("root")
             || std::env::var("LOGNAME").as_deref() == Ok("root");
@@ -3595,11 +3578,13 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.access_log = Some(log_path);
         let report = preflight(&cfg);
-        assert!(!report.has_failures(), "writable parent must PASS: {report}");
-        let writable_pass = report
-            .checks
-            .iter()
-            .any(|c| matches!(c, Check::Pass(m) if m.contains("access_log") && m.contains("writable")));
+        assert!(
+            !report.has_failures(),
+            "writable parent must PASS: {report}"
+        );
+        let writable_pass = report.checks.iter().any(
+            |c| matches!(c, Check::Pass(m) if m.contains("access_log") && m.contains("writable")),
+        );
         assert!(
             writable_pass,
             "PASS message must call out 'writable' so operator knows the iter-50 check ran: {report}"
@@ -3672,7 +3657,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.restart_state_file = Some(dir.join("restart.json"));
         let report = preflight(&cfg);
-        assert!(!report.has_failures(), "writable parent must PASS: {report}");
+        assert!(
+            !report.has_failures(),
+            "writable parent must PASS: {report}"
+        );
         let writable_pass = report.checks.iter().any(|c| {
             matches!(c, Check::Pass(m) if m.contains("restart_state_file") && m.contains("writable"))
         });
@@ -3689,7 +3677,10 @@ mod tests {
         let mut cfg = minimal_cfg(&dir);
         cfg.restart_state_file = Some(PathBuf::from("/does/not/exist/restart.json"));
         let report = preflight(&cfg);
-        assert!(report.has_failures(), "nonexistent parent must FAIL: {report}");
+        assert!(
+            report.has_failures(),
+            "nonexistent parent must FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3832,7 +3823,10 @@ mod tests {
         );
         let dup_fail = report.checks.iter().any(|c| match c {
             Check::Fail(s) => {
-                s.contains("duplicate user_id") && s.contains("alice") && s.contains("[0]") && s.contains("[1]")
+                s.contains("duplicate user_id")
+                    && s.contains("alice")
+                    && s.contains("[0]")
+                    && s.contains("[1]")
             }
             _ => false,
         });
@@ -3867,7 +3861,10 @@ mod tests {
             Check::Fail(s) => s.contains("duplicate user_id"),
             _ => false,
         });
-        assert!(!dup_fail, "distinct user_ids must not trigger dup-check: {report}");
+        assert!(
+            !dup_fail,
+            "distinct user_ids must not trigger dup-check: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -3891,15 +3888,10 @@ mod tests {
             "trailing-whitespace allowlist user_id MUST FAIL: {report}"
         );
         let ws_fail = report.checks.iter().any(|c| match c {
-            Check::Fail(s) => {
-                s.contains("client_allowlist") && s.contains("whitespace")
-            }
+            Check::Fail(s) => s.contains("client_allowlist") && s.contains("whitespace"),
             _ => false,
         });
-        assert!(
-            ws_fail,
-            "FAIL message must mention 'whitespace': {report}"
-        );
+        assert!(ws_fail, "FAIL message must mention 'whitespace': {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

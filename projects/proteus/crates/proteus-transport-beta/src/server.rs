@@ -141,10 +141,8 @@ pub fn make_endpoint_with_perf(
     // OS default (~212 KiB on Linux) — caps single-stream
     // throughput on long-fat-pipe paths well below Hy2 / TUIC5.
     let std_sock = std::net::UdpSocket::bind(addr)?;
-    let buf_outcome = crate::apply_udp_socket_buffers(
-        &std_sock,
-        crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES,
-    )?;
+    let buf_outcome =
+        crate::apply_udp_socket_buffers(&std_sock, crate::DEFAULT_UDP_SOCKET_BUFFER_BYTES)?;
     if !buf_outcome.met_target {
         tracing::warn!(
             requested_bytes = buf_outcome.requested,

@@ -438,9 +438,7 @@ pub async fn cli_run(
     // broken jq pipeline with no clear cause. Reject unknown
     // formats with exit 2.
     if format != "text" && format != "json" {
-        eprintln!(
-            "connect-test: unknown --format {format:?} (expected 'text' or 'json')"
-        );
+        eprintln!("connect-test: unknown --format {format:?} (expected 'text' or 'json')");
         return Ok(2);
     }
     let connect_timeout = Duration::from_secs(connect_timeout_secs);
@@ -779,9 +777,15 @@ mod tests {
         let exit = 1;
         let s = render_json_all(&reports, exit);
         // Schema sanity (string match — fast, no serde dep at runtime).
-        assert!(s.starts_with(r#"{"kind":"connect_test_all_endpoints""#), "{s}");
+        assert!(
+            s.starts_with(r#"{"kind":"connect_test_all_endpoints""#),
+            "{s}"
+        );
         assert!(s.contains(r#""reports":["#), "{s}");
-        assert!(s.contains(r#""endpoint":"primary.example.com:8443""#), "{s}");
+        assert!(
+            s.contains(r#""endpoint":"primary.example.com:8443""#),
+            "{s}"
+        );
         assert!(s.contains(r#""endpoint":"backup.example.com:8443""#), "{s}");
         assert!(s.contains(r#""total":2"#), "{s}");
         assert!(s.contains(r#""ok":1"#), "{s}");
@@ -892,9 +896,7 @@ mod tests {
     #[tokio::test]
     async fn iter111_cli_run_rejects_excessive_timeout() {
         let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
-        let exit = cli_run(bogus_path, 1200, "text")
-            .await
-            .expect("clean exit");
+        let exit = cli_run(bogus_path, 1200, "text").await.expect("clean exit");
         assert_eq!(exit, 2, "1200s timeout must exit 2");
     }
 
@@ -911,9 +913,7 @@ mod tests {
     #[tokio::test]
     async fn iter113_cli_run_rejects_unknown_format() {
         let bogus_path = std::path::Path::new("/does/not/exist/client.yaml");
-        let exit = cli_run(bogus_path, 10, "yaml")
-            .await
-            .expect("clean exit");
+        let exit = cli_run(bogus_path, 10, "yaml").await.expect("clean exit");
         assert_eq!(exit, 2, "yaml format must exit 2");
     }
 

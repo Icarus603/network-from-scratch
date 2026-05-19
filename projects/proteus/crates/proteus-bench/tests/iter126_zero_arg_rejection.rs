@@ -317,7 +317,11 @@ fn iter128_soak_rejects_success_rate_above_1() {
     // to "2.99" would break every commit.
     expect_exit_2_with(
         &["soak", "--min-success-rate=2.5"],
-        &["--min-success-rate = 2.5", "[0.0, 1.0]", "fraction, NOT a percentage"],
+        &[
+            "--min-success-rate = 2.5",
+            "[0.0, 1.0]",
+            "fraction, NOT a percentage",
+        ],
     );
 }
 

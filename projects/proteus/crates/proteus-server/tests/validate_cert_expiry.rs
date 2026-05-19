@@ -54,7 +54,10 @@ fn touch(dir: &std::path::Path, name: &str) -> PathBuf {
 /// Mint a self-signed cert + PKCS8 key whose validity window is
 /// `[now - 30d, not_after)`. Writes them as `cert.pem` + `key.pem`
 /// inside `dir` and returns the paths.
-fn mint_cert_with_not_after(dir: &std::path::Path, not_after: time::OffsetDateTime) -> (PathBuf, PathBuf) {
+fn mint_cert_with_not_after(
+    dir: &std::path::Path,
+    not_after: time::OffsetDateTime,
+) -> (PathBuf, PathBuf) {
     let mut params = rcgen::CertificateParams::default();
     params.distinguished_name = rcgen::DistinguishedName::new();
     params
@@ -282,8 +285,14 @@ async fn iter46_cert_with_plenty_of_lifetime_passes() {
         "cert with ≥14 days left MUST produce a PASS row with days-remaining: {report}"
     );
     // No expiry-related WARN/FAIL.
-    let any_warn = report.checks.iter().any(|c| matches!(c, Check::Warn(s) if s.contains("expires in")));
-    let any_fail = report.checks.iter().any(|c| matches!(c, Check::Fail(s) if s.contains("EXPIRED")));
+    let any_warn = report
+        .checks
+        .iter()
+        .any(|c| matches!(c, Check::Warn(s) if s.contains("expires in")));
+    let any_fail = report
+        .checks
+        .iter()
+        .any(|c| matches!(c, Check::Fail(s) if s.contains("EXPIRED")));
     assert!(!any_warn, "healthy cert must not WARN: {report}");
     assert!(!any_fail, "healthy cert must not FAIL: {report}");
     let _ = std::fs::remove_dir_all(&dir);
