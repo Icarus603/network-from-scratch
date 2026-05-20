@@ -39,10 +39,11 @@
 //!    peer's fresh DH share).
 
 use rand_core::{CryptoRng, RngCore};
+use subtle::ConstantTimeEq;
 use x25519_dalek::{PublicKey as XPublicKey, ReusableSecret};
 use zeroize::Zeroizing;
 
-use crate::kdf;
+use crate::{kdf, CryptoError};
 
 /// Bytes per traffic secret.
 pub const SECRET_LEN: usize = 32;
@@ -83,30 +84,68 @@ impl RatchetState {
 
     /// Step the ratchet forward on the **send** side. Returns the new DH
     /// public to ship inside the KEYUPDATE inner packet.
-    pub fn step_send<R: RngCore + CryptoRng>(&mut self, rng: &mut R) -> [u8; 32] {
+    ///
+    /// Iter-165: returns `Err(CryptoError::X25519ZeroOutput)` if the
+    /// peer's last-known DH public is one of the X25519 low-order
+    /// points (RFC 7748 §6.1) — those force the DH output to all-zero,
+    /// reducing the new secret to a deterministic
+    /// `HKDF(current_secret, 0)` and DEFEATING post-compromise
+    /// security for this step. The recv-side wire path
+    /// (`session::apply_ratchet`) has the equivalent check; this
+    /// closes the matching gap on the send-side `RatchetState` API
+    /// so any future user of this module (the α data path, a future
+    /// β/γ transport, integration-test harness) inherits the
+    /// defense.
+    pub fn step_send<R: RngCore + CryptoRng>(
+        &mut self,
+        rng: &mut R,
+    ) -> Result<[u8; 32], CryptoError> {
         let new_sk = ReusableSecret::random_from_rng(&mut *rng);
         let new_pk = XPublicKey::from(&new_sk).to_bytes();
         let shared = new_sk.diffie_hellman(&XPublicKey::from(self.peer_last_dh_pk));
+        let zero = [0u8; 32];
+        if bool::from(shared.as_bytes().ct_eq(&zero)) {
+            // X25519 low-order point on the peer's stored share —
+            // either an attacker injected a malicious previous
+            // ratchet pubkey OR upstream code seeded the ratchet
+            // with one. Either way refuse to advance; the session's
+            // current secret stays intact and the caller surfaces
+            // the failure to the operator.
+            return Err(CryptoError::X25519ZeroOutput);
+        }
         let new_secret = kdf::extract(self.current_secret.as_ref(), shared.as_bytes());
 
         // Install new state.
         self.epoch = self.epoch.wrapping_add(1);
         self.current_secret = Zeroizing::new(*new_secret);
         self.my_last_dh_sk = new_sk;
-        new_pk
+        Ok(new_pk)
     }
 
     /// Step the ratchet forward on the **recv** side using the peer's
     /// `new_dh_pk` carried in the KEYUPDATE packet.
-    pub fn step_recv(&mut self, peer_new_dh_pk: [u8; 32]) {
+    ///
+    /// Iter-165: same RFC 7748 §6.1 low-order-point rejection as
+    /// `step_send`. A malicious peer who sends a low-order public
+    /// in their KEYUPDATE would otherwise force `DH(my_sk,
+    /// peer_low_order) = 0`, reducing the new traffic secret to
+    /// `HKDF(current_secret, 0)` — a deterministic function of the
+    /// pre-compromise state. PCS is broken for any future ratchet
+    /// step the attacker can compose this on.
+    pub fn step_recv(&mut self, peer_new_dh_pk: [u8; 32]) -> Result<(), CryptoError> {
         let shared = self
             .my_last_dh_sk
             .diffie_hellman(&XPublicKey::from(peer_new_dh_pk));
+        let zero = [0u8; 32];
+        if bool::from(shared.as_bytes().ct_eq(&zero)) {
+            return Err(CryptoError::X25519ZeroOutput);
+        }
         let new_secret = kdf::extract(self.current_secret.as_ref(), shared.as_bytes());
 
         self.epoch = self.epoch.wrapping_add(1);
         self.current_secret = Zeroizing::new(*new_secret);
         self.peer_last_dh_pk = peer_new_dh_pk;
+        Ok(())
     }
 }
 
@@ -135,8 +174,8 @@ mod tests {
         let mut server = RatchetState::seed(initial_secret, server_dh_sk, client_dh_pk);
 
         // Client ratchets, generates a new pk, ships it.
-        let client_new_pk = client.step_send(&mut rng);
-        server.step_recv(client_new_pk);
+        let client_new_pk = client.step_send(&mut rng).expect("send step");
+        server.step_recv(client_new_pk).expect("recv step");
 
         assert_eq!(client.epoch, 1);
         assert_eq!(server.epoch, 1);
@@ -160,13 +199,13 @@ mod tests {
 
         // Client sends 3 ratchets, then server sends 2.
         for _ in 0..3 {
-            let pk = client.step_send(&mut rng);
-            server.step_recv(pk);
+            let pk = client.step_send(&mut rng).expect("send step");
+            server.step_recv(pk).expect("recv step");
             assert_eq!(client.current_secret(), server.current_secret());
         }
         for _ in 0..2 {
-            let pk = server.step_send(&mut rng);
-            client.step_recv(pk);
+            let pk = server.step_send(&mut rng).expect("send step");
+            client.step_recv(pk).expect("recv step");
             assert_eq!(client.current_secret(), server.current_secret());
         }
         assert_eq!(client.epoch, 5);
@@ -187,13 +226,77 @@ mod tests {
             let b_pk = XPublicKey::from(&b_sk).to_bytes();
             let mut a = RatchetState::seed(initial_secret, a_sk, b_pk);
             let mut b = RatchetState::seed(initial_secret, b_sk, a_pk);
-            let pk = a.step_send(rng);
-            b.step_recv(pk);
+            let pk = a.step_send(rng).expect("send step");
+            b.step_recv(pk).expect("recv step");
             *a.current_secret()
         };
 
         let s1 = mk_pair(&mut rng);
         let s2 = mk_pair(&mut rng);
         assert_ne!(s1, s2, "independent sessions MUST diverge");
+    }
+
+    /// Iter-165: a peer who supplies an X25519 low-order point as
+    /// their stored DH public (either at seed time or via a
+    /// previous KEYUPDATE) must NOT be allowed to advance the
+    /// ratchet, because the resulting DH output is the all-zero
+    /// shared (RFC 7748 §6.1) and the new traffic secret becomes
+    /// a deterministic function of the pre-step `current_secret`
+    /// — DEFEATING post-compromise security for that step.
+    ///
+    /// The seven X25519 low-order points (curve25519-dalek's
+    /// `LOW_ORDER_POINTS`) all produce the same all-zero output;
+    /// we exercise the first one (`u = 0`) here as representative.
+    #[test]
+    fn iter165_step_send_rejects_low_order_peer_pubkey() {
+        let mut rng = OsRng;
+        let initial_secret = [0xfeu8; SECRET_LEN];
+        let my_sk = ReusableSecret::random_from_rng(rng);
+        // `u = 0` is the X25519 low-order point of order 1 (RFC 7748
+        // §6.1 / curve25519-dalek's LOW_ORDER_POINTS[0]).
+        let peer_low_order = [0u8; 32];
+        let mut state = RatchetState::seed(initial_secret, my_sk, peer_low_order);
+        let prev_epoch = state.epoch;
+        let prev_secret = *state.current_secret();
+
+        let res = state.step_send(&mut rng);
+        assert!(
+            matches!(res, Err(CryptoError::X25519ZeroOutput)),
+            "iter-165: step_send must reject low-order peer DH pubkey, got {res:?}"
+        );
+        // CRITICAL: the failed step must NOT advance the ratchet —
+        // otherwise an attacker could force the session into a
+        // deterministic-key state by sending a low-order pubkey.
+        assert_eq!(state.epoch, prev_epoch);
+        assert_eq!(state.current_secret(), &prev_secret);
+    }
+
+    /// Iter-165: the same low-order-point rejection on the recv
+    /// side. A malicious KEYUPDATE carrying `peer_new_dh_pk = [0;
+    /// 32]` would otherwise force DH = 0 and a deterministic
+    /// post-step secret.
+    #[test]
+    fn iter165_step_recv_rejects_low_order_peer_pubkey() {
+        let rng = OsRng;
+        let initial_secret = [0xfeu8; SECRET_LEN];
+        let my_sk = ReusableSecret::random_from_rng(rng);
+        let peer_normal_sk = ReusableSecret::random_from_rng(rng);
+        let peer_normal_pk = XPublicKey::from(&peer_normal_sk).to_bytes();
+        let mut state = RatchetState::seed(initial_secret, my_sk, peer_normal_pk);
+        let prev_epoch = state.epoch;
+        let prev_secret = *state.current_secret();
+
+        // Attacker's KEYUPDATE carries the low-order point.
+        let res = state.step_recv([0u8; 32]);
+        assert!(
+            matches!(res, Err(CryptoError::X25519ZeroOutput)),
+            "iter-165: step_recv must reject low-order peer DH pubkey, got {res:?}"
+        );
+        assert_eq!(state.epoch, prev_epoch);
+        assert_eq!(state.current_secret(), &prev_secret);
+        // peer_last_dh_pk MUST also be unchanged — otherwise a
+        // future step_send would feed the attacker-chosen
+        // low-order point as its DH partner.
+        assert_eq!(state.peer_last_dh_pk, peer_normal_pk);
     }
 }
