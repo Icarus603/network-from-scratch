@@ -24,6 +24,7 @@ proteus-handshake = { path = "../proteus-handshake" }
 ed25519-dalek.workspace = true
 rand_core = { workspace = true, features = ["getrandom"] }
 thiserror.workspace = true
+zeroize.workspace = true
 
 tokio = { workspace = true, features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "fs", "signal"] }
 
