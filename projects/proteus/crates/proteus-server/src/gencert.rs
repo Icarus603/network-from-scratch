@@ -9,6 +9,8 @@ use std::fs;
 use std::net::IpAddr;
 use std::path::Path;
 
+use zeroize::{Zeroize as _, Zeroizing};
+
 /// Iter-129: validate `--dns-name` BEFORE handing it to rcgen.
 /// Pre-iter-129 rcgen accepted literally anything as a SAN string
 /// — empty string, "...", "Hello World" all silently produced a
@@ -148,7 +150,24 @@ pub fn run_with_force(
     fs::create_dir_all(out_dir)?;
     let ck = rcgen::generate_simple_self_signed(vec![dns_name.to_string()])?;
     let cert_pem = ck.cert.pem();
-    let key_pem = ck.key_pair.serialize_pem();
+    // Iter-179: wrap the PEM-encoded private key in `Zeroizing` so
+    // the String backing buffer scrubs on drop. PEM is just
+    // base64-of-DER bracketed by BEGIN/END headers — anyone with
+    // the bytes can re-import the key with rustls /
+    // ed25519/ecdsa libraries. Pre-iter-179 the `key_pem`
+    // String lingered on the heap from the moment rcgen
+    // serialized it through the file-write syscall and after
+    // the function returned, until later allocation activity
+    // reused its backing. Same defect class as iter-167
+    // (knock-keygen + keygen b64 + body buffers) and iter-168
+    // (server SK file-bytes/decode), closed for the TLS
+    // private-key path.
+    //
+    // The String type doesn't impl Zeroize directly, but
+    // Zeroizing<String> works because `zeroize::Zeroize` is
+    // impl'd on `String` (drops to memset over the internal
+    // bytes).
+    let mut key_pem = Zeroizing::new(ck.key_pair.serialize_pem());
     // Iter-152: atomic-mode-0600 + fsync for the SK (private key).
     // The cert is public so 0644 is fine; we keep the cert path
     // on the legacy fs::write path. The SK is the same compromise
@@ -156,30 +175,37 @@ pub fn run_with_force(
     // write-then-chmod race window is a real exfil vector on
     // shared hosts.
     fs::write(&cert_path, cert_pem)?;
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&key_path)?;
-        f.write_all(key_pem.as_bytes())?;
-        f.sync_all()?;
-        // Cert path: legacy chmod 0644 (the cert is public, the
-        // race window doesn't leak anything sensitive — but we
-        // also want the explicit mode for consistency with
-        // operator-deployed Let's Encrypt files).
-        let mut cperm = fs::metadata(&cert_path)?.permissions();
-        cperm.set_mode(0o644);
-        fs::set_permissions(&cert_path, cperm)?;
-    }
-    #[cfg(not(unix))]
-    {
-        fs::write(&key_path, key_pem)?;
-    }
+    let write_result = (|| -> std::io::Result<()> {
+        #[cfg(unix)]
+        {
+            use std::io::Write;
+            use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+            let mut f = fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(&key_path)?;
+            f.write_all(key_pem.as_bytes())?;
+            f.sync_all()?;
+            // Cert path: legacy chmod 0644 (the cert is public, the
+            // race window doesn't leak anything sensitive — but we
+            // also want the explicit mode for consistency with
+            // operator-deployed Let's Encrypt files).
+            let mut cperm = fs::metadata(&cert_path)?.permissions();
+            cperm.set_mode(0o644);
+            fs::set_permissions(&cert_path, cperm)?;
+        }
+        #[cfg(not(unix))]
+        {
+            fs::write(&key_path, key_pem.as_bytes())?;
+        }
+        Ok(())
+    })();
+    // Scrub the PEM regardless of write outcome — partial writes
+    // still leak the key if the buffer lingers.
+    key_pem.zeroize();
+    write_result?;
     // Parent-dir fsync (best-effort) so the directory entries
     // for BOTH files are durable.
     if let Ok(parent_f) = fs::File::open(out_dir) {
