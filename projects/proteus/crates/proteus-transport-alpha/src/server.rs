@@ -2491,7 +2491,13 @@ where
     // exporters on each side and therefore cannot relay the inner
     // Finished MAC chain (which now commits to the exporter via the
     // transcript hash on both ends).
-    let mut binding = [0u8; crate::client::CHANNEL_BINDING_LEN];
+    //
+    // Iter-174: wrap the channel-binding tag in `Zeroizing` so the
+    // 32-byte exporter output scrubs on drop. Mirrors the matching
+    // client-side fix; see that comment block for the threat
+    // analysis. Server-side has larger blast radius — this path is
+    // taken for every accepted TLS-wrapped handshake.
+    let mut binding = Zeroizing::new([0u8; crate::client::CHANNEL_BINDING_LEN]);
     {
         let (_io, conn) = tls_stream.get_ref();
         conn.export_keying_material(&mut binding[..], crate::client::TLS_EXPORTER_LABEL, None)
@@ -2502,7 +2508,10 @@ where
             })?;
     }
     let (read, write) = tokio::io::split(tls_stream);
-    handshake_over_split_bound(read, write, ctx, Some(binding)).await
+    // Pass the binding bytes by value; the receiver re-wraps them
+    // in its own Zeroizing on entry. The wrapper here scrubs as
+    // soon as this function exits.
+    handshake_over_split_bound(read, write, ctx, Some(*binding)).await
 }
 
 /// Run the server-side Proteus handshake over an already-split
@@ -2681,10 +2690,15 @@ where
     // wire frame goes into the transcript, otherwise their inner
     // Finished MAC chains diverge — which is exactly the failure
     // mode we want when a MITM bridges two distinct TLS sessions.
-    if let Some(binding) = channel_binding {
-        let mut pre = Vec::with_capacity(2 + crate::client::CHANNEL_BINDING_LEN);
+    // Iter-174: rewrap the by-value param into Zeroizing so the
+    // in-function copy scrubs on scope exit. Same approach as
+    // the matching client-side fix; the public-API signature
+    // can't change (β transport + integration tests consume it).
+    if let Some(binding_raw) = channel_binding {
+        let binding = Zeroizing::new(binding_raw);
+        let mut pre = Zeroizing::new(Vec::with_capacity(2 + crate::client::CHANNEL_BINDING_LEN));
         pre.extend_from_slice(b"cb");
-        pre.extend_from_slice(&binding);
+        pre.extend_from_slice(&*binding);
         transcript.update(&pre);
     }
     transcript.update(&ch.body);

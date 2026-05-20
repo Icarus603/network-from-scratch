@@ -14,6 +14,7 @@ use proteus_transport_alpha::session::AlphaSession;
 use proteus_transport_alpha::ProfileHint;
 use rustls::pki_types::CertificateDer;
 use tracing::info;
+use zeroize::Zeroizing;
 
 use crate::error::BetaError;
 use crate::ALPN;
@@ -556,7 +557,12 @@ pub async fn connect_with_timeout_perf_cached_crypto(
     // relayed → handshake aborts. quinn-proto uses a different
     // exporter shape than rustls (always passes Some(context)) so
     // α and β bindings are deliberately not interchangeable.
-    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+    // Iter-174: wrap the QUIC exporter output in Zeroizing —
+    // same defense as the α-profile fix in the matching iteration.
+    // The QUIC TLS exporter is the channel-binding tag the inner
+    // Proteus handshake commits to via its Finished MAC chain;
+    // recovery via stack-image grab → MITM-binding bypass.
+    let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
     conn.export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
         .map_err(|_| {
             BetaError::Io(std::io::Error::other(
@@ -565,7 +571,7 @@ pub async fn connect_with_timeout_perf_cached_crypto(
         })?;
 
     let (send, recv) = conn.open_bi().await?;
-    let session = handshake_over_split_bound(recv, send, &cfg, Some(binding)).await?;
+    let session = handshake_over_split_bound(recv, send, &cfg, Some(*binding)).await?;
     Ok(BetaClientSession {
         session,
         connection: conn,

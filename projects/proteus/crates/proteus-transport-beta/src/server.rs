@@ -63,6 +63,7 @@ fn record_probe_anomaly(ctx: &Arc<ServerCtx>, peer: &SocketAddr) {
 use rustls::pki_types::{CertificateDer, PrivateKeyDer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
+use zeroize::Zeroizing;
 
 use crate::error::BetaError;
 use crate::ALPN;
@@ -346,7 +347,11 @@ where
                     // exporter for α; quinn-proto exporter for β), and
                     // they are not interchangeable. That's a feature: a
                     // β-rogue cannot replay an α capture and vice versa.
-                    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+                    // Iter-174: Zeroize-wrap the QUIC exporter so
+                    // the channel-binding tag scrubs on drop. Same
+                    // residue defense as the α-profile fix in the
+                    // matching iteration.
+                    let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
                     if conn
                         .export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
                         .is_err()
@@ -368,7 +373,7 @@ where
                     // Measure handshake wall-clock so the on_session
                     // handler can feed it into the latency histogram.
                     let hs_start = std::time::Instant::now();
-                    let hs_fut = handshake_over_split_bound(recv, send, &ctx, Some(binding));
+                    let hs_fut = handshake_over_split_bound(recv, send, &ctx, Some(*binding));
                     let session = match tokio::time::timeout(ctx.handshake_deadline(), hs_fut).await
                     {
                         Ok(Ok(s)) => {

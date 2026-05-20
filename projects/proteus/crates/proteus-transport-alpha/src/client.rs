@@ -133,7 +133,18 @@ pub async fn handshake_over_tls(
     // we lose access to the rustls ClientConnection). On TLS 1.3 the
     // exporter is fully usable post-handshake; rustls will return Err
     // if the handshake is somehow not complete — surface that.
-    let mut binding = [0u8; CHANNEL_BINDING_LEN];
+    //
+    // Iter-174: wrap the channel-binding tag in `Zeroizing` so the
+    // 32-byte exporter output scrubs on drop. The tag is mixed into
+    // the inner Proteus transcript and the inner Finished MAC chain
+    // commits to it (spec §5.10 / RFC 5705 / 9266). Recovering it
+    // from a stack-image grab lets an attacker independently
+    // reconstruct the same channel-binding (= replay the outer TLS
+    // exporter against the inner key schedule), defeating the
+    // outer-TLS↔inner-Proteus binding that protects against an
+    // outer-TLS MITM. The matching server-side residue is closed
+    // in iter-174's companion fix.
+    let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
     {
         let (_io, conn) = tls_stream.get_ref();
         conn.export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, None)
@@ -144,7 +155,11 @@ pub async fn handshake_over_tls(
             })?;
     }
     let (read, write) = tokio::io::split(tls_stream);
-    handshake_over_split_bound(read, write, config, Some(binding)).await
+    // Pass the tag by value via deref-copy — the receiver wraps
+    // it in its own Zeroizing on entry. The original `binding`
+    // wrapper here scrubs on the function exit immediately after
+    // this `await`.
+    handshake_over_split_bound(read, write, config, Some(*binding)).await
 }
 
 /// Inner handshake driver, generic over any AsyncRead/AsyncWrite split.
@@ -372,10 +387,19 @@ where
     // length-prefixed so the receiver can't be tricked by length
     // ambiguity if a future extension adds more pre-transcript
     // material.
-    if let Some(binding) = channel_binding {
-        let mut pre = Vec::with_capacity(2 + CHANNEL_BINDING_LEN);
+    // Iter-174: rebind the channel_binding param into Zeroizing
+    // so the in-function copy scrubs when this scope exits. The
+    // function signature can't change (public-API surface used by
+    // the β transport + integration tests), so we take the by-
+    // value Option<[u8;32]> and immediately move it into the
+    // Zeroizing-wrapped slot. The pre-transcript Vec also holds
+    // the binding bytes, so wrap it too — it's small (34 bytes)
+    // and scrubs on the if-let scope's end.
+    if let Some(binding_raw) = channel_binding {
+        let binding = Zeroizing::new(binding_raw);
+        let mut pre = Zeroizing::new(Vec::with_capacity(2 + CHANNEL_BINDING_LEN));
         pre.extend_from_slice(b"cb"); // 2-byte label so future pre-transcript items can be added
-        pre.extend_from_slice(&binding);
+        pre.extend_from_slice(&*binding);
         transcript.update(&pre);
     }
     transcript.update(&ch_payload);
