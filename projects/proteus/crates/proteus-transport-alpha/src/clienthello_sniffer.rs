@@ -210,10 +210,16 @@ where
             }
             // If the header claims more than our cap, we still
             // try to fill what we can — the parser will surface
-            // BadRecord on the truncation.
-            if full_record > buf.len() {
-                buf.resize(full_record.min(limit * 2), 0);
-            }
+            // BadRecord on the truncation. We DELIBERATELY do not
+            // resize beyond `limit` here: iter-156 closes a defect
+            // where a previous `buf.resize(full_record.min(limit * 2), 0)`
+            // silently doubled the documented `peek_limit` on a
+            // malformed record-length header — an attacker who set
+            // `record_body_len = 0xFFFF` could force the sniffer to
+            // hold 2 × peek_limit bytes per connection. The buffer
+            // is already pre-sized to `limit` on entry, so a record
+            // that demands more bytes than the cap simply truncates
+            // and the parser rejects it as BadRecord.
         }
     }
     buf.truncate(total);
@@ -431,5 +437,81 @@ mod tests {
             err,
             SniffError::BadRecord(_) | SniffError::ConnectionClosed { .. }
         ));
+    }
+
+    /// Iter-156: an attacker who controls the TLS-record-length
+    /// header (bytes 3-4) could previously force the sniffer to
+    /// `buf.resize(full_record.min(limit * 2), 0)` — silently
+    /// doubling the documented `peek_limit`. This test feeds the
+    /// maximum possible 16-bit length (`record_body_len = 0xFFFF`)
+    /// against a tight 256-byte cap and asserts the error surfaces
+    /// without the buffer ever growing beyond the cap.
+    ///
+    /// Verification strategy: we use a `CountingReader` that
+    /// records the largest `buf.remaining()` it observes across
+    /// poll_read calls. The cap is N bytes; observed `remaining`
+    /// must never exceed `N - 5` (= N minus the bytes already
+    /// consumed by the time the cap is first felt).
+    #[tokio::test]
+    async fn sniff_does_not_grow_buffer_past_peek_limit_on_attacker_length() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        struct CountingReader {
+            inner: Vec<u8>,
+            pos: usize,
+            max_buf_remaining: Arc<AtomicUsize>,
+        }
+        impl AsyncRead for CountingReader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _cx: &mut std::task::Context<'_>,
+                buf: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<std::io::Result<()>> {
+                let prev = self.max_buf_remaining.load(Ordering::Relaxed);
+                let now = buf.remaining();
+                if now > prev {
+                    self.max_buf_remaining.store(now, Ordering::Relaxed);
+                }
+                let remaining = self.inner.len() - self.pos;
+                let want = remaining.min(8).min(buf.remaining());
+                if want == 0 {
+                    return std::task::Poll::Ready(Ok(()));
+                }
+                let start = self.pos;
+                let end = start + want;
+                buf.put_slice(&self.inner[start..end]);
+                self.pos = end;
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+
+        // Crafted record: type=0x16, version=0x0301, length=0xFFFF
+        // — the maximum a 16-bit big-endian length can claim. Body
+        // is much smaller; we never deliver more than the cap.
+        let mut bytes = vec![0x16, 0x03, 0x01, 0xFF, 0xFF];
+        bytes.extend_from_slice(&[0x00; 1024]);
+
+        let cap: usize = 256;
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let mut reader = CountingReader {
+            inner: bytes,
+            pos: 0,
+            max_buf_remaining: max_observed.clone(),
+        };
+
+        let res = sniff_client_hello_with_limits(&mut reader, cap, DEFAULT_PEEK_TIMEOUT).await;
+        // Must error (truncated record body); never panic and
+        // never allocate beyond the cap.
+        assert!(res.is_err(), "expected error on oversized claim");
+        let observed = max_observed.load(Ordering::Relaxed);
+        assert!(
+            observed <= cap,
+            "iter-156: sniffer offered {observed} bytes to the reader \
+             (cap = {cap}). The pre-iter-156 code would double the \
+             buffer via `buf.resize(full_record.min(limit * 2), 0)` \
+             when the attacker-controlled record-length header \
+             exceeded the cap."
+        );
     }
 }
