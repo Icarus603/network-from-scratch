@@ -518,6 +518,18 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// per-ratchet, so a peer can up- or down-grade mid-session.
     async fn send_ratchet_frame(&mut self) -> AlphaResult<()> {
         let new_epoch = self.epoch.saturating_add(1);
+        // Iter-177: same EPOCH_MAX gate as the recv-side
+        // `apply_ratchet` path. If we ever reach 1 << 24 epochs
+        // (impossible in any realistic deployment, but a future
+        // bug or pathological peer could trigger it), the
+        // 24-bit epoch field overflows when packed into the
+        // 64-bit AEAD nonce counter via `u64::from(epoch) << 40`,
+        // breaking the nonce-uniqueness invariant. Refuse to
+        // emit the ratchet and surface a closed session — the
+        // operator must restart with a fresh handshake.
+        if u64::from(new_epoch) >= (1u64 << proteus_spec::EPOCH_BITS) {
+            return Err(AlphaError::Closed);
+        }
 
         // One-shot DH heal step: the FIRST ratchet event on this
         // direction takes the bootstrap dh_sk + peer_dh_pub and
@@ -1082,6 +1094,28 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         }
         let new_epoch = u32::from_be_bytes([pt_bytes[0], pt_bytes[1], pt_bytes[2], pt_bytes[3]]);
         if new_epoch != self.epoch.saturating_add(1) {
+            return Err(AlphaError::BadServerFinished);
+        }
+        // Iter-177: enforce the 24-bit epoch field (spec §4.5 +
+        // proteus_spec::EPOCH_BITS = 24). The wire format packs
+        // `epoch:24 || seqnum:40` into a 64-bit AEAD nonce
+        // counter; if `epoch` reaches `1 << 24` the
+        // `u64::from(epoch) << 40` shift in `recv_record` /
+        // `send_record` would overflow u64 (debug panic / release
+        // wrap-to-0). Either outcome breaks the
+        // nonce-uniqueness invariant that AEAD security
+        // depends on. Once we cross EPOCH_MAX, refuse to apply
+        // the ratchet and close the session — operator must
+        // start a fresh handshake.
+        //
+        // Sessions hit this limit only after 2^24 = ~16M
+        // ratchet events. At RATCHET_BYTES = 4 MiB that's 64 TiB
+        // per direction per session — never reached in any
+        // realistic deployment, but the gate must be present so
+        // a deliberately-pathological peer (or a hypothetical
+        // future bug that triggers excessive ratcheting) cannot
+        // smash the nonce invariant.
+        if u64::from(new_epoch) >= (1u64 << proteus_spec::EPOCH_BITS) {
             return Err(AlphaError::BadServerFinished);
         }
 
