@@ -1290,7 +1290,34 @@ async fn pump<R, W>(
         // 64 KiB matches AlphaSender::TX_BUF_CAPACITY so a single
         // read can fill the BufWriter, and consecutive full reads
         // coalesce cleanly without exceeding it.
-        let mut buf = vec![0u8; 64 * 1024];
+        //
+        // Iter-184: scope-exit scrub via ScrubOnDrop. Same
+        // residue defect as iter-183 (server-side relay):
+        // `sock_r.read(&mut buf)` only overwrites `buf[..n]`,
+        // leaving prior reads' tail residue accumulating at
+        // the high-water mark. The SOCKS5 inbound is APPLICATION
+        // PLAINTEXT (the user's HTTP request lines, the user's
+        // TCP-tunneled bytes) — exactly what Proteus promises
+        // never to leak.
+        struct ScrubOnDrop(Vec<u8>);
+        impl Drop for ScrubOnDrop {
+            fn drop(&mut self) {
+                use zeroize::Zeroize as _;
+                self.0.zeroize();
+            }
+        }
+        impl std::ops::Deref for ScrubOnDrop {
+            type Target = Vec<u8>;
+            fn deref(&self) -> &Vec<u8> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for ScrubOnDrop {
+            fn deref_mut(&mut self) -> &mut Vec<u8> {
+                &mut self.0
+            }
+        }
+        let mut buf = ScrubOnDrop(vec![0u8; 64 * 1024]);
         loop {
             match sock_r.read(&mut buf).await {
                 Ok(0) | Err(_) => {
@@ -1321,9 +1348,21 @@ async fn pump<R, W>(
     let server_to_client = async {
         loop {
             match receiver.recv_record().await {
-                Ok(Some(buf)) if !buf.is_empty() => {
+                Ok(Some(mut buf)) if !buf.is_empty() => {
                     let buf_len = buf.len();
-                    if sock_w.write_all(&buf).await.is_err() {
+                    let write_result = sock_w.write_all(&buf).await;
+                    // Iter-184: scrub the decrypted-plaintext Vec
+                    // immediately after the downstream-socket
+                    // write completes (success OR error). The
+                    // bytes are application plaintext returned
+                    // from the upstream — HTTP response headers,
+                    // file-download payloads, TCP-tunnel bytes.
+                    // Same scrub policy as iter-183's relay.rs
+                    // direction-1 fix, applied here on the
+                    // client side.
+                    use zeroize::Zeroize as _;
+                    buf.zeroize();
+                    if write_result.is_err() {
                         break;
                     }
                     // Iter-63: adaptive flush, symmetric with the
