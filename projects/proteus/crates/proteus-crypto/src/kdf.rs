@@ -39,11 +39,23 @@ pub fn expand_label(
     context: &[u8],
     output: &mut [u8],
 ) -> Result<(), CryptoError> {
+    use zeroize::Zeroize as _;
+
     let length: u16 = u16::try_from(output.len()).map_err(|_| CryptoError::Hkdf)?;
     let full_label_len = PROTEUS_LABEL_PREFIX
         .len()
         .checked_add(label.len())
         .ok_or(CryptoError::Hkdf)?;
+    // Iter-192: wrap the `info` Vec backing buffer in a manual
+    // scope-exit scrub. `info` carries the HKDF info bytes
+    // including `context` — which for some callers IS secret
+    // (e.g. `derive_secret` passes a transcript hash, which is
+    // public, but other call sites can pass `dh_ikm` or other
+    // session-key-adjacent bytes). Pre-iter-192 the Vec
+    // dropped without zeroize after every HKDF-Expand-Label
+    // call; on a long-running server processing hundreds of
+    // sessions per second this accumulates a lot of recent
+    // info-buffer residue on the heap.
     let mut info = Vec::with_capacity(2 + 1 + full_label_len + 1 + context.len());
     info.extend_from_slice(&length.to_be_bytes());
     info.push(u8::try_from(full_label_len).map_err(|_| CryptoError::Hkdf)?);
@@ -53,7 +65,9 @@ pub fn expand_label(
     info.extend_from_slice(context);
 
     let hk = Hkdf::<Sha256>::from_prk(secret).map_err(|_| CryptoError::Hkdf)?;
-    hk.expand(&info, output).map_err(|_| CryptoError::Hkdf)?;
+    let result = hk.expand(&info, output).map_err(|_| CryptoError::Hkdf);
+    info.zeroize();
+    result?;
     Ok(())
 }
 
