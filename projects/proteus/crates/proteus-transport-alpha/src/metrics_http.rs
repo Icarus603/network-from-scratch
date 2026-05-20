@@ -991,12 +991,55 @@ async fn handle_connection_v12(
     tls_cert_watcher: Option<Arc<crate::tls_watcher::CertFileWatcher>>,
     live_blocks: Vec<Arc<LiveMetricsBlock>>,
 ) {
+    // Iter-161: bound the inbound request read with a wall-clock
+    // timeout. The metrics_listen socket binds loopback by default
+    // but operators can expose it publicly (with bearer auth) for
+    // scrape-via-Prometheus deployments — at which point a slow-
+    // loris attacker on the TCP layer can pin one tokio task per
+    // connection forever (OS-level TCP keepalive is 2 hours).
+    //
+    // 5 s is generous for a real Prometheus scrape (writes the
+    // ~100-byte GET in <1 ms even from a transcontinental
+    // collector) and tight enough to keep the FD / task budget
+    // bounded under a SYN-flood-style probe.
+    //
+    // We intentionally do NOT distinguish "timeout" from "EOF
+    // before any bytes": both surface as "drop the connection
+    // silently" (no response written). A real scraper that
+    // disconnects pre-request and a slow-loris attacker that
+    // never sends bytes are indistinguishable on the wire
+    // anyway; the response shape stays identical to a
+    // cover-passthrough scenario.
+    const REQUEST_HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let mut req = [0u8; 2048];
-    let _ = match stream.read(&mut req).await {
-        Ok(n) => n,
-        Err(_) => return,
+    let read_n = match tokio::time::timeout(REQUEST_HEAD_READ_TIMEOUT, stream.read(&mut req)).await
+    {
+        Ok(Ok(n)) => n,
+        Ok(Err(_)) => return,
+        Err(_) => {
+            // Slow-loris: peer opened TCP but didn't send the GET
+            // line within 5 s. Drop silently — log at DEBUG, not
+            // WARN, because legitimate dead-peer scrapes (e.g. a
+            // collector LB health-checking us by opening then
+            // immediately closing the TCP without sending the
+            // request) would otherwise spam at WARN.
+            tracing::debug!(
+                timeout_secs = REQUEST_HEAD_READ_TIMEOUT.as_secs(),
+                "metrics_http read timed out — possible slow-loris probe"
+            );
+            return;
+        }
     };
-    let head = std::str::from_utf8(&req).unwrap_or("");
+    // Constrain the str::from_utf8 view to the bytes we actually
+    // read so a stray byte at position N+1 from a prior connection
+    // can't influence parsing. Pre-iter-161 we passed the full
+    // 2048-byte zero-initialized buffer; the trailing NULs were
+    // harmless (extract_authorization splits on \r\n and matches_path
+    // looks at a prefix) but constraining is correct on principle
+    // and gives matches_path a chance to surface a malformed
+    // request if the peer sent <"GET /…HTTP/1.1\r\n"> bytes
+    // (which is the only well-formed shape we accept).
+    let head = std::str::from_utf8(&req[..read_n]).unwrap_or("");
     // Render the live blocks once per request and concatenate
     // them into a single string for handoff to the existing
     // render_full_v11. Since the live blocks need to appear
@@ -2274,6 +2317,59 @@ mod tests {
         metrics.ready.store(true, Ordering::Relaxed);
         let r = fetch(addr, "/readyz").await;
         assert!(r.starts_with("HTTP/1.1 200 OK"), "expected 200, got: {r}");
+
+        server_task.abort();
+    }
+
+    /// Iter-161: a peer that opens TCP and sends NO bytes must be
+    /// dropped within ~5 s, not held forever. Pre-iter-161 the
+    /// `stream.read(&mut req).await` had no timeout, so a slow-
+    /// loris attacker could pin one tokio task per connection
+    /// indefinitely (OS-level TCP keepalive is 2 hours).
+    ///
+    /// The test opens a connection, sends nothing, and asserts
+    /// that the server closes the connection from its end within
+    /// 10 s. With the iter-161 5-s read-timeout we expect
+    /// closure at ~5 s; we allow up to 10 s of slack so the
+    /// test is robust to scheduler jitter on busy CI runners.
+    /// Pre-iter-161 this test would hang for the full 10 s
+    /// (the read would still be pending) and fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iter161_slow_loris_drops_connection_within_timeout() {
+        let metrics = Arc::new(ServerMetrics::default());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_task = tokio::spawn(serve_on_listener(listener, Arc::clone(&metrics)));
+        tokio::task::yield_now().await;
+
+        let mut sock = timeout(Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+            .expect("connect timeout")
+            .expect("connect ok");
+
+        // Send nothing. Just hold the socket open and wait for the
+        // server to drop it. We detect that by reading until EOF;
+        // a server that drops the connection writes 0 bytes (or
+        // possibly the response then closes — either way read_to_end
+        // returns).
+        let mut buf = Vec::new();
+        let read_result = timeout(Duration::from_secs(10), sock.read_to_end(&mut buf)).await;
+        assert!(
+            read_result.is_ok(),
+            "iter-161: server must close the slow-loris connection within 10 s; \
+             pre-iter-161 the read would still be pending. read_to_end: {read_result:?}"
+        );
+        // The server with iter-161 simply closes the connection
+        // silently on read timeout — buf should be empty (no
+        // response written). The exact body is not asserted; the
+        // critical property is that the read completed at all.
+        assert!(
+            buf.is_empty(),
+            "iter-161: server must close silently without writing a response on \
+             slow-loris timeout, got {} bytes: {:?}",
+            buf.len(),
+            String::from_utf8_lossy(&buf)
+        );
 
         server_task.abort();
     }
