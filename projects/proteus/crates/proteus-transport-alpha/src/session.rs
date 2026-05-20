@@ -862,6 +862,24 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                     // the recv_record return signature.
                                     let bytes = self.rx_aead_scratch.clone();
                                     self.metrics.record_rx(bytes.len() as u64);
+                                    // Iter-197: scrub the scratch
+                                    // buffer NOW (post-clone) so the
+                                    // plaintext doesn't linger
+                                    // between recv_record calls. On a
+                                    // low-traffic session the gap can
+                                    // be minutes — long enough for a
+                                    // coredump or stack-image grab to
+                                    // recover the last record's
+                                    // plaintext (HTTP response
+                                    // headers, tunneled bytes). The
+                                    // iter-135 Drop scrub catches the
+                                    // teardown case; this catches the
+                                    // BETWEEN-RECORDS case. Vec::zeroize
+                                    // preserves capacity (clears len +
+                                    // zeros spare), so the hot-loop
+                                    // alloc-free property is preserved.
+                                    use zeroize::Zeroize as _;
+                                    self.rx_aead_scratch.zeroize();
                                     return Ok(Some(bytes));
                                 }
                                 Err(_) => {
@@ -973,6 +991,15 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                         out
                                     };
                                     self.metrics.record_rx(bytes.len() as u64);
+                                    // Iter-197: scrub the AEAD scratch
+                                    // post-clone-into-`bytes` so the
+                                    // plaintext doesn't linger between
+                                    // recv_record calls. Same fix as
+                                    // the unpadded RECORD_DATA path
+                                    // above; same threat model
+                                    // (between-records residue).
+                                    use zeroize::Zeroize as _;
+                                    self.rx_aead_scratch.zeroize();
                                     return Ok(Some(bytes));
                                 }
                                 Err(_) => {
