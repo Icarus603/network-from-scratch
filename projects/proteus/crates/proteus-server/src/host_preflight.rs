@@ -258,6 +258,17 @@ fn check_key_file_modes(cfg_path: &Path, r: &mut HostReport) {
         "cert_chain",
         "private_key",
         "metrics_token_file",
+        // Iter-195: include the knock_psk_file key. Pre-iter-195
+        // the preflight scanned for SK / cert / token paths but
+        // skipped the knock PSK file entirely — an operator who
+        // set `knock_psk_file: /tmp/world-readable.psk` got zero
+        // warnings from `proteus-server preflight --host`, even
+        // though the knock PSK is a 32-byte server secret in the
+        // same compromise category as mlkem_sk / x25519_sk. The
+        // `is_secret_key_path` heuristic below also gets the
+        // `psk` marker added in iter-195 so the file IS
+        // classified as secret once the preflight finds it.
+        "knock_psk_file",
     ];
     for line in text.lines() {
         let trimmed = line.trim_start();
@@ -421,6 +432,14 @@ fn is_secret_key_path(path: &Path) -> bool {
         || name == "privkey.pem"
         || name.contains("private")
         || name.contains("token")
+        // Iter-195: recognize knock PSK files. The default
+        // `knock-keygen --out` filename ends in `.knock_psk`
+        // and the broader `psk` marker catches any operator
+        // who renamed it (server.psk, knock.psk, etc.). PSK
+        // is the entire authentication boundary on Path A;
+        // world-readable PSK = probers pass the cover gate at
+        // will.
+        || name.contains("psk")
 }
 
 /// Check the process's RLIMIT_NOFILE soft limit. systemd unit sets
@@ -1086,5 +1105,33 @@ mod tests {
         assert!(!is_secret_key_path(Path::new("foo.pk")));
         assert!(!is_secret_key_path(Path::new("ed25519.pk")));
         assert!(!is_secret_key_path(Path::new("fullchain.pem")));
+    }
+
+    /// Iter-195: the knock-PSK file is a 32-byte server secret in
+    /// the same compromise category as mlkem_sk / x25519_sk —
+    /// world-readable PSK = probers pass the Path-A cover gate at
+    /// will. Pre-iter-195 the host preflight skipped the PSK file
+    /// entirely (not in `interesting_keys`) AND would not have
+    /// classified it as secret even if it had been found
+    /// (`is_secret_key_path` lacked the `psk` marker). This test
+    /// pins both: the classifier MUST treat `psk`-named files as
+    /// secrets, regardless of the operator's chosen filename
+    /// convention.
+    #[test]
+    fn iter195_knock_psk_filenames_classified_as_secret() {
+        for path in [
+            "server.knock_psk",  // default name from knock-keygen --out
+            "server.psk",        // operator shortened
+            "knock.psk",         // alternative naming
+            "proteus-knock.psk", // operator-prefixed
+            "PSK_FILE",          // uppercase / non-conventional
+            "my_server_psk.bin", // embedded in middle of name
+        ] {
+            assert!(
+                is_secret_key_path(Path::new(path)),
+                "iter-195: {path:?} must classify as secret (knock PSK files \
+                 are 32-byte authentication-boundary material)"
+            );
+        }
     }
 }
