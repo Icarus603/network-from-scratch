@@ -2109,12 +2109,21 @@ fn check_parent_writable(report: &mut PreflightReport, label: &str, path: &Path)
 /// the server's static `x25519_pk` and `x25519_sk`. Skips the
 /// check when the file is absent or empty — those already FAILED
 /// via check_file's existing checks.
+///
+/// Iter-187: wrap the file-read bytes + decoded bytes in
+/// `Zeroizing<Vec<u8>>`. When called against `x25519_sk` the bytes
+/// ARE the SK material (or b64-encoded form thereof); pre-iter-187
+/// the file-read Vec lingered on the heap after validate exit. The
+/// `x25519_pk` path is non-secret; conservatively scrubbing both
+/// costs one memset per call and avoids baking "is-this-SK" into
+/// the helper signature.
 fn check_x25519_key_len(report: &mut PreflightReport, label: &str, path: &Path) {
+    use zeroize::Zeroizing;
     let bytes = match std::fs::read(path) {
-        Ok(b) if !b.is_empty() => b,
+        Ok(b) if !b.is_empty() => Zeroizing::new(b),
         _ => return,
     };
-    let decoded = base64_or_raw_bytes(&bytes);
+    let decoded = Zeroizing::new(base64_or_raw_bytes(&bytes));
     if decoded.len() == 32 || bytes.len() == 32 {
         return; // pass — no need for a second OK row
     }
@@ -2143,15 +2152,19 @@ fn check_mlkem_key_len(
     expected_raw_len: usize,
     description: &str,
 ) {
+    // Iter-187: same Zeroizing wrap as `check_x25519_key_len`.
+    // For `mlkem_sk` this is decapsulation-key material; for
+    // `mlkem_pk` this is non-secret. Conservative scrub on both.
+    use zeroize::Zeroizing;
     let bytes = match std::fs::read(path) {
-        Ok(b) => b,
+        Ok(b) => Zeroizing::new(b),
         Err(_) => {
             // The check_file call above already pushed a FAIL with
             // the underlying io::Error. Don't double-fail.
             return;
         }
     };
-    let decoded = base64_or_raw_bytes(&bytes);
+    let decoded = Zeroizing::new(base64_or_raw_bytes(&bytes));
     let raw_len = decoded.len();
     if raw_len == expected_raw_len {
         report.push_pass(format!(
@@ -2181,15 +2194,31 @@ fn check_mlkem_key_len(
 
 fn base64_or_raw_bytes(input: &[u8]) -> Vec<u8> {
     use base64::Engine;
-    let trimmed: Vec<u8> = input
+    use zeroize::Zeroize as _;
+
+    // Iter-187: scrub the intermediate `trimmed` Vec on drop.
+    // When validate-time SK length checks call this helper
+    // (mlkem_sk, x25519_sk files), `trimmed` is a byte-for-byte
+    // copy of the base64-encoded SK material — directly
+    // substitutable for the SK via b64-decode. The public-key
+    // load paths also exercise this helper; conservatively
+    // scrubbing both shapes costs ~one memset per call and
+    // avoids baking "is-this-SK" into the helper signature.
+    // Mirrors the iter-168 decode_b64_or_raw fix on the
+    // runtime key-load paths (config.rs server + client
+    // sides).
+    let mut trimmed: Vec<u8> = input
         .iter()
         .copied()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
-        return decoded;
-    }
-    input.to_vec()
+    let result = if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
+        decoded
+    } else {
+        input.to_vec()
+    };
+    trimmed.zeroize();
+    result
 }
 
 /// Top-level driver for the `validate` subcommand. Loads the YAML
