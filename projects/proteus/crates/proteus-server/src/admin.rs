@@ -1173,6 +1173,19 @@ pub fn parse_http_url(url: &str) -> Result<(String, u16, String), AdminError> {
             "{url:?}: host portion is empty (likely `http://:port` without a host)."
         )));
     }
+    // Iter-159: reject port 0. Mirrors the iter-158 cover-endpoint
+    // port-0 gate + the iter-153 client `parse_host_port` gate.
+    // TCP-connect to port 0 fails with EADDRNOTAVAIL on every
+    // platform (port 0 is reserved for bind/listen 'any free
+    // port'), so an admin URL pointing at port 0 is never a
+    // legitimate config — only a placeholder-template typo the
+    // bare `u16::parse` accepted silently.
+    if port == 0 {
+        return Err(AdminError::BadUrl(format!(
+            "{url:?}: port 0 is invalid as a TCP-connect target (reserved for bind/listen \
+             'any free port')."
+        )));
+    }
     // Iter-147: reject CRLF / NUL / TAB anywhere in host or path.
     // The host and path get embedded verbatim into the HTTP
     // request line + Host header in `http_get`; without this
@@ -2012,6 +2025,49 @@ proteus_some_future_counter_total 43
             assert!(
                 parse_http_url(url).is_ok(),
                 "iter-147: legit URL {url:?} must still parse cleanly"
+            );
+        }
+    }
+
+    // ---- iter-159: port 0 rejection on admin URL ----
+
+    /// Iter-159 closes a missing-gate on admin URL: port 0 is
+    /// invalid as a TCP-connect target (reserved for "any free
+    /// port" on bind/listen). Pre-iter-159 `http://127.0.0.1:0`
+    /// parsed cleanly and only failed at TCP-connect time with
+    /// an OS error, hiding the typo. The cover-endpoint parser
+    /// got the same gate in iter-158; this is the matching
+    /// admin-URL fix.
+    #[test]
+    fn iter159_parse_http_url_rejects_port_zero() {
+        for url in [
+            "http://127.0.0.1:0/metrics",
+            "http://[::1]:0/metrics",
+            "http://localhost:0/metrics",
+        ] {
+            let err = parse_http_url(url).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("port 0 is invalid") || msg.contains("port 0"),
+                "iter-159: port 0 in {url:?} must be rejected: {msg}"
+            );
+        }
+    }
+
+    /// Iter-159 regression: well-formed non-zero ports still
+    /// parse cleanly (the new gate must not reject anything
+    /// legitimate).
+    #[test]
+    fn iter159_well_formed_ports_still_parse() {
+        for url in [
+            "http://127.0.0.1:1/metrics",
+            "http://127.0.0.1:65535/metrics",
+            "http://localhost:9090/metrics",
+        ] {
+            assert!(
+                parse_http_url(url).is_ok(),
+                "iter-159: legitimate port in {url:?} must still parse: {:?}",
+                parse_http_url(url).err()
             );
         }
     }

@@ -517,6 +517,27 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), AlertsCheckError> 
             "{url:?}: port {port:?} isn't a valid u16 (1-65535)"
         ))
     })?;
+    // Iter-159: reject empty host. Symmetric with the
+    // iter-116 server-side gate; closes the
+    // `http://:9091/status` shape that previously parsed
+    // cleanly with host="" and resolved via libc to either
+    // localhost or 0.0.0.0 — an implicit-loopback surprise.
+    if host.is_empty() {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "{url:?}: host portion is empty (likely `http://:port` without a host)."
+        )));
+    }
+    // Iter-159: reject port 0. Symmetric with the iter-158
+    // cover-endpoint port-0 gate — TCP-connect to port 0 fails
+    // with EADDRNOTAVAIL on every platform, so port 0 is never a
+    // legitimate admin endpoint; the bare `u16::parse` happily
+    // accepted it before.
+    if port == 0 {
+        return Err(AlertsCheckError::BadUrl(format!(
+            "{url:?}: port 0 is invalid as a TCP-connect target (reserved for bind/listen \
+             'any free port')."
+        )));
+    }
     // Iter-147: reject CRLF / NUL / TAB / space in host or path —
     // both get embedded verbatim into the HTTP GET request (host
     // into Host:, path into the request line). Defense-in-depth
@@ -930,6 +951,47 @@ mod tests {
             msg.contains("99999") && msg.contains("u16"),
             "iter-116 must name bad port + valid range: {msg}"
         );
+    }
+
+    /// Iter-159: empty host (`http://:9091`) previously parsed
+    /// cleanly with host="". Symmetric with the iter-116
+    /// server-side gate.
+    #[test]
+    fn iter159_parse_empty_host_rejected() {
+        let err = parse_http_url("http://:9091").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("host portion is empty"),
+            "iter-159: empty host must reject: {msg}"
+        );
+    }
+
+    /// Iter-159: port 0 is invalid as a TCP-connect target.
+    /// Symmetric with the iter-158 cover-endpoint port-0 gate.
+    #[test]
+    fn iter159_parse_port_zero_rejected() {
+        let err = parse_http_url("http://127.0.0.1:0").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("port 0 is invalid"),
+            "iter-159: port 0 must reject: {msg}"
+        );
+    }
+
+    /// Iter-159 regression: legit URLs still parse.
+    #[test]
+    fn iter159_well_formed_urls_still_parse() {
+        for url in [
+            "http://127.0.0.1:9091",
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:65535",
+            "http://localhost:9091/status",
+        ] {
+            assert!(
+                parse_http_url(url).is_ok(),
+                "iter-159: legit URL {url:?} must parse"
+            );
+        }
     }
 
     /// Iter-114: unknown --format errors BEFORE any network I/O.

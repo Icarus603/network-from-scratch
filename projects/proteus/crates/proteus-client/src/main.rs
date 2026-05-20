@@ -493,6 +493,34 @@ fn parse_http_url(url: &str) -> Result<(String, u16, String), String> {
             ));
         }
     };
+    // Iter-159: reject empty host. The server-side
+    // `admin::parse_http_url` had this gate since iter-116; the
+    // two client-side parsers shipped without it, which left
+    // `http://:9091/status` parseable with host=""`. Tokio's
+    // `lookup_host("")` on most platforms then resolves to
+    // either localhost or 0.0.0.0 — either an implicit-loopback
+    // surprise (the operator typed `http://:9091` and got the
+    // local instance, possibly the wrong process) or a
+    // resolver-error stall.
+    if host.is_empty() {
+        return Err(format!(
+            "{url:?}: host portion is empty (likely `http://:port` without a host)."
+        ));
+    }
+    // Iter-159: reject port 0. The TCP-connect to port 0 fails
+    // with EADDRNOTAVAIL on every platform — there is no legit
+    // reason an operator would point an admin URL at port 0
+    // and "port 0" is a frequent placeholder-from-template
+    // typo that the bare `u16::parse` accepted silently. Match
+    // iter-153 (client `parse_host_port`), iter-151 (SOCKS5
+    // inbound), iter-158 (cover endpoint) which all reject
+    // port 0 for the same connect-target reason.
+    if port == 0 {
+        return Err(format!(
+            "{url:?}: port 0 is invalid as a TCP-connect target (port 0 is reserved \
+             for bind/listen 'any free port'). Use a real admin port like 9091."
+        ));
+    }
     // Iter-147: reject CRLF / NUL / TAB / space in host or path
     // to prevent HTTP request smuggling via the --url argument.
     // Symmetric with the iter-147 gates in
@@ -1199,6 +1227,59 @@ mod cli_helpers_tests {
     fn parse_http_url_rejects_missing_port() {
         let err = parse_http_url("http://example.com/path").unwrap_err();
         assert!(err.contains("port"), "should reject missing port: {err}");
+    }
+
+    // ---- iter-159: client-side admin URL parser closes empty-host + port-0 gaps ----
+
+    /// Iter-159: `http://:9091/status` was previously accepted with
+    /// host="". Tokio's `lookup_host("")` on most platforms then
+    /// resolves to either localhost or 0.0.0.0 — either an
+    /// implicit-loopback surprise or a resolver stall. The
+    /// server-side `admin::parse_http_url` had this gate since
+    /// iter-116; this is the matching client-side fix.
+    #[test]
+    fn iter159_parse_http_url_rejects_empty_host() {
+        let err = parse_http_url("http://:9091/status").unwrap_err();
+        assert!(
+            err.contains("host portion is empty"),
+            "iter-159: empty host must reject: {err}"
+        );
+    }
+
+    /// Iter-159: port 0 is invalid as a TCP-connect target
+    /// (reserved for bind/listen "any free port"). Pre-iter-159
+    /// `http://127.0.0.1:0` parsed and only failed at connect
+    /// time. Matches the iter-158 cover-endpoint port-0 gate.
+    #[test]
+    fn iter159_parse_http_url_rejects_port_zero() {
+        for url in [
+            "http://127.0.0.1:0/status",
+            "http://[::1]:0/status",
+            "http://localhost:0/status",
+        ] {
+            let err = parse_http_url(url).unwrap_err();
+            assert!(
+                err.contains("port 0 is invalid"),
+                "iter-159: port 0 in {url:?} must reject: {err}"
+            );
+        }
+    }
+
+    /// Iter-159 regression: non-zero ports + non-empty hosts
+    /// still parse cleanly.
+    #[test]
+    fn iter159_well_formed_urls_still_parse() {
+        for url in [
+            "http://127.0.0.1:9091/status",
+            "http://127.0.0.1:1/status",
+            "http://127.0.0.1:65535/status",
+            "http://[::1]:9091/status",
+        ] {
+            assert!(
+                parse_http_url(url).is_ok(),
+                "iter-159: legit URL {url:?} must parse"
+            );
+        }
     }
 
     #[test]
