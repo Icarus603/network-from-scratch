@@ -2115,9 +2115,17 @@ async fn handshake_with_prefix(
         Ok(c) => c,
         Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
     };
-
-    let mut hybrid_shared = [0u8; 64];
-    hybrid_shared.copy_from_slice(&combined[..]);
+    // Iter-171: `combined` is already a Zeroizing<[u8;64]> from
+    // `server_combine`. Pre-iter-171 we copied its bytes into a
+    // bare `let mut hybrid_shared = [0u8; 64]` stack array, which
+    // never gets scrubbed. The Deref<Target = [u8;64]> on
+    // Zeroizing lets us pass `&combined` directly to
+    // `key_schedule::derive` (which takes `&[u8; 64]`), eliminating
+    // the residue entirely. Pre-iter-171 a coredump or process-image
+    // grab against the handshake-dispatch stack frame could recover
+    // the full hybrid_shared (K_classic || K_pq) — sufficient to
+    // re-derive every key for that session via the standard
+    // Proteus key schedule.
 
     let sig_msg = {
         let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
@@ -2227,7 +2235,7 @@ async fn handshake_with_prefix(
 
     let provisional = match key_schedule::derive(
         &ext.client_nonce,
-        &hybrid_shared,
+        &combined,
         &th_ch_sh,
         &th_ch_sh,
         &th_ch_sh,
@@ -2302,7 +2310,7 @@ async fn handshake_with_prefix(
     });
     let final_secrets = match key_schedule::derive(
         &ext.client_nonce,
-        &hybrid_shared,
+        &combined,
         &th_ch_sh,
         &th_ch_sf,
         &th_ch_cf,
@@ -2591,9 +2599,10 @@ where
     state = state
         .step(proteus_handshake::state::Event::DecapsOk)
         .expect("AuthVerified→DecapsDone");
-
-    let mut hybrid_shared = [0u8; 64];
-    hybrid_shared.copy_from_slice(&combined[..]);
+    // Iter-171: pass `&combined` directly to `key_schedule::derive`
+    // — same residue fix as the matching site above. The bare
+    // `let mut hybrid_shared = [0u8; 64]; hybrid_shared.copy_from_slice
+    // (...)` pattern leaked the full hybrid shared on the stack.
 
     // ----- 5. Decrypt + verify client_id -----
     //
@@ -2669,7 +2678,7 @@ where
     // ----- 8. Derive provisional secrets and emit ServerFinished -----
     let provisional = key_schedule::derive(
         &ext.client_nonce,
-        &hybrid_shared,
+        &combined,
         &th_ch_sh,
         &th_ch_sh,
         &th_ch_sh,
@@ -2744,7 +2753,7 @@ where
     });
     let final_secrets = key_schedule::derive(
         &ext.client_nonce,
-        &hybrid_shared,
+        &combined,
         &th_ch_sh,
         &th_ch_sf,
         &th_ch_cf,

@@ -389,9 +389,13 @@ where
     // K_pq (ML-KEM half) requires the long-term ML-KEM secret which
     // the MITM does not have.
     let combined_dh = kex::client_combine(&client_eph, &server_x25519_pub)?;
-    let mut hybrid_shared = [0u8; 64];
-    hybrid_shared[..32].copy_from_slice(&combined_dh[..32]);
-    hybrid_shared[32..].copy_from_slice(&combined_dh[32..]);
+    // Iter-171: pass `&combined_dh` directly (Zeroizing<[u8;64]>
+    // Derefs to &[u8;64]) instead of copying into a bare stack
+    // array. Pre-iter-171 a `let mut hybrid_shared = [0u8; 64]`
+    // copy of the full K_classic || K_pq hybrid shared lingered
+    // in the client's handshake stack frame after the function
+    // returned. Same residue fix applied at both server-side
+    // call sites in this iteration.
 
     // Receive ServerFinished and verify before we accept the keys.
     let sf_frame = read_frame(&mut read, &mut rx_buf).await?;
@@ -432,7 +436,7 @@ where
     // secret derived from a separate label.
     let provisional = key_schedule::derive(
         &client_nonce,
-        &hybrid_shared,
+        &combined_dh,
         &th_ch_sh,
         &th_ch_sh, // for finished key purposes — pre-CF
         &th_ch_sh,
@@ -471,13 +475,8 @@ where
         h.extend_from_slice(&cf_mac);
         h
     });
-    let final_secrets = key_schedule::derive(
-        &client_nonce,
-        &hybrid_shared,
-        &th_ch_sh,
-        &th_ch_sf,
-        &th_ch_cf,
-    )?;
+    let final_secrets =
+        key_schedule::derive(&client_nonce, &combined_dh, &th_ch_sh, &th_ch_sf, &th_ch_cf)?;
 
     let (c_keys, s_keys) = final_secrets.direction_keys()?;
     // Client sends with c_ap_secret keys; receives with s_ap_secret keys.
