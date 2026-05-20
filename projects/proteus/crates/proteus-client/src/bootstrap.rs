@@ -199,6 +199,24 @@ pub async fn resolve_for_client(
 /// root cause. Symmetric with the iter-146 server-side
 /// `parse_connect` gate and the iter-151 SOCKS5-boundary gate.
 pub fn parse_host_port(s: &str) -> Option<(&str, u16)> {
+    // Iter-160: reject control bytes (NUL/CR/LF/TAB) anywhere in the
+    // endpoint string. `parse_host_port` is the boundary validator for
+    // `server_endpoint` (config-loaded, but third-party config-
+    // templating tools may pull from untrusted sources) and for the
+    // tokio `lookup_host(endpoint)` call below, which on Linux flows
+    // into libc's `getaddrinfo`. Standard libc resolvers historically
+    // have NOT validated control bytes inside an FQDN (RFC 8482 §3
+    // forbids them, but enforcement is on the consumer). A hostname
+    // containing CR/LF in particular can corrupt DNS-over-UDP query
+    // packets — see the long history of resolver-input smuggling
+    // (CVE-2008-1447 cache-poisoning patterns, CVE-2018-1000007).
+    // Mirrors the iter-147 / iter-158 control-byte gates at every
+    // other host-bearing boundary in the codebase.
+    if s.bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return None;
+    }
     if let Some(stripped) = s.strip_prefix('[') {
         if let Some(end) = stripped.find(']') {
             let host = &stripped[..end];
@@ -389,6 +407,53 @@ mod tests {
             assert!(
                 parse_host_port(ep).is_some(),
                 "iter-153: well-formed endpoint {ep:?} must still parse"
+            );
+        }
+    }
+
+    /// Iter-160: control bytes (NUL/CR/LF/TAB) in the endpoint
+    /// string must be rejected at parse time. The string flows
+    /// into tokio's `lookup_host`, which on Linux is libc's
+    /// getaddrinfo; CR/LF in particular can corrupt DNS-over-UDP
+    /// query packets. The pre-iter-160 parser would happily
+    /// extract `("vps.example.com\n", 443)` and hand the broken
+    /// hostname to the resolver. Symmetric with the iter-147
+    /// (admin URL host) + iter-158 (cover endpoint host) +
+    /// iter-151 (SOCKS5 hostname) gates.
+    #[test]
+    fn iter160_parse_host_port_rejects_control_bytes() {
+        for ep in [
+            "vps.example.com\n:443",
+            "vps.example.com\r:443",
+            "vps.example.com\t:443",
+            "vps.example.com\0:443",
+            "\nvps.example.com:443",
+            "vps.example.com:443\n",
+            "vps.example.com:4\n43",
+            "198.51.100.42\n:443",
+            "[2001:db8::1]\n:443",
+        ] {
+            assert!(
+                parse_host_port(ep).is_none(),
+                "iter-160: control byte in {ep:?} must be rejected"
+            );
+        }
+    }
+
+    /// Iter-160 regression: legit non-control hostnames still parse.
+    /// Specifically exercises the underscore + hyphen FQDN characters
+    /// (the gate must NOT over-reject — only NUL/CR/LF/TAB).
+    #[test]
+    fn iter160_legit_hostnames_still_parse_after_control_byte_gate() {
+        for ep in [
+            "vps-east-1.example.com:443",
+            "vps_internal.example.com:443", // technically RFC-illegal but resolver-accepted
+            "a.b.c.d.e.f.example.com:443",
+            "xn--bcher-kva.example.com:443", // IDN punycode
+        ] {
+            assert!(
+                parse_host_port(ep).is_some(),
+                "iter-160: legit endpoint {ep:?} must still parse"
             );
         }
     }
