@@ -898,7 +898,25 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                         // the total accumulator so a malicious
                                         // peer cannot OOM us with an unbounded
                                         // continuation chain.
-                                        if self.pending.len() + (raw.len() - 4) > RX_BUF_HARD_CAP {
+                                        //
+                                        // Iter-176: checked_add on the
+                                        // `pending.len() + (raw.len() - 4)`
+                                        // sum. raw.len() ≥ 4 here (we just
+                                        // dispatched off raw[0..4]'s u32),
+                                        // so `raw.len() - 4` is well-defined.
+                                        // The sum can in principle overflow
+                                        // `usize` on 32-bit hosts; closing
+                                        // it is the same defense-in-depth
+                                        // class as the iter-175 / iter-176
+                                        // terminal-cell-length fix. Failure
+                                        // path (overflow OR cap exceeded)
+                                        // closes the session cleanly.
+                                        let proj = self
+                                            .pending
+                                            .len()
+                                            .checked_add(raw.len() - 4)
+                                            .filter(|p| *p <= RX_BUF_HARD_CAP);
+                                        if proj.is_none() {
                                             self.metrics.record_aead_drop();
                                             return Err(AlphaError::Closed);
                                         }
@@ -909,11 +927,32 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                     // Terminal cell: parse the real length,
                                     // reassemble with any pending bytes.
                                     let real_len = len_prefix as usize;
-                                    if 4 + real_len > raw.len() {
-                                        self.metrics.record_aead_drop();
-                                        continue;
-                                    }
-                                    let last_chunk = &raw[4..4 + real_len];
+                                    // Iter-176: checked_add on `4 + real_len`
+                                    // — closes the matching overflow class
+                                    // iter-175 fixed in alpha::decode_frame.
+                                    // On 32-bit hosts `4 + real_len` with
+                                    // real_len near 2^32-1 wraps to a small
+                                    // value, sneaks past the `> raw.len()`
+                                    // check, then `&raw[4..4 + real_len]`
+                                    // panics on the OOB slice. The peer-
+                                    // controlled `len_prefix` is the u32
+                                    // read from the cell's first 4 bytes
+                                    // AFTER AEAD-decrypt — already
+                                    // authenticated, but a malicious
+                                    // sealing-key holder (= the peer)
+                                    // controls every byte of plaintext.
+                                    // Fail-closed via silent-drop matches
+                                    // every other terminal-cell rejection
+                                    // path above (truncated, sentinel-
+                                    // mismatch, etc.).
+                                    let end = match 4usize.checked_add(real_len) {
+                                        Some(e) if e <= raw.len() => e,
+                                        _ => {
+                                            self.metrics.record_aead_drop();
+                                            continue;
+                                        }
+                                    };
+                                    let last_chunk = &raw[4..end];
                                     let bytes = if self.pending.is_empty() {
                                         last_chunk.to_vec()
                                     } else {
