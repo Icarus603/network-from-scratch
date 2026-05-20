@@ -2014,9 +2014,24 @@ fn check_file(report: &mut PreflightReport, label: &str, path: &Path) {
             // signal should fire there.
             //
             // Pattern: the file is a "SECRET" if the label ends with
-            // `_sk` OR the label is `tls.private_key`. Public keys
-            // (`_pk`, `cert_chain`) skip the mode check.
-            let is_secret = label.ends_with("_sk") || label == "tls.private_key";
+            // `_sk` OR the label is `tls.private_key` OR the label
+            // contains `psk` / `token_file`. Public keys (`_pk`,
+            // `cert_chain`) skip the mode check.
+            //
+            // Iter-196: expand the SECRET-label heuristic to cover
+            // `knock_psk_file` (and any future `*_psk*` / `*token*`
+            // labels). Pre-iter-196 a future caller that piped
+            // these labels through `check_file` would silently
+            // miss the mode-0600 enforcement. The explicit
+            // `check_secret_file_mode` call at line 1342 already
+            // covers the knock_psk_file when it's checked through
+            // the iter-1334 dedicated path, but the generic
+            // helper's classifier was incomplete. Mirrors the
+            // iter-195 host_preflight tightening.
+            let is_secret = label.ends_with("_sk")
+                || label == "tls.private_key"
+                || label.contains("psk")
+                || label.contains("token");
             if is_secret {
                 check_secret_file_mode(report, label, path);
             }
