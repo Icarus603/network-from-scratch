@@ -440,19 +440,27 @@ pub fn evaluate(body: &str) -> Report {
 /// design — no token gate. Returns the response body on 200,
 /// errors otherwise.
 async fn http_get_async(url: &str, timeout: Duration) -> Result<String, AlertsCheckError> {
+    use zeroize::{Zeroize as _, Zeroizing};
+
     let (host, port, base_path) = parse_http_url(url)?;
     let path = if base_path == "/" {
         "/metrics".to_string()
     } else {
         format!("{base_path}/metrics")
     };
-    let req = format!(
+    // Iter-186: wrap the request line in Zeroizing. Even though
+    // the client admin endpoint is loopback-only and
+    // unauthenticated (no bearer token in this request line),
+    // the request String still drops without scrubbing in the
+    // pre-iter-186 path. Conservative wrap matches the
+    // server-side iter-185 fix at the matching endpoint.
+    let req = Zeroizing::new(format!(
         "GET {path} HTTP/1.1\r\n\
          Host: {host}:{port}\r\n\
          User-Agent: proteus-client-alerts-check/1\r\n\
          Accept: */*\r\n\
          Connection: close\r\n\r\n"
-    );
+    ));
     let fut = async {
         let mut stream = tokio::net::TcpStream::connect((host.as_str(), port))
             .await
@@ -468,9 +476,15 @@ async fn http_get_async(url: &str, timeout: Duration) -> Result<String, AlertsCh
             .map_err(|e| AlertsCheckError::Network(format!("read: {e}")))?;
         Ok::<Vec<u8>, AlertsCheckError>(buf)
     };
-    let buf = tokio::time::timeout(timeout, fut)
+    let mut buf = tokio::time::timeout(timeout, fut)
         .await
         .map_err(|_| AlertsCheckError::Network("timeout".to_string()))??;
+    // Iter-186: scrub the response Vec after we've copied the
+    // body into the returned String. The full /metrics response
+    // contains user_id labels (PerUserBandwidth lines), current
+    // quarantine state, abuse-fire history — operator-sensitive
+    // observability output that an attacker shouldn't recover
+    // from process memory after the call returns.
     let s = std::str::from_utf8(&buf)
         .map_err(|e| AlertsCheckError::Network(format!("non-UTF8: {e}")))?;
     let split = s
@@ -480,9 +494,13 @@ async fn http_get_async(url: &str, timeout: Duration) -> Result<String, AlertsCh
     let body = &s[split + 4..];
     let status_line = head.lines().next().unwrap_or("");
     if !status_line.starts_with("HTTP/1.1 200") {
-        return Err(AlertsCheckError::Status(status_line.to_string()));
+        let status = status_line.to_string();
+        buf.zeroize();
+        return Err(AlertsCheckError::Status(status));
     }
-    Ok(body.to_string())
+    let result = body.to_string();
+    buf.zeroize();
+    Ok(result)
 }
 
 /// Parse `http://host:port[/path]`. HTTP only (admin endpoint is
