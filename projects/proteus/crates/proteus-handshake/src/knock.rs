@@ -300,13 +300,25 @@ fn hmac_truncated_96(
     timestamp: &[u8; KNOCK_TIMESTAMP_LEN],
     client_random: &[u8; CLIENT_RANDOM_LEN],
 ) -> [u8; KNOCK_TAG_LEN] {
+    use zeroize::Zeroize as _;
     let mut mac = HmacSha256::new_from_slice(psk.raw_bytes()).expect("HMAC accepts any key length");
     mac.update(KNOCK_DOMAIN_TAG);
     mac.update(timestamp);
     mac.update(client_random);
-    let full = mac.finalize().into_bytes();
+    let mut full = mac.finalize().into_bytes();
     let mut out = [0u8; KNOCK_TAG_LEN];
     out.copy_from_slice(&full[..KNOCK_TAG_LEN]);
+    // Iter-190: scrub the full 32-byte HMAC output before the
+    // function returns. We truncate to 12 bytes for the wire
+    // format (96 bits is the IPsec ESP precedent for
+    // truncation), but the un-truncated bytes lingering on the
+    // stack carry the FULL PRF output for this `(psk, ts,
+    // client_random)` triple. Same defect class as iter-189
+    // (auth_tag) + iter-190 alpha-handshake hmac_sha256.
+    {
+        let bytes: &mut [u8] = full.as_mut();
+        bytes.zeroize();
+    }
     out
 }
 

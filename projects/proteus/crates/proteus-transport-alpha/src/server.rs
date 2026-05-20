@@ -2857,11 +2857,24 @@ struct OwnedFrame {
 fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+    use zeroize::Zeroize as _;
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
-    let out = mac.finalize().into_bytes();
+    let mut out = mac.finalize().into_bytes();
     let mut tag = [0u8; 32];
     tag.copy_from_slice(&out);
+    // Iter-190: same stack-residue scrub as the matching client-
+    // side helper. The hmac-0.12 GenericArray output doesn't
+    // impl Zeroize; the 32-byte HMAC tag lingers on the stack
+    // until later activity overwrites the slot. Server-side
+    // blast radius is larger — `hmac_sha256` is called for the
+    // ServerFinished + ClientFinished MAC computation on every
+    // accepted handshake; residue accumulates per-session in
+    // recently-freed stack pages.
+    {
+        let bytes: &mut [u8] = out.as_mut();
+        bytes.zeroize();
+    }
     tag
 }
 

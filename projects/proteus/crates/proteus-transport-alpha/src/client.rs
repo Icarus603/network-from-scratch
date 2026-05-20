@@ -642,11 +642,30 @@ pub fn fresh_shape_params<R: rand_core::RngCore>(rng: &mut R) -> (u32, u16) {
 fn hmac_sha256(key: &[u8; 32], data: &[u8]) -> [u8; 32] {
     use hmac::{Hmac, Mac};
     use sha2::Sha256;
+    use zeroize::Zeroize as _;
     let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
-    let out = mac.finalize().into_bytes();
+    let mut out = mac.finalize().into_bytes();
     let mut tag = [0u8; 32];
     tag.copy_from_slice(&out);
+    // Iter-190: scrub the GenericArray that hmac's `finalize`
+    // returned BEFORE we drop. Mirrors iter-189's `auth_tag::
+    // compute` fix on the matching helper in
+    // proteus-handshake. hmac-0.12's `into_bytes()` returns a
+    // `GenericArray<u8, U32>` that doesn't impl Zeroize/
+    // ZeroizeOnDrop, so the 32-byte HMAC output lingers on the
+    // stack until later activity overwrites the slot.
+    //
+    // `hmac_sha256` is called for finished-MAC computation
+    // (`expected_sf`, `cf_mac`) — the tags ARE secret in the
+    // sense that they authenticate the handshake transcript;
+    // an attacker who recovers either via a coredump can
+    // forge a Finished MAC chain for the captured handshake's
+    // (c_ap_secret, s_ap_secret, transcript_hash) triple.
+    {
+        let bytes: &mut [u8] = out.as_mut();
+        bytes.zeroize();
+    }
     tag
 }
 
