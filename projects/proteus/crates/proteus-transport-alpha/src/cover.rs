@@ -113,14 +113,55 @@ pub async fn forward_to_cover(
 
 /// Parse a cover endpoint string of the form `"host:port"` into a
 /// resolvable target. Returns `None` if the string is malformed.
+///
+/// Iter-158: port 0 is **rejected**. Port 0 is reserved in BSD
+/// sockets for "any free port" on bind/listen — it has no meaning
+/// as a connect target. Every TCP_connect to port 0 fails with
+/// `EADDRNOTAVAIL` (or platform equivalent) before any cover
+/// response can be served, which means the auth-fail probe sees
+/// the server hang up immediately. That's indistinguishable from
+/// "no cover_endpoint configured" — the cover arm is defeated
+/// silently and the operator only finds out by inspecting
+/// `/metrics` for cover-forward failure counters they may not
+/// even be monitoring. Reject at parse time so the validator
+/// FAILs at boot, mirroring the iter-151 (SOCKS5 host:port-0
+/// gate) and iter-153 (client `parse_host_port` port-0 gate).
+///
+/// Also rejects control bytes inside the host portion (NUL/CR/LF/
+/// TAB). The cover forwarder feeds the raw `s` string back into
+/// `TcpStream::connect`, which on Linux invokes the libc resolver
+/// chain — control bytes in the host portion can corrupt resolver
+/// query packets (RFC 8482 §3 forbids NUL/CR/LF inside an FQDN,
+/// but standard libc resolvers historically have NOT validated
+/// this). Mirrors the iter-147 (admin host control-byte gate)
+/// surface.
 #[must_use]
 pub fn parse_cover_endpoint(s: &str) -> Option<String> {
-    if s.parse::<SocketAddr>().is_ok() {
+    // Iter-158: reject control bytes anywhere in the endpoint
+    // string — both host and port. Done BEFORE the SocketAddr
+    // parse so even bare-IP `"127.0.0.1\n:443"` strings are
+    // refused (they wouldn't parse as a SocketAddr anyway, but
+    // defense in depth).
+    if s.bytes()
+        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
+    {
+        return None;
+    }
+    if let Ok(sa) = s.parse::<SocketAddr>() {
+        // Iter-158: reject port 0 on both bare IPv4 and IPv6 +
+        // bracketed-IPv6 SocketAddr forms.
+        if sa.port() == 0 {
+            return None;
+        }
         return Some(s.to_string());
     }
     if let Some((host, port)) = s.rsplit_once(':') {
-        if !host.is_empty() && port.parse::<u16>().is_ok() {
-            return Some(s.to_string());
+        if !host.is_empty() {
+            if let Ok(p) = port.parse::<u16>() {
+                if p != 0 {
+                    return Some(s.to_string());
+                }
+            }
         }
     }
     None
@@ -156,6 +197,77 @@ mod tests {
         assert!(parse_cover_endpoint("nope").is_none());
         assert!(parse_cover_endpoint("host:notaport").is_none());
         assert!(parse_cover_endpoint(":443").is_none());
+    }
+
+    /// Iter-158: port 0 is reserved for "any free port" on bind/
+    /// listen and has no meaning as a connect target. TCP_connect
+    /// to port 0 fails with EADDRNOTAVAIL before any cover
+    /// response can be served — silently defeating the cover arm.
+    /// All three port-0 endpoint shapes (bare IPv4, bracketed
+    /// IPv6, hostname) must reject at parse time.
+    #[test]
+    fn endpoint_parse_rejects_port_zero() {
+        // Bare IPv4 form (parses as SocketAddr).
+        assert!(
+            parse_cover_endpoint("127.0.0.1:0").is_none(),
+            "iter-158: 127.0.0.1:0 must reject — port 0 is invalid as a TCP-connect target"
+        );
+        // Bracketed IPv6 form (also parses as SocketAddr).
+        assert!(
+            parse_cover_endpoint("[::1]:0").is_none(),
+            "iter-158: [::1]:0 must reject"
+        );
+        // Hostname form (falls through to the rsplit_once branch).
+        assert!(
+            parse_cover_endpoint("www.cloudflare.com:0").is_none(),
+            "iter-158: hostname:0 must reject"
+        );
+    }
+
+    /// Iter-158: control bytes (NUL/CR/LF/TAB) in either half of
+    /// the endpoint string corrupt the resolver query packet on
+    /// the libc resolver chain. Reject before any of the parse
+    /// branches run.
+    #[test]
+    fn endpoint_parse_rejects_control_bytes() {
+        for bad in [
+            "host\n:443",
+            "host\r:443",
+            "host\t:443",
+            "host\0:443",
+            "host:4\n43",
+            "host:4\r43",
+            "127.0.0.1\n:443",
+            "\nhost:443",
+            "host:443\n",
+        ] {
+            assert!(
+                parse_cover_endpoint(bad).is_none(),
+                "iter-158: control byte in {bad:?} must reject"
+            );
+        }
+    }
+
+    /// Regression: well-formed canonical endpoints still parse
+    /// (the iter-158 gates only add rejections, no false-positives
+    /// on legitimate values).
+    #[test]
+    fn endpoint_parse_still_accepts_canonical_after_iter158() {
+        for ok in [
+            "127.0.0.1:443",
+            "[::1]:443",
+            "www.cloudflare.com:443",
+            "www.cloudflare.com:8443",
+            "host:9443",
+            "host:65535", // u16 max
+            "host:1",     // smallest valid TCP port
+        ] {
+            assert_eq!(
+                parse_cover_endpoint(ok).as_deref(),
+                Some(ok),
+                "iter-158: {ok:?} is canonical, must still parse"
+            );
+        }
     }
 
     // ---- iter-137: cover-upstream socket-options hardening ----
