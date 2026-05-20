@@ -18,6 +18,7 @@ use base64::Engine;
 use proteus_transport_alpha::client;
 use rand_core::OsRng;
 use serde::Deserialize;
+use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Debug, Deserialize)]
 pub struct ClientConfig {
@@ -429,14 +430,27 @@ impl ClientConfig {
         let mut server_pq_fingerprint = [0u8; 32];
         server_pq_fingerprint.copy_from_slice(&fp_bytes);
 
-        let sk_bytes = decode_b64_or_raw(&std::fs::read(&self.keys.client_ed25519_sk)?);
+        // Iter-168: wrap the Ed25519 SK file-bytes + decoded
+        // intermediates in `Zeroizing` so the heap/stack copies of
+        // the long-term identity seed are scrubbed on drop. The
+        // SigningKey itself is ZeroizeOnDrop (closes the actual
+        // signing-key residue), but the file-bytes Vec, the
+        // post-b64 decoded Vec, and the `[u8; 32]` array passed
+        // to `from_bytes()` are NOT. Pre-iter-168 a coredump
+        // taken during startup could recover the seed bytes
+        // verbatim from the heap/stack.
+        let sk_raw = Zeroizing::new(std::fs::read(&self.keys.client_ed25519_sk)?);
+        let sk_bytes = Zeroizing::new(decode_b64_or_raw(&sk_raw));
         if sk_bytes.len() != 32 {
             return Err(ConfigError::BadKey(
                 "client_ed25519_sk must be 32 bytes (raw seed)",
             ));
         }
-        let sk_arr: [u8; 32] = sk_bytes.as_slice().try_into().unwrap();
+        let mut sk_arr: [u8; 32] = sk_bytes.as_slice().try_into().unwrap();
         let client_id_sk = ed25519_dalek::SigningKey::from_bytes(&sk_arr);
+        // SigningKey::from_bytes() copies the seed into the
+        // ZeroizeOnDrop SigningKey; scrub the stack copy now.
+        sk_arr.zeroize();
 
         let user_id = encode_user_id(&self.user_id);
 
@@ -540,15 +554,26 @@ fn encode_user_id(user_id: &str) -> [u8; 8] {
 }
 
 fn decode_b64_or_raw(input: &[u8]) -> Vec<u8> {
-    let trimmed: Vec<u8> = input
+    // Iter-168: scrub the intermediate `trimmed` Vec on drop.
+    // When this helper sees the SK b64 file (the client_ed25519_sk
+    // load path), `trimmed` is a byte-for-byte copy of the
+    // base64-encoded SK seed — directly substitutable for the
+    // SK via b64-decode. The public-key load paths also call
+    // here; conservatively scrubbing both costs ~one memset
+    // per call and avoids baking "is-this-SK" into the helper
+    // signature.
+    let mut trimmed: Vec<u8> = input
         .iter()
         .copied()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
-        return decoded;
-    }
-    input.to_vec()
+    let result = if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
+        decoded
+    } else {
+        input.to_vec()
+    };
+    trimmed.zeroize();
+    result
 }
 
 #[cfg(test)]

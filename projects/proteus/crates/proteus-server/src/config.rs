@@ -20,6 +20,7 @@ use proteus_crypto::key_schedule;
 use proteus_transport_alpha::server::ServerKeys;
 use serde::Deserialize;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
+use zeroize::{Zeroize as _, Zeroizing};
 
 #[derive(Debug, Deserialize)]
 pub struct ServerConfig {
@@ -1557,17 +1558,36 @@ pub fn load_server_keys(cfg: &ServerConfig) -> Result<ServerKeys, ConfigError> {
         let mlkem_pk_bytes = std::fs::read(&cfg.keys.mlkem_pk).map_err(ConfigError::Io)?;
         let mlkem_pk_bytes = decode_b64_or_raw(&mlkem_pk_bytes);
 
-        let mlkem_sk_raw = std::fs::read(&cfg.keys.mlkem_sk).map_err(ConfigError::Io)?;
-        let mlkem_sk_bytes = decode_b64_or_raw(&mlkem_sk_raw);
+        // Iter-168: secret-bearing key-load intermediates wrapped in
+        // Zeroizing so the heap/stack copies scrub on drop. The
+        // server SK files are loaded once at startup and stay
+        // resident in the long-lived `ServerKeys` (whose own fields
+        // — ml-kem `DecapsulationKey` and x25519 `StaticSecret` —
+        // are both ZeroizeOnDrop). What pre-iter-168 leaked were
+        // the TRANSIENT copies between disk and the long-lived
+        // structs: the file-bytes Vec, the post-b64 decode Vec,
+        // and the [u8; 32] stack array passed to
+        // `StaticSecret::from()`. A coredump taken during startup
+        // (or anytime before the heap allocator reuses those
+        // freed Vec backings) can recover the raw SK bytes
+        // verbatim.
+        let mlkem_sk_raw =
+            Zeroizing::new(std::fs::read(&cfg.keys.mlkem_sk).map_err(ConfigError::Io)?);
+        let mlkem_sk_bytes = Zeroizing::new(decode_b64_or_raw(&mlkem_sk_raw));
 
-        let x25519_sk_raw = std::fs::read(&cfg.keys.x25519_sk).map_err(ConfigError::Io)?;
-        let x25519_sk_bytes = decode_b64_or_raw(&x25519_sk_raw);
+        let x25519_sk_raw =
+            Zeroizing::new(std::fs::read(&cfg.keys.x25519_sk).map_err(ConfigError::Io)?);
+        let x25519_sk_bytes = Zeroizing::new(decode_b64_or_raw(&x25519_sk_raw));
         if x25519_sk_bytes.len() != 32 {
             return Err(ConfigError::BadKey("x25519_sk must be 32 bytes"));
         }
-        let x25519_sk_arr: [u8; 32] = x25519_sk_bytes.as_slice().try_into().unwrap();
+        let mut x25519_sk_arr: [u8; 32] = x25519_sk_bytes.as_slice().try_into().unwrap();
         let x25519_sk = StaticSecret::from(x25519_sk_arr);
         let x25519_pub = XPublicKey::from(&x25519_sk).to_bytes();
+        // StaticSecret::from() copied the bytes into the
+        // ZeroizeOnDrop StaticSecret; we can now scrub the stack
+        // array copy.
+        x25519_sk_arr.zeroize();
 
         let ek_array = ml_kem::array::Array::<u8, _>::try_from(&mlkem_pk_bytes[..])
             .map_err(|_| ConfigError::BadKey("invalid mlkem_pk length"))?;
@@ -1625,16 +1645,27 @@ fn encode_user_id(user_id: &str) -> [u8; 8] {
 }
 
 fn decode_b64_or_raw(input: &[u8]) -> Vec<u8> {
-    // Try base64 (line-buffered file with optional trailing newline).
-    let trimmed: Vec<u8> = input
+    // Iter-168: scrub the intermediate `trimmed` Vec on drop. When
+    // this helper is called with SK file bytes (the common case
+    // for mlkem_sk / x25519_sk loads), `trimmed` is a byte-for-
+    // byte copy of the base64-encoded SK — directly substitutable
+    // for the SK via b64-decode. Pre-iter-168 that Vec lingered
+    // on the heap until later activity reused its backing.
+    // (Public-key callers also exercise this path; conservatively
+    // scrubbing both shapes costs ~one memset per call and avoids
+    // baking "is-this-SK" into the helper signature.)
+    let mut trimmed: Vec<u8> = input
         .iter()
         .copied()
         .filter(|b| !b.is_ascii_whitespace())
         .collect();
-    if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
-        return decoded;
-    }
-    input.to_vec()
+    let result = if let Ok(decoded) = base64::engine::general_purpose::STANDARD.decode(&trimmed) {
+        decoded
+    } else {
+        input.to_vec()
+    };
+    trimmed.zeroize();
+    result
 }
 
 #[derive(thiserror::Error, Debug)]
