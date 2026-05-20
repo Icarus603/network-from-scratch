@@ -38,6 +38,7 @@ use std::path::Path;
 
 use base64::Engine;
 use proteus_handshake::knock::KNOCK_PSK_LEN;
+use zeroize::Zeroizing;
 
 /// Loader-side errors. Distinct from anything else in the
 /// codebase so the YAML-load path can surface
@@ -74,9 +75,17 @@ pub enum KnockPskLoadError {
 /// Parse a knock-PSK file in the format the server's
 /// `knock-keygen` writes. Returns the 32 raw bytes ready to
 /// hand to [`proteus_handshake::knock::KnockPsk::from_bytes`].
+///
+/// Iter-169: secret-bearing intermediates scrubbed on drop —
+/// symmetric to the server-side `knock_keygen::load` fix in the
+/// same iteration. `body` (full file contents incl. the b64 PSK)
+/// and `raw` (decoded PSK bytes) are both substitutable for the
+/// PSK; pre-iter-169 they lingered on the heap until later
+/// activity reused their backings.
 pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], KnockPskLoadError> {
-    let body =
-        fs::read_to_string(path).map_err(|e| KnockPskLoadError::Io(path.to_path_buf(), e))?;
+    let body = Zeroizing::new(
+        fs::read_to_string(path).map_err(|e| KnockPskLoadError::Io(path.to_path_buf(), e))?,
+    );
     let mut data_line: Option<&str> = None;
     for line in body.lines() {
         let trimmed = line.trim();
@@ -89,9 +98,11 @@ pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], KnockPskLoadError> {
         data_line = Some(trimmed);
     }
     let line = data_line.ok_or_else(|| KnockPskLoadError::Empty(path.to_path_buf()))?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(line)
-        .map_err(|e| KnockPskLoadError::Base64(path.to_path_buf(), e.to_string()))?;
+    let raw = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(line)
+            .map_err(|e| KnockPskLoadError::Base64(path.to_path_buf(), e.to_string()))?,
+    );
     if raw.len() != KNOCK_PSK_LEN {
         return Err(KnockPskLoadError::WrongLength {
             path: path.to_path_buf(),

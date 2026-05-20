@@ -190,8 +190,23 @@ pub fn run_with_force(
 /// with `#`, expects one base64 line, decodes to exactly 32 bytes.
 /// Used by the config loader (follow-up) when the operator sets
 /// `server_knock_psk_file:` in their YAML.
+///
+/// Iter-169: secret-bearing intermediates scrubbed on drop. The
+/// `body` String holds the entire file contents (incl. the b64
+/// PSK), and `raw` holds the decoded PSK bytes. Both are
+/// directly-or-trivially substitutable for the PSK; pre-iter-169
+/// they lingered on the heap until later activity reused their
+/// backings. The companion key-WRITE path (`run_with_force`) got
+/// the matching scrub in iter-167 and the key-LOAD paths in
+/// `config.rs` got it in iter-168 — this closes the matching
+/// PSK-LOAD path so the secret-bearing residue defense is
+/// complete across the entire knock-PSK lifecycle.
 pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], LoadError> {
-    let body = fs::read_to_string(path).map_err(|e| LoadError::Io(path.to_path_buf(), e))?;
+    // Read the whole file into a Zeroizing<String> so the
+    // backing buffer scrubs on drop. We lose `read_to_string`'s
+    // convenience but match what other key-load paths do.
+    let body =
+        Zeroizing::new(fs::read_to_string(path).map_err(|e| LoadError::Io(path.to_path_buf(), e))?);
     let mut data_line: Option<&str> = None;
     for line in body.lines() {
         let trimmed = line.trim();
@@ -204,9 +219,11 @@ pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], LoadError> {
         data_line = Some(trimmed);
     }
     let line = data_line.ok_or_else(|| LoadError::Empty(path.to_path_buf()))?;
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(line)
-        .map_err(|e| LoadError::Base64(path.to_path_buf(), e.to_string()))?;
+    let raw = Zeroizing::new(
+        base64::engine::general_purpose::STANDARD
+            .decode(line)
+            .map_err(|e| LoadError::Base64(path.to_path_buf(), e.to_string()))?,
+    );
     if raw.len() != KNOCK_PSK_LEN {
         return Err(LoadError::WrongLength {
             path: path.to_path_buf(),
