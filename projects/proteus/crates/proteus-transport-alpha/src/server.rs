@@ -126,6 +126,7 @@ use tokio::net::tcp::OwnedReadHalf;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Mutex;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
+use zeroize::Zeroizing;
 
 use crate::error::{AlphaError, AlphaResult};
 use crate::session::AlphaSession;
@@ -2243,12 +2244,19 @@ async fn handshake_with_prefix(
         Ok(s) => s,
         Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
     };
-    let mut server_finished_key = [0u8; 32];
+    // Iter-172: wrap the HKDF-derived finished MAC keys in
+    // `Zeroizing` so the 32-byte secret arrays scrub on drop.
+    // See the matching iter-172 fix in client.rs for the threat
+    // analysis. Server-side has the larger blast radius — this
+    // function is called for every accepted handshake, so leaving
+    // residue accumulates one stack-image of every session's
+    // finished MAC keys.
+    let mut server_finished_key = Zeroizing::new([0u8; 32]);
     if proteus_crypto::kdf::expand_label(
         &provisional.s_ap_secret,
         b"finished",
         b"",
-        &mut server_finished_key,
+        &mut *server_finished_key,
     )
     .is_err()
     {
@@ -2280,12 +2288,12 @@ async fn handshake_with_prefix(
         h.extend_from_slice(&sf_mac);
         h
     });
-    let mut client_finished_key = [0u8; 32];
+    let mut client_finished_key = Zeroizing::new([0u8; 32]);
     if proteus_crypto::kdf::expand_label(
         &provisional.c_ap_secret,
         b"finished",
         b"",
-        &mut client_finished_key,
+        &mut *client_finished_key,
     )
     .is_err()
     {
@@ -2683,12 +2691,15 @@ where
         &th_ch_sh,
         &th_ch_sh,
     )?;
-    let mut server_finished_key = [0u8; 32];
+    // Iter-172: same Zeroizing wrap as the matching site in
+    // `handshake_with_cover`. Closes the residue on the
+    // raw-TCP (no-cover-forward) handshake path.
+    let mut server_finished_key = Zeroizing::new([0u8; 32]);
     proteus_crypto::kdf::expand_label(
         &provisional.s_ap_secret,
         b"finished",
         b"",
-        &mut server_finished_key,
+        &mut *server_finished_key,
     )?;
     let sf_mac = hmac_sha256(&server_finished_key, &th_ch_sh);
     let sf_frame = alpha::encode_handshake(alpha::FRAME_SERVER_FINISHED, &sf_mac);
@@ -2719,12 +2730,12 @@ where
         h.extend_from_slice(&sf_mac);
         h
     });
-    let mut client_finished_key = [0u8; 32];
+    let mut client_finished_key = Zeroizing::new([0u8; 32]);
     proteus_crypto::kdf::expand_label(
         &provisional.c_ap_secret,
         b"finished",
         b"",
-        &mut client_finished_key,
+        &mut *client_finished_key,
     )?;
     let expected_cf = hmac_sha256(&client_finished_key, &th_ch_sf);
     // Defense-in-depth: even though the `cf.body.len() != 32` early

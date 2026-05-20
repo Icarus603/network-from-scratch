@@ -15,6 +15,7 @@ use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use rand_core::OsRng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use zeroize::Zeroizing;
 
 use crate::error::{AlphaError, AlphaResult};
 use crate::session::AlphaSession;
@@ -442,12 +443,25 @@ where
         &th_ch_sh,
     )?;
 
-    let mut server_finished_key = [0u8; 32];
+    // Iter-172: wrap the HKDF-derived finished MAC keys in
+    // `Zeroizing` so the 32-byte secret arrays are scrubbed on
+    // drop. Pre-iter-172 a bare `let mut server_finished_key =
+    // [0u8; 32]` / `let mut client_finished_key = [0u8; 32]`
+    // pair lingered in the client's handshake stack frame after
+    // the function returned. These are the HMAC keys that
+    // authenticate the Finished frames against the transcript
+    // hash — recovering one lets an attacker forge a Finished
+    // for that session's handshake direction, breaking the
+    // RFC 8446-style transcript-binding handshake integrity.
+    // Matches the iter-171 hybrid_shared residue closure (which
+    // closed the IKM side); this closes the matching derived-
+    // key residue.
+    let mut server_finished_key = Zeroizing::new([0u8; 32]);
     proteus_crypto::kdf::expand_label(
         &provisional.s_ap_secret,
         b"finished",
         b"",
-        &mut server_finished_key,
+        &mut *server_finished_key,
     )?;
     let expected_sf = hmac_sha256(&server_finished_key, &th_ch_sh);
     if !ct_eq(&expected_sf, &received_server_finished) {
@@ -455,12 +469,12 @@ where
     }
 
     // ----- 5. Send ClientFinished -----
-    let mut client_finished_key = [0u8; 32];
+    let mut client_finished_key = Zeroizing::new([0u8; 32]);
     proteus_crypto::kdf::expand_label(
         &provisional.c_ap_secret,
         b"finished",
         b"",
-        &mut client_finished_key,
+        &mut *client_finished_key,
     )?;
     let cf_mac = hmac_sha256(&client_finished_key, &th_ch_sf);
     let cf_frame = alpha::encode_handshake(alpha::FRAME_CLIENT_FINISHED, &cf_mac);
