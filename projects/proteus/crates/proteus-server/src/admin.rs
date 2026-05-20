@@ -1272,19 +1272,40 @@ pub fn http_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<Str
     sock.set_read_timeout(Some(timeout)).ok();
     sock.set_write_timeout(Some(timeout)).ok();
 
-    let mut req = format!(
+    // Iter-185: wrap the assembled request String in Zeroizing
+    // so the heap-allocated buffer scrubs on drop. When `token`
+    // is Some, the request line contains `Authorization: Bearer
+    // {token}` — recovering this String from a coredump or
+    // process-image grab is full bearer-token exfiltration.
+    // Same operator-privilege blast radius as the iter-180 +
+    // iter-181 bearer-token leaks.
+    use zeroize::{Zeroize as _, Zeroizing};
+    let mut req = Zeroizing::new(format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: proteus-admin\r\nConnection: close\r\n",
-    );
+    ));
     if let Some(t) = token {
         use std::fmt::Write as _;
-        let _ = write!(&mut req, "Authorization: Bearer {t}\r\n");
+        let _ = write!(&mut *req, "Authorization: Bearer {t}\r\n");
     }
     req.push_str("\r\n");
-    sock.write_all(req.as_bytes()).map_err(AdminError::Write)?;
+    let write_result = sock.write_all(req.as_bytes());
+    // req drops here when its scope ends with the Zeroizing
+    // wrapper firing memset on the backing buffer; force the
+    // drop explicitly so the secret is gone before any of the
+    // later String allocations.
+    drop(req);
+    write_result.map_err(AdminError::Write)?;
 
     let mut raw = Vec::with_capacity(8192);
     sock.read_to_end(&mut raw).map_err(AdminError::Read)?;
+    // Iter-185: the response body MAY contain operator-
+    // sensitive observability output (user_id lists, current
+    // quarantine state, abuse-fire history) that would otherwise
+    // linger in the raw Vec until later heap reuse. Scrub on
+    // function exit via a deferred zeroize after we've converted
+    // it to the text String we actually return.
     let text = String::from_utf8_lossy(&raw).into_owned();
+    raw.zeroize();
 
     // Split headers / body on the first \r\n\r\n.
     let split = text.find("\r\n\r\n").ok_or(AdminError::NoBody)?;
