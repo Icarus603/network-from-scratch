@@ -440,12 +440,37 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
             self.tx_aead_scratch.clear();
             if is_last {
                 // Terminal cell: build [real_len | chunk | zero-pad].
-                // Resize-to-zero + targeted overwrites is the simplest
-                // way to express "zero the tail" — capacity sticks so
-                // resize is a memset, not a realloc.
+                //
+                // Iter-202: extend prefix + chunk first, THEN resize
+                // up to `quantum` with zeros. Vec::resize only memsets
+                // the bytes between current len and new len, so this
+                // zeros ONLY the actual padding region — not the
+                // prefix + chunk bytes that the previous order
+                // (resize-to-quantum-with-0, then overwrite prefix
+                // and chunk) was memset-then-overwritten on every
+                // call. Wins scale linearly with chunk.len(): at
+                // pad_quantum=1280 and chunk.len()=900 (typical
+                // mid-payload terminal cell), this saves a 904-byte
+                // memset per record. On bulk download where the
+                // terminal cell tends to be full or near-full
+                // (chunk.len() ≈ chunk_max), the saving approaches
+                // an entire quantum's worth of memset per logical
+                // record. AEAD encrypt still dominates CPU, but a
+                // saved memset is L1 cycles back in the budget — and
+                // unlike the iter-150 win for non-terminal cells
+                // (which only kicks in on multi-cell records), this
+                // fires on EVERY logical record, including the common
+                // single-cell case where the entire payload fits in
+                // one cell.
+                self.tx_aead_scratch
+                    .extend_from_slice(&(chunk.len() as u32).to_be_bytes());
+                self.tx_aead_scratch.extend_from_slice(chunk);
                 self.tx_aead_scratch.resize(quantum, 0);
-                self.tx_aead_scratch[..4].copy_from_slice(&(chunk.len() as u32).to_be_bytes());
-                self.tx_aead_scratch[4..4 + chunk.len()].copy_from_slice(chunk);
+                debug_assert_eq!(
+                    self.tx_aead_scratch.len(),
+                    quantum,
+                    "terminal cell must be exactly quantum bytes pre-AEAD"
+                );
             } else {
                 // Non-terminal cell: build [sentinel | chunk_max bytes]
                 // = quantum bytes, no padding region. extend_from_slice
