@@ -21,11 +21,26 @@ pub const PROTEUS_LABEL_PREFIX: &[u8] = b"proteus v1 ";
 ///
 /// Returns the 32-byte PRK wrapped in [`Zeroizing`] so it cannot outlive
 /// its drop without explicit clone.
+///
+/// Iter-193: scrub the upstream `hkdf` crate's `prk` GenericArray
+/// after we copy into the Zeroizing-wrapped `out`. The `hkdf =
+/// 0.12` extract returns `GenericArray<u8, U32>` which does NOT
+/// impl Zeroize/ZeroizeOnDrop, so the 32-byte PRK lingers on the
+/// stack after the function returns. Mirrors the iter-189/190
+/// fixes on the HMAC GenericArray outputs. The Proteus key
+/// schedule calls `extract` multiple times per handshake (early
+/// secret, handshake secret, master secret), each leaving a
+/// 32-byte PRK residue.
 #[must_use]
 pub fn extract(salt: &[u8], ikm: &[u8]) -> Zeroizing<[u8; 32]> {
-    let (prk, _) = Hkdf::<Sha256>::extract(Some(salt), ikm);
+    use zeroize::Zeroize as _;
+    let (mut prk, _) = Hkdf::<Sha256>::extract(Some(salt), ikm);
     let mut out = Zeroizing::new([0u8; 32]);
     out.copy_from_slice(&prk);
+    {
+        let bytes: &mut [u8] = prk.as_mut();
+        bytes.zeroize();
+    }
     out
 }
 
