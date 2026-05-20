@@ -46,15 +46,34 @@ pub fn client_ephemeral<R: RngCore + CryptoRng>(
     rng: &mut R,
     server_mlkem_pub: &<MlKem768 as KemCore>::EncapsulationKey,
 ) -> Result<ClientEphemeral, CryptoError> {
+    use zeroize::Zeroize as _;
+
     let x25519_sk = StaticSecret::random_from_rng(&mut *rng);
     let x25519_pub = XPublicKey::from(&x25519_sk).to_bytes();
 
-    let (ct, shared) = server_mlkem_pub
+    let (ct, mut shared) = server_mlkem_pub
         .encapsulate(rng)
         .map_err(|_| CryptoError::KemDecap)?;
 
     let mut shared_arr = Zeroizing::new([0u8; 32]);
     shared_arr.copy_from_slice(shared.as_ref());
+    // Iter-163: scrub the raw `shared` stack copy from ml-kem.
+    // ml-kem 0.2.3's `SharedKey = B32` (generic hybrid_array::Array
+    // alias) does NOT implement `Zeroize`/`ZeroizeOnDrop` on the
+    // SharedKey output of `encapsulate`. The bytes we just copied
+    // into `shared_arr` would otherwise linger in the caller's stack
+    // frame until later stack activity overwrites them — long enough
+    // for a heap-spray or coredump to recover the K_pq half of the
+    // hybrid shared. Explicit memset closes the residue.
+    //
+    // Server-side `server_combine` doesn't have this problem because
+    // it copies the decapsulate output directly into the
+    // already-Zeroizing `combined` buffer; the temporary on this
+    // client path is the only stack-resident plaintext copy.
+    {
+        let bytes: &mut [u8] = shared.as_mut();
+        bytes.zeroize();
+    }
 
     // Pack ciphertext into a fixed 1088-byte array.
     let ct_bytes: &[u8] = ct.as_ref();
@@ -149,6 +168,35 @@ mod tests {
 
         assert_eq!(client_combined.as_slice(), server_combined.as_slice());
         assert_eq!(client_combined.len(), HYBRID_SHARED_LEN);
+    }
+
+    /// Iter-163: a happy-path encapsulate must still produce a
+    /// usable `ClientEphemeral.mlkem_shared` — the
+    /// post-iter-163 stack-zeroize on the raw `shared` copy
+    /// must not corrupt the value we already copied into the
+    /// `Zeroizing<[u8; 32]>` wrapper.
+    ///
+    /// This is a regression pin: a sloppy fix that zeroized the
+    /// wrong buffer (or zeroized before the copy) would surface
+    /// here as `client_combined == server_combined` failing in
+    /// the existing round-trip test, but having a dedicated test
+    /// for the wrapper's contents makes the regression cause
+    /// obvious.
+    #[test]
+    fn iter163_client_ephemeral_preserves_mlkem_shared_after_stack_zeroize() {
+        let mut rng = OsRng;
+        let (_sk, pk) = MlKem768::generate(&mut rng);
+        let eph = client_ephemeral(&mut rng, &pk).unwrap();
+        // The shared must be non-zero (vanishingly unlikely for a
+        // real ML-KEM-768 encapsulate output to be all-zero, but
+        // the post-iter-163 `shared.zeroize()` could regress to
+        // wiping `shared_arr` instead).
+        assert!(
+            eph.mlkem_shared.iter().any(|&b| b != 0),
+            "iter-163: mlkem_shared must contain the encapsulated K_pq, \
+             not be wiped by the post-copy zeroize"
+        );
+        assert_eq!(eph.mlkem_shared.len(), 32);
     }
 
     #[test]
