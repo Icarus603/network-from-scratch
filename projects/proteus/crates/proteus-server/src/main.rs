@@ -504,12 +504,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
-                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN")
+                        .ok()
+                        .map(zeroize::Zeroizing::new),
                 };
                 let fmt: proteus_server::admin::OutputFormat = format.parse()?;
                 proteus_server::admin::run(
                     &url,
-                    token.as_deref(),
+                    token.as_deref().map(|s| s.as_str()),
                     std::time::Duration::from_secs(timeout_secs),
                     fmt,
                 )?;
@@ -565,12 +567,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
-                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN")
+                        .ok()
+                        .map(zeroize::Zeroizing::new),
                 };
                 let fmt: proteus_server::admin::OutputFormat = format.parse()?;
                 proteus_server::admin::run_watch(
                     &url,
-                    token.as_deref(),
+                    token.as_deref().map(|s| s.as_str()),
                     std::time::Duration::from_secs(timeout_secs),
                     std::time::Duration::from_secs(interval_secs),
                     fmt,
@@ -592,11 +596,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 let token = match token_file {
                     Some(p) => Some(proteus_server::admin::read_token_file(&p)?),
-                    None => std::env::var("PROTEUS_METRICS_TOKEN").ok(),
+                    None => std::env::var("PROTEUS_METRICS_TOKEN")
+                        .ok()
+                        .map(zeroize::Zeroizing::new),
                 };
                 let code = proteus_server::admin_alerts_check::cli_run(
                     &url,
-                    token.as_deref(),
+                    token.as_deref().map(|s| s.as_str()),
                     std::time::Duration::from_secs(timeout_secs),
                     &format,
                 )?;

@@ -22,6 +22,8 @@ use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::Path;
 use std::time::Duration;
 
+use zeroize::Zeroizing;
+
 /// All counters / gauges we recognize. Unknown counter names from the
 /// exposition are ignored (forward-compatible — newer servers can add
 /// counters without breaking older admin clients).
@@ -998,22 +1000,23 @@ pub enum AdminError {
 /// whitespace; rejects empty.
 ///
 /// Iter-180: wrap the file-read String in `Zeroizing` so the
-/// backing buffer scrubs on drop. The bearer token itself
-/// flows out via the returned `String`; callers that hold the
-/// token in a long-lived store (e.g. `MetricsAuth`) wrap it
-/// further. The bytes we scrub here are the IMMEDIATE
-/// file-read buffer including leading/trailing whitespace —
-/// distinct from the trimmed `token` that we return, but
-/// containing the same secret bytes. Pre-iter-180 the file-
-/// read String lingered on the heap until later activity
-/// reused its backing.
-pub fn read_token_file(path: &Path) -> Result<String, AdminError> {
-    use zeroize::Zeroizing;
+/// backing buffer scrubs on drop.
+///
+/// Iter-194: the return type is now `Zeroizing<String>` so the
+/// CALLER's binding also scrubs on drop. Pre-iter-194 the
+/// caller got a bare `String token` which lingered for the
+/// entire CLI invocation (worst case: `admin watch` / `admin
+/// alerts-check` loops that run for hours in a tmux pane). The
+/// trimmed token still flows out — callers use
+/// `Option<Zeroizing<String>>::as_deref()` to obtain
+/// `Option<&str>` for the `http_get` call site, which is
+/// unchanged.
+pub fn read_token_file(path: &Path) -> Result<Zeroizing<String>, AdminError> {
     let raw = Zeroizing::new(
         std::fs::read_to_string(path)
             .map_err(|e| AdminError::Token(path.display().to_string(), e))?,
     );
-    let token = raw.trim().to_string();
+    let token = Zeroizing::new(raw.trim().to_string());
     if token.is_empty() {
         return Err(AdminError::Token(
             path.display().to_string(),
@@ -1279,7 +1282,7 @@ pub fn http_get(url: &str, token: Option<&str>, timeout: Duration) -> Result<Str
     // process-image grab is full bearer-token exfiltration.
     // Same operator-privilege blast radius as the iter-180 +
     // iter-181 bearer-token leaks.
-    use zeroize::{Zeroize as _, Zeroizing};
+    use zeroize::Zeroize as _;
     let mut req = Zeroizing::new(format!(
         "GET {path} HTTP/1.1\r\nHost: {host}:{port}\r\nUser-Agent: proteus-admin\r\nConnection: close\r\n",
     ));
@@ -2697,7 +2700,7 @@ proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 30\n";
         let p = std::env::temp_dir().join(format!("proteus-admin-ok-token-{}", std::process::id()));
         std::fs::write(&p, b"abcdef0123\n").unwrap();
         let t = read_token_file(&p).unwrap();
-        assert_eq!(t, "abcdef0123");
+        assert_eq!(*t, "abcdef0123");
         let _ = std::fs::remove_file(&p);
     }
 
@@ -2752,7 +2755,7 @@ proteus_auto_deny_remaining_secs{prefix=\"203.0.113.0/24\"} 30\n";
         // bytes — the canonical shape `openssl rand -base64` writes.
         std::fs::write(&p, b"X9k+Lq3pZv2nT0wB8sR4aQ==\n").unwrap();
         let t = read_token_file(&p).unwrap();
-        assert_eq!(t, "X9k+Lq3pZv2nT0wB8sR4aQ==");
+        assert_eq!(*t, "X9k+Lq3pZv2nT0wB8sR4aQ==");
         let _ = std::fs::remove_file(&p);
     }
 
