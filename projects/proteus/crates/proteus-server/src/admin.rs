@@ -996,9 +996,23 @@ pub enum AdminError {
 
 /// Read a bearer token from `path`. Strips trailing newline +
 /// whitespace; rejects empty.
+///
+/// Iter-180: wrap the file-read String in `Zeroizing` so the
+/// backing buffer scrubs on drop. The bearer token itself
+/// flows out via the returned `String`; callers that hold the
+/// token in a long-lived store (e.g. `MetricsAuth`) wrap it
+/// further. The bytes we scrub here are the IMMEDIATE
+/// file-read buffer including leading/trailing whitespace —
+/// distinct from the trimmed `token` that we return, but
+/// containing the same secret bytes. Pre-iter-180 the file-
+/// read String lingered on the heap until later activity
+/// reused its backing.
 pub fn read_token_file(path: &Path) -> Result<String, AdminError> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| AdminError::Token(path.display().to_string(), e))?;
+    use zeroize::Zeroizing;
+    let raw = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .map_err(|e| AdminError::Token(path.display().to_string(), e))?,
+    );
     let token = raw.trim().to_string();
     if token.is_empty() {
         return Err(AdminError::Token(

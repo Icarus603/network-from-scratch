@@ -1595,8 +1595,29 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         // chose, defeating the whole point of configuring auth.
         let auth = match cfg.metrics_token_file.as_ref() {
             Some(path) => {
-                let raw = std::fs::read_to_string(path)
-                    .map_err(|e| format!("metrics_token_file {path:?}: {e}"))?;
+                // Iter-180: wrap the file-read String in
+                // `Zeroizing` so the backing buffer scrubs on
+                // drop. `raw` carries the bearer token verbatim
+                // (with leading/trailing whitespace) and the
+                // trimmed `&str` slice in `token` references the
+                // same bytes — the token is moved into the
+                // Arc-Zeroizing<String> inside `MetricsAuth::new`,
+                // but the source `raw` String lingered on the
+                // heap pre-iter-180 until later activity reused
+                // its backing.
+                //
+                // Bearer-token recovery via coredump = the
+                // attacker can scrape `/metrics`, `/diagnose`,
+                // `/healthz` against the live binary — same
+                // operator-privilege set, including the
+                // per-user-bandwidth + auto-deny + abuse-fires
+                // observability surfaces that reveal who's
+                // connected.
+                use zeroize::Zeroizing;
+                let raw = Zeroizing::new(
+                    std::fs::read_to_string(path)
+                        .map_err(|e| format!("metrics_token_file {path:?}: {e}"))?,
+                );
                 let token = raw.trim();
                 match proteus_transport_alpha::metrics_http::MetricsAuth::new(token) {
                     Some(a) => {
