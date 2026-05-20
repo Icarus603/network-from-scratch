@@ -365,11 +365,22 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
                 // IPv6
                 let mut buf = [0u8; 18];
                 sock.read_exact(&mut buf).await?;
-                let segs: Vec<String> = buf[..16]
-                    .chunks(2)
-                    .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
-                    .collect();
-                (segs.join(":"), u16::from_be_bytes([buf[16], buf[17]]))
+                // Iter-170: use the std `Ipv6Addr::to_string` which
+                // produces RFC 5952 canonical form. Pre-iter-170 we
+                // hand-formatted via `format!("{:x}", segs).join(":")`,
+                // which produced `2001:db8:0:0:0:0:0:1` for what
+                // should canonicalize to `2001:db8::1`. The downstream
+                // server's `parse_connect`-then-`lookup_host` parser
+                // accepted both shapes (libc's getaddrinfo handles
+                // either), but the access-log line and any operator
+                // grep against the upstream-dial host string saw
+                // the non-canonical form, complicating forensics +
+                // making it harder to match against IP-reputation
+                // / outbound-filter rules that expect canonical
+                // RFC 5952 representations.
+                let ipv6_bytes: [u8; 16] = buf[..16].try_into().expect("16 bytes");
+                let host = std::net::Ipv6Addr::from(ipv6_bytes).to_string();
+                (host, u16::from_be_bytes([buf[16], buf[17]]))
             }
             _ => {
                 sock.write_all(&[0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
@@ -1396,6 +1407,77 @@ mod socks5_error_code_tests {
                 socks5_error_code_for(&e),
                 0x06,
                 "iter-30 timeout-message mapping regressed for {msg:?}"
+            );
+        }
+    }
+
+    /// Iter-170: the SOCKS5 ATYP=0x04 path used to format IPv6
+    /// segments via `format!("{:x}", u16)`, producing
+    /// `2001:db8:0:0:0:0:0:1` for what should canonicalize to
+    /// `2001:db8::1`. Iter-170 switches to `Ipv6Addr::to_string()`
+    /// which produces RFC 5952 canonical form. This test pins
+    /// the std library's behavior: the standard
+    /// `Ipv6Addr::from(&[u8; 16])` + `.to_string()` round-trip
+    /// MUST produce the canonical compressed form.
+    ///
+    /// Pre-iter-170 the hand-formatted output of the equivalent
+    /// `chunks(2).map(format!("{:x}", ...)).join(":")` would have
+    /// produced the LONG (non-compressed) form for any input with
+    /// runs of zero segments, so the same `[2001:db8::1]` address
+    /// would have shown up in access logs and operator greps as
+    /// `2001:db8:0:0:0:0:0:1` — confusing and missable.
+    #[test]
+    fn iter170_ipv6_canonicalization_matches_rfc_5952() {
+        // Sanity: confirm the pre-iter-170 hand-format produced
+        // the NON-canonical long form for at least one input that
+        // we now canonicalize. This pins the regression evidence:
+        // if a future refactor goes back to the hand-format, the
+        // test below this one (the canonical form check) fails.
+        let bytes: [u8; 16] = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let segs: Vec<String> = bytes
+            .chunks(2)
+            .map(|c| format!("{:x}", u16::from_be_bytes([c[0], c[1]])))
+            .collect();
+        let pre_iter170 = segs.join(":");
+        assert_eq!(
+            pre_iter170, "2001:db8:0:0:0:0:0:1",
+            "pre-iter-170 hand-format reference: long form expected"
+        );
+        let post_iter170 = std::net::Ipv6Addr::from(bytes).to_string();
+        assert_ne!(
+            post_iter170, pre_iter170,
+            "iter-170: canonical form must differ from the broken long form"
+        );
+        assert_eq!(post_iter170, "2001:db8::1");
+    }
+
+    /// Iter-170: the broader canonicalization matrix. Walks the
+    /// standard RFC 5952 examples through `Ipv6Addr::to_string()`.
+    #[test]
+    fn iter170_ipv6_canonicalization_matrix() {
+        for (bytes, expected) in [
+            (
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                "2001:db8::1",
+            ),
+            ([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], "::1"),
+            (
+                [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                "fe80::",
+            ),
+            (
+                [
+                    0x20, 0x01, 0x0d, 0xb8, 0x85, 0xa3, 0, 0, 0, 0, 0x8a, 0x2e, 0x03, 0x70, 0x73,
+                    0x34,
+                ],
+                "2001:db8:85a3::8a2e:370:7334",
+            ),
+        ] {
+            let s = std::net::Ipv6Addr::from(bytes).to_string();
+            assert_eq!(
+                s, expected,
+                "iter-170: Ipv6Addr::to_string() must canonicalize per RFC 5952; \
+                 got {s:?} for {bytes:?}"
             );
         }
     }
