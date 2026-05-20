@@ -700,7 +700,27 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// to 255 bytes for the on-wire `u8` length prefix).
     pub async fn send_close(&mut self, error_code: u8, reason: &[u8]) -> AlphaResult<()> {
         let reason_len = reason.len().min(255) as u8;
-        let mut pt = Vec::with_capacity(2 + reason_len as usize);
+        // Iter-203: wrap the plaintext buffer in `Zeroizing` so it
+        // scrubs on drop instead of leaving stack/heap residue at
+        // function exit. The plaintext is `[error_code | reason_len |
+        // reason...]`; `error_code` + `reason_len` are non-secret
+        // (the spec defines fixed wire codes), but `reason` is
+        // operator-supplied opaque bytes per spec §26.2 — could be a
+        // free-form diagnostic string, an internal error tag, or
+        // anything callers wanted to surface. Treating the whole
+        // plaintext as scrub-on-drop is the uniform discipline; cheap
+        // when reason is short (≤255 bytes), and removes the implicit
+        // "trust the caller to never pass anything sensitive" footgun.
+        //
+        // Same residue-defense class as iter-184 (relay buffers) and
+        // iter-197 (rx AEAD scratch). The matching recv side already
+        // surfaces `last_close_reason` to the caller through a
+        // controlled accessor — the SENDER side never re-reads the
+        // buffer after `aead::seal`, so the only purpose of holding
+        // the bytes around is residue, which is exactly what we
+        // want gone.
+        use zeroize::Zeroizing;
+        let mut pt: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(2 + reason_len as usize));
         pt.push(error_code);
         pt.push(reason_len);
         pt.extend_from_slice(&reason[..reason_len as usize]);
