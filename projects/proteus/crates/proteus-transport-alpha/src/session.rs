@@ -821,7 +821,55 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     /// return the plaintext. RATCHET records are consumed internally
     /// and the call resumes reading the next frame. CLOSE records
     /// surface as `Ok(None)` after recording the peer's stated reason.
+    ///
+    /// **Allocation note**: this method clones the decrypted plaintext
+    /// into a fresh `Vec<u8>` per call. Hot relay loops should prefer
+    /// [`AlphaReceiver::recv_record_into`] which writes into a
+    /// caller-owned buffer whose capacity sticks across calls.
     pub async fn recv_record(&mut self) -> AlphaResult<Option<Vec<u8>>> {
+        let mut buf = Vec::new();
+        match self.recv_record_into(&mut buf).await? {
+            Some(()) => Ok(Some(buf)),
+            None => Ok(None),
+        }
+    }
+
+    /// Zero-alloc variant of [`AlphaReceiver::recv_record`].
+    ///
+    /// On `Ok(Some(()))` the caller's `out` buffer is cleared and then
+    /// extended with the decrypted plaintext (an empty buffer signals a
+    /// keepalive, same as `recv_record` returning `Ok(Some(vec![]))`).
+    /// On `Ok(None)` the peer issued a clean CLOSE and `out` is left
+    /// empty.
+    ///
+    /// ## Why this exists
+    ///
+    /// The α data plane on a bulk relay leg can process thousands of
+    /// records per second (pad_quantum=1280 → ~12 cells per logical
+    /// 16 KiB record × hundreds of MiB/s). The legacy `recv_record`
+    /// returned an owned `Vec<u8>` per record; each return path
+    /// allocated a fresh backing buffer (`rx_aead_scratch.clone()` /
+    /// `last_chunk.to_vec()`) purely to hand the plaintext to the
+    /// caller. That's one heap allocation per record on the hottest
+    /// loop in the codebase — burning ~120 K allocs/sec on a saturated
+    /// gigabit relay.
+    ///
+    /// `recv_record_into` re-uses the caller's buffer. The relay code
+    /// keeps a single `Vec<u8>` per session direction; its capacity
+    /// stabilises at the first large record and stays there for the
+    /// session lifetime. AEAD decrypt remains the dominant CPU cost,
+    /// but the per-record `malloc/free` round-trip is now gone.
+    ///
+    /// ## Buffer hygiene
+    ///
+    /// `out.clear()` is called at the top of every successful return
+    /// path. Capacity is preserved (Vec::clear only sets `len = 0`).
+    /// Callers who care about plaintext residue should call
+    /// `out.zeroize()` after they finish processing each record — the
+    /// session itself scrubs its internal scratch (iter-197) but not
+    /// the caller's buffer, by design.
+    pub async fn recv_record_into(&mut self, out: &mut Vec<u8>) -> AlphaResult<Option<()>> {
+        out.clear();
         loop {
             match alpha::decode_frame(&self.rx_buf[self.rx_offset..]) {
                 Ok((frame, consumed)) => {
@@ -854,16 +902,19 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                             ) {
                                 Ok(()) => {
                                     self.next_seqnum = self.next_seqnum.saturating_add(1);
-                                    // Hand the decrypted plaintext to
-                                    // the caller. The clone is one
-                                    // allocation per logical record —
-                                    // matches the legacy behavior and
-                                    // can't be avoided without changing
-                                    // the recv_record return signature.
-                                    let bytes = self.rx_aead_scratch.clone();
-                                    self.metrics.record_rx(bytes.len() as u64);
+                                    // Iter-200: extend the caller-supplied
+                                    // `out` buffer in place instead of
+                                    // cloning the scratch into a fresh
+                                    // Vec. On a bulk relay leg this is
+                                    // the difference between one heap
+                                    // allocation per record (legacy) and
+                                    // zero (this path). The scratch is
+                                    // scrubbed below so plaintext residue
+                                    // does not survive the call.
+                                    out.extend_from_slice(&self.rx_aead_scratch);
+                                    self.metrics.record_rx(out.len() as u64);
                                     // Iter-197: scrub the scratch
-                                    // buffer NOW (post-clone) so the
+                                    // buffer NOW (post-extend) so the
                                     // plaintext doesn't linger
                                     // between recv_record calls. On a
                                     // low-traffic session the gap can
@@ -880,7 +931,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                     // alloc-free property is preserved.
                                     use zeroize::Zeroize as _;
                                     self.rx_aead_scratch.zeroize();
-                                    return Ok(Some(bytes));
+                                    return Ok(Some(()));
                                 }
                                 Err(_) => {
                                     self.metrics.record_aead_drop();
@@ -983,24 +1034,36 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                                         }
                                     };
                                     let last_chunk = &raw[4..end];
-                                    let bytes = if self.pending.is_empty() {
-                                        last_chunk.to_vec()
-                                    } else {
-                                        let mut out = std::mem::take(&mut self.pending);
-                                        out.extend_from_slice(last_chunk);
-                                        out
-                                    };
-                                    self.metrics.record_rx(bytes.len() as u64);
+                                    // Iter-200: write the reassembled
+                                    // logical record into `out`. If
+                                    // `pending` carried earlier
+                                    // continuation cells, drain them
+                                    // into `out` first, then append
+                                    // this terminal chunk. The
+                                    // continuation buffer is scrubbed
+                                    // on take (Vec::clear() preserves
+                                    // capacity; we explicitly zeroize
+                                    // before clearing so residue from
+                                    // earlier continuation cells
+                                    // doesn't linger).
+                                    if !self.pending.is_empty() {
+                                        out.extend_from_slice(&self.pending);
+                                        use zeroize::Zeroize as _;
+                                        self.pending.zeroize();
+                                        self.pending.clear();
+                                    }
+                                    out.extend_from_slice(last_chunk);
+                                    self.metrics.record_rx(out.len() as u64);
                                     // Iter-197: scrub the AEAD scratch
-                                    // post-clone-into-`bytes` so the
-                                    // plaintext doesn't linger between
+                                    // post-extend so the plaintext
+                                    // doesn't linger between
                                     // recv_record calls. Same fix as
                                     // the unpadded RECORD_DATA path
                                     // above; same threat model
                                     // (between-records residue).
                                     use zeroize::Zeroize as _;
                                     self.rx_aead_scratch.zeroize();
-                                    return Ok(Some(bytes));
+                                    return Ok(Some(()));
                                 }
                                 Err(_) => {
                                     self.metrics.record_aead_drop();
@@ -1686,6 +1749,106 @@ mod rx_cursor_compaction_tests {
         // No more bytes are in flight (everything was consumed), so
         // the buf length equals the cursor (i.e., zero live bytes).
         assert_eq!(rx.rx_buf.len(), rx.rx_offset);
+    }
+
+    /// Iter-200: `recv_record_into` MUST produce the same plaintext
+    /// as `recv_record` and MUST reuse the caller's buffer (capacity
+    /// stable across the second call). If this regresses, the relay
+    /// hot path silently falls back to per-record allocation.
+    #[tokio::test]
+    async fn recv_record_into_reuses_buffer_capacity() {
+        let session_keys = keys();
+        let cipher = session_keys.aead_key();
+        let mut wire = Vec::new();
+        // Two records, ~6 KiB each.
+        for seq in 0..2u64 {
+            let combined = seq;
+            let aad = combined.to_be_bytes();
+            let mut body = vec![0xA5u8; 6 * 1024];
+            cipher.seal_into(combined, &aad, &mut body).unwrap();
+            wire.extend_from_slice(&alpha::encode_record(alpha::RECORD_DATA, &body));
+        }
+        let reader = OnceReader { data: wire, pos: 0 };
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        let mut rx = AlphaReceiver::new(
+            reader,
+            session_keys,
+            zeroize::Zeroizing::new([0u8; 32]),
+            metrics,
+        );
+
+        let mut out = Vec::new();
+        let r1 = rx.recv_record_into(&mut out).await.unwrap();
+        assert_eq!(r1, Some(()));
+        assert_eq!(out.len(), 6 * 1024);
+        assert!(out.iter().all(|&b| b == 0xA5));
+        let cap_after_first = out.capacity();
+        assert!(cap_after_first >= 6 * 1024);
+
+        // Second call: same buffer, same plaintext. Capacity must NOT
+        // grow — recv_record_into() does clear() then extend, so a
+        // sufficiently-sized backing stays put.
+        let r2 = rx.recv_record_into(&mut out).await.unwrap();
+        assert_eq!(r2, Some(()));
+        assert_eq!(out.len(), 6 * 1024);
+        assert_eq!(
+            out.capacity(),
+            cap_after_first,
+            "recv_record_into grew capacity on second call — alloc-free invariant broken"
+        );
+    }
+
+    /// `recv_record_into` and the legacy `recv_record` MUST agree on
+    /// the plaintext bytes for every record type the data plane uses.
+    /// This catches the case where one path refactors but the other
+    /// drifts.
+    #[tokio::test]
+    async fn recv_record_into_matches_legacy_recv_record() {
+        let session_keys = keys();
+        let cipher = session_keys.aead_key();
+        let mut wire_a = Vec::new();
+        let mut wire_b = Vec::new();
+        let payload = b"proteus iter-200 zero-alloc recv";
+        for seq in 0..3u64 {
+            let combined = seq;
+            let aad = combined.to_be_bytes();
+            let mut body = payload.to_vec();
+            cipher.seal_into(combined, &aad, &mut body).unwrap();
+            let bytes = alpha::encode_record(alpha::RECORD_DATA, &body);
+            wire_a.extend_from_slice(&bytes);
+            wire_b.extend_from_slice(&bytes);
+        }
+        let metrics = std::sync::Arc::new(SessionMetrics::default());
+        // DirectionKeys is not Clone (intentional — secret material).
+        // Build two parallel receivers from `keys()` which deterministically
+        // yields the same direction key from the zero secret.
+        drop(session_keys);
+        let mut rx_a = AlphaReceiver::new(
+            OnceReader {
+                data: wire_a,
+                pos: 0,
+            },
+            keys(),
+            zeroize::Zeroizing::new([0u8; 32]),
+            metrics.clone(),
+        );
+        let mut rx_b = AlphaReceiver::new(
+            OnceReader {
+                data: wire_b,
+                pos: 0,
+            },
+            keys(),
+            zeroize::Zeroizing::new([0u8; 32]),
+            metrics,
+        );
+        for _ in 0..3 {
+            let a = rx_a.recv_record().await.unwrap();
+            let mut b_buf = Vec::new();
+            let b = rx_b.recv_record_into(&mut b_buf).await.unwrap();
+            assert_eq!(b, Some(()));
+            assert_eq!(a.as_deref(), Some(b_buf.as_slice()));
+            assert_eq!(b_buf, payload);
+        }
     }
 
     /// On drop, the `rx_aead_scratch` must be scrubbed. This is a

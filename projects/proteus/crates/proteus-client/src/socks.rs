@@ -1354,11 +1354,38 @@ async fn pump<R, W>(
         }
     };
     let server_to_client = async {
+        // Iter-200: reuse a single plaintext scratch across
+        // recv_record_into() calls so the bulk-download hot loop
+        // stops paying one Vec allocation per record. ScrubOnDrop
+        // mirrors the iter-184 zeroize policy: when this future
+        // gets dropped (select! teardown, panic, normal exit) the
+        // last record's plaintext gets scrubbed exactly once,
+        // regardless of path.
+        struct ScrubOnDrop(Vec<u8>);
+        impl Drop for ScrubOnDrop {
+            fn drop(&mut self) {
+                use zeroize::Zeroize as _;
+                self.0.zeroize();
+            }
+        }
+        impl std::ops::Deref for ScrubOnDrop {
+            type Target = Vec<u8>;
+            fn deref(&self) -> &Vec<u8> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for ScrubOnDrop {
+            fn deref_mut(&mut self) -> &mut Vec<u8> {
+                &mut self.0
+            }
+        }
+        let mut plaintext = ScrubOnDrop(Vec::with_capacity(16 * 1024));
         loop {
-            match receiver.recv_record().await {
-                Ok(Some(mut buf)) if !buf.is_empty() => {
+            match receiver.recv_record_into(&mut plaintext.0).await {
+                Ok(Some(())) if !plaintext.is_empty() => {
+                    let buf = &mut *plaintext;
                     let buf_len = buf.len();
-                    let write_result = sock_w.write_all(&buf).await;
+                    let write_result = sock_w.write_all(buf).await;
                     // Iter-184: scrub the decrypted-plaintext Vec
                     // immediately after the downstream-socket
                     // write completes (success OR error). The
@@ -1384,7 +1411,7 @@ async fn pump<R, W>(
                         break;
                     }
                 }
-                Ok(Some(_)) => {} // keepalive
+                Ok(Some(())) => {} // keepalive (plaintext empty)
                 Ok(None) | Err(_) => break,
             }
         }

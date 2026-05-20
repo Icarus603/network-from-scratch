@@ -521,8 +521,34 @@ where
     let reason_c2u = std::sync::Arc::clone(&reason_cell);
     let bytes_c2u = std::sync::Arc::clone(&bytes_used);
     let client_to_upstream = async move {
+        // Iter-200: per-direction plaintext scratch reused across
+        // recv calls. `recv_record_into` clears+extends; capacity
+        // stabilises at the first large record and stays there for
+        // the session lifetime, eliminating the per-record heap
+        // allocation that `recv_record()` paid. ScrubOnDrop ensures
+        // the last record's plaintext doesn't leak past loop exit
+        // (mirrors the upstream→client direction's iter-183 guard).
+        struct ScrubOnDrop(Vec<u8>);
+        impl Drop for ScrubOnDrop {
+            fn drop(&mut self) {
+                use zeroize::Zeroize as _;
+                self.0.zeroize();
+            }
+        }
+        impl std::ops::Deref for ScrubOnDrop {
+            type Target = Vec<u8>;
+            fn deref(&self) -> &Vec<u8> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for ScrubOnDrop {
+            fn deref_mut(&mut self) -> &mut Vec<u8> {
+                &mut self.0
+            }
+        }
+        let mut plaintext = ScrubOnDrop(Vec::with_capacity(16 * 1024));
         loop {
-            let recv = receiver.recv_record();
+            let recv = receiver.recv_record_into(&mut plaintext.0);
             let next = match idle {
                 Some(d) => match tokio::time::timeout(d, recv).await {
                     Ok(r) => r,
@@ -539,7 +565,8 @@ where
                 None => recv.await,
             };
             match next {
-                Ok(Some(mut buf)) if !buf.is_empty() => {
+                Ok(Some(())) if !plaintext.is_empty() => {
+                    let buf = &mut *plaintext;
                     // Bump-then-check: even if the cap is exceeded
                     // mid-write, we still finish this one buffer so the
                     // upstream sees a consistent stream boundary, but
@@ -608,7 +635,7 @@ where
                         }
                     }
                 }
-                Ok(Some(_empty)) => {} // keepalive
+                Ok(Some(())) => {} // keepalive (plaintext is empty)
                 Ok(None) => {
                     set_reason(&reason_c2u, "client_close");
                     break;
