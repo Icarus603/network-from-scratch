@@ -72,7 +72,7 @@ fn server_format_file_loads_into_client_loader_byte_for_byte() {
     write_in_server_format(&p, &original);
 
     let loaded = knock_psk::load(&p).expect("client loader must accept server format");
-    assert_eq!(loaded, original);
+    assert_eq!(*loaded, original);
     let _ = std::fs::remove_file(&p);
 }
 
@@ -87,7 +87,7 @@ fn loaded_psk_drives_compute_and_verify_end_to_end() {
     write_in_server_format(&p, &raw);
 
     let loaded = knock_psk::load(&p).unwrap();
-    let psk = KnockPsk::from_bytes(loaded);
+    let psk = KnockPsk::from_bytes(*loaded);
     let client_random = [0x42; 32];
     let now = 1_720_000_000u64;
     let tok = compute_knock(&psk, &client_random, now);
@@ -109,8 +109,8 @@ fn two_different_psks_yield_distinct_tokens_via_client_loader() {
     write_in_server_format(&p_a, &[0x11; 32]);
     write_in_server_format(&p_b, &[0x22; 32]);
 
-    let psk_a = KnockPsk::from_bytes(knock_psk::load(&p_a).unwrap());
-    let psk_b = KnockPsk::from_bytes(knock_psk::load(&p_b).unwrap());
+    let psk_a = KnockPsk::from_bytes(*knock_psk::load(&p_a).unwrap());
+    let psk_b = KnockPsk::from_bytes(*knock_psk::load(&p_b).unwrap());
     let client_random = [0xAA; 32];
     let now = 1_720_000_000u64;
     let tok_a = compute_knock(&psk_a, &client_random, now);

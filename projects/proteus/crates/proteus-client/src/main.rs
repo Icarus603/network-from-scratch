@@ -589,8 +589,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                         "knock PSK loaded — Path A probe-resistance primitive ready \
                          (transport-layer wire-format integration is a follow-up iteration)"
                     );
+                    // Iter-191: `bytes` is now Zeroizing<[u8;32]>;
+                    // deref via `*bytes` to extract the bare
+                    // array for KnockPsk::from_bytes.
                     Some(std::sync::Arc::new(
-                        proteus_handshake::knock::KnockPsk::from_bytes(bytes),
+                        proteus_handshake::knock::KnockPsk::from_bytes(*bytes),
                     ))
                 }
                 Err(e) => {

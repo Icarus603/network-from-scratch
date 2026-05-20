@@ -201,7 +201,7 @@ pub fn run_with_force(
 /// `config.rs` got it in iter-168 — this closes the matching
 /// PSK-LOAD path so the secret-bearing residue defense is
 /// complete across the entire knock-PSK lifecycle.
-pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], LoadError> {
+pub fn load(path: &Path) -> Result<Zeroizing<[u8; KNOCK_PSK_LEN]>, LoadError> {
     // Read the whole file into a Zeroizing<String> so the
     // backing buffer scrubs on drop. We lose `read_to_string`'s
     // convenience but match what other key-load paths do.
@@ -231,7 +231,20 @@ pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], LoadError> {
             want: KNOCK_PSK_LEN,
         });
     }
-    let mut out = [0u8; KNOCK_PSK_LEN];
+    // Iter-191: return Zeroizing<[u8; 32]> so the PSK bytes
+    // scrub on drop both inside this function AND in the
+    // caller's local binding. Pre-iter-191 the function
+    // returned a bare `[u8; 32]` which the caller bound via
+    // `Ok(bytes)` — the caller's stack copy lingered until
+    // later activity overwrites it. Now both the inner `out`
+    // and the caller's binding are Zeroizing-wrapped.
+    //
+    // The KnockPsk constructor takes `[u8; 32]` by value; we
+    // deref via `*loaded` at the call site to extract the bare
+    // array AT THE LAST POSSIBLE MOMENT before constructing
+    // the long-lived KnockPsk (which has its own Zeroizing
+    // wrapper internally).
+    let mut out = Zeroizing::new([0u8; KNOCK_PSK_LEN]);
     out.copy_from_slice(&raw);
     Ok(out)
 }
@@ -301,7 +314,7 @@ mod tests {
         let p = tmp_path("round-trip");
         let mint = run(&p).unwrap();
         let loaded = load(&p).expect("load must succeed for a fresh file");
-        assert_eq!(mint, loaded);
+        assert_eq!(mint, *loaded);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -315,7 +328,7 @@ mod tests {
         let p = tmp_path("compute-verify");
         run(&p).unwrap();
         let loaded = load(&p).unwrap();
-        let psk = KnockPsk::from_bytes(loaded);
+        let psk = KnockPsk::from_bytes(*loaded);
         let client_random = [0xCC; 32];
         let now = 1_715_900_000u64;
         let tok = compute_knock(&psk, &client_random, now);

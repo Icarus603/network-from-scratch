@@ -82,7 +82,7 @@ pub enum KnockPskLoadError {
 /// and `raw` (decoded PSK bytes) are both substitutable for the
 /// PSK; pre-iter-169 they lingered on the heap until later
 /// activity reused their backings.
-pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], KnockPskLoadError> {
+pub fn load(path: &Path) -> Result<Zeroizing<[u8; KNOCK_PSK_LEN]>, KnockPskLoadError> {
     let body = Zeroizing::new(
         fs::read_to_string(path).map_err(|e| KnockPskLoadError::Io(path.to_path_buf(), e))?,
     );
@@ -110,7 +110,10 @@ pub fn load(path: &Path) -> Result<[u8; KNOCK_PSK_LEN], KnockPskLoadError> {
             want: KNOCK_PSK_LEN,
         });
     }
-    let mut out = [0u8; KNOCK_PSK_LEN];
+    // Iter-191: return Zeroizing<[u8; 32]> so the caller's
+    // stack copy scrubs on drop too. Same fix as the matching
+    // proteus-server::knock_keygen::load in this iteration.
+    let mut out = Zeroizing::new([0u8; KNOCK_PSK_LEN]);
     out.copy_from_slice(&raw);
     Ok(out)
 }
@@ -154,7 +157,7 @@ mod tests {
         let key = [0xA1; KNOCK_PSK_LEN];
         write_psk(&p, &key);
         let loaded = load(&p).unwrap();
-        assert_eq!(loaded, key);
+        assert_eq!(*loaded, key);
         let _ = std::fs::remove_file(&p);
     }
 
@@ -168,7 +171,7 @@ mod tests {
         let key = [0x33; KNOCK_PSK_LEN];
         write_psk(&p, &key);
         let loaded = load(&p).unwrap();
-        let psk = KnockPsk::from_bytes(loaded);
+        let psk = KnockPsk::from_bytes(*loaded);
         let client_random = [0xCC; 32];
         let now = 1_715_900_000u64;
         let tok = compute_knock(&psk, &client_random, now);
@@ -238,7 +241,7 @@ mod tests {
         let b64 = base64::engine::general_purpose::STANDARD.encode(key);
         std::fs::write(&p, format!("# c1\n\n# c2\n\n{b64}\n\n\n")).unwrap();
         let loaded = load(&p).unwrap();
-        assert_eq!(loaded, key);
+        assert_eq!(*loaded, key);
         let _ = std::fs::remove_file(&p);
     }
 }

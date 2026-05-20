@@ -901,7 +901,13 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                     path = ?path,
                     "knock PSK loaded — Path A probe-resistance gate will run at accept time"
                 );
-                Some(proteus_handshake::knock::KnockPsk::from_bytes(bytes))
+                // Iter-191: `bytes` is Zeroizing<[u8;32]>; deref
+                // via `*bytes` AT THE LAST MOMENT to extract the
+                // bare array for KnockPsk::from_bytes (which
+                // wraps it in its own internal Zeroizing). The
+                // Zeroizing wrapper around `bytes` scrubs the
+                // outer copy on the match-arm exit.
+                Some(proteus_handshake::knock::KnockPsk::from_bytes(*bytes))
             }
             Err(e) => {
                 // Fatal — operator explicitly asked for
