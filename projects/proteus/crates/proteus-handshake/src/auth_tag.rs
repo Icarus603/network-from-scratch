@@ -52,18 +52,44 @@ pub fn derive_auth_key(
 /// Compute `HMAC-SHA-256(auth_key, auth_input)`.
 #[must_use]
 pub fn compute(auth_key: &[u8; 32], auth_input: &[u8]) -> [u8; HMAC_TAG_LEN] {
+    use zeroize::Zeroize as _;
     let mut mac = HmacSha256::new_from_slice(auth_key).expect("HMAC accepts any key length");
     mac.update(auth_input);
-    let result = mac.finalize().into_bytes();
+    let mut result = mac.finalize().into_bytes();
     let mut out = [0u8; HMAC_TAG_LEN];
     out.copy_from_slice(&result);
+    // Iter-189: scrub the GenericArray that hmac's `finalize`
+    // returned BEFORE we drop. hmac-0.12's `into_bytes()` returns
+    // a `GenericArray<u8, U32>` that doesn't impl Zeroize/
+    // ZeroizeOnDrop, so the 32-byte HMAC output lingers on the
+    // stack until later activity overwrites the slot.
+    //
+    // The function's RETURN value `out` is moved to the caller
+    // (who's expected to wrap it in Zeroizing — iter-189
+    // `verify` does, and other call sites either zeroize
+    // themselves OR pass the tag straight to AEAD context).
+    // What this scrubs is just the function-local copy in
+    // `result`.
+    {
+        let bytes: &mut [u8] = result.as_mut();
+        bytes.zeroize();
+    }
     out
 }
 
 /// Verify `auth_tag` in constant time.
+///
+/// Iter-189: wrap the freshly-computed `actual` HMAC tag in
+/// `Zeroizing` so its 32 bytes scrub on drop. The HMAC tag is
+/// the proof-of-knowledge of `auth_key` — recovery via coredump
+/// against the server's verify call lets an attacker
+/// independently forge an `auth_tag` for whatever auth_input
+/// they captured. The matching iter-157 fix wrapped the
+/// auth_key itself in Zeroizing; this closes the matching
+/// residue on the COMPUTED-TAG side.
 #[must_use]
 pub fn verify(auth_key: &[u8; 32], auth_input: &[u8], expected_tag: &[u8; HMAC_TAG_LEN]) -> bool {
-    let actual = compute(auth_key, auth_input);
+    let actual = Zeroizing::new(compute(auth_key, auth_input));
     bool::from(actual.ct_eq(expected_tag))
 }
 
