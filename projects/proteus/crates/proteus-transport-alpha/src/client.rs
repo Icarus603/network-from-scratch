@@ -248,12 +248,27 @@ where
     let mut client_nonce = [0u8; 16];
     rand_core::RngCore::fill_bytes(&mut rng, &mut client_nonce);
 
-    let mut cid_key = [0u8; 32];
+    // Iter-173: wrap cid_key in Zeroizing — it's the AEAD key
+    // that protects the client's user_id field on the wire.
+    // Pre-iter-173 a coredump recovering this 32-byte key lets
+    // an attacker decrypt the `client_id` ciphertext of any
+    // captured Proteus handshake, revealing the user_id of
+    // every captured client. The key is HKDF-derived
+    // deterministically from the (public) server_pq_fingerprint,
+    // so it's CONSTANT across every handshake the client ever
+    // makes — a single recovery = a perpetual user-id-decryption
+    // capability against every future captured handshake until
+    // the server rotates its ML-KEM long-term key. Same key
+    // derivation lives on the server side via
+    // `client_id_aead_key` in ServerKeys — TODO file follow-up
+    // to wrap that one too (closes the same property on the
+    // server's long-running storage).
+    let mut cid_key = Zeroizing::new([0u8; 32]);
     proteus_crypto::kdf::expand_label(
         &config.server_pq_fingerprint,
         b"proteus-cid-key-v1",
         b"",
-        &mut cid_key,
+        &mut *cid_key,
     )?;
     let mut cid_n = [0u8; 12];
     cid_n.copy_from_slice(&client_nonce[..12]);

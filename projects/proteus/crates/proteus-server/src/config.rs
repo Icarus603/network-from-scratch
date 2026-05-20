@@ -1601,12 +1601,16 @@ pub fn load_server_keys(cfg: &ServerConfig) -> Result<ServerKeys, ConfigError> {
 
         let pq_fingerprint = key_schedule::sha256(&mlkem_pk_bytes);
 
-        let mut client_id_aead_key = [0u8; 32];
+        // Iter-173: wrap the long-lived AEAD key in Zeroizing
+        // so it scrubs on `ServerKeys` drop. See the
+        // server.rs::ServerKeys.client_id_aead_key field
+        // docstring for the threat analysis.
+        let mut client_id_aead_key = Zeroizing::new([0u8; 32]);
         proteus_crypto::kdf::expand_label(
             &pq_fingerprint,
             b"proteus-cid-key-v1",
             b"",
-            &mut client_id_aead_key,
+            &mut *client_id_aead_key,
         )
         .map_err(|_| ConfigError::BadKey("hkdf failed"))?;
 

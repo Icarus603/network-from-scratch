@@ -147,7 +147,19 @@ pub struct ServerKeys {
     /// Allowed client Ed25519 verifying keys (allowlist by `user_id`).
     pub client_allowlist: Vec<([u8; 8], ed25519_dalek::VerifyingKey)>,
     /// Server-side AEAD key for the `client_id` field.
-    pub client_id_aead_key: [u8; 32],
+    ///
+    /// Iter-173: wrapped in `Zeroizing` so the key bytes scrub
+    /// when `ServerKeys` drops (process exit / SIGHUP-rebuild
+    /// path). The key is HKDF-derived deterministically from
+    /// the server's ML-KEM public-key fingerprint, so the same
+    /// 32 bytes decrypt the `client_id` field of EVERY captured
+    /// handshake against this server — recovering it via a
+    /// process-image grab = a perpetual user-id-decryption
+    /// capability until the operator rotates the server's ML-KEM
+    /// long-term key. Wrapping the long-lived storage in
+    /// Zeroizing closes the matching residue on the server side
+    /// to the iter-173 client-side `cid_key` fix.
+    pub client_id_aead_key: zeroize::Zeroizing<[u8; 32]>,
 }
 
 impl ServerKeys {
@@ -165,12 +177,12 @@ impl ServerKeys {
 
         // Derive a deterministic client_id key from the PQ fingerprint —
         // matches what the client does (spec §5.7.1).
-        let mut client_id_aead_key = [0u8; 32];
+        let mut client_id_aead_key = Zeroizing::new([0u8; 32]);
         proteus_crypto::kdf::expand_label(
             &pq_fingerprint,
             b"proteus-cid-key-v1",
             b"",
-            &mut client_id_aead_key,
+            &mut *client_id_aead_key,
         )
         .expect("hkdf");
 
