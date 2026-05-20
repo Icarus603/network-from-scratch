@@ -99,6 +99,8 @@ pub fn server_combine(
     client_x25519_pub: &[u8; 32],
     client_mlkem_ct: &[u8; 1088],
 ) -> Result<Zeroizing<[u8; HYBRID_SHARED_LEN]>, CryptoError> {
+    use zeroize::Zeroize as _;
+
     let client_pub = XPublicKey::from(*client_x25519_pub);
     let k_classic = server_x25519_sk.diffie_hellman(&client_pub);
 
@@ -110,13 +112,59 @@ pub fn server_combine(
 
     let ct = Ciphertext::<MlKem768>::try_from(&client_mlkem_ct[..])
         .map_err(|_| CryptoError::KemDecap)?;
-    let k_pq = server_mlkem_sk
+    let mut k_pq = server_mlkem_sk
         .decapsulate(&ct)
         .map_err(|_| CryptoError::KemDecap)?;
 
     let mut combined = Zeroizing::new([0u8; HYBRID_SHARED_LEN]);
+    // Copy into combined FIRST, then scrub the source stack
+    // copies. Order matters: zeroizing before the copy would
+    // write all-zero bytes into combined.
     combined[..32].copy_from_slice(k_classic.as_bytes());
     combined[32..].copy_from_slice(k_pq.as_ref());
+
+    // Iter-164: scrub the raw `k_pq` stack copy from ml-kem.
+    //
+    // ml-kem 0.2.3's `SharedKey = B32` (hybrid_array Array)
+    // doesn't impl `Zeroize`/`ZeroizeOnDrop` on the encap/decap
+    // output — only DecapsulationKey is ZeroizeOnDrop. The
+    // 32-byte stack-resident copy of K_pq would otherwise linger
+    // in the caller's stack frame until later activity overwrites
+    // it. Same defect closed on the client-side encapsulate path
+    // in iter-163; this is the matching fix on the server-side
+    // decapsulate path.
+    //
+    // K_pq is the post-quantum half of the hybrid shared input to
+    // HKDF-Extract at the Handshake-Secret stage. On the server
+    // side this function is called for every accepted handshake —
+    // leaving residue would accumulate one stack-image of every
+    // session's PQ-strong key in the process's recent stack
+    // pages, with a heap-spray / coredump primitive amplifying
+    // the blast radius to many sessions at once.
+    //
+    // Block-scoped reference binding works around ml-kem's generic
+    // `AsMut` impl needing explicit `&mut [u8]` typing.
+    {
+        let bytes: &mut [u8] = k_pq.as_mut();
+        bytes.zeroize();
+    }
+    //
+    // `k_classic` (x25519_dalek `SharedSecret`) is intentionally
+    // NOT scrubbed inline here. `SharedSecret(MontgomeryPoint)`
+    // does not impl Drop, but the inner `MontgomeryPoint` impls
+    // Zeroize — and the type doesn't expose a public `as_mut() ->
+    // &mut [u8]` (only `as_bytes() -> &[u8; 32]`). Reaching the
+    // inner bytes through unsafe pointer arithmetic just to scrub
+    // them is a worse trade than waiting for upstream
+    // x25519_dalek to add ZeroizeOnDrop (issue #131 in
+    // dalek-cryptography/curve25519-dalek). The K_classic residue
+    // on its own is half of a hybrid shared — without the
+    // matching K_pq (which iter-163/164 now scrub on both sides)
+    // it doesn't open any session's keys.
+    //
+    // Filed as a TODO against upstream; meanwhile we've removed
+    // the ML-KEM residue, which was the other half of the
+    // problem.
     Ok(combined)
 }
 
@@ -197,6 +245,53 @@ mod tests {
              not be wiped by the post-copy zeroize"
         );
         assert_eq!(eph.mlkem_shared.len(), 32);
+    }
+
+    /// Iter-164: server-side decapsulate must STILL produce a usable
+    /// K_pq inside the combined hybrid shared after the post-iter-164
+    /// stack-zeroize of `k_pq`. The wire-format value (= `combined`
+    /// returned by `server_combine`) must equal the client's
+    /// `client_combine` output — the round-trip test already covers
+    /// this end-to-end, but a dedicated test here makes the
+    /// regression cause obvious if a future fix zeroizes the wrong
+    /// buffer (e.g. wipes `combined[32..]` instead of the source
+    /// stack copy).
+    #[test]
+    fn iter164_server_combine_preserves_k_pq_in_combined() {
+        let mut rng = OsRng;
+        let (sk, pk) = MlKem768::generate(&mut rng);
+        let s_x_sk = StaticSecret::random_from_rng(rng);
+        let s_x_pub = XPublicKey::from(&s_x_sk).to_bytes();
+
+        let eph = client_ephemeral(&mut rng, &pk).unwrap();
+        let combined = server_combine(&s_x_sk, &sk, &eph.x25519_pub, &eph.mlkem_ct).unwrap();
+        // Pin: K_pq half (bytes 32..64) must equal the client's
+        // remembered shared. A sloppy iter-164 that wiped
+        // `combined[32..]` after the copy would surface here as
+        // an all-zero PQ half.
+        assert_eq!(
+            &combined[32..],
+            eph.mlkem_shared.as_slice(),
+            "iter-164: server_combine must preserve K_pq in combined; \
+             the post-copy zeroize must scrub the source `k_pq` stack \
+             copy, not the destination."
+        );
+        // And K_pq must not itself be all-zero (vanishingly
+        // unlikely for a real ML-KEM-768 output, but a sloppy
+        // fix would land here too).
+        assert!(
+            combined[32..].iter().any(|&b| b != 0),
+            "iter-164: K_pq half must be non-zero — sloppy fix likely \
+             wiped the destination buffer"
+        );
+        // K_classic half (bytes 0..32) must also be intact.
+        let s_diff_check = client_combine(&eph, &s_x_pub).expect("client_combine for cross-check");
+        assert_eq!(
+            &combined[..],
+            s_diff_check.as_slice(),
+            "iter-164: full combined hybrid shared must match the \
+             client-derived value"
+        );
     }
 
     #[test]
