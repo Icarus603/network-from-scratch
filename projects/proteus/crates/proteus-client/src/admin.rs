@@ -1187,8 +1187,37 @@ async fn handle_connection_ctx(
     ctx: Arc<ClientCtx>,
     healthz_staleness_secs: u64,
 ) -> std::io::Result<()> {
+    // Iter-162: bound the inbound request-head read with a wall-
+    // clock timeout. Mirrors the server-side iter-161 fix on the
+    // metrics_listen handler.
+    //
+    // The client's admin endpoint is loopback-only by default but
+    // operators can bind it on a LAN address for cross-host
+    // status checks. A slow-loris attacker that opens TCP and
+    // sends nothing would otherwise pin one tokio task per
+    // connection forever (OS TCP-keepalive on Linux = ~2 h).
+    //
+    // 5 s matches the server-side budget — generous for a real
+    // `proteus-client status` call (which writes the ~80-byte
+    // GET in <1 ms over any path) and tight enough that a
+    // sustained probe cannot pile up FDs.
+    //
+    // We translate timeout into a fresh ETIMEDOUT std::io::Error
+    // so the existing `?`-propagating caller (which only logs
+    // io::Error) gives the operator a clear "client disconnected
+    // before sending GET" signal at the access-log level rather
+    // than a silent task drop.
+    const REQUEST_HEAD_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     let mut req = [0u8; 1024];
-    let n = stream.read(&mut req).await?;
+    let n = match tokio::time::timeout(REQUEST_HEAD_READ_TIMEOUT, stream.read(&mut req)).await {
+        Ok(r) => r?,
+        Err(_) => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "client admin: request head read timed out — possible slow-loris probe",
+            ));
+        }
+    };
     let head = std::str::from_utf8(&req[..n]).unwrap_or("");
     let snap = ClientStatusSnapshot::from_ctx_with_healthz_staleness(
         alive.load(Ordering::Relaxed),
@@ -3261,5 +3290,82 @@ mod tests {
         };
         let s = format!("{snap}");
         assert!(s.contains("Dials: 100 attempted (95 ok, 5 failed)"), "{s}");
+    }
+
+    /// Iter-162: a peer that opens TCP to the client admin endpoint
+    /// and sends NO bytes must be dropped within ~5 s, not held
+    /// forever. Pre-iter-162 the `stream.read(&mut req).await` had
+    /// no timeout, so a slow-loris attacker could pin one tokio
+    /// task per connection indefinitely (OS-level TCP keepalive is
+    /// 2 hours).
+    ///
+    /// Mirrors the server-side iter-161 test on metrics_http.
+    /// Acceptance criterion: server closes the connection within
+    /// 10 s wall-clock (vs the 5-s timeout, allowing 5 s of
+    /// scheduler-jitter slack for busy CI). Pre-iter-162 the
+    /// `read_to_end` would still be pending at the 10-s
+    /// outer-timeout boundary and the test would fail.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn iter162_slow_loris_drops_client_admin_connection_within_timeout() {
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::AsyncReadExt;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let alive = Arc::new(AtomicBool::new(true));
+        let ctx = Arc::new(ClientCtx::new(
+            Arc::new(CarrierHealth::new()),
+            None,
+            None,
+            0,
+            false,
+        ));
+
+        // Spawn the admin handler against the bound listener. We
+        // exercise the same code path the production binary takes
+        // via serve_with_ctx_v2 — accept one connection then drive
+        // handle_connection_ctx, which contains the iter-162 read
+        // timeout.
+        let server_task = tokio::spawn(async move {
+            let (stream, _peer) = listener.accept().await.unwrap();
+            let alive_clone = Arc::clone(&alive);
+            let ctx_clone = Arc::clone(&ctx);
+            // Inline the handler dispatch identical to the real
+            // serve loop above. Iter-162's 5-s gate lives inside
+            // `handle_connection_ctx`.
+            let _ = handle_connection_ctx(stream, alive_clone, ctx_clone, 0).await;
+        });
+        tokio::task::yield_now().await;
+
+        let mut sock = tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
+            .await
+            .expect("connect timeout")
+            .expect("connect ok");
+
+        // Send nothing — just hold the socket open. The server
+        // should close the connection from its end within the
+        // iter-162 5-s timeout. We allow up to 10 s outer wall-
+        // clock for scheduler jitter.
+        let mut buf = Vec::new();
+        let res = tokio::time::timeout(Duration::from_secs(10), sock.read_to_end(&mut buf)).await;
+        assert!(
+            res.is_ok(),
+            "iter-162: client admin must close the slow-loris connection within 10 s; \
+             pre-iter-162 the read would still be pending. read_to_end: {res:?}"
+        );
+        // On read timeout the handler errors out (logged at WARN);
+        // no response is written. buf should be empty.
+        assert!(
+            buf.is_empty(),
+            "iter-162: client admin must close silently on slow-loris read timeout, \
+             got {} bytes: {:?}",
+            buf.len(),
+            String::from_utf8_lossy(&buf)
+        );
+        // Drain task; we don't care about its exit status (the
+        // handler returned a TimedOut io::Error which the serve
+        // loop just logs).
+        let _ = server_task.await;
     }
 }
