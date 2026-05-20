@@ -1134,26 +1134,46 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 self.rx_buf.drain(..self.rx_offset);
                 self.rx_offset = 0;
             }
-            // 16 KiB scratch (was 4 KiB pre-iter-17). At
-            // pad_quantum=1280 each cell-padded record is
-            // ~1.3 KiB ciphertext + header; the prior 4 KiB
-            // could hold 3 records per syscall, the new 16 KiB
-            // holds 12. On bulk download this is a 4× reduction
-            // in `read` syscalls without changing the wire
-            // shape. AEAD decrypt remains the dominant CPU cost
-            // so the extra 12 KiB of stack scratch is free in
-            // every measurable way (no allocation — array on
-            // the stack — no extra memory commitment beyond the
-            // existing `rx_buf` Vec capacity). Bigger sizes
-            // (64 KiB+) showed no further benefit on loopback
-            // since the kernel TCP read buffer caps the
-            // effective batch anyway.
-            let mut tmp = [0u8; 16 * 1024];
-            let n = self.read.read(&mut tmp).await?;
+            // Iter-201: read directly into the rx_buf's spare
+            // capacity via `AsyncReadExt::read_buf`, eliminating
+            // the 16 KiB stack scratch + extend_from_slice memcpy
+            // that the legacy path paid on every syscall. The
+            // tokio implementation calls the underlying
+            // `poll_read` against a `ReadBuf` wrapping the Vec's
+            // unfilled tail, then bumps Vec::len by `n`. End
+            // result: the kernel writes the bytes once into the
+            // final destination, not into a stack page first.
+            //
+            // Target batch size remains ~16 KiB so the receive
+            // syscall caps at the same throughput as pre-iter-201
+            // on bulk download. We reserve the spare capacity
+            // *only if* the current spare is below the target —
+            // a session that's already at high water mark
+            // (post-compaction with ~64 KiB held) re-uses the
+            // existing capacity. The reserve is bounded above by
+            // RX_BUF_HARD_CAP so a pathological reserve request
+            // can never push us past the hard cap (we measured
+            // live_len < RX_BUF_HARD_CAP above this block).
+            const RECV_BATCH: usize = 16 * 1024;
+            let spare = self.rx_buf.capacity() - self.rx_buf.len();
+            if spare < RECV_BATCH {
+                // `try_reserve` rather than `reserve` so an
+                // allocator failure surfaces as a clean session
+                // close rather than aborting the process.
+                let need = RECV_BATCH - spare;
+                if self.rx_buf.try_reserve(need).is_err() {
+                    self.metrics.record_aead_drop();
+                    return Err(AlphaError::Closed);
+                }
+            }
+            // `read_buf` writes into the Vec's spare capacity and
+                // returns the byte count. EOF is signalled by `n == 0`.
+            let pre_len = self.rx_buf.len();
+            let n = self.read.read_buf(&mut self.rx_buf).await?;
+            debug_assert_eq!(self.rx_buf.len(), pre_len + n);
             if n == 0 {
                 return Ok(None);
             }
-            self.rx_buf.extend_from_slice(&tmp[..n]);
         }
     }
 
