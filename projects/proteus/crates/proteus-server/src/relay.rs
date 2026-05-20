@@ -539,7 +539,7 @@ where
                 None => recv.await,
             };
             match next {
-                Ok(Some(buf)) if !buf.is_empty() => {
+                Ok(Some(mut buf)) if !buf.is_empty() => {
                     // Bump-then-check: even if the cap is exceeded
                     // mid-write, we still finish this one buffer so the
                     // upstream sees a consistent stream boundary, but
@@ -548,7 +548,34 @@ where
                     let new_total = bytes_c2u
                         .fetch_add(buf_len as u64, std::sync::atomic::Ordering::Relaxed)
                         + buf_len as u64;
-                    if up_w.write_all(&buf).await.is_err() {
+                    let write_result = up_w.write_all(&buf).await;
+                    // Iter-183: scrub the plaintext relay buffer
+                    // immediately after the upstream write (before
+                    // we drop the Vec or surface a write error).
+                    // `recv_record()` returns `Vec<u8>` of decrypted
+                    // plaintext — operator-visible user traffic
+                    // (HTTP request lines, TCP-level payloads).
+                    // Pre-iter-183 each successful relay tick left
+                    // the plaintext lingering on the heap until
+                    // later allocation activity reused the Vec's
+                    // backing. On a long-running server under
+                    // sustained load, this accumulates thousands
+                    // of recent recv_record bodies in recently-
+                    // freed heap pages. A coredump or
+                    // process-image grab recovers them verbatim —
+                    // exactly the "captured + replayed handshake
+                    // decrypts to plaintext" property the
+                    // session's AEAD design is meant to defend
+                    // against (the AEAD keys close per-direction
+                    // FS, but the post-decrypt residue gives an
+                    // attacker the same data without breaking the
+                    // crypto). The downstream `up_w` BufWriter
+                    // holds another transient copy until its
+                    // flush; that's bounded by the 64 KiB
+                    // capacity and naturally rotates.
+                    use zeroize::Zeroize as _;
+                    buf.zeroize();
+                    if write_result.is_err() {
                         set_reason(&reason_c2u, "upstream_write_fail");
                         break;
                     }
@@ -604,7 +631,37 @@ where
         // which split bulk responses (HTTP/2 long-poll, file
         // downloads, video chunks) across 4× the records strictly
         // needed.
-        let mut buf = vec![0u8; 64 * 1024];
+        //
+        // Iter-183: scope-exit scrub via a Drop-impl guard.
+        // The 64 KiB Vec accumulates the high-water-mark of
+        // plaintext bytes across the session (each iteration's
+        // `up_r.read(&mut buf)` only overwrites `buf[..n]`,
+        // leaving the tail of prior reads' residue). At loop
+        // exit the bytes linger on the heap unscrubbed; pre-
+        // iter-183 a coredump or process-image grab recovers
+        // recently-relayed upstream-to-client traffic. The
+        // ScrubOnDrop guard zeroizes the Vec when this async
+        // block exits regardless of how (normal exit, panic,
+        // future-drop on session teardown).
+        struct ScrubOnDrop(Vec<u8>);
+        impl Drop for ScrubOnDrop {
+            fn drop(&mut self) {
+                use zeroize::Zeroize as _;
+                self.0.zeroize();
+            }
+        }
+        impl std::ops::Deref for ScrubOnDrop {
+            type Target = Vec<u8>;
+            fn deref(&self) -> &Vec<u8> {
+                &self.0
+            }
+        }
+        impl std::ops::DerefMut for ScrubOnDrop {
+            fn deref_mut(&mut self) -> &mut Vec<u8> {
+                &mut self.0
+            }
+        }
+        let mut buf = ScrubOnDrop(vec![0u8; 64 * 1024]);
         loop {
             let read_fut = up_r.read(&mut buf);
             let n = match idle {
