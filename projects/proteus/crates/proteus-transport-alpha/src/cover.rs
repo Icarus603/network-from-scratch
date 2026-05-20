@@ -142,9 +142,18 @@ pub fn parse_cover_endpoint(s: &str) -> Option<String> {
     // parse so even bare-IP `"127.0.0.1\n:443"` strings are
     // refused (they wouldn't parse as a SocketAddr anyway, but
     // defense in depth).
-    if s.bytes()
-        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
-    {
+    //
+    // Iter-182: tighten from the iter-158 four-byte
+    // (NUL/CR/LF/TAB) set to ALL ASCII control characters
+    // (`< 0x20` OR `== 0x7f` DEL). Operator-supplied
+    // cover-endpoint strings have ZERO reason to contain any
+    // control byte — RFC 1035 forbids them, RFC 3986 reserves
+    // sub-delims, and any value < 0x20 in a host:port string
+    // is either operator typo OR a config-templating tool
+    // pulling from untrusted input. The pre-iter-182 gate
+    // covered the four bytes that enable the worst attacks;
+    // this closes the residual surface (BEL/VT/FF/ESC/etc.).
+    if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return None;
     }
     if let Ok(sa) = s.parse::<SocketAddr>() {

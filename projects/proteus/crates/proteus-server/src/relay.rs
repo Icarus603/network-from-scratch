@@ -804,10 +804,22 @@ fn parse_connect(buf: &[u8]) -> Result<(String, u16), Box<dyn std::error::Error 
     // role in DNS names or IP literals. RFC 1035 §2.3.1 LDH +
     // dot + brackets-for-v6 cover every legit byte; anything else
     // is operator-error OR an attempt to exploit the downstream.
-    if host
-        .bytes()
-        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
-    {
+    //
+    // Iter-182: tighten the gate from the iter-146 four-byte
+    // (NUL/CR/LF/TAB) set to ALL ASCII control characters
+    // (`< 0x20` OR `== 0x7f` DEL). RFC 1035 §2.3.1 LDH rule
+    // forbids every byte below 0x20; the prior implementation
+    // only rejected the four that ENABLE the worst attacks
+    // (HTTP-header CRLF smuggling, libc-resolver NUL truncation),
+    // leaving BEL/VT/FF/ESC/etc. as residual surface. A
+    // malicious downstream that smuggled a `\x07` (BEL) or
+    // `\x1b` (ESC) into the hostname would still pass the
+    // pre-iter-182 gate, then surface in operator logs as a
+    // terminal-control-byte payload — small risk (log injection
+    // / terminal title hijack via tmux / iTerm escape sequences)
+    // but real on operator workstations that grep the access
+    // log without `cat -v` or `LESSSECURE`.
+    if host.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return Err("connect host contains forbidden control byte".into());
     }
     let port = u16::from_be_bytes([buf[1 + host_len], buf[1 + host_len + 1]]);

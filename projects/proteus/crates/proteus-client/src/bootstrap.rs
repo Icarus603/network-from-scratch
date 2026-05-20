@@ -212,9 +212,15 @@ pub fn parse_host_port(s: &str) -> Option<(&str, u16)> {
     // (CVE-2008-1447 cache-poisoning patterns, CVE-2018-1000007).
     // Mirrors the iter-147 / iter-158 control-byte gates at every
     // other host-bearing boundary in the codebase.
-    if s.bytes()
-        .any(|b| b == 0 || b == b'\r' || b == b'\n' || b == b'\t')
-    {
+    //
+    // Iter-182: tighten from the iter-160 four-byte set
+    // (NUL/CR/LF/TAB) to ALL ASCII control characters
+    // (`< 0x20` OR `== 0x7f` DEL). Configured server endpoints
+    // have ZERO reason to contain any control byte; the prior
+    // gate covered the four with the worst attack profiles but
+    // left BEL/VT/FF/ESC/etc. as residual log-injection /
+    // terminal-control-byte surface.
+    if s.bytes().any(|b| b < 0x20 || b == 0x7f) {
         return None;
     }
     if let Some(stripped) = s.strip_prefix('[') {
@@ -454,6 +460,40 @@ mod tests {
             assert!(
                 parse_host_port(ep).is_some(),
                 "iter-160: legit endpoint {ep:?} must still parse"
+            );
+        }
+    }
+
+    /// Iter-182: tightened the iter-160 gate from the four-byte
+    /// NUL/CR/LF/TAB set to ALL ASCII control characters
+    /// (`< 0x20` OR `== 0x7f` DEL). This test exercises the
+    /// EXTRA bytes the new gate now rejects — BEL (0x07), VT
+    /// (0x0b), FF (0x0c), ESC (0x1b), DEL (0x7f) — that the
+    /// pre-iter-182 implementation would have accepted.
+    ///
+    /// Real-world threat: a malicious downstream that smuggles
+    /// terminal-control bytes into the hostname surfaces in
+    /// operator logs as a payload that — if grep'd without
+    /// `cat -v` or LESSSECURE — can hijack the terminal title
+    /// via xterm / tmux / iTerm escape sequences. Small-blast-
+    /// radius but defense-in-depth.
+    #[test]
+    fn iter182_parse_host_port_rejects_extended_control_bytes() {
+        for ch in [
+            '\x01', // SOH
+            '\x07', // BEL
+            '\x08', // BS
+            '\x0b', // VT
+            '\x0c', // FF
+            '\x0e', // SO
+            '\x1b', // ESC
+            '\x1f', // US
+            '\x7f', // DEL
+        ] {
+            let ep = format!("vps.example.com{ch}:443");
+            assert!(
+                parse_host_port(&ep).is_none(),
+                "iter-182: extended control byte {ch:?} in {ep:?} must reject"
             );
         }
     }
