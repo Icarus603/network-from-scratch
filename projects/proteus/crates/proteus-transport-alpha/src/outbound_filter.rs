@@ -319,8 +319,22 @@ impl OutboundPolicy {
 
     /// Hot-path port check. Returns true if the port is allowed (or
     /// if no port restriction is configured).
+    ///
+    /// Iter-178: port 0 is ALWAYS rejected, even when the operator
+    /// configured an empty `allowed_ports` list ("no port
+    /// restriction"). Port 0 is reserved for "any free port" on
+    /// bind/listen; as a TCP-connect target it has no meaning and
+    /// the OS-level connect fails with EADDRNOTAVAIL. Surfacing
+    /// the rejection at the policy layer turns a confusing
+    /// runtime error into a clear `DeniedPort(0)` decision that
+    /// the access log + abuse detector key off. Mirrors the
+    /// iter-158 (cover endpoint) / iter-159 (admin URL) port-0
+    /// gates at every other host:port boundary.
     #[must_use]
     pub fn port_allowed(&self, port: u16) -> bool {
+        if port == 0 {
+            return false;
+        }
         self.allowed_ports.is_empty() || self.allowed_ports.contains(&port)
     }
 
@@ -692,7 +706,10 @@ mod tests {
             p.check("", 22, &[ip("127.0.0.1")]),
             Decision::Allow(_)
         ));
-        assert!(matches!(p.check("", 0, &[ip("::1")]), Decision::Allow(_)));
+        // Iter-178: port 0 is now unconditionally rejected (see
+        // the iter-178 test below). Use a non-zero port to
+        // exercise the "permissive admits everything else" path.
+        assert!(matches!(p.check("", 1, &[ip("::1")]), Decision::Allow(_)));
     }
 
     #[test]
@@ -998,5 +1015,52 @@ mod tests {
     fn extend_allowed_hostnames_propagates_parse_error() {
         let mut p = OutboundPolicy::permissive();
         assert!(p.extend_allowed_hostnames(["bad pattern!!"]).is_err());
+    }
+
+    /// Iter-178: port 0 must be rejected unconditionally, even
+    /// against a permissive policy with no port restriction
+    /// configured. Port 0 has no meaning as a TCP-connect
+    /// destination — the OS-level connect would fail with
+    /// EADDRNOTAVAIL anyway, but surfacing the rejection at the
+    /// policy layer turns a confusing runtime error into a clean
+    /// `DeniedPort(0)` decision that the access log + abuse
+    /// detector can key off.
+    #[test]
+    fn iter178_port_zero_rejected_against_permissive_policy() {
+        let p = OutboundPolicy::permissive();
+        assert!(
+            !p.port_allowed(0),
+            "iter-178: port 0 must reject even against permissive policy"
+        );
+        // The full `check()` path must surface DeniedPort(0).
+        let d = p.check("example.com", 0, &[ip("1.1.1.1")]);
+        assert_eq!(d, Decision::DeniedPort(0));
+    }
+
+    /// Iter-178: regression sanity — port 0 must reject even on
+    /// the default policy (which already has a non-empty allowlist
+    /// of [80, 443]). This is the COMMON case; the previous
+    /// `port_allowed` implementation happened to reject 0 here
+    /// because [80,443] doesn't contain 0, but the explicit
+    /// `port == 0` gate makes the rejection load-bearing rather
+    /// than incidental.
+    #[test]
+    fn iter178_port_zero_rejected_against_default_policy() {
+        let p = OutboundPolicy::default();
+        assert!(!p.port_allowed(0));
+    }
+
+    /// Iter-178: normal ports (1, 80, 443, 65535) still work on
+    /// the permissive policy — regression check the explicit
+    /// `port == 0` gate doesn't over-reject.
+    #[test]
+    fn iter178_normal_ports_still_allowed_on_permissive() {
+        let p = OutboundPolicy::permissive();
+        for port in [1u16, 22, 80, 443, 8443, 65535] {
+            assert!(
+                p.port_allowed(port),
+                "iter-178: port {port} must still be allowed on permissive"
+            );
+        }
     }
 }
