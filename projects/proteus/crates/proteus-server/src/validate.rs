@@ -786,7 +786,15 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
     //   - file mode (secret-file-mode warn, same as iter-52
     //     keys/SK handling)
     if let Some(path) = cfg.metrics_token_file.as_ref() {
-        match std::fs::read_to_string(path) {
+        // Iter-188: wrap the file-read String in Zeroizing so
+        // the bearer-token bytes (and the trimmed-token &str
+        // slice into the same buffer) are scrubbed on drop.
+        // Mirrors the iter-180 fix on the runtime path; this
+        // closes the matching residue at the validate-time
+        // pre-startup invocation.
+        use zeroize::Zeroizing;
+        let read_result = std::fs::read_to_string(path).map(Zeroizing::new);
+        match read_result {
             Ok(s) if s.trim().is_empty() => {
                 r.push_fail(format!("metrics_token_file {path:?} is empty"));
             }
