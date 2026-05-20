@@ -310,10 +310,18 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
                 // IPv4
                 let mut buf = [0u8; 6];
                 sock.read_exact(&mut buf).await?;
-                (
-                    format!("{}.{}.{}.{}", buf[0], buf[1], buf[2], buf[3]),
-                    u16::from_be_bytes([buf[4], buf[5]]),
-                )
+                // Iter-198: use std `Ipv4Addr` for consistency with
+                // the iter-170 IPv6 canonicalization. The IPv4
+                // canonical form happens to match the hand-format
+                // (`"a.b.c.d"`) so the wire-side host string is
+                // identical, but routing through `Ipv4Addr` makes
+                // the parse-then-stringify discipline uniform with
+                // the ATYP=0x04 branch — easier to audit + immune
+                // to future format-string changes that might
+                // diverge from canonical form.
+                let ipv4_bytes: [u8; 4] = buf[..4].try_into().expect("4 bytes");
+                let host = std::net::Ipv4Addr::from(ipv4_bytes).to_string();
+                (host, u16::from_be_bytes([buf[4], buf[5]]))
             }
             0x03 => {
                 // domain name
