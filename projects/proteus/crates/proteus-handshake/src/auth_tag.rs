@@ -16,21 +16,37 @@ use proteus_crypto::kdf;
 use proteus_spec::HMAC_TAG_LEN;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
+use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
 
 /// Derive `auth_key = HKDF-Extract(salt=fp, IKM=x25519_pub || client_nonce)`.
+///
+/// The returned key is wrapped in [`Zeroizing`] so the caller's stack
+/// copy is scrubbed on drop. `kdf::extract` already produces a
+/// `Zeroizing<[u8;32]>`; iter-157 propagates that wrapper through the
+/// public API instead of dropping it via the prior `*prk` deref. The
+/// auth_key is a long-lived secret per `(server_pq_fingerprint,
+/// client_x25519_pub, client_nonce)` triple — anyone who recovers it
+/// from a stale stack page can forge tags for that user across the
+/// 90 s timestamp window, so leaving the bytes resident is
+/// gratuitous risk.
 #[must_use]
 pub fn derive_auth_key(
     server_pq_fingerprint: &[u8; 32],
     client_x25519_pub: &[u8; 32],
     client_nonce: &[u8; 16],
-) -> [u8; 32] {
-    let mut ikm = [0u8; 32 + 16];
+) -> Zeroizing<[u8; 32]> {
+    // IKM is also wrapped in Zeroizing — it contains the client_nonce
+    // (low entropy on its own but a piece of the auth tuple) and the
+    // client_x25519_pub (public, but the concatenation is what HKDF
+    // sees). Zeroize-on-drop costs one extra 48-byte memset and
+    // closes a stale-stack-page residue.
+    let mut ikm = Zeroizing::new([0u8; 32 + 16]);
     ikm[..32].copy_from_slice(client_x25519_pub);
     ikm[32..].copy_from_slice(client_nonce);
-    let prk = kdf::extract(server_pq_fingerprint, &ikm);
-    *prk
+    let prk = kdf::extract(server_pq_fingerprint, ikm.as_ref());
+    Zeroizing::new(*prk)
 }
 
 /// Compute `HMAC-SHA-256(auth_key, auth_input)`.
@@ -66,6 +82,25 @@ mod tests {
         assert!(verify(&key, input, &tag));
     }
 
+    /// Iter-157: `derive_auth_key` MUST return a `Zeroizing`-wrapped
+    /// key so the caller's stack copy is scrubbed on drop. The
+    /// `Zeroizing<[u8;32]>` return type is a load-bearing invariant
+    /// — downgrading it back to `[u8;32]` would silently re-introduce
+    /// the residue.
+    ///
+    /// This test is a compile-time pin: if the return type changes,
+    /// the closure-coerced `Zeroizing<[u8;32]>` annotation below
+    /// stops compiling.
+    #[test]
+    fn derive_auth_key_returns_zeroizing_wrapper() {
+        let fp = [0u8; 32];
+        let pub_ = [0u8; 32];
+        let nonce = [0u8; 16];
+        let key: Zeroizing<[u8; 32]> = derive_auth_key(&fp, &pub_, &nonce);
+        // Reach into the wrapped value to confirm the deref works.
+        assert_eq!(key.len(), 32);
+    }
+
     #[test]
     fn flipped_byte_rejects() {
         let key = [0xaau8; 32];
@@ -89,11 +124,11 @@ mod tests {
         let nonce = [0x20u8; 16];
         let k1 = derive_auth_key(&fp, &[0x30u8; 32], &nonce);
         let k2 = derive_auth_key(&fp, &[0x31u8; 32], &nonce);
-        assert_ne!(k1, k2);
+        assert_ne!(*k1, *k2);
 
         let pub_ = [0x40u8; 32];
         let k3 = derive_auth_key(&fp, &pub_, &[0x50u8; 16]);
         let k4 = derive_auth_key(&fp, &pub_, &[0x51u8; 16]);
-        assert_ne!(k3, k4);
+        assert_ne!(*k3, *k4);
     }
 }
