@@ -211,6 +211,26 @@ impl std::fmt::Debug for AeadKey {
     }
 }
 
+/// Iter-199: scrub the IV field on drop. `chacha20poly1305 = 0.10`
+/// impls `ZeroizeOnDrop` on its `ChaCha20Poly1305` so the KEY
+/// field already scrubs — but the bare `[u8; NONCE_LEN]` IV
+/// field does not. The IV is the HKDF-derived "iv" leaf of the
+/// per-direction key schedule (see `direction_keys_from_secret`
+/// in proteus_crypto::key_schedule); recovering it from a
+/// coredump in tandem with a recovered key field would yield
+/// per-record nonces directly. Defense-in-depth even though the
+/// matching key field is already protected: same residue
+/// discipline as iter-189/190's HMAC-tag closures and the
+/// session.rs Drop impls on `AlphaSender` / `AlphaReceiver`.
+impl Drop for AeadKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize as _;
+        self.iv.zeroize();
+        // The `cipher` field's ZeroizeOnDrop fires automatically
+        // when the struct drops; we don't need to call it here.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
