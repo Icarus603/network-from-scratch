@@ -66,10 +66,8 @@ pub fn client_ephemeral<R: RngCore + CryptoRng>(
     // for a heap-spray or coredump to recover the K_pq half of the
     // hybrid shared. Explicit memset closes the residue.
     //
-    // Server-side `server_combine` doesn't have this problem because
-    // it copies the decapsulate output directly into the
-    // already-Zeroizing `combined` buffer; the temporary on this
-    // client path is the only stack-resident plaintext copy.
+    // Matching server-side decapsulate residue is closed by
+    // iter-164 inside `server_combine`.
     {
         let bytes: &mut [u8] = shared.as_mut();
         bytes.zeroize();
