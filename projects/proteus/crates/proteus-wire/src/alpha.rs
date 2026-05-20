@@ -144,7 +144,24 @@ pub fn decode_frame(buf: &[u8]) -> Result<(Frame<'_>, usize), WireError> {
     let (len, varint_len) = varint::decode(&buf[1..])?;
     let header_len = 1 + varint_len;
     let body_len = usize::try_from(len).map_err(|_| WireError::Varint)?;
-    let total = header_len + body_len;
+    // Iter-175: `1 + varint_len + body_len` overflows `usize` if a
+    // peer ships a varint that decodes to ~`usize::MAX`. On 64-bit
+    // hosts the upper bound is 2^62 - 1 (varint max) + 9 bytes of
+    // header, well under `usize::MAX = 2^64 - 1` — safe. On 32-bit
+    // hosts the same value EXCEEDS `usize::MAX = 2^32 - 1`, so the
+    // `header_len + body_len` would wrap and the subsequent
+    // `buf.len() < total` check would compare against a tiny
+    // wrapped `total`, accepting a frame whose declared body length
+    // is far larger than the buffer. The slicing `&buf[header_len..
+    // total]` would then panic on the out-of-bounds index.
+    //
+    // The `usize::try_from(len)` above already rejects values too
+    // large to fit in `usize`; this `checked_add` closes the
+    // remaining `header_len + body_len` add. Same fail-closed
+    // class as the iter-156 sniffer peek_limit fix — refuse to
+    // process attacker-controlled length fields that overflow our
+    // arithmetic.
+    let total = header_len.checked_add(body_len).ok_or(WireError::Varint)?;
     if buf.len() < total {
         return Err(WireError::Short {
             needed: total,
@@ -249,5 +266,61 @@ mod tests {
         let (frame, consumed) = decode_frame(&wire).unwrap();
         assert_eq!(consumed, wire.len());
         assert_eq!(frame.body.len(), body.len());
+    }
+
+    /// Iter-175: a peer that declares the maximum possible varint
+    /// body length (2^62 - 1) MUST surface as a `WireError::Varint`
+    /// (or `Short` for the partial-data branch), not a panic.
+    /// Pre-iter-175 the `let total = header_len + body_len;` add
+    /// could overflow `usize` on 32-bit hosts (max 2^32 - 1),
+    /// wrapping `total` to a small value that passes the
+    /// `buf.len() < total` check, leading to an out-of-bounds
+    /// slice + panic.
+    ///
+    /// The test crafts a frame with a maximum-encoded varint
+    /// (8-byte form, value = 2^62 - 1) followed by zero body
+    /// bytes. The decoder must error cleanly without panicking.
+    #[test]
+    fn iter175_decode_frame_handles_maximum_varint_body_length() {
+        let mut wire = Vec::with_capacity(1 + 8 + 1);
+        wire.push(FRAME_CLIENT_HELLO);
+        // Encode varint = 2^62 - 1 (varint MAX). Per RFC 9000 §16
+        // the 8-byte form is `0xc0 | (top byte of value)` then 7
+        // more value bytes. The value 2^62 - 1 in 8 bytes
+        // big-endian is `0x3f ff ff ff ff ff ff ff` — top bits
+        // are `0011_1111`. Adding the 2-bit length tag (`11`) in
+        // the high 2 bits gives `0xff` as the first byte, then
+        // `ff ff ff ff ff ff ff` for the rest.
+        wire.extend_from_slice(&[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        wire.push(0u8); // 1 byte of "body" — far short of declared length
+        let err = decode_frame(&wire).unwrap_err();
+        // Either Varint (overflow path, on 32-bit hosts where
+        // header_len + body_len > usize::MAX) or Short (on
+        // 64-bit hosts where the add succeeds but buf.len() is
+        // tiny relative to the declared body length). Both are
+        // fail-closed; neither is a panic.
+        assert!(
+            matches!(err, WireError::Varint | WireError::Short { .. }),
+            "iter-175: max-varint frame must error cleanly, got {err:?}"
+        );
+    }
+
+    /// Iter-175: regression sanity — a frame whose declared body
+    /// length exceeds the buffer's remaining capacity but stays
+    /// within `usize` bounds still surfaces `Short`. This is the
+    /// PRE-iter-175 hot path (no overflow); confirms the new
+    /// `checked_add` doesn't break the common-case "wait for
+    /// more bytes" branch.
+    #[test]
+    fn iter175_short_frame_still_surfaces_short_error() {
+        let mut wire = Vec::with_capacity(6);
+        wire.push(FRAME_CLIENT_HELLO);
+        varint::encode(1024, &mut wire); // declares 1024-byte body
+        wire.extend_from_slice(b"abc"); // delivers 3 bytes
+        let err = decode_frame(&wire).unwrap_err();
+        assert!(
+            matches!(err, WireError::Short { .. }),
+            "iter-175: legitimate short-buffer case must still surface Short, got {err:?}"
+        );
     }
 }
