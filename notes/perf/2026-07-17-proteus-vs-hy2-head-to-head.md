@@ -350,3 +350,29 @@ throughput、CPU、RSS 陣列、bootstrap/permutation 統計、qdisc
 counters、commit 與 image digest；以一格一行避免把 container logs
 膨脹成數萬行。physical dual-host、reordering、short-flow 與至少
 30 observations 的最終 promoted matrix 仍是封頂前置條件。
+
+## 2026-07-18 ACK 恢復默認值校正
+
+先前 benchmark harness 強制使用 RFC 9802 threshold `10`，與
+Proteus 生產默認 `1` 不一致。固定 5% IID loss、100 ms RTT、
+256 MiB payload，其餘條件完全相同的三輪診斷 A/B 顯示，threshold
+`1`、`2`、`10` 的 Proteus median 依次為 116.39、111.78、98.98
+MiB/s；對應 Hy2 median 約 87 MiB/s。這個篩選不承擔正式顯著性
+結論，只用來選擇 recovery 參數。Harness、Compose、兩端模板與
+entrypoint 因而統一回生產默認 `1`，CI 另加漂移檢查。
+
+晉級後的 512 MiB、七輪 matched cells 都由乾淨的 `b0a03fb` 啟動，
+使用同一組 version-pinned images 與 64 MiB warmup：
+
+| cell | Proteus | Hy2 | uplift (95% bootstrap) | CPU P/H | RSS P/H |
+|---|---:|---:|---:|---:|---:|
+| 5% IID, 100 ms RTT | 131.33 | 95.22 | **+37.92%** (+32.67%, +41.30%) | 2.634 / **2.532 s** | 34.51 / 178.89 MiB |
+| moderate burst, 100 ms RTT | 153.18 | 103.45 | **+48.07%** (+39.56%, +49.90%) | 2.532 / **2.367 s** | 30.49 / 149.91 MiB |
+| severe burst, 100 ms RTT | 105.57 | 84.85 | **+24.42%** (+16.16%, +34.91%) | **2.674** / 2.775 s | 34.58 / 201.62 MiB |
+
+三格雙方皆 7/7 成功，throughput interval 全部高於零，所有
+loss/burst 格的雙向 qdisc 都留下實際 drop。IID 與 moderate burst
+也保留了反例：Proteus client CPU 分別高約 4% 與 7%，因此結論仍是
+sustained-bulk throughput 與 RSS 優勢，不宣稱每格、每個資源維度
+皆勝。逐輪 throughput、image digest、commit、qdisc counters 與
+摘要保存在 `2026-07-18-ack1-recovery-head-to-head.jsonl`。
