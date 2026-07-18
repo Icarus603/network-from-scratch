@@ -342,7 +342,7 @@ impl EndpointHealth {
         let n = self
             .suppressed_connect_count
             .fetch_add(1, Ordering::Relaxed);
-        if n % PROBE_INTERVAL == 0 {
+        if n.is_multiple_of(PROBE_INTERVAL) {
             EndpointDecision::Probe
         } else {
             EndpointDecision::SkipSuppressed

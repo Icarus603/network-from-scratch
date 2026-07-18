@@ -123,6 +123,11 @@ impl BetaConnectionPool {
     pub async fn len(&self) -> usize {
         self.entries.lock().await.len()
     }
+
+    #[cfg(test)]
+    pub async fn is_empty(&self) -> bool {
+        self.entries.lock().await.is_empty()
+    }
 }
 
 #[cfg(test)]

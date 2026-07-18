@@ -738,7 +738,7 @@ mod tests {
             "self-signed should produce a 1-cert chain"
         );
         assert!(
-            !c.leaf_hex.is_empty() && c.leaf_hex.len() % 2 == 0,
+            !c.leaf_hex.is_empty() && c.leaf_hex.len().is_multiple_of(2),
             "leaf_hex should be even-length non-empty hex: len={}",
             c.leaf_hex.len()
         );

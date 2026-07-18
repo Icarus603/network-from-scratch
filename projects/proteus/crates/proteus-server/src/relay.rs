@@ -575,7 +575,7 @@ where
                     let new_total = bytes_c2u
                         .fetch_add(buf_len as u64, std::sync::atomic::Ordering::Relaxed)
                         + buf_len as u64;
-                    let write_result = up_w.write_all(&buf).await;
+                    let write_result = up_w.write_all(buf).await;
                     // Iter-183: scrub the plaintext relay buffer
                     // immediately after the upstream write (before
                     // we drop the Vec or surface a write error).
