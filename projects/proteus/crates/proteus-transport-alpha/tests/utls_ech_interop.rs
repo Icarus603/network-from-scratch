@@ -176,7 +176,7 @@ fn run_go_client(
             .encode(config_list)
             .as_bytes(),
     );
-    Command::new("go")
+    go_command(temp)
         .args([
             "test",
             "-run",
@@ -201,6 +201,18 @@ fn run_go_client(
         )
         .output()
         .expect("run Go uTLS interop client")
+}
+
+fn go_command(temp: &Path) -> Command {
+    let mut command = Command::new("go");
+    // Go otherwise defaults GOPATH to ~/go and GOCACHE to the user's
+    // Library/Caches directory. Cross-language tests must be
+    // self-contained and leave no persistent home-directory cache.
+    command
+        .env("GOPATH", temp.join("go-path"))
+        .env("GOMODCACHE", temp.join("go-mod-cache"))
+        .env("GOCACHE", temp.join("go-build-cache"));
+    command
 }
 
 fn assert_case(
@@ -339,7 +351,7 @@ fn assert_full_inner_handshake(
             .as_bytes(),
     );
     let bridge_path = temp.join("proteus-utls-bridge");
-    let build = Command::new("go")
+    let build = go_command(temp)
         .args(["build", "-trimpath", "-o"])
         .arg(&bridge_path)
         .arg(".")
