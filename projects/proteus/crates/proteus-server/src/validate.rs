@@ -324,6 +324,54 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                     Err(e) => r.push_fail(format!("tls.acceptor: {e}")),
                 }
             }
+            if let Some(ech) = tls.ech.as_ref() {
+                if cfg.knock_psk_file.is_none() {
+                    r.push_fail(
+                        "tls.ech is configured without knock_psk_file — ECH termination must \
+                         remain behind the Path-A possession/replay gate",
+                    );
+                }
+                if ech.keys.is_empty() {
+                    r.push_fail("tls.ech.keys is empty");
+                }
+                if !ech.keys.iter().any(|entry| entry.retry_config) {
+                    r.push_fail(
+                        "tls.ech.keys has no retry_config=true entry — RFC 9849 stale-key \
+                         recovery cannot be authenticated",
+                    );
+                }
+                for (index, entry) in ech.keys.iter().enumerate() {
+                    check_file(
+                        &mut r,
+                        &format!("tls.ech.keys[{index}].config"),
+                        &entry.config,
+                    );
+                    check_file(
+                        &mut r,
+                        &format!("tls.ech.keys[{index}].private_key"),
+                        &entry.private_key,
+                    );
+                    check_secret_file_mode(
+                        &mut r,
+                        &format!("tls.ech.keys[{index}].private_key"),
+                        &entry.private_key,
+                    );
+                }
+                match crate::config::load_ech_keys(tls) {
+                    Ok(keys) => match proteus_ech::EchAcceptor::from_pem_files(
+                        &tls.cert_chain,
+                        &tls.private_key,
+                        &keys,
+                    ) {
+                        Ok(_) => r.push_pass(format!(
+                            "tls.ech acceptor builds ({} overlap key(s), fail-closed)",
+                            keys.len()
+                        )),
+                        Err(error) => r.push_fail(format!("tls.ech acceptor: {error}")),
+                    },
+                    Err(error) => r.push_fail(format!("tls.ech keys: {error}")),
+                }
+            }
         }
         None => r.push_warn(
             "tls block missing — server will run plain TCP; passive DPI will identify the protocol",

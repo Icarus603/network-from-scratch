@@ -10,9 +10,10 @@ honest carrier-comparison table further down.
 **Status: M2.** α-profile (TCP+TLS 1.3) and β-profile (QUIC+BBR)
 carriers both work end-to-end. The opt-in α uTLS bridge now emits a
 version-locked Chrome 150 profile while preserving the Path A knock
-and exporter-bound hybrid handshake. Multipath QUIC, real ECH
-termination, MASQUE (γ-profile), and a cross-host adversarial
-benchmark against Hy2/TUIC-v5 remain M3+ work.
+and exporter-bound hybrid handshake. RFC 9849 ECH termination is now
+wired fail-closed behind Path A, while outer-wire capture, DNS
+publication/rotation drills, multipath QUIC, MASQUE (γ-profile), and a
+cross-host adversarial benchmark against Hy2/TUIC-v5 remain M3+ work.
 **Not yet production-ready for arbitrary-user deployment** — see
 the gap analysis at the bottom of this README.
 
@@ -113,7 +114,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 |---|---|---|---|
 | 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ✅ opt-in Chrome 150 real-capture ClientHello with full normalized wire-profile gate; ⚠ field deployment evidence pending |
 | 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; ✅ `deploy/README.md` "Deployment topology" section + security-checklist topology items; ✅ **multi-VPS HA client** (2026-05-18 — EndpointPool + EndpointHealth + YAML `server_endpoints:` with auto failover); ✅ **TLS cert-expiry + reload observability** (2026-05-18 — `proteus_tls_cert_not_after_unix_seconds` gauge + `_reload_attempts/_succeeded_total` counters + `admin status` "TLS cert" block with RENEW NOW / EXPIRED warnings; closes the silent-certbot-failure case that has killed multiple production Hy2/TUIC nodes) |
-| 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
+| 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; 🟡 RFC 9849 shared-mode ECH termination and downgrade refusal wired, but packet-capture proof + DNS HTTPS publication/rotation drill remain |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ✅ **malformed, partial, slow, and non-TLS α probes preserve their consumed prefix and route to cover** (obvious non-TLS headers are rejected immediately, avoiding the 3 s sniff-timeout oracle); ✅ **cover-endpoint pool with per-src-IP /24 affinity** (no rotation signal); ✅ **probe-anomaly detector wired across both α and β** (sliding-window per-/24 counter + Prometheus alert); ✅ **detector recent-fires ring exposed via `/metrics` + admin CLI** (operator sees WHICH /24 fired in PromQL/Grafana AND in-terminal); ✅ **operator-opt-in auto-deny loop** (TTL-bounded in-binary deny list; entries auto-expire so false positives heal); ✅ **β pre-QUIC-handshake auto-deny short-circuit** (denied /24s get `Incoming::ignore()` BEFORE quinn pays the TLS+QUIC handshake cost; prober's wire view = server unreachable, no response packet at all); ✅ **auto-deny *current-state* surface** (2026-05-18 — Prometheus `proteus_auto_deny_active_prefixes`/`inserted_total`/`refused_inserts_total` + per-entry `proteus_auto_deny_remaining_secs{prefix=…}` labelled gauge AND `admin status` text/JSON block showing who is blocked right now + TTL countdown; closes the gap where long-TTL entries persisted past the recent-fires ring) |
 | 5 | UDP / QUIC throttling (Hy2 / TUIC visibly degrades 2026 Q1+) | nationally deployed | ✅ α survives; ✅ **`CarrierHealth` automatic α↔β fallback** (2026-05-18, streak-based β suppression with capped exponential back-off + periodic recovery probe — single auto-clear on next β success); ❌ γ profile (MASQUE) still M3+ |
 | 6 | DoH / DoT identification (bootstrap-layer attack on the client itself) | rolling out 2026 Q2 | ✅ `bootstrap_dns: { direct_ip: <ip> }` config + IP-literal endpoint passthrough + `proteus-client validate` WARN on unpinned hostnames |
@@ -121,7 +122,15 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 
 **Roadmap priorities driven by this threat intel**:
 
-- **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, ~~`deploy/README.md` anti-relay topology warning~~ ✅ **done 2026-05-18**. **4 of 5 P0 done**; only ECH (multi-week, rustls-fork) remains.
+- **P0** (must precede any "production-ready" claim): ECH integration
+  now has a fail-closed BoringSSL terminator, real acceptance/exporter
+  tests, config validation, and Path-A wiring; packet-capture SNI
+  secrecy plus DNS rotation remain before promotion.
+  ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**,
+  ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**,
+  ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**,
+  ~~`deploy/README.md` anti-relay topology warning~~ ✅
+  **done 2026-05-18**.
 - **P1** (M3): ~~uTLS-grade browser-profile ClientHello~~ ✅ opt-in Chrome 150 bridge + real-capture fixture + normalized raw-wire gate done 2026-07-18, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
@@ -1850,8 +1859,15 @@ latest hardening pass:
   rotation policy. REALITY still has the stronger deployment history
   here.
 - ❌ **Multipath QUIC** (spec §10.4): not started.
-- ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
-  publication. Needed to hide `proteus-β-v1` ALPN in flight.
+- 🟡 **ECH binding** (spec §7.4): BoringSSL shared-mode termination is
+  now wired behind the Path-A knock/replay gate. Correct ECH must be
+  accepted, TLS must be 1.3, and its exporter is committed to the
+  existing hybrid Finished transcript; plain/GREASE/stale-key
+  handshakes cannot enter the data plane. A deterministic wire recorder
+  proves that the public name remains visible while the real inner SNI
+  is absent, and both peers derive the same exporter. The remaining
+  promotion gates are live DNS HTTPS-record publication and an
+  old→new overlap rotation drill against the deployed uTLS client.
 - ✅ **`0xfe0d` ClientHello injection** (spec §4.2): α now uses
   rustls ECH GREASE with a fresh P-256 HPKE placeholder key. This
   removes one stable rustls-vs-browser extension classifier; it

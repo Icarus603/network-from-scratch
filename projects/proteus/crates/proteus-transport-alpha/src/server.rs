@@ -1731,6 +1731,151 @@ where
     }
 }
 
+/// RFC 9849 ECH-required Path-A server.
+///
+/// The existing knock/replay dispatcher remains the public edge. Only
+/// an authenticated `Pass` reaches BoringSSL, and only a TLS 1.3
+/// handshake for which BoringSSL reports ECH accepted reaches the
+/// inner Proteus handshake. The BoringSSL exporter is mixed into the
+/// same Finished transcript as the rustls and uTLS paths.
+pub async fn serve_ech_with_gate<F, Fut>(
+    listener: TcpListener,
+    ctx: Arc<ServerCtx>,
+    acceptor: proteus_ech::EchAcceptor,
+    dispatch_cfg: Arc<crate::knock_dispatch::DispatchConfig>,
+    handle: F,
+) -> std::io::Result<()>
+where
+    F: Fn(
+            AlphaSession<
+                tokio::io::ReadHalf<
+                    proteus_ech::EchTlsStream<crate::knock_dispatch::PrependedStream>,
+                >,
+                tokio::io::WriteHalf<
+                    proteus_ech::EchTlsStream<crate::knock_dispatch::PrependedStream>,
+                >,
+            >,
+        ) -> Fut
+        + Send
+        + Sync
+        + Clone
+        + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let (stream, peer) = match accept_with_backoff(&listener, accept_error_throttle()).await? {
+            AcceptOutcome::Got(pair) => pair,
+            AcceptOutcome::Transient => continue,
+        };
+        let ctx = Arc::clone(&ctx);
+        let acceptor = acceptor.clone();
+        let handle = handle.clone();
+        let dispatch_cfg = Arc::clone(&dispatch_cfg);
+
+        if !admission_ok(&ctx, &peer) {
+            route_to_cover_or_drop(&ctx, stream, &peer);
+            continue;
+        }
+
+        let permit = match ctx.try_acquire_connection() {
+            ConnGate::Unbounded => None,
+            ConnGate::Allowed(permit) => Some(permit),
+            ConnGate::Rejected => {
+                if matches!(
+                    max_connections_throttle().try_acquire(),
+                    AcquireResult::Allowed
+                ) {
+                    tracing::warn!(
+                        peer = %peer,
+                        "max_connections reached; routing to cover (Path-A ECH)"
+                    );
+                }
+                if let Some(metrics) = ctx.metrics() {
+                    metrics
+                        .conn_limit_rejected
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
+                route_to_cover_or_drop(&ctx, stream, &peer);
+                continue;
+            }
+        };
+
+        let _ = apply_tcp_keepalive(&stream, ctx.tcp_keepalive_secs());
+        let _ = stream.set_nodelay(true);
+
+        tokio::spawn(async move {
+            let _permit_held = permit;
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let routing =
+                crate::knock_dispatch::dispatch_or_local_terminate(stream, &dispatch_cfg, now_secs)
+                    .await;
+
+            let prepended = match routing {
+                crate::knock_dispatch::PathARouting::TerminateLocally(stream) => stream,
+                crate::knock_dispatch::PathARouting::RoutedToCover {
+                    reason,
+                    splice_outcome,
+                } => {
+                    tracing::debug!(
+                        peer = %peer,
+                        ?reason,
+                        cover_ok = splice_outcome.is_ok(),
+                        "Path-A ECH: connection routed to cover"
+                    );
+                    return;
+                }
+                crate::knock_dispatch::PathARouting::Dropped { reason } => {
+                    tracing::debug!(peer = %peer, ?reason, "Path-A ECH: connection dropped");
+                    return;
+                }
+            };
+
+            let deadline = ctx.handshake_deadline();
+            let started = std::time::Instant::now();
+            let outcome =
+                tokio::time::timeout(deadline, handshake_over_ech_io(prepended, &acceptor, &ctx))
+                    .await;
+            match outcome {
+                Ok(Ok(session)) => {
+                    let session = session
+                        .with_peer_addr(peer)
+                        .with_handshake_duration(started.elapsed());
+                    if user_admission_ok(&ctx, &session) {
+                        handle(session).await;
+                    }
+                }
+                Ok(Err(error)) => {
+                    tracing::debug!(
+                        peer = %peer,
+                        error = %error,
+                        "Path-A ECH/Proteus handshake failed"
+                    );
+                    if let Some(metrics) = ctx.metrics() {
+                        metrics
+                            .handshakes_failed
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        peer = %peer,
+                        timeout_secs = deadline.as_secs(),
+                        "Path-A ECH handshake deadline elapsed"
+                    );
+                    if let Some(metrics) = ctx.metrics() {
+                        metrics
+                            .handshake_timeouts
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        });
+    }
+}
+
 /// Listen on `addr` and serve α-profile handshakes. `handle` is invoked
 /// per established session.
 ///
@@ -2557,6 +2702,30 @@ where
         .await
         .map_err(|e| AlphaError::Io(std::io::Error::other(e.to_string())))?;
     handshake_over_tls_stream_post_accept(tls_stream, ctx).await
+}
+
+/// Terminate a shared-mode ECH TLS connection and bind the resulting
+/// exporter into the inner Proteus handshake.
+pub async fn handshake_over_ech_io<S>(
+    stream: S,
+    acceptor: &proteus_ech::EchAcceptor,
+    ctx: &Arc<ServerCtx>,
+) -> AlphaResult<
+    AlphaSession<
+        tokio::io::ReadHalf<proteus_ech::EchTlsStream<S>>,
+        tokio::io::WriteHalf<proteus_ech::EchTlsStream<S>>,
+    >,
+>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let accepted = acceptor
+        .accept_required(stream)
+        .await
+        .map_err(|error| AlphaError::Io(std::io::Error::other(error.to_string())))?;
+    let binding = accepted.exporter;
+    let (read, write) = tokio::io::split(accepted.stream);
+    handshake_over_split_bound(read, write, ctx, Some(*binding)).await
 }
 
 /// Shared post-TLS-accept logic (channel binding extraction +

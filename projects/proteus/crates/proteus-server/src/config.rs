@@ -857,6 +857,29 @@ pub struct TlsCfg {
     pub cert_chain: PathBuf,
     /// PEM-encoded PKCS8 / PKCS1 / SEC1 private key.
     pub private_key: PathBuf,
+    /// RFC 9849 shared-mode ECH termination. When present, Path A
+    /// requires a valid knock and accepted ECH before the Proteus
+    /// handshake is exposed.
+    #[serde(default)]
+    pub ech: Option<EchServerCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EchServerCfg {
+    /// Newest config first, followed by overlap keys retained while
+    /// DNS caches age out. At least one entry must be a retry config.
+    pub keys: Vec<EchKeyCfg>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EchKeyCfg {
+    /// Binary RFC 9849 ECHConfig, without ECHConfigList's length prefix.
+    pub config: PathBuf,
+    /// Raw 32-byte X25519 HPKE private key.
+    pub private_key: PathBuf,
+    /// Advertise this config to clients that present a stale key.
+    #[serde(default)]
+    pub retry_config: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1663,6 +1686,37 @@ pub fn load_server_keys(cfg: &ServerConfig) -> Result<ServerKeys, ConfigError> {
             client_id_aead_key,
         })
     }
+}
+
+/// Load the ECH overlap key set while keeping private-key file buffers
+/// zeroizing. ECHConfig is public DNS material; the matching HPKE key
+/// is always treated as secret.
+pub fn load_ech_keys(tls: &TlsCfg) -> Result<Vec<proteus_ech::EchKey>, ConfigError> {
+    let Some(ech) = tls.ech.as_ref() else {
+        return Ok(Vec::new());
+    };
+    if ech.keys.is_empty() {
+        return Err(ConfigError::BadKey("tls.ech.keys must not be empty"));
+    }
+
+    ech.keys
+        .iter()
+        .map(|entry| {
+            let ech_config = std::fs::read(&entry.config).map_err(ConfigError::Io)?;
+            let private_key =
+                Zeroizing::new(std::fs::read(&entry.private_key).map_err(ConfigError::Io)?);
+            if private_key.len() != 32 {
+                return Err(ConfigError::BadKey(
+                    "tls.ech private_key must contain 32 raw bytes",
+                ));
+            }
+            Ok(proteus_ech::EchKey {
+                ech_config,
+                private_key,
+                retry_config: entry.retry_config,
+            })
+        })
+        .collect()
 }
 
 fn encode_user_id(user_id: &str) -> [u8; 8] {

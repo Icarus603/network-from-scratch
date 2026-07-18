@@ -14,6 +14,7 @@ proteus-crypto = { path = "../proteus-crypto" }
 proteus-handshake = { path = "../proteus-handshake" }
 proteus-shape = { path = "../proteus-shape" }
 proteus-fingerprint = { path = "../proteus-fingerprint" }
+proteus-ech = { path = "../proteus-ech" }
 
 ml-kem.workspace = true
 x25519-dalek.workspace = true

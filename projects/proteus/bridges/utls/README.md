@@ -28,8 +28,14 @@ go build -trimpath -o proteus-utls-bridge .
 ./proteus-utls-bridge \
   --listen /run/proteus/utls.sock \
   --knock-psk /etc/proteus/keys/server.knock_psk \
-  --trusted-ca /etc/proteus/keys/tls/self-signed-ca.pem
+  --trusted-ca /etc/proteus/keys/tls/self-signed-ca.pem \
+  --ech-config-list /etc/proteus/keys/ech/current.echconfiglist.b64
 ```
+
+The ECH file is optional until the server enables `tls.ech`. Once the
+server does, omitting it is a fail-closed deployment error. See the
+[ECH terminator runbook](../ech/README.md) for key generation,
+DNS publication, and overlap rotation.
 
 The checked fixture at
 `profiles/chrome-150-macos-arm64.json` is a normalized real-browser

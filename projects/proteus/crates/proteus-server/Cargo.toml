@@ -21,6 +21,7 @@ proteus-transport-beta = { path = "../proteus-transport-beta" }
 proteus-fingerprint = { path = "../proteus-fingerprint" }
 proteus-panic-hook = { path = "../proteus-panic-hook" }
 proteus-sd-notify = { path = "../proteus-sd-notify" }
+proteus-ech = { path = "../proteus-ech" }
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 
 ml-kem.workspace = true

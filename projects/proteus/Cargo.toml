@@ -11,6 +11,7 @@ members = [
     "crates/proteus-fingerprint",
     "crates/proteus-panic-hook",
     "crates/proteus-sd-notify",
+    "crates/proteus-ech",
     "crates/proteus-server",
     "crates/proteus-client",
     "crates/proteus-bench",
@@ -56,6 +57,8 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "aws_
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
 mimalloc = "0.1.52"
+boring = "5.1.0"
+tokio-boring = "5.0.0"
 
 # X.509 parser — used by the α transport's cert-expiry observability
 # surface to extract `notAfter` from a loaded cert chain. We pin the

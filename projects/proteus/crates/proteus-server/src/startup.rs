@@ -395,6 +395,7 @@ mod tests {
         cfg.tls = Some(TlsCfg {
             cert_chain: PathBuf::from("/etc/proteus/keys/tls/fullchain.pem"),
             private_key: PathBuf::from("/etc/proteus/keys/tls/privkey.pem"),
+            ech: None,
         });
         cfg.cover_endpoint = Some("www.cloudflare.com:443".to_string());
         cfg.rate_limit = Some(RateLimitCfg {
@@ -454,6 +455,7 @@ mod tests {
         cfg.tls = Some(TlsCfg {
             cert_chain: PathBuf::from("/x/fullchain.pem"),
             private_key: PathBuf::from("/x/privkey.pem"),
+            ech: None,
         });
         cfg.cover_endpoint = Some("cover.example.com:443".to_string());
         cfg.rate_limit = Some(RateLimitCfg {
@@ -569,6 +571,7 @@ mod tests {
         cfg.tls = Some(TlsCfg {
             cert_chain: PathBuf::from("/x/fullchain.pem"),
             private_key: PathBuf::from("/x/privkey.pem"),
+            ech: None,
         });
         cfg.cover_endpoint = Some("c:443".to_string());
         cfg.rate_limit = Some(RateLimitCfg {

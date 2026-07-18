@@ -10,7 +10,7 @@ RUN sed -i \
         -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}|g" \
         /etc/apt/sources.list.d/debian.sources \
     && apt-get update && apt-get install -y --no-install-recommends \
-        build-essential ca-certificates cmake perl pkg-config \
+        build-essential ca-certificates clang cmake git libclang-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_TOOLCHAIN=1.85.1
 WORKDIR /src

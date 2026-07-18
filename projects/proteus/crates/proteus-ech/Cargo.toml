@@ -1,0 +1,26 @@
+[package]
+name = "proteus-ech"
+version = "0.1.0"
+edition.workspace = true
+publish = false
+license.workspace = true
+authors.workspace = true
+description = "Fail-closed RFC 9849 ECH TLS terminator for Proteus"
+
+[dependencies]
+boring.workspace = true
+tokio-boring.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
+zeroize.workspace = true
+
+[dev-dependencies]
+rcgen = "0.13"
+rand_core = { workspace = true, features = ["getrandom"] }
+x25519-dalek.workspace = true
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = "warn"

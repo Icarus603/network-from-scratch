@@ -546,6 +546,21 @@ pow_difficulty: 0
 tls:
   cert_chain: /etc/proteus/keys/tls/fullchain.pem
   private_key: /etc/proteus/keys/tls/privkey.pem
+  # RFC 9849 shared-mode ECH termination. Generate each binary
+  # config/key pair with the pinned BoringSSL `bssl generate-ech`
+  # command documented in bridges/ech/README.md. Keep the old key
+  # during at least the DNS HTTPS-record TTL overlap window.
+  # Enabling this block is fail-closed: ordinary TLS and GREASE ECH
+  # never enter the Proteus data plane. `knock_psk_file` above is
+  # mandatory.
+  # ech:
+  #   keys:
+  #     - config: /etc/proteus/keys/ech/current.echconfig
+  #       private_key: /etc/proteus/keys/ech/current.key
+  #       retry_config: true
+  #     - config: /etc/proteus/keys/ech/previous.echconfig
+  #       private_key: /etc/proteus/keys/ech/previous.key
+  #       retry_config: false
 
 # Cover endpoint for auth-fail forwarding (spec §7.5). The server pipes
 # byte-verbatim to this endpoint on any handshake failure, making the
