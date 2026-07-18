@@ -433,3 +433,18 @@ commit/image identity 與 qdisc counters 保存在
 `2026-07-18-reordering-threshold-head-to-head.jsonl`。靜態 threshold
 掃描到此停止；下一階段必須觀測 spurious loss，並以自適應
 reordering tolerance 降低長尾，而非繼續提高固定數值。
+
+後續 recovery telemetry 把原因再收窄。threshold `3` 與 `10` 的
+30-run reordered cells，Quinn 宣告 loss 的總 packet 比例分別為
+77.98% 與 76.71%，遠高於 kernel qdisc 的零 drop；同一 telemetry
+在 5% IID loss guard 中為 4.95%，與實際 impairment 相符。這讓
+QUIC-declared loss 成為可靠的 reordered-path 診斷訊號，但它仍是
+代理量，不等同於逐 packet 證明的 spurious loss。
+
+由 50 ms delay 與實測 packet rate 推導的 packet threshold `4096`
+及 `16384`，搭配 time threshold `1.125`／`2.0` 做三次診斷後，
+declared-loss total 仍介於 64.90%–74.06%，Proteus median 也沒有
+單調改善；`16384/2.0` 甚至落後 Hy2 40.35%。因此 packet/time
+threshold 靜態掃描正式終止。下一階段需比較 carrier-level probe
+的 completion time、ACK/pacing 狀態與 recovery counters，再由
+selector 換 carrier profile；不能從單一 loss ratio 直接推導參數。
