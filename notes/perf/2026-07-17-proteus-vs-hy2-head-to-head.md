@@ -255,3 +255,22 @@ severe 30-run 嘗試於第 3 對揭露 benchmark client 的十秒
 抹去前述 64 MiB severe-burst 反例：短流當時為 −1.7%，信賴區間
 跨零。現有證據支持 sustained-bulk burst superiority，仍不支持
 所有 payload、RTT 與路徑上的 universal dominance。
+
+## 2026-07-18 official TUIC-v5 初篩
+
+第一次 `INCLUDE_TUIC=1` 矩陣錯用了 sing-box 1.13.12 相容實作；
+它在 0% loss、100 ms RTT 仍只有 9.59 MiB/s，證明預設 QUIC
+flow-control window 污染比較，因此兩個 sing-box cell 全部拒收。
+runner `cfc8ab9` 改回 codebase 已有的 upstream TUIC v5 1.0.0
+client/server，兩端顯式使用 64 MiB send/receive window，並保存
+官方 client/server daemon logs 與 image digest。
+
+| impairment | Proteus | Hy2 | official TUIC v5 | Proteus vs TUIC (95% bootstrap) |
+|---|---:|---:|---:|---:|
+| 0% loss, 100 ms RTT | 139.16 | 110.37 | 68.58 | **+102.92%** (**+82.69%, +114.52%**) |
+| 5% IID, 100 ms RTT | 104.94 | 96.12 | 73.57 | **+42.63%** (**+37.46%, +51.54%**) |
+
+三方在兩格都是 7/7，沒有 α fallback 或 run failure。這是通過配置
+反證後的方向性證據，尚未達 30 observations 晉升門檻；目前只能說
+Proteus 在這兩個 sustained-bulk cell 顯著領先 upstream TUIC
+reference，不能把 TUIC-v5 驗證標成完成。
