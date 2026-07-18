@@ -80,10 +80,13 @@ It does not call the latter a peak: Docker Desktop exposes
 `memory.peak` read-only, so the runner reports the reproducible
 post-observation process RSS instead of inventing resettable peaks.
 
-`STREAM_WINDOW_MIB` and `CONNECTION_WINDOW_MIB` override the Proteus
-client's flow-control windows for memory/throughput sweeps. Their
-defaults remain 64 and 256 MiB respectively; every override is exposed
-in Proteus's per-run `perf_profile`.
+Legacy one-shot mode uses `STREAM_WINDOW_MIB` and
+`CONNECTION_WINDOW_MIB`. Production-shaped proxy mode uses
+`PROTEUS_STREAM_RECEIVE_WINDOW_MIB`,
+`PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB`, and
+`PROTEUS_SEND_WINDOW_MIB` symmetrically on both Proteus peers. Their
+defaults remain 64, 256, and 64 MiB; `metadata.jsonl` records every
+selected value so a memory/throughput sweep cannot silently drift.
 
 Each workload driver is fresh, with deterministic AB/BA alternation.
 In proxy mode every impairment cell force-recreates all long-lived

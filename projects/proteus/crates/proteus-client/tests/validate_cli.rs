@@ -293,6 +293,55 @@ async fn out_of_range_initial_mtu_fires_fail() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn beta_quic_window_bounds_and_order_are_enforced() {
+    let dir = tempdir("bad_beta_windows");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_stream_receive_window_mib: 32\n\
+         beta_connection_receive_window_mib: 16\n\
+         beta_send_window_mib: 0\n",
+    );
+    let report = validate::run(&yaml).await;
+    let connection_fail = report.checks.iter().any(|c| {
+        matches!(
+            c,
+            validate::Check::Fail(s) if s.contains("beta_connection_receive_window_mib")
+        )
+    });
+    let send_fail = report
+        .checks
+        .iter()
+        .any(|c| matches!(c, validate::Check::Fail(s) if s.contains("beta_send_window_mib")));
+    assert!(
+        connection_fail && send_fail,
+        "window order and zero send window MUST both fail: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn beta_quic_32_128_32_window_profile_passes_window_gate() {
+    let dir = tempdir("good_beta_windows");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_stream_receive_window_mib: 32\n\
+         beta_connection_receive_window_mib: 128\n\
+         beta_send_window_mib: 32\n",
+    );
+    let report = validate::run(&yaml).await;
+    let window_fail = report
+        .checks
+        .iter()
+        .any(|c| matches!(c, validate::Check::Fail(s) if s.contains("_window_mib")));
+    assert!(!window_fail, "32/128/32 must pass window gate: {report}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- Bootstrap-DNS posture coverage ----------
 //
 // These tests pin the validate-time guidance for the 2026 P0

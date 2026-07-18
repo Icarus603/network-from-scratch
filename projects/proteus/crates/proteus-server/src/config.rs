@@ -91,6 +91,18 @@ pub struct ServerConfig {
     /// too-high value is harmless on non-jumbo paths.
     #[serde(default)]
     pub beta_mtu_upper_bound: Option<u16>,
+    /// β QUIC per-stream receive flow-control window, in MiB.
+    /// Default 64. Lower values reduce pooled-carrier memory; higher
+    /// values are only useful when the measured path BDP requires it.
+    #[serde(default)]
+    pub beta_stream_receive_window_mib: Option<u32>,
+    /// β QUIC aggregate connection receive window, in MiB.
+    /// Default 256 and must be at least the effective stream window.
+    #[serde(default)]
+    pub beta_connection_receive_window_mib: Option<u32>,
+    /// β QUIC local send-buffer window, in MiB. Default 64.
+    #[serde(default)]
+    pub beta_send_window_mib: Option<u32>,
     /// β QUIC congestion controller: `"bbr"` (default, TCP-friendly)
     /// or `"brutal"` (operator-rate-targeted, loss compensated).
     #[serde(default)]

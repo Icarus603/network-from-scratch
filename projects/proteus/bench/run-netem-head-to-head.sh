@@ -18,6 +18,9 @@ PROTEUS_ACK_ELICITING_THRESHOLD="${PROTEUS_ACK_ELICITING_THRESHOLD:-10}"
 PROTEUS_INITIAL_MTU="${PROTEUS_INITIAL_MTU:-1350}"
 PROTEUS_MINIMUM_MTU="${PROTEUS_MINIMUM_MTU:-1350}"
 PROTEUS_MTU_UPPER_BOUND="${PROTEUS_MTU_UPPER_BOUND:-1452}"
+PROTEUS_STREAM_RECEIVE_WINDOW_MIB="${PROTEUS_STREAM_RECEIVE_WINDOW_MIB:-64}"
+PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB="${PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB:-256}"
+PROTEUS_SEND_WINDOW_MIB="${PROTEUS_SEND_WINDOW_MIB:-64}"
 PROTEUS_BETA_FIRST_TIMEOUT_SECS="${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
@@ -43,6 +46,9 @@ export PROTEUS_ACK_ELICITING_THRESHOLD
 export PROTEUS_INITIAL_MTU
 export PROTEUS_MINIMUM_MTU
 export PROTEUS_MTU_UPPER_BOUND
+export PROTEUS_STREAM_RECEIVE_WINDOW_MIB
+export PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB
+export PROTEUS_SEND_WINDOW_MIB
 export PROTEUS_BETA_FIRST_TIMEOUT_SECS
 
 wait_for_log_marker() {
@@ -254,6 +260,9 @@ done
     printf '"proteus_initial_mtu":%s,' "$PROTEUS_INITIAL_MTU"
     printf '"proteus_minimum_mtu":%s,' "$PROTEUS_MINIMUM_MTU"
     printf '"proteus_mtu_upper_bound":%s,' "$PROTEUS_MTU_UPPER_BOUND"
+    printf '"proteus_stream_receive_window_mib":%s,' "$PROTEUS_STREAM_RECEIVE_WINDOW_MIB"
+    printf '"proteus_connection_receive_window_mib":%s,' "$PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB"
+    printf '"proteus_send_window_mib":%s,' "$PROTEUS_SEND_WINDOW_MIB"
     printf '"proteus_beta_first_timeout_secs":%s,' "$PROTEUS_BETA_FIRST_TIMEOUT_SECS"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \

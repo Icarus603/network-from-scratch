@@ -329,6 +329,9 @@ mod tests {
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
             beta_mtu_upper_bound: None,
+            beta_stream_receive_window_mib: None,
+            beta_connection_receive_window_mib: None,
+            beta_send_window_mib: None,
             beta_congestion: None,
             beta_brutal_target_mbps: None,
             keys: KeysCfg {

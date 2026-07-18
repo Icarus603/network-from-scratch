@@ -665,6 +665,38 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        // QUIC flow-control and local send-buffer windows. Keep the
+        // accepted range bounded: zero deadlocks the carrier, while
+        // multi-GiB windows let a small number of pooled carriers
+        // consume the whole host under pressure.
+        for (name, value) in [
+            (
+                "beta_stream_receive_window_mib",
+                cfg.beta_stream_receive_window_mib,
+            ),
+            (
+                "beta_connection_receive_window_mib",
+                cfg.beta_connection_receive_window_mib,
+            ),
+            ("beta_send_window_mib", cfg.beta_send_window_mib),
+        ] {
+            if let Some(mib) = value {
+                if !(1..=2048).contains(&mib) {
+                    r.push_fail(format!("{name} = {mib} is out of sane range [1, 2048] MiB"));
+                } else {
+                    r.push_pass(format!("{name} = {mib} MiB"));
+                }
+            }
+        }
+        let stream_window = cfg.beta_stream_receive_window_mib.unwrap_or(64);
+        let connection_window = cfg.beta_connection_receive_window_mib.unwrap_or(256);
+        if connection_window < stream_window {
+            r.push_fail(format!(
+                "beta_connection_receive_window_mib = {connection_window} is LESS than \
+                 the effective beta_stream_receive_window_mib = {stream_window}. The \
+                 aggregate connection window must cover at least one stream."
+            ));
+        }
         // Iter-92: beta_ack_eliciting_threshold sanity.
         //
         // RFC 9802 ACK frequency reduction. quinn's default is 1

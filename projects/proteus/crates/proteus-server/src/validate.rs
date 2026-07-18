@@ -1048,6 +1048,32 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    for (name, value) in [
+        (
+            "beta_stream_receive_window_mib",
+            cfg.beta_stream_receive_window_mib,
+        ),
+        (
+            "beta_connection_receive_window_mib",
+            cfg.beta_connection_receive_window_mib,
+        ),
+        ("beta_send_window_mib", cfg.beta_send_window_mib),
+    ] {
+        if let Some(mib) = value {
+            if !(1..=2048).contains(&mib) {
+                r.push_fail(format!("{name} = {mib} is out of sane range [1, 2048] MiB"));
+            }
+        }
+    }
+    let stream_window = cfg.beta_stream_receive_window_mib.unwrap_or(64);
+    let connection_window = cfg.beta_connection_receive_window_mib.unwrap_or(256);
+    if connection_window < stream_window {
+        r.push_fail(format!(
+            "beta_connection_receive_window_mib = {connection_window} is LESS than \
+             the effective beta_stream_receive_window_mib = {stream_window}. The \
+             aggregate connection window must cover at least one stream."
+        ));
+    }
     if let Some(thr) = cfg.beta_ack_eliciting_threshold {
         if thr == 0 {
             r.push_fail(
@@ -2387,6 +2413,9 @@ mod tests {
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
             beta_mtu_upper_bound: None,
+            beta_stream_receive_window_mib: None,
+            beta_connection_receive_window_mib: None,
+            beta_send_window_mib: None,
             beta_congestion: None,
             beta_brutal_target_mbps: None,
             keys: KeysCfg {
@@ -2810,6 +2839,44 @@ mod tests {
             report.has_failures(),
             "minimum MTU > upper bound MUST FAIL: {report}"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_quic_window_bounds_and_order_are_enforced() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_stream_receive_window_mib = Some(32);
+        cfg.beta_connection_receive_window_mib = Some(16);
+        cfg.beta_send_window_mib = Some(0);
+        let report = preflight(&cfg);
+        let connection_fail = report.checks.iter().any(
+            |c| matches!(c, Check::Fail(s) if s.contains("beta_connection_receive_window_mib")),
+        );
+        let send_fail = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Fail(s) if s.contains("beta_send_window_mib")));
+        assert!(
+            connection_fail && send_fail,
+            "window order and zero send window MUST both fail: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_quic_32_128_32_window_profile_passes_window_gate() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_stream_receive_window_mib = Some(32);
+        cfg.beta_connection_receive_window_mib = Some(128);
+        cfg.beta_send_window_mib = Some(32);
+        let report = preflight(&cfg);
+        let window_fail = report
+            .checks
+            .iter()
+            .any(|c| matches!(c, Check::Fail(s) if s.contains("_window_mib")));
+        assert!(!window_fail, "32/128/32 must pass window gate: {report}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

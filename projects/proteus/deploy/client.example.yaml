@@ -117,6 +117,9 @@ server_endpoint: "vps.example.com:8443"
 #                                         opt in to 10 ONLY for measured
 #                                         long-fat-pipe deploys)
 #   beta_mtu_upper_bound = 1452          (Ethernet max under IPv6+UDP)
+#   beta_stream_receive_window_mib = 64  (per-stream flow control)
+#   beta_connection_receive_window_mib = 256 (aggregate flow control)
+#   beta_send_window_mib = 64             (local buffered writes)
 #
 # Production anti-censorship config (match server-side settings —
 # the choices interact with quinn's path-MTU discovery):
@@ -127,6 +130,9 @@ server_endpoint: "vps.example.com:8443"
 # beta_initial_mtu: 1350
 # beta_minimum_mtu: 1200
 # beta_pad_quic_to_mtu: false
+# beta_stream_receive_window_mib: 64
+# beta_connection_receive_window_mib: 256
+# beta_send_window_mib: 64
 #
 # On a completely controlled path whose end-to-end UDP payload MTU
 # has been measured, minimum may equal initial. This prevents random

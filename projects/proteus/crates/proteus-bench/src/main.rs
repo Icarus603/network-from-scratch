@@ -908,6 +908,7 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
+        send_window_override: None,
         congestion: args.congestion.into(),
         brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
     };
@@ -1006,6 +1007,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
+        send_window_override: None,
         congestion: args.congestion.into(),
         brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
     };

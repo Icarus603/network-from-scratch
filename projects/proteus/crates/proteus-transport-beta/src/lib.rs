@@ -212,26 +212,24 @@ pub struct PerfProfile {
     /// `client.yaml` (`beta_mtu_upper_bound: 9000`).
     pub mtu_upper_bound: u16,
     /// Per-stream receive window override in bytes. `None` keeps the
-    /// production default (64 MiB). `Some(n)` overrides — used by
-    /// `proteus-bench` to push single-stream throughput past the
-    /// 64 MiB window stall documented in the README throughput
-    /// table.
-    ///
-    /// **Why expose this as an override, not a config knob**: in
-    /// production, 64 MiB / RTT is the right sizing for the
-    /// transcontinental long-fat-pipe paths Proteus targets. Bumping
-    /// it higher is bench-only — you're trading buffer memory for
-    /// the ability to keep one stream saturated past the natural
-    /// flow-control gate. The bench harness sweeps this to find
-    /// where BBR's bandwidth estimate stops being the bottleneck;
-    /// production deploys leave the default.
+    /// production default (64 MiB). Operators and the benchmark
+    /// harness may lower it to cap per-carrier memory or raise it for
+    /// a measured path whose bandwidth-delay product exceeds the
+    /// default. The production YAML layer validates the operator
+    /// shorthand in MiB before converting it to this byte value.
     ///
     /// Default: `None` (= 64 MiB).
     pub stream_receive_window_override: Option<u32>,
     /// Per-connection receive window override in bytes. Mirrors the
-    /// per-stream override above. Bench-only; production defaults to
-    /// 256 MiB.
+    /// per-stream override above. Production defaults to 256 MiB and
+    /// validation requires this value to be at least the stream
+    /// receive window.
     pub connection_receive_window_override: Option<u32>,
+    /// Local send-buffer window override in bytes. `None` keeps the
+    /// 64 MiB production default. Quinn accepts a `u64` here, but the
+    /// production configuration deliberately caps the MiB shorthand
+    /// well below pathological multi-GiB allocations.
+    pub send_window_override: Option<u64>,
     /// Congestion controller selection for β QUIC.
     ///
     /// - [`CongestionKind::Bbr`] (default): quinn stock BBR — fair,
@@ -283,10 +281,11 @@ impl Default for PerfProfile {
             // quinn's current default but pins it so a future quinn
             // upgrade can't silently regress paths that depend on it.
             mtu_upper_bound: 1452,
-            // BENCH-ONLY overrides — None means "keep the 64/256 MiB
-            // production defaults wired into apply_perf_tuning_with".
+            // None means "keep the 64/256/64 MiB production defaults
+            // wired into apply_perf_tuning_with".
             stream_receive_window_override: None,
             connection_receive_window_override: None,
+            send_window_override: None,
             congestion: CongestionKind::Bbr,
             brutal_target_bps: DEFAULT_TARGET_BPS,
         }
@@ -422,7 +421,7 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         // the congestion controller's flight budget. Quinn allocates
         // this lazily as the application writes; idle sessions do not
         // preallocate 64 MiB.
-        .send_window(64 * 1024 * 1024)
+        .send_window(profile.send_window_override.unwrap_or(64 * 1024 * 1024))
         // MTU bump — see PerfProfile docs.
         .initial_mtu(profile.initial_mtu)
         .min_mtu(profile.minimum_mtu)
