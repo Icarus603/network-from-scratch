@@ -37,7 +37,7 @@
 //! operator can see exactly what the gap to a browser baseline
 //! looks like.
 
-use proteus_fingerprint::ja4::parse_client_hello;
+use proteus_fingerprint::ja4::{parse_client_hello, parse_client_hello_with_components};
 use rustls::pki_types::ServerName;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
@@ -116,6 +116,8 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
     );
 
     let ja4 = parse_client_hello(&raw, 't').expect("parse ClientHello");
+    let (_, components) =
+        parse_client_hello_with_components(&raw, 't').expect("parse ClientHello components");
 
     eprintln!("=== Proteus α (rustls 0.23) ClientHello JA4 baseline ===");
     eprintln!("  {ja4}");
@@ -166,10 +168,14 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
     // Cargo.toml turns on. Chrome 124 ships this extension; matching
     // it closes one ext_count gap toward Chrome.
     assert!(
-        ja4.ext_count >= 11,
-        "compress_certificate extension expected to be enabled (ext_count should be ≥ 11); \
+        ja4.ext_count >= 12,
+        "compress_certificate + ECH GREASE extensions expected (ext_count should be ≥ 12); \
          got {} — did the rustls `brotli` workspace feature get dropped?",
         ja4.ext_count,
+    );
+    assert!(
+        components.extensions.contains(&0xfe0d),
+        "ECH GREASE extension 0xfe0d must remain on the wire"
     );
     // Hashes are 12 lowercase hex chars.
     assert_eq!(ja4.cipher_hash.len(), 12);
@@ -241,11 +247,14 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
     //     preference)
     //   - compress_certificate (ext 0x001b): enabled via rustls
     //     `brotli` feature, +1 to ext_count and shifts ext_hash
+    //   - ECH GREASE (ext 0xfe0d): rustls's browser-compatible
+    //     placeholder offer, +1 to ext_count without claiming SNI
+    //     confidentiality
     //
     // Compared to FoxIO Chrome 124 baseline
     // (`t13d1517h2_8daaf6152771_b0da82dd1658`):
-    //   ext_count: 11 vs Chrome's 17 (still short — Chrome ships
-    //     6 more extensions Proteus doesn't: padding 0x0015,
+    //   ext_count: 12 vs Chrome's 17 (still short — Chrome ships
+    //     5 more extensions Proteus doesn't: padding 0x0015,
     //     application_settings 0x4469 / 0x4468, status_request
     //     0x0005, etc. Some of these are rustls-internal and not
     //     toggleable via the public ClientConfig API; closing the
@@ -257,7 +266,7 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
     //   cipher_hash + ext_hash: both differ because the SETS still
     //     differ. Each commit chipping at the SET moves the hash;
     //     this CI gate locks each step.
-    const EXPECTED_BASELINE: &str = "t13d0911h2_f91f431d341e_165ef185bad8";
+    const EXPECTED_BASELINE: &str = "t13d0912h2_f91f431d341e_5130dee6fa12";
     assert_eq!(
         ja4.to_string(),
         EXPECTED_BASELINE,

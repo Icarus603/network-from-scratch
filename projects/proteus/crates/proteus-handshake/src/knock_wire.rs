@@ -51,15 +51,15 @@
 //! see `verify_knock` fail on the first 16 (random ≠
 //! HMAC-derived) and get routed to cover.
 //!
-//! ## What this module does NOT do
+//! ## Integration boundary
 //!
-//! - **Does not write the session_id into a real ClientHello
-//!   on the client side.** That requires either (a) forking
-//!   rustls's ClientHello assembler or (b) using a custom
-//!   pre-write hook on the rustls `ClientConfig`. This module
-//!   provides the encode/decode primitives the future client
-//!   transport layer will call; the actual rustls integration
-//!   is iteration 5.
+//! - **Client-side serialization is implemented by
+//!   `proteus-transport-alpha::tls::KnockSecureRandom`.** It
+//!   supplies the compatibility `session_id` and its bound
+//!   `client_random` during rustls's own synchronous
+//!   ClientHello construction. The knock is therefore inside
+//!   rustls's transcript from the beginning; no serialized
+//!   packet rewrite or rustls fork is required.
 //! - **Does not parse the session_id out of a server-side
 //!   ClientHello.** That's the server's pre-auth-passthrough
 //!   layer (iteration 5/6) — it raw-reads the ClientHello
@@ -104,9 +104,9 @@ pub enum DecodeError {
 /// trailing 16 are OS-random padding (fresh per call —
 /// regenerating per ClientHello is cheap).
 ///
-/// This is the **client-side** helper. Called by the future
-/// rustls integration just before the ClientHello is serialized
-/// onto the wire.
+/// This is the **client-side** helper. Called by the
+/// transcript-native rustls provider while ClientHello is being
+/// constructed.
 #[must_use]
 pub fn encode_session_id(knock_token: &[u8; KNOCK_TOKEN_LEN]) -> [u8; ENCODED_SESSION_ID_LEN] {
     let mut out = [0u8; ENCODED_SESSION_ID_LEN];

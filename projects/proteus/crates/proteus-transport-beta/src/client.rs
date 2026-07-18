@@ -1,8 +1,10 @@
 //! β-profile QUIC client.
 //!
-//! Dials the server over QUIC + TLS 1.3 + `proteus-β-v1` ALPN, opens
-//! ONE bidirectional stream, and drives the standard Proteus
-//! handshake from `proteus-transport-alpha` on it.
+//! Dials the server over QUIC + TLS 1.3 + `proteus-β-v1` ALPN and
+//! opens independently authenticated bidirectional streams. A
+//! [`BetaClientConnection`] can be retained across SOCKS CONNECTs;
+//! every stream still runs a fresh Proteus handshake and derives a
+//! stream-specific TLS-exporter binding.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -149,7 +151,118 @@ pub struct BetaClientSession {
     server_addr: SocketAddr,
 }
 
+/// A reusable β carrier.
+///
+/// The QUIC/TLS connection is deliberately separated from the
+/// inner Proteus session so production clients can amortize the
+/// outer handshake across many SOCKS CONNECTs, as Hy2 and TUIC do.
+/// This is not an authentication shortcut: [`Self::open_session`]
+/// runs a fresh hybrid Proteus handshake on every QUIC stream.
+#[derive(Clone)]
+pub struct BetaClientConnection {
+    connection: quinn::Connection,
+    endpoint: quinn::Endpoint,
+    server_addr: SocketAddr,
+}
+
+impl BetaClientConnection {
+    /// Whether quinn still considers the carrier open.
+    #[must_use]
+    pub fn is_usable(&self) -> bool {
+        self.connection.close_reason().is_none()
+    }
+
+    /// Remote address of this carrier.
+    #[must_use]
+    pub fn remote_address(&self) -> SocketAddr {
+        self.connection.remote_address()
+    }
+
+    /// Process-local stable identity used for race-safe pool eviction.
+    #[must_use]
+    pub fn stable_id(&self) -> usize {
+        self.connection.stable_id()
+    }
+
+    /// Open one independently authenticated Proteus session.
+    ///
+    /// The stream ID is included as TLS-exporter context. A relay
+    /// that moves an inner handshake between two streams on the same
+    /// QUIC connection therefore obtains a different channel binding
+    /// and fails the Finished chain.
+    pub async fn open_session(
+        &self,
+        cfg: ClientConfig,
+        handshake_timeout: std::time::Duration,
+    ) -> Result<AlphaSession<quinn::RecvStream, quinn::SendStream>, BetaError> {
+        if !matches!(cfg.profile_hint, ProfileHint::Beta) {
+            return Err(BetaError::AlpnMismatch(
+                vec![cfg.profile_hint.to_byte()],
+                vec![ProfileHint::Beta.to_byte()],
+            ));
+        }
+
+        let (send, recv) = tokio::time::timeout(handshake_timeout, self.connection.open_bi())
+            .await
+            .map_err(|_| {
+                BetaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "β: timed out waiting for a bidirectional stream slot",
+                ))
+            })??;
+        debug_assert_eq!(send.id(), recv.id());
+
+        let context = crate::stream_exporter_context(send.id());
+        let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
+        self.connection
+            .export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, &context)
+            .map_err(|_| {
+                BetaError::Io(std::io::Error::other(
+                    "β: QUIC exporter unavailable for stream",
+                ))
+            })?;
+
+        tokio::time::timeout(
+            handshake_timeout,
+            handshake_over_split_bound(recv, send, &cfg, Some(*binding)),
+        )
+        .await
+        .map_err(|_| {
+            BetaError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "β: inner Proteus handshake timed out",
+            ))
+        })?
+        .map_err(BetaError::from)
+    }
+
+    /// Close the carrier with the wire-indistinguishable normal code.
+    pub fn close(&self) {
+        self.connection.close(0u32.into(), b"");
+    }
+}
+
 impl BetaClientSession {
+    /// Split a legacy one-shot wrapper into its inner session and a
+    /// reusable carrier handle. Keeping the returned carrier alive
+    /// preserves the endpoint/UDP socket for the session lifetime.
+    #[must_use]
+    pub fn into_session_and_carrier(
+        self,
+    ) -> (
+        AlphaSession<quinn::RecvStream, quinn::SendStream>,
+        BetaClientConnection,
+    ) {
+        (
+            self.session,
+            BetaClientConnection {
+                connection: self.connection,
+                endpoint: self.endpoint,
+                server_addr: self.server_addr,
+            },
+        )
+    }
+
     /// Trigger a QUIC connection migration — rebinds the local UDP
     /// socket to a fresh source port and lets quinn negotiate the
     /// new path with the server (RFC 9000 §9). All in-flight records
@@ -333,15 +446,48 @@ pub async fn connect_with_timeout_perf_cached_crypto(
             vec![ProfileHint::Beta.to_byte()],
         ));
     }
+    let carrier = connect_carrier_with_timeout_perf_cached_crypto(
+        server_name,
+        server_addr,
+        crypto,
+        connect_timeout,
+        perf,
+    )
+    .await?;
+    let session = carrier.open_session(cfg, connect_timeout).await?;
+    Ok(BetaClientSession {
+        session,
+        connection: carrier.connection,
+        endpoint: carrier.endpoint,
+        server_addr: carrier.server_addr,
+    })
+}
+
+/// Establish only the reusable QUIC/TLS carrier.
+///
+/// Call [`BetaClientConnection::open_session`] for every logical
+/// SOCKS CONNECT. Production pooling uses this entry point; the
+/// legacy one-shot APIs above are implemented as carrier + one
+/// stream and retain their public behavior.
+pub async fn connect_carrier_with_timeout_perf_cached_crypto(
+    server_name: &str,
+    server_addr: SocketAddr,
+    crypto: &BetaClientCrypto,
+    connect_timeout: std::time::Duration,
+    perf: crate::PerfProfile,
+) -> Result<BetaClientConnection, BetaError> {
     let crypto = crypto.quic_client_config();
     let mut client_cfg = quinn::ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
-    // The idle timeout doubles as quinn's effective handshake
-    // timeout — its internal abort fires when no progress happens
-    // for `idle_timeout` and during a stalled handshake there's no
-    // progress at all. Clamp to the caller's connect_timeout so a
-    // dead UDP peer doesn't hang for the default 60 s.
-    transport.max_idle_timeout(Some(connect_timeout.try_into().unwrap_or_else(|_| {
+    // Handshake and carrier-idle deadlines have different semantics.
+    // A production caller commonly asks for a 3–10 s fast-fail dial,
+    // but a reusable carrier must survive longer recovery gaps and
+    // quiet periods between SOCKS requests. Negotiating the short dial
+    // deadline as max_idle_timeout killed healthy pooled carriers under
+    // loss. Keep at least the server's 60 s idle lifetime and enforce
+    // the caller's dial deadline explicitly around `Connecting` below.
+    let carrier_idle_timeout = connect_timeout.max(std::time::Duration::from_secs(60));
+    transport.max_idle_timeout(Some(carrier_idle_timeout.try_into().unwrap_or_else(|_| {
         // Saturate to ~10 min if the caller supplied something insane.
         std::time::Duration::from_secs(600).try_into().unwrap()
     })));
@@ -546,34 +692,28 @@ pub async fn connect_with_timeout_perf_cached_crypto(
     )?;
     endpoint.set_default_client_config(client_cfg);
 
-    let conn = endpoint.connect(server_addr, server_name)?.await?;
-    info!(remote = %conn.remote_address(), "β QUIC handshake complete");
-
-    // ----- TLS channel binding (RFC 5705 / 9266) -----
-    // Mirror the α-profile binding (commit 906ab22): extract the QUIC
-    // outer-TLS exporter and mix it into the inner Proteus transcript.
-    // A MITM bridging two distinct QUIC sessions sees different
-    // exporters on each side; the inner Finished MAC cannot be
-    // relayed → handshake aborts. quinn-proto uses a different
-    // exporter shape than rustls (always passes Some(context)) so
-    // α and β bindings are deliberately not interchangeable.
-    // Iter-174: wrap the QUIC exporter output in Zeroizing —
-    // same defense as the α-profile fix in the matching iteration.
-    // The QUIC TLS exporter is the channel-binding tag the inner
-    // Proteus handshake commits to via its Finished MAC chain;
-    // recovery via stack-image grab → MITM-binding bypass.
-    let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
-    conn.export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
+    let connecting = endpoint.connect(server_addr, server_name)?;
+    let conn = tokio::time::timeout(connect_timeout, connecting)
+        .await
         .map_err(|_| {
-            BetaError::Io(std::io::Error::other(
-                "β: QUIC exporter unavailable post-handshake",
+            BetaError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "β: QUIC handshake timed out",
             ))
-        })?;
+        })??;
+    info!(remote = %conn.remote_address(), "β QUIC handshake complete");
+    let close_observer = conn.clone();
+    tokio::spawn(async move {
+        let reason = close_observer.closed().await;
+        tracing::warn!(
+            remote = %server_addr,
+            error = %reason,
+            error_debug = ?reason,
+            "β QUIC carrier closed"
+        );
+    });
 
-    let (send, recv) = conn.open_bi().await?;
-    let session = handshake_over_split_bound(recv, send, &cfg, Some(*binding)).await?;
-    Ok(BetaClientSession {
-        session,
+    Ok(BetaClientConnection {
         connection: conn,
         endpoint,
         server_addr,

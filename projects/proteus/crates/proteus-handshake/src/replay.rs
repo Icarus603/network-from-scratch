@@ -60,6 +60,7 @@ pub enum Verdict {
 ///   * `order`: O(1) FIFO eviction queue — pushed on insert, popped
 ///     when the set hits `capacity`. Pairs are stored in insertion
 ///     order so the OLDEST entry is always at the head of the queue.
+#[derive(Debug)]
 pub struct ReplayWindow {
     seen: HashSet<([u8; 16], u64)>,
     order: VecDeque<([u8; 16], u64)>,

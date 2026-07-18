@@ -87,7 +87,13 @@ async fn handshake_succeeds_when_client_solves_pow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn handshake_fails_when_client_skips_pow() {
-    let difficulty = 8u8;
+    // A skipped solver still supplies one candidate nonce. At
+    // difficulty 8 that candidate passes by chance with probability
+    // 1/256, making the security rejection gate intrinsically flaky
+    // under large workspace runs. 32 bits keeps the malicious client
+    // instant (it performs no work) while making accidental acceptance
+    // negligible.
+    let difficulty = 32u8;
     let (addr, mlkem_pk_bytes, pq_fingerprint, server_x25519_pub) = spawn_server(difficulty).await;
 
     let mut rng = OsRng;

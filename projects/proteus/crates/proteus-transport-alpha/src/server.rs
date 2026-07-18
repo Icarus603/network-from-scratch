@@ -585,6 +585,16 @@ pub struct ServerCtx {
     /// flood that survives the rate limiter can still OOM the
     /// server by parking unbounded per-connection ML-KEM allocations.
     conn_limit: Option<Arc<tokio::sync::Semaphore>>,
+    /// β multiplexing needs a session cap distinct from the outer
+    /// QUIC-carrier cap. Otherwise one admitted carrier could open
+    /// an unbounded number of independently buffered Proteus
+    /// sessions and bypass `max_connections`.
+    ///
+    /// `with_max_connections(n)` installs both semaphores at the
+    /// same capacity: at most `n` live carriers and at most `n`
+    /// live β sessions process-wide. α continues to use only the
+    /// carrier semaphore because one TCP connection is one session.
+    beta_session_limit: Option<Arc<tokio::sync::Semaphore>>,
     /// Optional bounded-concurrency semaphore for the cover-forward
     /// path (iter-20). When set, AT MOST this many cover-forward
     /// tasks run simultaneously across the entire process; further
@@ -699,6 +709,7 @@ impl ServerCtx {
             pow_difficulty: 0,
             metrics: None,
             conn_limit: None,
+            beta_session_limit: None,
             cover_forward_limit: None,
             firewall: crate::firewall::ReloadableFirewall::default(),
             handshake_budget: None,
@@ -973,6 +984,17 @@ impl ServerCtx {
     #[must_use]
     pub fn with_max_connections(mut self, n: usize) -> Self {
         self.conn_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
+        self.beta_session_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
+        self
+    }
+
+    /// Override the β inner-session cap independently from the
+    /// outer carrier cap. Call after [`Self::with_max_connections`].
+    /// Useful when a small carrier fleet intentionally multiplexes
+    /// more logical sessions per connection.
+    #[must_use]
+    pub fn with_max_beta_sessions(mut self, n: usize) -> Self {
+        self.beta_session_limit = Some(Arc::new(tokio::sync::Semaphore::new(n)));
         self
     }
 
@@ -1025,6 +1047,22 @@ impl ServerCtx {
     /// - `ConnGate::Rejected` — limit exhausted; reject this connection.
     pub fn try_acquire_connection(&self) -> ConnGate {
         match &self.conn_limit {
+            Some(sem) => match Arc::clone(sem).try_acquire_owned() {
+                Ok(permit) => ConnGate::Allowed(permit),
+                Err(_) => ConnGate::Rejected,
+            },
+            None => ConnGate::Unbounded,
+        }
+    }
+
+    /// Try to acquire one β inner-session slot.
+    ///
+    /// This is deliberately separate from the outer QUIC carrier
+    /// slot: pooling lets many streams share one carrier, but it
+    /// must not let those streams evade the process-wide session
+    /// memory ceiling.
+    pub fn try_acquire_beta_session(&self) -> ConnGate {
+        match &self.beta_session_limit {
             Some(sem) => match Arc::clone(sem).try_acquire_owned() {
                 Ok(permit) => ConnGate::Allowed(permit),
                 Err(_) => ConnGate::Rejected,

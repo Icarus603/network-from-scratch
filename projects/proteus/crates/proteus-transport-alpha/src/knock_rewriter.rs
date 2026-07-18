@@ -6,15 +6,17 @@
 //!   * `proteus_handshake::knock_wire` — session_id encoder
 //!   * server-side sniffer + gate + dispatch + accept loop
 //!
-//! ## STATUS: primitive lands; full Path-A client deferred
+//! ## STATUS: superseded by transcript-native injection
 //!
-//! This module ships the byte-level rewriter as a tested,
-//! self-contained primitive — but the **full client-side
-//! Path-A pipeline cannot use it as-is**, because of a TLS 1.3
-//! transcript-hash binding that I discovered while wiring the
-//! e2e test (`knock_rewriter_e2e_real_rustls.rs` — both
-//! end-to-end tests fail with `DecryptError` and are marked
-//! `#[ignore]` with the failure explanation).
+//! This module remains as a tested, self-contained record-layout
+//! primitive and as a regression record of an approach that cannot
+//! work. Production Path A now uses
+//! `tls::KnockSecureRandom`: rustls receives the knock-bearing
+//! session_id during its own ClientHello construction, before hashing
+//! the transcript. The passing
+//! `transcript_native_knock_passes_gate_and_tls_handshake` and
+//! `shared_knock_connector_survives_concurrent_clienthello_construction`
+//! tests cover the replacement path.
 //!
 //! ### What goes wrong
 //!
@@ -49,37 +51,21 @@
 //! ANY ClientHello byte without modifying rustls's internal
 //! state produces the same DecryptError.
 //!
-//! ### The path forward (iteration 10)
+//! ### The replacement that shipped
 //!
-//! Two viable options to actually inject the knock into
-//! rustls's transcript-bound view of the ClientHello:
-//!
-//!   1. **Vendor a thin rustls fork** with a public
-//!      `legacy_session_id_provider: Arc<dyn Fn(client_random)
-//!      -> [u8; 32]>` hook on `ClientConfig`. This is exactly
-//!      what utls did for X-Ray/REALITY. ~50 LoC patch on
-//!      rustls's `client/hs.rs::start_handshake`; the rest of
-//!      rustls is unchanged. Maintenance cost: re-rebase the
-//!      patch on rustls's release branches. The Proteus spec
-//!      already documents this ("M2 will swap the TCP carrier
-//!      for a rustls-fork", see `lib.rs` module header).
-//!
-//!   2. **Pre-TLS prefix bytes.** Have the client send the
-//!      32-byte knock BEFORE the TLS record on the wire; server
-//!      reads it first, verifies, then transparently TLS-
-//!      terminates everything after. Both rustlses see identical
-//!      bytes (the unmodified ClientHello), so transcripts
-//!      match. Trade-off: the 32 pre-TLS high-entropy bytes are
-//!      themselves a passive fingerprint — exactly what Path A
-//!      was supposed to eliminate. Strictly weaker than REALITY.
-//!
-//! Option (1) is the right answer for "match REALITY-grade
-//! probe-resistance". Iteration 10 should do it.
+//! rustls's public `CryptoProvider::secure_random` surface supplies
+//! the TLS 1.3 compatibility session_id and client_random. The
+//! knock-aware provider predicts the outer random, derives the
+//! session_id from it, and returns the same prediction on rustls's
+//! next outer-random request. ECH GREASE adds a third 32-byte inner
+//! random request; an explicit state-machine passes that one through
+//! unchanged. This avoids both a rustls fork and a fingerprintable
+//! pre-TLS prefix.
 //!
 //! ## What this module is good for TODAY
 //!
-//! Even though the full client-side pipeline is blocked, this
-//! rewriter is preserved as a USEFUL PRIMITIVE for two reasons:
+//! Although production no longer calls this rewriter, it remains
+//! useful for two reasons:
 //!
 //!   1. It documents (with proofs via unit tests) the wire
 //!      layout of TLS 1.3 ClientHello/ServerHello session_id
@@ -88,10 +74,8 @@
 //!      isolation (verified by `knock_token_is_recoverable_by_
 //!      server_decode`): the rewriter's output decodes
 //!      successfully via `decode_and_verify_session_id`. The
-//!      iteration-10 rustls fork can REUSE this module's
-//!      offset constants and the `patch_outbound_in_place`
-//!      helper to generate the session_id bytes rustls will
-//!      put into its ClientHello.
+//!      wire-format debugging can reuse this module's offset
+//!      constants and `patch_outbound_in_place` helper.
 //!
 //! ## Wire layout we patch (RFC 8446 §4.1.2 ClientHello,
 //! §4.1.3 ServerHello)

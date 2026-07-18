@@ -66,7 +66,7 @@ and confirmed continuously by GFW.report.
 | Chrome-aligned cipher order | ✅ via uTLS (Go) | n/a | ✅ wire-verified test [`proteus-fingerprint::tests::proteus_alpha_clienthello_ja4_baseline`] (extracts cipher wire-order from real ClientHello) |
 | Chrome-aligned sig_algs | ✅ via uTLS | n/a | ✅ same test pins JA4 against frozen baseline, commit 94132e1 |
 | `compress_certificate` (ext 0x001b) | ✅ via uTLS | n/a | ✅ enabled via rustls `brotli` feature, commit 70909ae |
-| uTLS bit-perfect ClientHello (cipher_count, ext_count) | ✅ (uTLS Go matches Chrome exactly) | n/a | ⚠ cipher_count 09 vs Chrome 15; ext_count 11 vs Chrome 17 |
+| uTLS bit-perfect ClientHello (cipher_count, ext_count) | ✅ (uTLS Go matches Chrome exactly) | n/a | ⚠ cipher_count 09 vs Chrome 15; ext_count 12 vs FoxIO's current generic Chrome example 16 after ECH GREASE (the frozen Chrome-124 PSK-bearing reference has 17) |
 
 **Verdict: ↓ slightly behind on bit-perfect ClientHello.** This is
 the only place REALITY clearly leads. Closing it requires forking
@@ -85,6 +85,8 @@ QUIC services; Shadowsocks-style payloads to suspect SS); see
 | | VLESS+Reality | Hy2/TUIC-v5 | Proteus |
 |---|---|---|---|
 | Cover-server splice on auth fail | ✅ REALITY proxies to "dest" SNI | ❌ raw QUIC, no cover | ✅ byte-verbatim cover-forward, p99 < 1 ms, tested in `proteus-transport-alpha/tests/cover_forward.rs` + `cover_forward_fast_teardown.rs` |
+| Unforgeable pre-TLS admission signal | ✅ REALITY session-id auth | ❌ | ✅ transcript-native HMAC knock bound to `client_random`; gate-to-rustls e2e test proves identical transcript bytes |
+| Exact captured-ClientHello replay | ⚠ timestamp-bounded auth; current exact replay-cache semantics require a source re-audit | ❌ | ✅ shared FIFO replay window routes second use to cover; `exact_clienthello_replay_is_routed_to_cover` |
 | Cover server independence | ⚠ operator picks SNI but the dest socket is opened from the Proteus server's IP, so the cover sees our IP not the client's (first-party fingerprint from cover's POV) | n/a | ⚠ same — both have this limitation |
 | Anti-DoS during probe storm | ❌ no PoW / rate-limit gate by default | ❌ no PoW | ✅ tunable PoW gate (0/8/16/24) + 3-layer rate limit + handshake budget |
 | Memory ceiling under probe storm | ⚠ Go runtime ~16 KiB/handshake but no hard cap | ⚠ similar | ✅ 16 MiB rx-buffer hard cap + 64 KiB handshake-time cap |

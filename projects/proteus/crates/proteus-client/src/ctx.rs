@@ -23,6 +23,7 @@ use std::sync::Arc;
 
 use tokio::sync::Semaphore;
 
+use crate::beta_pool::BetaConnectionPool;
 use crate::carrier_health::CarrierHealth;
 use crate::endpoint_pool::{EndpointPool, ReloadablePool};
 
@@ -135,6 +136,10 @@ pub struct ClientCtx {
     /// `trusted_ca` failed to load at startup; per-CONNECT β
     /// dials fall back to the legacy `make_client_crypto` path.
     pub beta_crypto: Option<Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    /// Reusable β QUIC carriers keyed by concrete endpoint + SNI.
+    /// Every logical session still performs a fresh inner handshake;
+    /// this cache only amortizes UDP + QUIC + outer TLS setup.
+    pub beta_connections: Arc<BetaConnectionPool>,
     /// Process-lifecycle info — captured once at startup, read at
     /// scrape time by the admin endpoint for the
     /// `proteus_client_process_*` Prometheus block + the `/status`
@@ -183,6 +188,7 @@ impl ClientCtx {
             // Default: no cached β crypto. Main attaches via
             // `with_beta_crypto` when β is configured.
             beta_crypto: None,
+            beta_connections: Arc::new(BetaConnectionPool::new()),
             // Default process_info: empty strings + start_unix
             // captured at construction. Real binary overrides via
             // `with_process_info` so /metrics reports the actual

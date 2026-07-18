@@ -105,6 +105,11 @@ pub enum CoverReason {
         /// Skew in seconds (positive = client behind, negative = ahead).
         skew_secs: i64,
     },
+    /// The knock was cryptographically valid and fresh, but this exact
+    /// `(client_random, timestamp)` pair already passed the gate. A
+    /// captured ClientHello is being replayed; route it to cover so the
+    /// observer learns no local-termination oracle.
+    ReplayKnock,
 }
 
 /// Reason a connection was dropped (not cover-routed). These

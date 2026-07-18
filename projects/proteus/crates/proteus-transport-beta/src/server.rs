@@ -124,12 +124,13 @@ pub fn make_endpoint_with_perf(
             .map_err(|_| BetaError::CryptoInstall)?,
     );
     let mut server_cfg = quinn::ServerConfig::with_crypto(crypto);
-    // Single inner stream per connection for M2 — spec §10.3 calls
-    // for one Proteus session per QUIC connection in profile β.
-    // Multipath / multi-stream is M3+.
+    // A warm carrier may serve concurrent SOCKS CONNECTs. The
+    // process-wide β-session semaphore in ServerCtx is the hard
+    // memory bound; this transport parameter is the independent
+    // per-carrier fan-out bound.
     let mut transport = quinn::TransportConfig::default();
     transport
-        .max_concurrent_bidi_streams(quinn::VarInt::from_u32(4))
+        .max_concurrent_bidi_streams(quinn::VarInt::from_u32(64))
         // 60s idle is the spec default; operators override via
         // server.yaml.
         .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
@@ -166,9 +167,11 @@ pub fn make_endpoint_with_perf(
     Ok(endpoint)
 }
 
-/// Accept loop. For each incoming QUIC connection: complete TLS+QUIC,
-/// accept ONE bidirectional stream, run the Proteus handshake, hand
-/// the resulting [`AlphaSession`] to `handler`.
+/// Accept loop. Each QUIC carrier can host multiple independently
+/// authenticated Proteus sessions. Every accepted stream passes the
+/// canonical admission pipeline, a distinct global β-session cap,
+/// a stream-specific TLS-exporter binding, and the full inner
+/// handshake before reaching `handler`.
 pub async fn serve<F, Fut>(
     endpoint: quinn::Endpoint,
     ctx: Arc<ServerCtx>,
@@ -229,46 +232,11 @@ where
                     let remote = conn.remote_address();
                     debug!(remote = %remote, "β QUIC connection accepted");
 
-                    // ----- Admission gates (firewall + global handshake
-                    // budget + per-IP rate limit). These MUST mirror α
-                    // 1:1 — without them an attacker that speaks UDP to
-                    // the server can drain ML-KEM cycles unmetered.
-                    //
-                    // β has no cover-forward path (the QUIC handshake
-                    // already completed; we don't have a raw TLS byte
-                    // stream below it). Rejection mode is therefore a
-                    // clean QUIC close. From the peer's perspective the
-                    // close is indistinguishable from "server decided
-                    // to terminate" — same fingerprint as a normal
-                    // server-initiated close.
-                    //
-                    // ## Indistinguishability discipline (USENIX 25 ++)
-                    //
-                    // Every close MUST be NO_ERROR (0x00) with an empty
-                    // reason phrase. Earlier revisions surfaced reasons
-                    // like "admission-denied" / "max-connections" /
-                    // "alpn-mismatch" / "bi-stream-timeout" /
-                    // "no-exporter" with distinct error codes (1, 2, 0,
-                    // 3, 4). An active GFW prober that retries the
-                    // handshake under different invariants — fresh IP
-                    // vs. blocked IP, fresh user_id vs. unknown
-                    // user_id, varied ALPN — can read the reason phrase
-                    // out of the CONNECTION_CLOSE frame (it's
-                    // unencrypted at the QUIC transport level, RFC
-                    // 9000 §19.19) and CLASSIFY the server's policy.
-                    // That distinguishes Proteus from generic QUIC
-                    // services that close with NO_ERROR + empty
-                    // reason. The diagnostic content stays in the
-                    // operator's tracing logs + Prometheus metrics —
-                    // never on the wire.
-                    if !admission_ok(&ctx, &remote) {
-                        record_probe_anomaly(&ctx, &remote);
-                        conn.close(0u32.into(), b"");
-                        return;
-                    }
-
-                    // ----- max_connections semaphore (same as α).
-                    let _permit = match ctx.try_acquire_connection() {
+                    // The outer max_connections semaphore limits live
+                    // QUIC carriers, including authenticated peers that
+                    // never open a stream. A separate equal-capacity
+                    // semaphore below limits live inner sessions.
+                    let _carrier_permit = match ctx.try_acquire_connection() {
                         ConnGate::Unbounded => None,
                         ConnGate::Allowed(p) => Some(p),
                         ConnGate::Rejected => {
@@ -301,124 +269,169 @@ where
                         }
                     }
 
-                    // Accept exactly one bidi stream, bounded by the
-                    // configured per-handshake wall-clock deadline so
-                    // a peer that opens a QUIC connection then refuses
-                    // to send the inner stream cannot park resources
-                    // indefinitely (slowloris-over-QUIC).
-                    let bi_fut = conn.accept_bi();
-                    let (send, recv) =
-                        match tokio::time::timeout(ctx.handshake_deadline(), bi_fut).await {
-                            Ok(Ok(pair)) => pair,
-                            Ok(Err(e)) => {
-                                warn!(error = %e, "β: accept_bi failed");
-                                return;
+                    // A carrier earns warm-idle privileges only after
+                    // one complete, admitted inner handshake. Before
+                    // that point, opening QUIC and sending no stream is
+                    // still a slowloris/probe event bounded by the
+                    // configured handshake deadline.
+                    let authenticated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                    let authenticated_notify = Arc::new(tokio::sync::Notify::new());
+
+                    // A reusable carrier waits on accept_bi until its
+                    // QUIC idle timeout or peer close. Applying the
+                    // short handshake deadline to this wait would kill
+                    // healthy warm carriers between user requests.
+                    loop {
+                        let accepted = if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                            conn.accept_bi().await
+                        } else {
+                            let notified = authenticated_notify.notified();
+                            tokio::pin!(notified);
+                            if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                                continue;
                             }
-                            Err(_) => {
+                            tokio::select! {
+                                result = conn.accept_bi() => result,
+                                () = &mut notified => continue,
+                                () = tokio::time::sleep(ctx.handshake_deadline()) => {
+                                    if authenticated.load(std::sync::atomic::Ordering::Acquire) {
+                                        continue;
+                                    }
+                                    warn!(
+                                        remote = %remote,
+                                        "β: unauthenticated carrier opened no stream before deadline"
+                                    );
+                                    if let Some(m) = ctx.metrics() {
+                                        m.handshake_timeouts.fetch_add(
+                                            1,
+                                            std::sync::atomic::Ordering::Relaxed,
+                                        );
+                                    }
+                                    record_probe_anomaly(&ctx, &remote);
+                                    conn.close(0u32.into(), b"");
+                                    return;
+                                }
+                            }
+                        };
+                        let (send, recv) = match accepted {
+                            Ok(pair) => pair,
+                            Err(quinn::ConnectionError::LocallyClosed) => return,
+                            Err(e) => {
                                 warn!(
                                     remote = %remote,
-                                    "β: peer never opened bidi stream within handshake_deadline"
+                                    error = %e,
+                                    error_debug = ?e,
+                                    "β carrier closed"
+                                );
+                                return;
+                            }
+                        };
+                        debug_assert_eq!(send.id(), recv.id());
+                        let stream_id = send.id();
+
+                        // Admission is per inner handshake, not merely
+                        // per carrier. Otherwise an authenticated QUIC
+                        // peer could open streams indefinitely and drain
+                        // ML-KEM work after paying one rate-limit token.
+                        if !admission_ok(&ctx, &remote) {
+                            record_probe_anomaly(&ctx, &remote);
+                            conn.close(0u32.into(), b"");
+                            return;
+                        }
+
+                        let session_permit = match ctx.try_acquire_beta_session() {
+                            ConnGate::Unbounded => None,
+                            ConnGate::Allowed(p) => Some(p),
+                            ConnGate::Rejected => {
+                                warn!(
+                                    peer = %remote,
+                                    "β: global inner-session cap reached; closing carrier"
                                 );
                                 if let Some(m) = ctx.metrics() {
-                                    m.handshake_timeouts
+                                    m.firewall_denied
                                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                 }
-                                record_probe_anomaly(&ctx, &remote);
-                                // Indistinguishability: NO_ERROR + empty
-                                // reason. Same discipline as the
-                                // admission/cap branches above. Reason
-                                // visible only in operator metrics.
                                 conn.close(0u32.into(), b"");
                                 return;
                             }
                         };
 
-                    // ----- TLS channel binding (RFC 5705 / 9266) -----
-                    // Extract the QUIC outer-TLS exporter and feed it into
-                    // the inner Proteus handshake transcript so a MITM
-                    // bridging two distinct QUIC sessions (rogue cert,
-                    // SSL-bumping middlebox of the QUIC variety) cannot
-                    // relay the inner Finished MAC chain. Same threat
-                    // model + same defense as the α-profile path —
-                    // identical to commit 906ab22 but using quinn's
-                    // `export_keying_material` instead of rustls's.
-                    //
-                    // The two carriers use DIFFERENT binding bytes (rustls
-                    // exporter for α; quinn-proto exporter for β), and
-                    // they are not interchangeable. That's a feature: a
-                    // β-rogue cannot replay an α capture and vice versa.
-                    // Iter-174: Zeroize-wrap the QUIC exporter so
-                    // the channel-binding tag scrubs on drop. Same
-                    // residue defense as the α-profile fix in the
-                    // matching iteration.
-                    let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
-                    if conn
-                        .export_keying_material(&mut binding[..], TLS_EXPORTER_LABEL, b"")
-                        .is_err()
-                    {
-                        warn!(
-                            remote = %remote,
-                            "β: TLS exporter unavailable post-handshake; closing"
-                        );
-                        record_probe_anomaly(&ctx, &remote);
-                        // Indistinguishability: NO_ERROR + empty
-                        // reason. Diagnostic stays in the tracing log
-                        // above.
-                        conn.close(0u32.into(), b"");
-                        return;
-                    }
+                        let stream_ctx = Arc::clone(&ctx);
+                        let stream_handler = handler.clone();
+                        let stream_conn = conn.clone();
+                        let stream_authenticated = Arc::clone(&authenticated);
+                        let stream_authenticated_notify = Arc::clone(&authenticated_notify);
+                        tokio::spawn(async move {
+                            // Hold through handshake + relay handler.
+                            let _session_permit = session_permit;
 
-                    // Run the Proteus handshake, also bounded by the
-                    // wall-clock deadline. Same semantics as α.
-                    // Measure handshake wall-clock so the on_session
-                    // handler can feed it into the latency histogram.
-                    let hs_start = std::time::Instant::now();
-                    let hs_fut = handshake_over_split_bound(recv, send, &ctx, Some(*binding));
-                    let session = match tokio::time::timeout(ctx.handshake_deadline(), hs_fut).await
-                    {
-                        Ok(Ok(s)) => {
-                            let elapsed = hs_start.elapsed();
-                            s.with_peer_addr(remote).with_handshake_duration(elapsed)
-                        }
-                        Ok(Err(e)) => {
-                            warn!(remote = %remote, error = %e, "β: Proteus handshake failed");
-                            record_probe_anomaly(&ctx, &remote);
-                            return;
-                        }
-                        Err(_) => {
-                            warn!(
-                                remote = %remote,
-                                "β: Proteus handshake exceeded handshake_deadline"
-                            );
-                            if let Some(m) = ctx.metrics() {
-                                m.handshake_timeouts
-                                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let context = crate::stream_exporter_context(stream_id);
+                            let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
+                            if stream_conn
+                                .export_keying_material(
+                                    &mut binding[..],
+                                    TLS_EXPORTER_LABEL,
+                                    &context,
+                                )
+                                .is_err()
+                            {
+                                warn!(
+                                    remote = %remote,
+                                    stream = %stream_id,
+                                    "β: TLS exporter unavailable for stream; closing"
+                                );
+                                record_probe_anomaly(&stream_ctx, &remote);
+                                stream_conn.close(0u32.into(), b"");
+                                return;
                             }
-                            record_probe_anomaly(&ctx, &remote);
-                            return;
-                        }
-                    };
 
-                    // Post-handshake per-user limit. Mirrors α.
-                    if !user_admission_ok(&ctx, &session) {
-                        // user_admission_ok already logged + bumped the
-                        // rate-limit counter. Drop the session — the
-                        // QUIC connection close on scope exit is the
-                        // peer-visible signal.
-                        return;
+                            let hs_start = std::time::Instant::now();
+                            let hs_fut =
+                                handshake_over_split_bound(recv, send, &stream_ctx, Some(*binding));
+                            let session =
+                                match tokio::time::timeout(stream_ctx.handshake_deadline(), hs_fut)
+                                    .await
+                                {
+                                    Ok(Ok(s)) => s
+                                        .with_peer_addr(remote)
+                                        .with_handshake_duration(hs_start.elapsed()),
+                                    Ok(Err(e)) => {
+                                        warn!(
+                                            remote = %remote,
+                                            stream = %stream_id,
+                                            error = %e,
+                                            "β: Proteus stream handshake failed"
+                                        );
+                                        record_probe_anomaly(&stream_ctx, &remote);
+                                        stream_conn.close(0u32.into(), b"");
+                                        return;
+                                    }
+                                    Err(_) => {
+                                        warn!(
+                                            remote = %remote,
+                                            stream = %stream_id,
+                                            "β: Proteus stream handshake exceeded deadline"
+                                        );
+                                        if let Some(m) = stream_ctx.metrics() {
+                                            m.handshake_timeouts
+                                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                                        }
+                                        record_probe_anomaly(&stream_ctx, &remote);
+                                        stream_conn.close(0u32.into(), b"");
+                                        return;
+                                    }
+                                };
+
+                            if !user_admission_ok(&stream_ctx, &session) {
+                                stream_conn.close(0u32.into(), b"");
+                                return;
+                            }
+
+                            stream_authenticated.store(true, std::sync::atomic::Ordering::Release);
+                            stream_authenticated_notify.notify_waiters();
+                            stream_handler(session).await;
+                        });
                     }
-
-                    handler(session).await;
-                    // After the handler returns, wait for the peer
-                    // to close the QUIC connection. This lets the
-                    // peer's read side drain any FIN'd stream bytes
-                    // we sent before we drop `conn` (which would
-                    // otherwise abort the connection with ApplicationClose).
-                    //
-                    // Bounded grace period — if the peer is gone for
-                    // > 10 s we drop unilaterally.
-                    let _ = tokio::time::timeout(std::time::Duration::from_secs(10), conn.closed())
-                        .await;
                 }
                 Err(e) => warn!(error = %e, "β QUIC connecting failed"),
             }

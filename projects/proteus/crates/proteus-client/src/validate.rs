@@ -661,6 +661,30 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        match cfg.beta_congestion.as_deref() {
+            None | Some("bbr") => {
+                if cfg.beta_brutal_target_mbps.is_some() {
+                    r.push_warn(
+                        "beta_brutal_target_mbps is set while beta_congestion is BBR; \
+                         the target is ignored.",
+                    );
+                }
+            }
+            Some("brutal") => match cfg.beta_brutal_target_mbps {
+                None | Some(0) => r.push_fail(
+                    "beta_congestion = brutal requires a positive \
+                     beta_brutal_target_mbps measured for this path.",
+                ),
+                Some(rate) if rate > 100_000 => r.push_warn(format!(
+                    "beta_brutal_target_mbps = {rate} exceeds 100 Gbit/s; verify \
+                     units and NIC capacity before enabling it."
+                )),
+                Some(_) => {}
+            },
+            Some(other) => r.push_fail(format!(
+                "beta_congestion = {other:?} is invalid; expected \"bbr\" or \"brutal\"."
+            )),
+        }
     }
 
     // ----- Bootstrap-DNS posture -----

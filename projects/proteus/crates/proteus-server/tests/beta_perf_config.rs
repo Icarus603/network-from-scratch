@@ -6,6 +6,8 @@
 //!   - beta_allow_spin_bit: Option<bool>        (privacy)
 //!   - beta_ack_eliciting_threshold: Option<u32> (RFC 9802 speed knob)
 //!   - beta_mtu_upper_bound: Option<u16>         (jumbo-frame MTU discovery)
+//!   - beta_congestion: Option<String>            (BBR / Brutal)
+//!   - beta_brutal_target_mbps: Option<u64>       (Brutal pacing target)
 //!
 //! These fields gate access to the matching `PerfProfile` knobs
 //! without recompiling the binary. Without YAML exposure (the prior
@@ -105,6 +107,8 @@ async fn yaml_round_trips_new_perf_fields_2026_05_18() {
              beta_allow_spin_bit: false\n\
              beta_ack_eliciting_threshold: 16\n\
              beta_mtu_upper_bound: 9000\n\
+             beta_congestion: brutal\n\
+             beta_brutal_target_mbps: 1000\n\
              keys:\n  \
                  mlkem_pk: {dir}/mlkem.pk\n  \
                  mlkem_sk: {dir}/mlkem.sk\n  \
@@ -119,6 +123,8 @@ async fn yaml_round_trips_new_perf_fields_2026_05_18() {
     assert_eq!(cfg.beta_allow_spin_bit, Some(false));
     assert_eq!(cfg.beta_ack_eliciting_threshold, Some(16));
     assert_eq!(cfg.beta_mtu_upper_bound, Some(9000));
+    assert_eq!(cfg.beta_congestion.as_deref(), Some("brutal"));
+    assert_eq!(cfg.beta_brutal_target_mbps, Some(1000));
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -156,6 +162,8 @@ async fn yaml_new_perf_fields_default_to_none_when_absent() {
     assert_eq!(cfg.beta_allow_spin_bit, None);
     assert_eq!(cfg.beta_ack_eliciting_threshold, None);
     assert_eq!(cfg.beta_mtu_upper_bound, None);
+    assert_eq!(cfg.beta_congestion, None);
+    assert_eq!(cfg.beta_brutal_target_mbps, None);
 
     let _ = std::fs::remove_dir_all(&dir);
 }

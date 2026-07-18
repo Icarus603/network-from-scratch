@@ -328,6 +328,8 @@ mod tests {
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
             beta_mtu_upper_bound: None,
+            beta_congestion: None,
+            beta_brutal_target_mbps: None,
             keys: KeysCfg {
                 mlkem_pk: PathBuf::from("/dev/null"),
                 mlkem_sk: PathBuf::from("/dev/null"),

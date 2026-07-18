@@ -1033,6 +1033,30 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    match cfg.beta_congestion.as_deref() {
+        None | Some("bbr") => {
+            if cfg.beta_brutal_target_mbps.is_some() {
+                r.push_warn(
+                    "beta_brutal_target_mbps is set while beta_congestion is BBR; \
+                     the target is ignored.",
+                );
+            }
+        }
+        Some("brutal") => match cfg.beta_brutal_target_mbps {
+            None | Some(0) => r.push_fail(
+                "beta_congestion = brutal requires a positive \
+                 beta_brutal_target_mbps measured for this path.",
+            ),
+            Some(rate) if rate > 100_000 => r.push_warn(format!(
+                "beta_brutal_target_mbps = {rate} exceeds 100 Gbit/s; verify units \
+                 and NIC capacity before enabling a non-TCP-friendly controller."
+            )),
+            Some(_) => {}
+        },
+        Some(other) => r.push_fail(format!(
+            "beta_congestion = {other:?} is invalid; expected \"bbr\" or \"brutal\"."
+        )),
+    }
 
     // Iter-96: periodic_self_test_failure_threshold sanity.
     //
@@ -2334,6 +2358,8 @@ mod tests {
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
             beta_mtu_upper_bound: None,
+            beta_congestion: None,
+            beta_brutal_target_mbps: None,
             keys: KeysCfg {
                 mlkem_pk: dir.join("mlkem.pk"),
                 mlkem_sk: dir.join("mlkem.sk"),
@@ -2779,6 +2805,54 @@ mod tests {
             matches!(c, Check::Warn(s) if s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"))
         });
         assert!(warn, "ack=500 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brutal_requires_a_positive_target_rate() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_congestion = Some("brutal".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Fail(s) if s.contains("requires a positive"))),
+            "Brutal without a measured target MUST fail: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn brutal_with_positive_target_passes_controller_validation() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_congestion = Some("brutal".to_string());
+        cfg.beta_brutal_target_mbps = Some(1000);
+        let report = preflight(&cfg);
+        assert!(
+            !report
+                .checks
+                .iter()
+                .any(|c| matches!(c, Check::Fail(s) if s.contains("beta_congestion"))),
+            "valid Brutal controller config must not fail: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unknown_beta_congestion_controller_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_congestion = Some("magic".to_string());
+        let report = preflight(&cfg);
+        assert!(
+            report.checks.iter().any(
+                |c| matches!(c, Check::Fail(s) if s.contains("expected \"bbr\" or \"brutal\""))
+            ),
+            "unknown controller MUST fail: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

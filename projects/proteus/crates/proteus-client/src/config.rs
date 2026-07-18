@@ -119,6 +119,14 @@ pub struct ClientConfig {
     /// frame paths for a real throughput win.
     #[serde(default)]
     pub beta_mtu_upper_bound: Option<u16>,
+    /// β QUIC congestion controller: `"bbr"` (default) or
+    /// `"brutal"` (rate-targeted, loss compensated).
+    #[serde(default)]
+    pub beta_congestion: Option<String>,
+    /// Brutal target send rate in Mbit/s. Required when
+    /// `beta_congestion: brutal`; ignored for BBR.
+    #[serde(default)]
+    pub beta_brutal_target_mbps: Option<u64>,
     /// Data-plane padding quantum (bytes). When non-zero, every
     /// outgoing DATA record's plaintext is wrapped as
     /// `[4-byte BE real_len | real_payload | zero-pad]` and rounded
@@ -593,9 +601,14 @@ keys:\n  \
   client_ed25519_sk: /tmp/x\n\
 user_id: \"alice001\"\n\
 healthz_staleness_secs: 120\n\
+server_endpoint_beta: \"vps.example.com:8443\"\n\
+beta_congestion: brutal\n\
+beta_brutal_target_mbps: 1000\n\
 ";
         let cfg: ClientConfig = serde_yaml::from_str(yaml).expect("parse");
         assert_eq!(cfg.healthz_staleness_secs, Some(120));
+        assert_eq!(cfg.beta_congestion.as_deref(), Some("brutal"));
+        assert_eq!(cfg.beta_brutal_target_mbps, Some(1000));
     }
 
     #[test]

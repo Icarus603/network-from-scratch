@@ -720,7 +720,8 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         // the bytes around is residue, which is exactly what we
         // want gone.
         use zeroize::Zeroizing;
-        let mut pt: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(2 + reason_len as usize));
+        let mut pt: Zeroizing<Vec<u8>> =
+            Zeroizing::new(Vec::with_capacity(2 + reason_len as usize));
         pt.push(error_code);
         pt.push(reason_len);
         pt.extend_from_slice(&reason[..reason_len as usize]);
@@ -1212,7 +1213,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 }
             }
             // `read_buf` writes into the Vec's spare capacity and
-                // returns the byte count. EOF is signalled by `n == 0`.
+            // returns the byte count. EOF is signalled by `n == 0`.
             let pre_len = self.rx_buf.len();
             let n = self.read.read_buf(&mut self.rx_buf).await?;
             debug_assert_eq!(self.rx_buf.len(), pre_len + n);

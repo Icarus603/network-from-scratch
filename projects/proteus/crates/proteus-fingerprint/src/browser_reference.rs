@@ -80,6 +80,22 @@ impl BrowserFingerprint {
 pub const BROWSERS: &[BrowserFingerprint] = &[
     BrowserFingerprint {
         browser: "Chrome",
+        version: "FoxIO current example",
+        platform: "desktop",
+        // Official FoxIO JA4 repository README, checked 2026-07-17.
+        // Keep this distinct from the older Chrome 124 PSK sample:
+        // browser fingerprints evolve and one historical capture is
+        // not an eternal definition of Chromium.
+        ja4: "t13d1516h2_8daaf6152771_02713d6af862",
+        proto: 't',
+        tls_version: "13",
+        sni: true,
+        cipher_count: 15,
+        ext_count: 16,
+        alpn: "h2",
+    },
+    BrowserFingerprint {
+        browser: "Chrome",
         version: "124",
         platform: "macOS / Windows / Linux desktop",
         ja4: "t13d1517h2_8daaf6152771_b0da82dd1658",
@@ -219,6 +235,9 @@ fn static_lookup_or_unknown(hash: &str) -> &'static str {
     if hash == "b0da82dd1658" {
         return "b0da82dd1658";
     }
+    if hash == "02713d6af862" {
+        return "02713d6af862";
+    }
     if hash == "3d5424432f57" {
         return "3d5424432f57";
     }
@@ -227,8 +246,8 @@ fn static_lookup_or_unknown(hash: &str) -> &'static str {
     if hash == "f91f431d341e" {
         return "f91f431d341e";
     }
-    if hash == "165ef185bad8" {
-        return "165ef185bad8";
+    if hash == "5130dee6fa12" {
+        return "5130dee6fa12";
     }
     ""
 }
@@ -337,7 +356,7 @@ mod tests {
         // Proteus's current baseline doesn't match any browser
         // exactly — but it SHOULD find a closest entry with
         // exact=false.
-        let proteus_baseline = "t13d0911h2_f91f431d341e_165ef185bad8";
+        let proteus_baseline = "t13d0912h2_f91f431d341e_5130dee6fa12";
         let (_closest, exact) = find_closest(proteus_baseline).unwrap();
         assert!(
             !exact,
@@ -362,7 +381,7 @@ mod tests {
         assert_eq!(cipher_hash_of(""), "");
         assert_eq!(cipher_hash_of("not_a_ja4"), "");
         assert_eq!(
-            cipher_hash_of("t13d0911h2_f91f431d341e_165ef185bad8"),
+            cipher_hash_of("t13d0912h2_f91f431d341e_5130dee6fa12"),
             "f91f431d341e"
         );
     }

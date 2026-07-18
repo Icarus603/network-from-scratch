@@ -576,18 +576,18 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // listener binds (operator who asked for probe-resistance
     // shouldn't silently get the legacy mode).
     //
-    // The Arc<KnockPsk> is held in `_knock_psk` and will be
-    // consumed by the future transport-layer wiring that mints
-    // a knock token per outbound handshake. This iteration just
-    // loads it; the wire-format integration is iteration 4.
-    let _knock_psk: Option<std::sync::Arc<proteus_handshake::knock::KnockPsk>> =
+    // The Arc keeps the zero-copy startup-loaded PSK alive until
+    // the cached TLS connector is built below. The connector's
+    // crypto provider then mints a fresh, client_random-bound knock
+    // inside rustls's own ClientHello construction for every dial.
+    let knock_psk: Option<std::sync::Arc<proteus_handshake::knock::KnockPsk>> =
         match cfg.knock_psk_file.as_ref() {
             Some(path) => match proteus_client::knock_psk::load(path) {
                 Ok(bytes) => {
                     info!(
                         path = ?path,
-                        "knock PSK loaded — Path A probe-resistance primitive ready \
-                         (transport-layer wire-format integration is a follow-up iteration)"
+                        "knock PSK loaded — transcript-native Path A probe resistance will \
+                         be attached to every TLS ClientHello"
                     );
                     // Iter-191: `bytes` is now Zeroizing<[u8;32]>;
                     // deref via `*bytes` to extract the bare
@@ -770,17 +770,33 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // per-request build path.
     let cached_tls_connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>> =
         if let Some(tls_cfg) = cfg.tls.as_ref() {
-            let connector = match tls_cfg.trusted_ca.as_ref() {
-                Some(ca) => {
-                    proteus_transport_alpha::tls::build_connector_with_ca(ca).map_err(|e| {
-                        format!("failed to build cached TLS connector (pinned CA): {e}")
+            let connector = match (tls_cfg.trusted_ca.as_ref(), knock_psk.as_deref()) {
+                (Some(ca), Some(psk)) => {
+                    proteus_transport_alpha::tls::build_connector_with_ca_and_knock(ca, psk.clone())
+                        .map_err(|e| {
+                            format!(
+                                "failed to build cached knock-aware TLS connector (pinned CA): {e}"
+                            )
+                        })?
+                }
+                (None, Some(psk)) => {
+                    proteus_transport_alpha::tls::build_connector_webpki_roots_with_knock(
+                        psk.clone(),
+                    )
+                    .map_err(|e| {
+                        format!("failed to build cached knock-aware TLS connector (webpki): {e}")
                     })?
                 }
-                None => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                (Some(ca), None) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
+                    .map_err(|e| {
+                        format!("failed to build cached TLS connector (pinned CA): {e}")
+                    })?,
+                (None, None) => proteus_transport_alpha::tls::build_connector_webpki_roots()
                     .map_err(|e| format!("failed to build cached TLS connector (webpki): {e}"))?,
             };
             info!(
                 server_name = %tls_cfg.server_name,
+                knock_enabled = knock_psk.is_some(),
                 "cached TLS connector built — SOCKS5 requests will reuse it instead of rebuilding per request"
             );
             Some(Arc::new(connector))
@@ -982,6 +998,11 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 let (prev, new) = ctx_for_reload
                     .reloadable_pool
                     .reload_from_addrs(new_endpoints);
+                // New CONNECTs must not reuse a carrier keyed under
+                // the pre-reload endpoint policy. Active sessions
+                // hold a per-session carrier lease and drain
+                // naturally; only the cache is invalidated here.
+                ctx_for_reload.beta_connections.invalidate_all().await;
                 let (added, removed) = proteus_client::endpoint_pool::pool_addr_diff(&prev, &new);
                 info!(
                     prev_count = prev.len(),

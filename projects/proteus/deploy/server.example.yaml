@@ -58,6 +58,14 @@ listen_alpha: "0.0.0.0:8443"
 # beta_allow_spin_bit: false
 # beta_ack_eliciting_threshold: 1
 # beta_mtu_upper_bound: 1452
+#
+# High-loss, operator-provisioned links can opt into Proteus Brutal.
+# Unlike BBR it does not treat ordinary loss as a signal to back off;
+# it paces at the configured target with bounded loss compensation.
+# Measure the real uplink first. Brutal is not TCP-friendly and must
+# not be aimed above a shared bottleneck's capacity.
+# beta_congestion: brutal
+# beta_brutal_target_mbps: 100
 
 # Prometheus exposition + container health probes (optional). The
 # same listener serves three routes:

@@ -29,6 +29,10 @@ tracing = "0.1"
 # QUIC carrier. quinn 0.11 is the current stable (2026-05 cutoff).
 # We use the ring-backed rustls provider to match what α uses.
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+# quinn-proto: needed only for `RttEstimator` in the custom Brutal
+# congestion controller (Controller trait method signature). Version
+# must stay in lockstep with whatever quinn 0.11 pulls.
+quinn-proto = { version = "=0.11.14", default-features = false }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 

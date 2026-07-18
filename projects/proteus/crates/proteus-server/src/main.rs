@@ -3187,6 +3187,13 @@ fn build_beta_endpoint(
     if let Some(v) = cfg.beta_mtu_upper_bound {
         perf.mtu_upper_bound = v;
     }
+    if cfg.beta_congestion.as_deref() == Some("brutal") {
+        perf.congestion = proteus_transport_beta::CongestionKind::Brutal;
+        perf.brutal_target_bps = cfg
+            .beta_brutal_target_mbps
+            .expect("validated: brutal target is required")
+            .saturating_mul(1_000_000);
+    }
     let endpoint = proteus_transport_beta::server::make_endpoint_with_perf(bind, chain, key, perf)
         .map_err(|e| format!("β endpoint: {e}"))?;
     Ok(Some(endpoint))

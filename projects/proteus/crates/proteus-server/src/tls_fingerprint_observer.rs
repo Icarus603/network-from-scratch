@@ -4,7 +4,7 @@
 //!
 //! The proteus-fingerprint crate ships a JA4 baseline regression
 //! test that locks the EXACT JA4 string Proteus α emits today
-//! (`t13d0911h2_f91f431d341e_165ef185bad8` with the current
+//! (`t13d0912h2_f91f431d341e_5130dee6fa12` with the current
 //! rustls 0.23 + Chrome-shaped CryptoProvider). That test catches
 //! changes at CI time.
 //!
@@ -72,7 +72,7 @@ pub struct LiveJa4 {
 /// `proteus-fingerprint::tests::proteus_alpha_ja4_baseline::EXPECTED_BASELINE`
 /// — see the unit test below that fails the build if they ever
 /// drift.
-pub const EXPECTED_BASELINE: &str = "t13d0911h2_f91f431d341e_165ef185bad8";
+pub const EXPECTED_BASELINE: &str = "t13d0912h2_f91f431d341e_5130dee6fa12";
 
 impl LiveJa4 {
     /// `true` when the observed JA4 matches the locked-in baseline.

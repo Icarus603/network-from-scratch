@@ -151,7 +151,7 @@ impl std::error::Error for SelfTestError {}
 /// them into the self-test, then use the original for the
 /// production listener.
 pub async fn run_self_test(
-    keys: ServerKeys,
+    mut keys: ServerKeys,
     deadline: Duration,
 ) -> Result<SelfTestOutcome, SelfTestError> {
     let total_start = Instant::now();
@@ -159,6 +159,16 @@ pub async fn run_self_test(
     let mlkem_pk_bytes = keys.mlkem_pk_bytes.clone();
     let pq_fingerprint = keys.pq_fingerprint;
     let server_x25519_pub = keys.x25519_pub;
+
+    // The production key bundle commonly contains a non-empty
+    // client allowlist. The self-test uses an ephemeral identity,
+    // so install that identity in the throwaway context before the
+    // server task starts. Previously, an allowlisted deployment
+    // rejected its own self-test client and refused to boot even
+    // though the server keypairs were healthy.
+    let mut rng = rand_core::OsRng;
+    let client_id_sk = proteus_crypto::sig::generate(&mut rng);
+    keys.client_allowlist = vec![(*b"selftest", client_id_sk.verifying_key())];
     let ctx = Arc::new(ServerCtx::new(keys));
 
     // ----- Step 1: bind loopback listener.
@@ -199,8 +209,6 @@ pub async fn run_self_test(
     // case is the self-test's probe shows up in their access log
     // as a noise event).
     let handshake_start = Instant::now();
-    let mut rng = rand_core::OsRng;
-    let client_id_sk = proteus_crypto::sig::generate(&mut rng);
     let client_cfg = ClientConfig {
         server_mlkem_pk_bytes: mlkem_pk_bytes,
         server_x25519_pub,
@@ -309,6 +317,19 @@ mod tests {
             "self-test took {:?} — > 5s suggests a serious regression",
             outcome.total
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_test_uses_an_ephemeral_allowlisted_identity() {
+        let mut keys = ServerKeys::generate();
+        let mut rng = rand_core::OsRng;
+        let unrelated = proteus_crypto::sig::generate(&mut rng);
+        keys.client_allowlist
+            .push((*b"operator", unrelated.verifying_key()));
+
+        run_self_test(keys, Duration::from_secs(10))
+            .await
+            .expect("a real production allowlist must not break startup self-test");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

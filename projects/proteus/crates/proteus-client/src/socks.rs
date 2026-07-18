@@ -208,6 +208,7 @@ pub async fn handle_socks5_with_ctx(
     // or build failed at startup), try_beta falls back to the
     // legacy uncached path.
     let beta_crypto = ctx.beta_crypto.clone();
+    let beta_connections = Some(Arc::clone(&ctx.beta_connections));
     let res = handle_socks5_with_health_and_pool_and_bootstrap_counters(
         sock,
         cfg,
@@ -217,6 +218,7 @@ pub async fn handle_socks5_with_ctx(
         connector,
         hs_source,
         beta_crypto,
+        beta_connections,
     )
     .await;
     match &res {
@@ -249,7 +251,7 @@ pub async fn handle_socks5_with_health_and_pool(
     // None, `try_alpha` / `try_beta` fall through to building
     // them inline per request.
     handle_socks5_with_health_and_pool_and_bootstrap_counters(
-        sock, cfg, health, pool, None, None, None, None,
+        sock, cfg, health, pool, None, None, None, None, None,
     )
     .await
 }
@@ -268,6 +270,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
     connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<Arc<crate::config::HandshakeConfigSource>>,
     beta_crypto: Option<Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    beta_connections: Option<Arc<crate::beta_pool::BetaConnectionPool>>,
 ) -> Result<(), SocksError> {
     sock.set_nodelay(true).ok();
 
@@ -465,6 +468,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             connector.as_ref(),
             hs_source.as_ref(),
             beta_crypto.as_ref(),
+            beta_connections.as_ref(),
         )
         .await
     } else {
@@ -479,6 +483,7 @@ pub async fn handle_socks5_with_health_and_pool_and_bootstrap_counters(
             connector.as_ref(),
             hs_source.as_ref(),
             beta_crypto.as_ref(),
+            beta_connections.as_ref(),
         )
         .await
     };
@@ -576,6 +581,7 @@ async fn single_endpoint_dispatch(
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
     beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    beta_connections: Option<&Arc<crate::beta_pool::BetaConnectionPool>>,
 ) -> Result<(), SocksError> {
     // Consult the carrier-health tracker: under sustained β
     // failures (e.g. UDP egress blocked by the network or
@@ -604,6 +610,7 @@ async fn single_endpoint_dispatch(
             bootstrap,
             hs_source,
             beta_crypto,
+            beta_connections,
         )
         .await
         {
@@ -677,6 +684,7 @@ async fn dispatch_via_pool(
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
     beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    beta_connections: Option<&Arc<crate::beta_pool::BetaConnectionPool>>,
 ) -> Result<(), SocksError> {
     let mut last_err: Option<SocksError> = None;
     let mut any_endpoint_attempted = false;
@@ -723,6 +731,7 @@ async fn dispatch_via_pool(
             connector,
             hs_source,
             beta_crypto,
+            beta_connections,
         )
         .await;
         match result {
@@ -801,6 +810,7 @@ async fn dispatch_via_pool(
             connector,
             hs_source,
             beta_crypto,
+            beta_connections,
         )
         .await;
         match &result {
@@ -835,6 +845,7 @@ async fn attempt_one_pool_entry(
     connector: Option<&Arc<proteus_transport_alpha::tls::TlsConnector>>,
     hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
     beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    beta_connections: Option<&Arc<crate::beta_pool::BetaConnectionPool>>,
 ) -> Result<(), SocksError> {
     let beta_configured = cfg.server_endpoint_beta.is_some();
     let beta_decision = health.decide_beta(beta_configured, std::time::Instant::now());
@@ -848,6 +859,7 @@ async fn attempt_one_pool_entry(
             bootstrap,
             hs_source,
             beta_crypto,
+            beta_connections,
         )
         .await
         {
@@ -901,6 +913,7 @@ async fn try_beta(
     bootstrap: Option<&crate::ctx::BootstrapCounterHandles>,
     cached_hs_source: Option<&Arc<crate::config::HandshakeConfigSource>>,
     cached_beta_crypto: Option<&Arc<proteus_transport_beta::client::BetaClientCrypto>>,
+    beta_connections: Option<&Arc<crate::beta_pool::BetaConnectionPool>>,
 ) -> Result<(), SocksError> {
     let beta_endpoint: &str = match endpoint_override {
         Some(e) => e,
@@ -937,21 +950,15 @@ async fn try_beta(
     // ClientConfig with profile_hint already set, no disk hit.
     // Falls back to the legacy builder + mutation when ctx didn't
     // attach a cached source.
-    let hs_cfg = match cached_hs_source {
-        Some(source) => source.beta(),
-        None => {
-            let mut c = cfg.build_handshake_config()?;
-            c.profile_hint = proteus_transport_alpha::ProfileHint::Beta;
-            c
-        }
-    };
-
-    // Optional extra-trust CA from the α TLS block (β reuses the
-    // same chain in the recommended deployment).
-    let extra_roots = match cfg.tls.as_ref().and_then(|t| t.trusted_ca.as_ref()) {
-        Some(ca) => proteus_transport_alpha::tls::load_cert_chain(ca)
-            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
-        None => Vec::new(),
+    let make_hs_cfg = || -> Result<_, SocksError> {
+        Ok(match cached_hs_source {
+            Some(source) => source.beta(),
+            None => {
+                let mut c = cfg.build_handshake_config()?;
+                c.profile_hint = proteus_transport_alpha::ProfileHint::Beta;
+                c
+            }
+        })
     };
 
     // Use connect_with_timeout so quinn's internal idle-timeout
@@ -984,6 +991,13 @@ async fn try_beta(
     if let Some(v) = cfg.beta_mtu_upper_bound {
         perf.mtu_upper_bound = v;
     }
+    if cfg.beta_congestion.as_deref() == Some("brutal") {
+        perf.congestion = proteus_transport_beta::CongestionKind::Brutal;
+        perf.brutal_target_bps = cfg
+            .beta_brutal_target_mbps
+            .expect("validated: brutal target is required")
+            .saturating_mul(1_000_000);
+    }
     // Iter-22: prefer the cached β crypto path when ctx
     // attached one (production hot path — skips rustls config
     // build + QuicClientConfig::try_from + the per-CONNECT
@@ -991,42 +1005,114 @@ async fn try_beta(
     // per-call builder when ctx didn't attach a cache
     // (back-compat entry points / tests / β-crypto-cache-build
     // failed at startup).
-    let beta_client = if let Some(crypto) = cached_beta_crypto {
-        // `extra_roots` was already folded into the cache at
-        // startup; the cached path doesn't need them.
-        drop(extra_roots);
+    let mut one_shot_carrier = None;
+    let mut pooled_carrier = None;
+    let beta_session = if let (Some(crypto), Some(connection_pool)) =
+        (cached_beta_crypto, beta_connections)
+    {
+        let key = crate::beta_pool::BetaPoolKey::new(server_addr, server_name);
+        let mut completed = None;
+        let mut last_error = None;
+
+        // One retry is reserved for a carrier that died between
+        // cache lookup and open_bi. Authentication failures on a
+        // still-live carrier are never retried: that would create
+        // a credential oracle and waste ML-KEM work.
+        for attempt in 0..2 {
+            let carrier_fut = connection_pool.get_or_try_init(key.clone(), || {
+                proteus_transport_beta::client::connect_carrier_with_timeout_perf_cached_crypto(
+                    server_name,
+                    server_addr,
+                    crypto,
+                    timeout,
+                    perf,
+                )
+            });
+            let carrier =
+                tokio::time::timeout(timeout + std::time::Duration::from_secs(1), carrier_fut)
+                    .await
+                    .map_err(|_| SocksError::Socks("β carrier handshake timed out"))?
+                    .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+
+            match carrier.open_session(make_hs_cfg()?, timeout).await {
+                Ok(session) => {
+                    // Lease the endpoint for the full relay
+                    // lifetime even if SIGHUP invalidates the
+                    // process cache while this session is active.
+                    pooled_carrier = Some(carrier);
+                    completed = Some(session);
+                    break;
+                }
+                Err(error) => {
+                    let carrier_dead = !carrier.is_usable();
+                    if carrier_dead {
+                        connection_pool.evict_if_current(&key, &carrier).await;
+                    }
+                    last_error = Some(error);
+                    if !carrier_dead || attempt == 1 {
+                        break;
+                    }
+                    tracing::debug!(
+                        endpoint = %server_addr,
+                        "β cached carrier closed during stream open; reconnecting once"
+                    );
+                }
+            }
+        }
+
+        completed.ok_or_else(|| {
+            let error = last_error
+                .map(|e| e.to_string())
+                .unwrap_or_else(|| "β pooled session failed without an error".to_string());
+            SocksError::Io(std::io::Error::other(error))
+        })?
+    } else if let Some(crypto) = cached_beta_crypto {
         let connect_fut = proteus_transport_beta::client::connect_with_timeout_perf_cached_crypto(
             server_name,
             server_addr,
             crypto,
-            hs_cfg,
+            make_hs_cfg()?,
             timeout,
             perf,
         );
-        tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
+        let client = tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
             .await
             .map_err(|_| SocksError::Socks("β handshake timed out"))?
-            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+        let (session, carrier) = client.into_session_and_carrier();
+        one_shot_carrier = Some(carrier);
+        session
     } else {
+        // Optional extra-trust CA from the α TLS block (β reuses the
+        // same chain in the recommended deployment). The production
+        // cached path loaded this once at startup.
+        let extra_roots = match cfg.tls.as_ref().and_then(|t| t.trusted_ca.as_ref()) {
+            Some(ca) => proteus_transport_alpha::tls::load_cert_chain(ca)
+                .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?,
+            None => Vec::new(),
+        };
         let connect_fut = proteus_transport_beta::client::connect_with_timeout_and_perf(
             server_name,
             server_addr,
             extra_roots,
-            hs_cfg,
+            make_hs_cfg()?,
             timeout,
             perf,
         );
-        tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
+        let client = tokio::time::timeout(timeout + std::time::Duration::from_secs(1), connect_fut)
             .await
             .map_err(|_| SocksError::Socks("β handshake timed out"))?
-            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+        let (session, carrier) = client.into_session_and_carrier();
+        one_shot_carrier = Some(carrier);
+        session
     };
 
     let proteus_transport_alpha::session::AlphaSession {
         mut sender,
         mut receiver,
         ..
-    } = beta_client.session;
+    } = beta_session;
     if let Some(q) = cfg.pad_quantum {
         if q > 0 {
             sender.set_pad_quantum(q);
@@ -1037,13 +1123,9 @@ async fn try_beta(
     sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
     pump(sock, &mut sender, &mut receiver).await;
+    drop(pooled_carrier);
+    drop(one_shot_carrier);
 
-    // Keep the endpoint + connection alive across the pump (they
-    // were moved into beta_client). Drop happens here when scope
-    // ends — at this point the session has finished and the close
-    // notification has already gone out via shutdown semantics.
-    drop(beta_client.connection);
-    drop(beta_client.endpoint);
     Ok(())
 }
 
@@ -1328,15 +1410,21 @@ async fn pump<R, W>(
         let mut buf = ScrubOnDrop(vec![0u8; 64 * 1024]);
         loop {
             match sock_r.read(&mut buf).await {
-                Ok(0) | Err(_) => {
+                Ok(0) => {
                     // Best-effort drain of anything still buffered
                     // before signaling EOF — the select! arm below
                     // will then send CLOSE + shut down the socket.
                     let _ = sender.flush().await;
                     break;
                 }
+                Err(e) => {
+                    tracing::warn!(error = %e, "SOCKS5 client read failed during pump");
+                    let _ = sender.flush().await;
+                    break;
+                }
                 Ok(n) => {
-                    if sender.send_record(&buf[..n]).await.is_err() {
+                    if let Err(e) = sender.send_record(&buf[..n]).await {
+                        tracing::warn!(error = %e, "β client→server record send failed");
                         break;
                     }
                     // Adaptive flush: only if the read returned LESS
@@ -1346,8 +1434,11 @@ async fn pump<R, W>(
                     // queued at the source — coalesce with the next
                     // chunk by skipping the flush, letting the
                     // BufWriter accumulate.
-                    if n < buf.len() && sender.flush().await.is_err() {
-                        break;
+                    if n < buf.len() {
+                        if let Err(e) = sender.flush().await {
+                            tracing::warn!(error = %e, "β client→server flush failed");
+                            break;
+                        }
                     }
                 }
             }
@@ -1397,7 +1488,8 @@ async fn pump<R, W>(
                     // client side.
                     use zeroize::Zeroize as _;
                     buf.zeroize();
-                    if write_result.is_err() {
+                    if let Err(e) = write_result {
+                        tracing::warn!(error = %e, "SOCKS5 downstream write failed");
                         break;
                     }
                     // Iter-63: adaptive flush, symmetric with the
@@ -1407,12 +1499,19 @@ async fn pump<R, W>(
                     // wants the bytes without waiting for the next
                     // record). Coalesce when the record is at
                     // capacity — more inbound bytes likely queued.
-                    if buf_len < 64 * 1024 && sock_w.flush().await.is_err() {
-                        break;
+                    if buf_len < 64 * 1024 {
+                        if let Err(e) = sock_w.flush().await {
+                            tracing::warn!(error = %e, "SOCKS5 downstream flush failed");
+                            break;
+                        }
                     }
                 }
                 Ok(Some(())) => {} // keepalive (plaintext empty)
-                Ok(None) | Err(_) => break,
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!(error = %e, "β server→client record receive failed");
+                    break;
+                }
             }
         }
     };

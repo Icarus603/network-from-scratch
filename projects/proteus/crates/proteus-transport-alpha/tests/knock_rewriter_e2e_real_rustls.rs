@@ -1,8 +1,8 @@
 //! End-to-end tests proving why `KnockRewriteStream` ALONE is
 //! insufficient for client-side Path A. Documents the
-//! TLS 1.3 transcript-hash binding that forces iteration 10
-//! (a rustls fork). See `src/knock_rewriter.rs` module
-//! header for the full explanation.
+//! TLS 1.3 transcript-hash binding that makes
+//! post-serialization mutation impossible. See
+//! `src/knock_rewriter.rs` for the replacement path.
 //!
 //! The two `#[ignore]` tests below stand as DELIBERATE failure
 //! evidence. Running them with `--include-ignored` produces
@@ -13,11 +13,10 @@
 //! and server (sees our rewritten session_id), so the keys
 //! derived from H_client ≠ keys derived from H_server.
 //!
-//! Iteration 10 will land the rustls fork that lets us
-//! generate the knock-bearing session_id INSIDE rustls's
-//! ClientHello assembler — transcripts match by construction
-//! and these tests will pass once that lands. Re-enabling
-//! them is the iteration-10 acceptance criterion.
+//! Production now generates the knock-bearing session_id inside
+//! rustls's own ClientHello construction through the knock-aware
+//! crypto provider. These ignored cases remain as historical
+//! negative controls; they must continue to fail if explicitly run.
 
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -48,7 +47,7 @@ fn unix_now() -> u64 {
 }
 
 #[tokio::test]
-#[ignore = "blocked by TLS 1.3 transcript-hash divergence; iteration 10 (rustls fork) will fix"]
+#[ignore = "historical negative control: post-serialization rewriting must fail transcript auth"]
 async fn rewriter_drives_full_tls_handshake_with_server_side_gate_verification() {
     // Shared PSK between client and server.
     let psk_bytes = [0x9Cu8; KNOCK_PSK_LEN];
@@ -118,7 +117,7 @@ async fn rewriter_drives_full_tls_handshake_with_server_side_gate_verification()
 }
 
 #[tokio::test]
-#[ignore = "blocked by TLS 1.3 transcript-hash divergence; iteration 10 (rustls fork) will fix"]
+#[ignore = "historical negative control: post-serialization rewriting must fail transcript auth"]
 async fn rewriter_passes_through_arbitrary_app_data_after_handshake() {
     // After the TLS handshake completes, app-data records flow
     // through the rewriter unmodified. Send a few KB to prove

@@ -86,6 +86,14 @@ pub struct ServerConfig {
     /// too-high value is harmless on non-jumbo paths.
     #[serde(default)]
     pub beta_mtu_upper_bound: Option<u16>,
+    /// β QUIC congestion controller: `"bbr"` (default, TCP-friendly)
+    /// or `"brutal"` (operator-rate-targeted, loss compensated).
+    #[serde(default)]
+    pub beta_congestion: Option<String>,
+    /// Brutal target send rate in Mbit/s. Required when
+    /// `beta_congestion: brutal`; ignored for BBR.
+    #[serde(default)]
+    pub beta_brutal_target_mbps: Option<u64>,
     pub keys: KeysCfg,
     #[serde(default)]
     pub client_allowlist: Vec<ClientCfg>,

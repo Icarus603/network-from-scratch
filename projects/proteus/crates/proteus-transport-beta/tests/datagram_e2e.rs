@@ -66,14 +66,15 @@ async fn datagram_round_trip_both_directions() {
         // this commit wires it for β). The production `serve` loop
         // does this automatically; here we replicate it inline because
         // the test bypasses `serve` to access the Connection handle.
+        let (send, recv) = conn.accept_bi().await.expect("accept_bi");
+        let context = proteus_transport_beta::stream_exporter_context(send.id());
         let mut binding = [0u8; proteus_transport_alpha::client::CHANNEL_BINDING_LEN];
         conn.export_keying_material(
             &mut binding[..],
             proteus_transport_alpha::client::TLS_EXPORTER_LABEL,
-            b"",
+            &context,
         )
         .expect("β QUIC exporter");
-        let (send, recv) = conn.accept_bi().await.expect("accept_bi");
         let session = proteus_transport_alpha::server::handshake_over_split_bound(
             recv,
             send,

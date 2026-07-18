@@ -42,10 +42,12 @@
 //! stream identical to what was on the wire.
 
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use proteus_handshake::knock::KnockPsk;
+use proteus_handshake::replay::{ReplayWindow, Verdict as ReplayVerdict};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 
@@ -73,6 +75,11 @@ pub struct DispatchConfig {
     pub peek_limit: usize,
     /// Wall-clock cap on the sniff. Defaults to 3s.
     pub peek_timeout: Duration,
+    /// Shared exact-replay detector for valid knocks. All cloned
+    /// dispatcher configs retain the same window, so concurrent
+    /// accept-loop tasks cannot admit the same captured ClientHello
+    /// twice.
+    pub replay_window: Arc<Mutex<ReplayWindow>>,
 }
 
 impl Default for DispatchConfig {
@@ -82,6 +89,7 @@ impl Default for DispatchConfig {
             cover_endpoint: None,
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
+            replay_window: Arc::new(Mutex::new(ReplayWindow::new())),
         }
     }
 }
@@ -257,6 +265,32 @@ pub async fn dispatch_or_local_terminate(
 
     match verdict {
         GateVerdict::Pass { sniffed } => {
+            // The HMAC gate proves possession and freshness, but an exact
+            // packet capture remains valid throughout the ±90 s timestamp
+            // window. Pin each accepted `(client_random, timestamp)` before
+            // local TLS termination. A second copy is cover-routed, which
+            // preserves the no-oracle behavior visible to an active prober.
+            let timestamp = u32::from_be_bytes(
+                sniffed.session_id[..4]
+                    .try_into()
+                    .expect("a valid knock always has a 32-byte session_id"),
+            ) as u64;
+            let nonce: [u8; 16] = sniffed.client_random[..16]
+                .try_into()
+                .expect("client_random is always 32 bytes");
+            let replay_verdict = cfg
+                .replay_window
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .check(now_unix_seconds, &nonce, timestamp);
+            if replay_verdict != ReplayVerdict::Accept {
+                let splice_outcome = splice_to_cover(stream, sniffed, cfg).await;
+                return PathARouting::RoutedToCover {
+                    reason: CoverReason::ReplayKnock,
+                    splice_outcome,
+                };
+            }
+
             // Re-feed semantics: the TLS terminator that runs
             // next sees the peeked bytes first, then live
             // socket reads. PrependedStream handles this
@@ -396,6 +430,7 @@ mod tests {
             cover_endpoint: None,
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
+            ..Default::default()
         };
         let routing = dispatch_or_local_terminate(server_stream, &cfg, now).await;
         match routing {
@@ -464,6 +499,7 @@ mod tests {
             cover_endpoint: Some(format!("{cover_addr}")),
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
+            ..Default::default()
         };
 
         let routing = dispatch_or_local_terminate(server_stream, &cfg, now).await;
@@ -509,6 +545,7 @@ mod tests {
             cover_endpoint: Some("127.0.0.1:1".to_string()), // unused
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
+            ..Default::default()
         };
         let routing = dispatch_or_local_terminate(server_stream, &cfg, 1_715_900_000u64).await;
         match routing {
@@ -546,6 +583,7 @@ mod tests {
             cover_endpoint: None, // misconfig
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
+            ..Default::default()
         };
         let routing = dispatch_or_local_terminate(server_stream, &cfg, 1_715_900_000u64).await;
         match routing {
@@ -556,5 +594,67 @@ mod tests {
             other => panic!("expected RoutedToCover w/ err, got {other:?}"),
         }
         let _ = client_handle.await;
+    }
+
+    #[tokio::test]
+    async fn exact_clienthello_replay_is_routed_to_cover() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let cover_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cover_addr = cover_listener.local_addr().unwrap();
+        let psk = psk_alpha();
+        let client_random = [0x6Du8; 32];
+        let now = 1_715_900_000u64;
+        let token = compute_knock(&psk, &client_random, now);
+        let session_id = encode_session_id(&token);
+        let captured = craft_clienthello(&client_random, &session_id);
+        let cfg = DispatchConfig {
+            psk: Some(psk),
+            cover_endpoint: Some(cover_addr.to_string()),
+            ..Default::default()
+        };
+
+        let first_bytes = captured.clone();
+        let first_client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(&first_bytes).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let (first_stream, _) = listener.accept().await.unwrap();
+        match dispatch_or_local_terminate(first_stream, &cfg, now).await {
+            PathARouting::TerminateLocally(mut local) => {
+                let mut received = Vec::new();
+                local.read_to_end(&mut received).await.unwrap();
+                assert_eq!(received, captured);
+            }
+            other => panic!("first use of a valid knock must pass: {other:?}"),
+        }
+        first_client.await.unwrap();
+
+        let cover = tokio::spawn(async move {
+            let (mut stream, _) = cover_listener.accept().await.unwrap();
+            let mut received = Vec::new();
+            stream.read_to_end(&mut received).await.unwrap();
+            received
+        });
+        let replay_bytes = captured.clone();
+        let replay_client = tokio::spawn(async move {
+            let mut stream = TcpStream::connect(addr).await.unwrap();
+            stream.write_all(&replay_bytes).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let (replay_stream, _) = listener.accept().await.unwrap();
+        match dispatch_or_local_terminate(replay_stream, &cfg, now).await {
+            PathARouting::RoutedToCover {
+                reason,
+                splice_outcome,
+            } => {
+                assert!(matches!(reason, CoverReason::ReplayKnock));
+                splice_outcome.unwrap();
+            }
+            other => panic!("exact replay must be routed to cover: {other:?}"),
+        }
+        replay_client.await.unwrap();
+        assert_eq!(cover.await.unwrap(), captured);
     }
 }

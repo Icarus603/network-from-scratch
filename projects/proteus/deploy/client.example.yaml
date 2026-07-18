@@ -124,6 +124,12 @@ server_endpoint: "vps.example.com:8443"
 #                                    GFW QUIC datagram-size analysis)
 # beta_initial_mtu: 1350
 # beta_pad_quic_to_mtu: false
+#
+# High-loss β paths may opt into the rate-targeted controller. Use the
+# measured client uplink, in Mbit/s. Brutal is intentionally
+# non-TCP-friendly; BBR remains the safe default.
+# beta_congestion: brutal
+# beta_brutal_target_mbps: 100
 
 # Local SOCKS5 inbound. Point your browser / curl / sing-box at this.
 socks_listen: "127.0.0.1:1080"

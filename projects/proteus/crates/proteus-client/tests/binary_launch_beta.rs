@@ -167,7 +167,14 @@ async fn client_binary_dual_stack_routes_through_beta() {
     let x25519_pub = server_keys.x25519_pub;
     let mut rng = rand_core::OsRng;
     let client_sk = proteus_crypto::sig::generate(&mut rng);
-    let ctx = Arc::new(ServerCtx::new(server_keys));
+    // Only one outer β carrier may exist, but it may host two
+    // concurrent inner sessions. The second SOCKS request below
+    // can succeed only if the real client binary reuses carrier #1.
+    let ctx = Arc::new(
+        ServerCtx::new(server_keys)
+            .with_max_connections(1)
+            .with_max_beta_sessions(2),
+    );
 
     // α TLS server.
     let acceptor =
@@ -296,7 +303,31 @@ async fn client_binary_dual_stack_routes_through_beta() {
         .expect("read echo ok");
     assert_eq!(buf.as_slice(), payload);
 
-    // 10. Cleanup.
+    // 10. Keep the first session open and start another. With the
+    // server's outer-carrier cap fixed at one, a pre-pooling client
+    // would create carrier #2 and be rejected. A successful second
+    // echo therefore proves production ClientCtx → try_beta reuse.
+    let mut second_tunnel = timeout(
+        STEP,
+        socks5_connect(socks_addr, "127.0.0.1", echo_addr.port()),
+    )
+    .await
+    .expect("second socks connect timed out")
+    .expect("second socks connect over warm β carrier");
+    let second_payload = b"second-concurrent-session-same-beta-carrier";
+    timeout(STEP, second_tunnel.write_all(second_payload))
+        .await
+        .unwrap()
+        .unwrap();
+    let mut second_buf = vec![0u8; second_payload.len()];
+    timeout(STEP, second_tunnel.read_exact(&mut second_buf))
+        .await
+        .expect("second echo timed out")
+        .expect("second echo ok");
+    assert_eq!(second_buf.as_slice(), second_payload);
+
+    // 11. Cleanup.
+    let _ = second_tunnel.shutdown().await;
     let _ = tunnel.shutdown().await;
     let _ = client.kill();
     let _ = client.wait();

@@ -24,7 +24,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rustls::crypto::CryptoProvider;
+use rustls::crypto::{CryptoProvider, GetRandomFailed, SecureRandom};
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
     ClientConfig, RootCertStore, ServerConfig,
@@ -138,7 +138,87 @@ static CHROME_SIG_ALGS: rustls::crypto::WebPkiSupportedAlgorithms =
         ],
     };
 
-fn proteus_chrome_provider() -> CryptoProvider {
+/// `rustls` asks its `SecureRandom` for the TLS 1.3 compatibility
+/// `session_id` before it asks for `client_random`. A knock-aware
+/// provider predicts the latter, computes the transcript-native
+/// session-id knock, then returns that same prediction when rustls
+/// requests `client_random`. Both TLS peers therefore hash identical
+/// ClientHello bytes; no post-serialization rewrite is involved.
+struct KnockSecureRandom {
+    inner: &'static dyn SecureRandom,
+    psk: proteus_handshake::knock::KnockPsk,
+    state_by_thread:
+        std::sync::Mutex<std::collections::HashMap<std::thread::ThreadId, KnockRngState>>,
+}
+
+/// rustls 0.23.40's ECH-GREASE ClientHello construction makes three
+/// 32-byte requests in this order: compatibility session_id, outer
+/// client_random, inner-hello random. The first two are coupled for
+/// the knock; the third must remain ordinary entropy.
+enum KnockRngState {
+    ReturnOuterRandom([u8; 32]),
+    PassThroughInnerRandom,
+}
+
+impl std::fmt::Debug for KnockSecureRandom {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KnockSecureRandom")
+            .field(
+                "pending_threads",
+                &self.state_by_thread.lock().map(|m| m.len()).ok(),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+impl SecureRandom for KnockSecureRandom {
+    fn fill(&self, buf: &mut [u8]) -> Result<(), GetRandomFailed> {
+        if buf.len() != proteus_handshake::knock::CLIENT_RANDOM_LEN {
+            return self.inner.fill(buf);
+        }
+
+        // ClientConnection::new constructs one ClientHello
+        // synchronously. ThreadId separates simultaneous creations on
+        // Tokio worker threads; the second 32-byte request on a thread
+        // is the client_random paired with the preceding session_id.
+        let thread = std::thread::current().id();
+        let mut states = self
+            .state_by_thread
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match states.remove(&thread) {
+            Some(KnockRngState::ReturnOuterRandom(predicted)) => {
+                buf.copy_from_slice(&predicted);
+                states.insert(thread, KnockRngState::PassThroughInnerRandom);
+                return Ok(());
+            }
+            Some(KnockRngState::PassThroughInnerRandom) => {
+                return self.inner.fill(buf);
+            }
+            None => {}
+        }
+
+        let mut predicted = [0u8; proteus_handshake::knock::CLIENT_RANDOM_LEN];
+        self.inner.fill(&mut predicted)?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let token = proteus_handshake::knock::compute_knock(&self.psk, &predicted, now);
+        let session_id = proteus_handshake::knock_wire::encode_session_id(&token);
+        buf.copy_from_slice(&session_id);
+        states.insert(thread, KnockRngState::ReturnOuterRandom(predicted));
+        Ok(())
+    }
+
+    fn fips(&self) -> bool {
+        self.inner.fips()
+    }
+}
+
+fn proteus_chrome_provider(
+    knock_psk: Option<proteus_handshake::knock::KnockPsk>,
+) -> CryptoProvider {
     use rustls::crypto::ring::cipher_suite::*;
     let mut p = rustls::crypto::ring::default_provider();
     // Chrome 124's cipher preference: TLS 1.3 first (128 → 256 →
@@ -160,6 +240,13 @@ fn proteus_chrome_provider() -> CryptoProvider {
     // Chrome-shaped signature_algorithms on the wire (8 schemes vs
     // rustls's 9 — drops ed25519 which Chrome doesn't advertise).
     p.signature_verification_algorithms = CHROME_SIG_ALGS;
+    if let Some(psk) = knock_psk {
+        p.secure_random = Box::leak(Box::new(KnockSecureRandom {
+            inner: p.secure_random,
+            psk,
+            state_by_thread: std::sync::Mutex::new(std::collections::HashMap::new()),
+        }));
+    }
     p
 }
 
@@ -302,10 +389,29 @@ pub fn build_acceptor(
 /// internal builder used by every public `build_connector_*` entry
 /// point so the wire-fingerprint stays consistent across deployment
 /// modes (webpki roots, pinned CA file, pinned CA DER).
-fn build_chrome_shaped_client_config(roots: RootCertStore) -> Result<ClientConfig, TlsError> {
-    let provider = Arc::new(proteus_chrome_provider());
+fn build_chrome_shaped_client_config(
+    roots: RootCertStore,
+    knock_psk: Option<proteus_handshake::knock::KnockPsk>,
+) -> Result<ClientConfig, TlsError> {
+    use rustls::client::{EchGreaseConfig, EchMode};
+    use rustls::crypto::aws_lc_rs::hpke::DH_KEM_P256_HKDF_SHA256_AES_128;
+    use rustls::crypto::hpke::Hpke;
+
+    let provider = Arc::new(proteus_chrome_provider(knock_psk));
+    // Chrome sends the ECH extension (0xfe0d) even when the target
+    // has no usable ECHConfig, using a freshly generated placeholder
+    // HPKE key to prevent extension ossification. rustls exposes this
+    // exact GREASE mode. It does not hide SNI — full ECH still needs
+    // a DNS HTTPS record and an ECH-capable public frontend — but it
+    // removes one stable "rustls, not a browser" classifier.
+    let (placeholder_key, _placeholder_secret) =
+        DH_KEM_P256_HKDF_SHA256_AES_128.generate_key_pair()?;
+    let ech_grease = EchMode::Grease(EchGreaseConfig::new(
+        DH_KEM_P256_HKDF_SHA256_AES_128,
+        placeholder_key,
+    ));
     let mut config = ClientConfig::builder_with_provider(provider)
-        .with_protocol_versions(&[&rustls::version::TLS13])
+        .with_ech(ech_grease)
         .map_err(|e| TlsError::BadServerName(format!("bad TLS provider config: {e}")))?
         .with_root_certificates(roots)
         .with_no_client_auth();
@@ -335,7 +441,18 @@ pub fn build_connector_webpki_roots() -> Result<TlsConnector, TlsError> {
     install_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = build_chrome_shaped_client_config(roots)?;
+    let config = build_chrome_shaped_client_config(roots, None)?;
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+/// Build the webpki connector with a transcript-native pre-TLS knock.
+pub fn build_connector_webpki_roots_with_knock(
+    psk: proteus_handshake::knock::KnockPsk,
+) -> Result<TlsConnector, TlsError> {
+    install_default_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = build_chrome_shaped_client_config(roots, Some(psk))?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -348,7 +465,25 @@ pub fn build_connector_with_ca(ca_path: &Path) -> Result<TlsConnector, TlsError>
     for cert in chain {
         roots.add(cert)?;
     }
-    let config = build_chrome_shaped_client_config(roots)?;
+    let config = build_chrome_shaped_client_config(roots, None)?;
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+/// Build a pinned-CA connector with a transcript-native pre-TLS
+/// knock. The returned connector is safe to share across concurrent
+/// dials; per-thread prediction state separates synchronous
+/// ClientHello construction.
+pub fn build_connector_with_ca_and_knock(
+    ca_path: &Path,
+    psk: proteus_handshake::knock::KnockPsk,
+) -> Result<TlsConnector, TlsError> {
+    install_default_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    let chain = load_cert_chain(ca_path)?;
+    for cert in chain {
+        roots.add(cert)?;
+    }
+    let config = build_chrome_shaped_client_config(roots, Some(psk))?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -360,7 +495,20 @@ pub fn build_connector_with_ca_der(ca: CertificateDer<'static>) -> Result<TlsCon
     install_default_crypto_provider();
     let mut roots = RootCertStore::empty();
     roots.add(ca)?;
-    let config = build_chrome_shaped_client_config(roots)?;
+    let config = build_chrome_shaped_client_config(roots, None)?;
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+/// In-memory pinned-CA variant used by wire-level and end-to-end
+/// knock tests.
+pub fn build_connector_with_ca_der_and_knock(
+    ca: CertificateDer<'static>,
+    psk: proteus_handshake::knock::KnockPsk,
+) -> Result<TlsConnector, TlsError> {
+    install_default_crypto_provider();
+    let mut roots = RootCertStore::empty();
+    roots.add(ca)?;
+    let config = build_chrome_shaped_client_config(roots, Some(psk))?;
     Ok(TlsConnector::from(Arc::new(config)))
 }
 
@@ -761,6 +909,138 @@ mod tests {
         install_default_crypto_provider();
         install_default_crypto_provider();
         install_default_crypto_provider();
+    }
+
+    fn mint_local_tls_pair() -> (
+        CertificateDer<'static>,
+        TlsAcceptor,
+        rustls::pki_types::ServerName<'static>,
+    ) {
+        use rcgen::generate_simple_self_signed;
+        use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let ck = generate_simple_self_signed(vec!["localhost".to_string()]).unwrap();
+        let cert = CertificateDer::from(ck.cert.der().to_vec());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(ck.key_pair.serialize_der()));
+        let acceptor = build_acceptor(vec![cert.clone()], key).unwrap();
+        (cert, acceptor, server_name("localhost").unwrap())
+    }
+
+    #[tokio::test]
+    async fn transcript_native_knock_passes_gate_and_tls_handshake() {
+        use proteus_handshake::knock::{KnockPsk, KNOCK_PSK_LEN};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let psk = KnockPsk::from_bytes([0x7Bu8; KNOCK_PSK_LEN]);
+        let (ca, acceptor, name) = mint_local_tls_pair();
+        let connector = build_connector_with_ca_der_and_knock(ca, psk.clone()).unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+
+        let server = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let cfg = crate::knock_dispatch::DispatchConfig {
+                psk: Some(psk),
+                cover_endpoint: None,
+                ..Default::default()
+            };
+            let routed = crate::knock_dispatch::dispatch_or_local_terminate(tcp, &cfg, now).await;
+            let stream = match routed {
+                crate::knock_dispatch::PathARouting::TerminateLocally(stream) => stream,
+                other => panic!("valid transcript-native knock must terminate locally: {other:?}"),
+            };
+            let mut tls = acceptor
+                .accept(stream)
+                .await
+                .expect("server must accept the exact ClientHello bytes inspected by the gate");
+            let mut byte = [0u8; 1];
+            tls.read_exact(&mut byte).await.unwrap();
+            assert_eq!(byte, [0xA5]);
+            tls.write_all(&[0x5A]).await.unwrap();
+        });
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let mut tls = connector
+            .connect(name, tcp)
+            .await
+            .expect("knock-aware ClientHello must remain valid in rustls transcript");
+        tls.write_all(&[0xA5]).await.unwrap();
+        let mut reply = [0u8; 1];
+        tls.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, [0x5A]);
+        server.await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn shared_knock_connector_survives_concurrent_clienthello_construction() {
+        use proteus_handshake::knock::{KnockPsk, KNOCK_PSK_LEN};
+        use std::sync::Arc;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        const CONNECTIONS: usize = 32;
+        let psk = KnockPsk::from_bytes([0x3Cu8; KNOCK_PSK_LEN]);
+        let (ca, acceptor, name) = mint_local_tls_pair();
+        let connector = Arc::new(build_connector_with_ca_der_and_knock(ca, psk.clone()).unwrap());
+        let dispatch = Arc::new(crate::knock_dispatch::DispatchConfig {
+            psk: Some(psk),
+            cover_endpoint: None,
+            ..Default::default()
+        });
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server = tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            for _ in 0..CONNECTIONS {
+                let (tcp, _) = listener.accept().await.unwrap();
+                let cfg = Arc::clone(&dispatch);
+                let acceptor = acceptor.clone();
+                tasks.spawn(async move {
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_secs();
+                    let routed =
+                        crate::knock_dispatch::dispatch_or_local_terminate(tcp, &cfg, now).await;
+                    let stream = match routed {
+                        crate::knock_dispatch::PathARouting::TerminateLocally(stream) => stream,
+                        other => panic!("every fresh concurrent knock must pass: {other:?}"),
+                    };
+                    let mut tls = acceptor.accept(stream).await.unwrap();
+                    let mut byte = [0u8; 1];
+                    tls.read_exact(&mut byte).await.unwrap();
+                    tls.write_all(&byte).await.unwrap();
+                });
+            }
+            while let Some(result) = tasks.join_next().await {
+                result.unwrap();
+            }
+        });
+
+        let mut clients = tokio::task::JoinSet::new();
+        for i in 0..CONNECTIONS {
+            let connector = Arc::clone(&connector);
+            let name = name.clone();
+            clients.spawn(async move {
+                let tcp = TcpStream::connect(addr).await.unwrap();
+                let mut tls = connector.connect(name, tcp).await.unwrap();
+                let sent = [i as u8];
+                tls.write_all(&sent).await.unwrap();
+                let mut echoed = [0u8; 1];
+                tls.read_exact(&mut echoed).await.unwrap();
+                assert_eq!(echoed, sent);
+            });
+        }
+        while let Some(result) = clients.join_next().await {
+            result.unwrap();
+        }
+        server.await.unwrap();
     }
 
     #[test]
