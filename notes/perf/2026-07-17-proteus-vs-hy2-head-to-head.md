@@ -448,3 +448,10 @@ declared-loss total 仍介於 64.90%–74.06%，Proteus median 也沒有
 threshold 靜態掃描正式終止。下一階段需比較 carrier-level probe
 的 completion time、ACK/pacing 狀態與 recovery counters，再由
 selector 換 carrier profile；不能從單一 loss ratio 直接推導參數。
+
+補齊 server path 後，threshold `3` 的 client/server declared-loss
+total 是 77.98%／67.39%；threshold `10` 是 76.71%／70.20%。
+client 只改善 1.27 個百分點，server 反而惡化 2.81 個百分點，
+解釋了 round-trip 吞吐為何沒有隨 client 指標同步改善。selector
+必須逐方向評分，且 declared loss 只能觸發 probe，最後仍由 matched
+completion time 與 real-loss veto 決策。
