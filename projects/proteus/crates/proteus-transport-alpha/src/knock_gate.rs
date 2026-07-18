@@ -21,9 +21,9 @@
 //!     (the common case for non-Proteus clients including
 //!     probers) from "knock present but invalid" (likely a
 //!     misconfigured client or a sophisticated forge attempt).
-//!   * `Drop { reason }` — gate hit an irrecoverable error
-//!     (peer closed mid-read, timeout, non-TLS bytes on the
-//!     port). Caller closes the connection silently.
+//!   * Sniff failures — malformed, partial, slow, and non-TLS
+//!     inputs are also routed to cover with their exact consumed
+//!     prefix. A local drop would expose an active-probing oracle.
 //!
 //! ## Gate-disabled mode
 //!
@@ -81,6 +81,29 @@ pub enum GateVerdict {
 /// support throttled per-reason logging at the call site.
 #[derive(Debug)]
 pub enum CoverReason {
+    /// Peer closed before a complete ClientHello was available.
+    IncompleteClientHello {
+        /// Bytes consumed before EOF.
+        bytes_read: usize,
+    },
+    /// The sniff deadline fired. The captured prefix, including
+    /// an empty prefix, is still replayed to cover.
+    PeekTimeout {
+        /// Bytes consumed before timeout.
+        bytes_read: usize,
+    },
+    /// The bytes were not a parseable TLS ClientHello. They are
+    /// forwarded verbatim so plaintext and malformed probes see
+    /// the same endpoint behavior as a direct cover connection.
+    MalformedClientHello {
+        /// Parser detail for throttled operator logs.
+        detail: String,
+    },
+    /// The inbound read itself failed after consuming a prefix.
+    SniffIo {
+        /// Error detail for throttled operator logs.
+        detail: String,
+    },
     /// session_id wasn't the expected 32 bytes — the common
     /// case for non-Proteus clients (a real curl, a probe with
     /// random session_id length, a TLS 1.3 stack that uses
@@ -193,25 +216,37 @@ where
 
     let sniffed = match sniff_client_hello_with_limits(reader, peek_limit, peek_timeout).await {
         Ok(s) => s,
-        Err(SniffError::ConnectionClosed { bytes }) => {
-            return GateVerdict::Drop {
-                reason: DropReason::ConnectionClosed { bytes_read: bytes },
+        Err(SniffError::ConnectionClosed { peeked_bytes }) => {
+            let bytes_read = peeked_bytes.len();
+            return GateVerdict::RouteToCover {
+                sniffed: raw_sniffed(peeked_bytes),
+                reason: CoverReason::IncompleteClientHello { bytes_read },
             };
         }
-        Err(SniffError::Timeout(_)) => {
-            return GateVerdict::Drop {
-                reason: DropReason::Timeout,
+        Err(SniffError::Timeout { peeked_bytes, .. }) => {
+            let bytes_read = peeked_bytes.len();
+            return GateVerdict::RouteToCover {
+                sniffed: raw_sniffed(peeked_bytes),
+                reason: CoverReason::PeekTimeout { bytes_read },
             };
         }
-        Err(SniffError::BadRecord(detail)) => {
-            return GateVerdict::Drop {
-                reason: DropReason::NotTls { detail },
+        Err(SniffError::BadRecord {
+            detail,
+            peeked_bytes,
+        }) => {
+            return GateVerdict::RouteToCover {
+                sniffed: raw_sniffed(peeked_bytes),
+                reason: CoverReason::MalformedClientHello { detail },
             };
         }
-        Err(SniffError::Io(e)) => {
-            return GateVerdict::Drop {
-                reason: DropReason::Io {
-                    detail: e.to_string(),
+        Err(SniffError::Io {
+            source,
+            peeked_bytes,
+        }) => {
+            return GateVerdict::RouteToCover {
+                sniffed: raw_sniffed(peeked_bytes),
+                reason: CoverReason::SniffIo {
+                    detail: source.to_string(),
                 },
             };
         }
@@ -261,6 +296,15 @@ where
             sniffed,
             reason: CoverReason::TimestampSkew { skew_secs: skew },
         },
+    }
+}
+
+fn raw_sniffed(peeked_bytes: Vec<u8>) -> SniffedClientHello {
+    SniffedClientHello {
+        peeked_bytes,
+        record_len: 0,
+        client_random: [0u8; 32],
+        session_id: Vec::new(),
     }
 }
 
@@ -424,7 +468,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_drops_on_connection_closed_mid_clienthello() {
+    async fn gate_routes_partial_clienthello_to_cover() {
         let psk = psk_alpha();
         let now = 1_715_900_000u64;
         let truncated = vec![0x16, 0x03]; // 2 bytes only
@@ -433,8 +477,9 @@ mod tests {
         assert!(
             matches!(
                 verdict,
-                GateVerdict::Drop {
-                    reason: DropReason::ConnectionClosed { bytes_read: 2 }
+                GateVerdict::RouteToCover {
+                    reason: CoverReason::IncompleteClientHello { bytes_read: 2 },
+                    ..
                 }
             ),
             "got {verdict:?}"
@@ -442,7 +487,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_drops_on_non_tls_bytes() {
+    async fn gate_routes_non_tls_bytes_to_cover() {
         let psk = psk_alpha();
         let now = 1_715_900_000u64;
         let mut cursor = Cursor::new(b"GET / HTTP/1.1\r\n\r\n".to_vec());
@@ -450,8 +495,9 @@ mod tests {
         assert!(
             matches!(
                 verdict,
-                GateVerdict::Drop {
-                    reason: DropReason::NotTls { .. }
+                GateVerdict::RouteToCover {
+                    reason: CoverReason::MalformedClientHello { .. },
+                    ..
                 }
             ),
             "got {verdict:?}"
@@ -478,7 +524,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gate_drops_on_peer_stall() {
+    async fn gate_routes_peer_stall_to_cover() {
         // PendingReader stalls forever. Gate's deadline fires.
         struct PendingReader;
         impl AsyncRead for PendingReader {
@@ -503,8 +549,9 @@ mod tests {
         assert!(
             matches!(
                 verdict,
-                GateVerdict::Drop {
-                    reason: DropReason::Timeout
+                GateVerdict::RouteToCover {
+                    reason: CoverReason::PeekTimeout { bytes_read: 0 },
+                    ..
                 }
             ),
             "got {verdict:?}"

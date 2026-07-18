@@ -96,36 +96,47 @@ pub struct SniffedClientHello {
     pub session_id: Vec<u8>,
 }
 
-/// Errors from the sniffer. The gate distinguishes these to
-/// drive different operational responses:
-///   * `Timeout` → operator-throttled INFO log (probers hang
-///     constantly; not page-worthy).
-///   * `ConnectionClosed` → same — common for half-open scans.
-///   * `BadRecord` → operator-throttled WARN log (someone is
-///     sending malformed bytes — probably a buggy client or
-///     a misconfiguration).
-///   * `Io` → unexpected (kernel-level failure); operator
-///     INFO log + drop connection.
+/// Errors from the sniffer. Every variant retains the bytes
+/// already consumed from the peer. The Path A dispatcher MUST
+/// replay those bytes to the cover endpoint: dropping malformed,
+/// partial, or slow probes locally would expose a differential
+/// active-probing oracle.
 #[derive(thiserror::Error, Debug)]
 pub enum SniffError {
     /// Peek didn't complete within the configured deadline.
-    #[error("peek timed out after {0:?}")]
-    Timeout(Duration),
+    #[error("peek timed out after {duration:?}")]
+    Timeout {
+        /// Configured wall-clock deadline.
+        duration: Duration,
+        /// Bytes consumed before the deadline fired.
+        peeked_bytes: Vec<u8>,
+    },
     /// Peer closed the connection before sending enough bytes
     /// to even include the TLS record header.
-    #[error("connection closed before ClientHello arrived (got {bytes} bytes, need at least 5)")]
+    #[error("connection closed before ClientHello arrived")]
     ConnectionClosed {
-        /// How many bytes were read before EOF.
-        bytes: usize,
+        /// Bytes consumed before EOF.
+        peeked_bytes: Vec<u8>,
     },
     /// TLS record / handshake / ClientHello parsing failed.
     /// Likely a non-TLS protocol on this port (e.g. HTTP CONNECT
     /// without TLS, plaintext SSH probe, etc.).
-    #[error("malformed ClientHello: {0}")]
-    BadRecord(String),
+    #[error("malformed ClientHello: {detail}")]
+    BadRecord {
+        /// Parser diagnostic for operator logs.
+        detail: String,
+        /// Exact bytes rejected by the parser.
+        peeked_bytes: Vec<u8>,
+    },
     /// Underlying I/O failure.
-    #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("io: {source}")]
+    Io {
+        /// Kernel/runtime error.
+        #[source]
+        source: std::io::Error,
+        /// Bytes consumed before the error.
+        peeked_bytes: Vec<u8>,
+    },
 }
 
 /// Sniff with default limits ([`DEFAULT_PEEK_LIMIT`] +
@@ -147,19 +158,40 @@ pub async fn sniff_client_hello_with_limits<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let read_fut = read_full_clienthello(reader, peek_limit);
-    let peeked_bytes = match tokio::time::timeout(peek_timeout, read_fut).await {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(e)) => return Err(e),
-        Err(_) => return Err(SniffError::Timeout(peek_timeout)),
+    let mut peeked_bytes = Vec::with_capacity(peek_limit);
+    let read_fut = read_full_clienthello(reader, peek_limit, &mut peeked_bytes);
+    let connection_closed = match tokio::time::timeout(peek_timeout, read_fut).await {
+        Ok(Ok(closed)) => closed,
+        Ok(Err(source)) => {
+            return Err(SniffError::Io {
+                source,
+                peeked_bytes,
+            });
+        }
+        Err(_) => {
+            return Err(SniffError::Timeout {
+                duration: peek_timeout,
+                peeked_bytes,
+            });
+        }
     };
+    if connection_closed && peeked_bytes.len() < 5 {
+        return Err(SniffError::ConnectionClosed { peeked_bytes });
+    }
 
     // Parse via the existing JA4 components extractor — it
     // gives us client_random + session_id directly without
     // duplicating TLS-record parsing here.
     let (_, components) =
-        proteus_fingerprint::ja4::parse_client_hello_with_components(&peeked_bytes, 't')
-            .map_err(|e| SniffError::BadRecord(format!("{e}")))?;
+        match proteus_fingerprint::ja4::parse_client_hello_with_components(&peeked_bytes, 't') {
+            Ok(parsed) => parsed,
+            Err(e) => {
+                return Err(SniffError::BadRecord {
+                    detail: format!("{e}"),
+                    peeked_bytes,
+                });
+            }
+        };
 
     // Record length the parser implicitly walked.
     // TLS record: bytes 0..5 are header, bytes 3..5 are the
@@ -178,35 +210,45 @@ where
 /// Read until we have at least one full TLS record (the
 /// ClientHello), OR `limit` bytes total, OR EOF. Returns the
 /// raw bytes collected.
-async fn read_full_clienthello<R>(reader: &mut R, limit: usize) -> Result<Vec<u8>, SniffError>
+async fn read_full_clienthello<R>(
+    reader: &mut R,
+    limit: usize,
+    buf: &mut Vec<u8>,
+) -> Result<bool, std::io::Error>
 where
     R: AsyncRead + Unpin,
 {
-    let mut buf = vec![0u8; limit];
-    let mut total = 0usize;
+    let mut chunk = [0u8; 1024];
     loop {
-        if total >= buf.len() {
+        if buf.len() >= limit {
             // Bumping into the cap. Returning what we have lets
             // the parser surface BadRecord if the record header
             // claimed more bytes than we read.
-            break;
+            return Ok(false);
         }
-        let n = reader.read(&mut buf[total..]).await?;
+        let remaining = limit - buf.len();
+        let read_len = remaining.min(chunk.len());
+        let n = reader.read(&mut chunk[..read_len]).await?;
         if n == 0 {
-            // EOF before any data or before the record completes.
-            if total < 5 {
-                return Err(SniffError::ConnectionClosed { bytes: total });
-            }
-            break;
+            return Ok(true);
         }
-        total += n;
+        buf.extend_from_slice(&chunk[..n]);
         // Header arrived — check if record body fits in what
         // we've already read.
-        if total >= 5 {
+        if buf.len() >= 5 {
+            // Reject an unmistakably non-TLS header immediately.
+            // Without this check, plaintext `GET /` is interpreted
+            // as a record length of 0x202f and waits for the full
+            // peek timeout before cover forwarding. A direct cover
+            // server responds or closes immediately, so that delay
+            // becomes an active-probing timing oracle.
+            if buf[0] != 0x16 || buf[1] != 0x03 {
+                return Ok(false);
+            }
             let record_body_len = u16::from_be_bytes([buf[3], buf[4]]) as usize;
             let full_record = 5 + record_body_len;
-            if total >= full_record {
-                break;
+            if buf.len() >= full_record {
+                return Ok(false);
             }
             // If the header claims more than our cap, we still
             // try to fill what we can — the parser will surface
@@ -222,14 +264,13 @@ where
             // and the parser rejects it as BadRecord.
         }
     }
-    buf.truncate(total);
-    Ok(buf)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use tokio::io::AsyncWriteExt;
 
     /// Build a minimal-but-valid TLS 1.3 ClientHello record.
     /// Mirrors the helper in `proteus-handshake::tests::knock_wire_e2e`
@@ -326,10 +367,12 @@ mod tests {
         // even the TLS record header (5 bytes).
         let mut cursor = Cursor::new(vec![0x16, 0x03]);
         let err = sniff_client_hello(&mut cursor).await.unwrap_err();
-        assert!(
-            matches!(err, SniffError::ConnectionClosed { bytes: 2 }),
-            "got {err:?}"
-        );
+        match err {
+            SniffError::ConnectionClosed { peeked_bytes } => {
+                assert_eq!(peeked_bytes, vec![0x16, 0x03]);
+            }
+            other => panic!("expected ConnectionClosed, got {other:?}"),
+        }
     }
 
     #[tokio::test]
@@ -337,9 +380,31 @@ mod tests {
         // HTTP GET probe — looks like text, parses as TLS
         // record-type 0x47 ('G') which the JA4 parser rejects
         // as BadRecord.
-        let mut cursor = Cursor::new(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec());
+        let payload = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
+        let mut cursor = Cursor::new(payload.clone());
         let err = sniff_client_hello(&mut cursor).await.unwrap_err();
-        assert!(matches!(err, SniffError::BadRecord(_)), "got {err:?}");
+        match err {
+            SniffError::BadRecord { peeked_bytes, .. } => {
+                assert_eq!(peeked_bytes, payload);
+            }
+            other => panic!("expected BadRecord, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn sniff_rejects_non_tls_without_waiting_for_eof_or_deadline() {
+        let payload = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
+        let (mut writer, mut reader) = tokio::io::duplex(256);
+        writer.write_all(&payload).await.unwrap();
+
+        let err = tokio::time::timeout(
+            Duration::from_millis(100),
+            sniff_client_hello_with_limits(&mut reader, DEFAULT_PEEK_LIMIT, Duration::from_secs(3)),
+        )
+        .await
+        .expect("plaintext probe must not wait for the 3s sniff deadline")
+        .unwrap_err();
+        assert!(matches!(err, SniffError::BadRecord { .. }), "got {err:?}");
     }
 
     #[tokio::test]
@@ -364,7 +429,16 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(matches!(err, SniffError::Timeout(_)), "got {err:?}");
+        assert!(
+            matches!(
+                err,
+                SniffError::Timeout {
+                    ref peeked_bytes,
+                    ..
+                } if peeked_bytes.is_empty()
+            ),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]
@@ -435,7 +509,7 @@ mod tests {
         // we did NOT allocate gigabytes.
         assert!(matches!(
             err,
-            SniffError::BadRecord(_) | SniffError::ConnectionClosed { .. }
+            SniffError::BadRecord { .. } | SniffError::ConnectionClosed { .. }
         ));
     }
 

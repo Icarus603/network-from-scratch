@@ -24,8 +24,8 @@
 //!       stream, &dispatch_cfg, now_unix_seconds,
 //!   ).await {
 //!       PathARouting::TerminateLocally(s) => s,
-//!       PathARouting::RoutedToCover => return,  // gate handled it
-//!       PathARouting::Dropped => return,
+//!       PathARouting::RoutedToCover { .. } => return, // gate handled it
+//!       PathARouting::Dropped { .. } => return,
 //!   };
 //!   // ... existing handle_connection path with the stream ...
 //! ```
@@ -124,9 +124,10 @@ pub enum PathARouting {
         /// cover endpoint refused, mid-flight network error).
         splice_outcome: std::io::Result<()>,
     },
-    /// The connection was unrecoverably bad (timeout, EOF
-    /// mid-ClientHello, non-TLS bytes). The dispatcher
-    /// dropped it; caller MUST NOT touch the stream.
+    /// Reserved for an unrecoverable local failure. Sniff
+    /// timeout, EOF, malformed ClientHello, and non-TLS input
+    /// are cover-routed; they must never reach this arm because
+    /// a local drop would expose an active-probing oracle.
     Dropped {
         /// Why we dropped. Drives per-reason throttled logging.
         reason: DropReason,
@@ -526,38 +527,62 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dispatch_drops_on_non_tls_bytes() {
+    async fn dispatch_routes_non_tls_bytes_to_cover_verbatim() {
+        let cover_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let cover_addr = cover_listener.local_addr().unwrap();
+        let payload = b"GET / HTTP/1.1\r\nHost: x\r\n\r\n".to_vec();
+        let expected = payload.clone();
+        let expected_len = expected.len();
+        let cover_response = b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n".to_vec();
+        let expected_response = cover_response.clone();
+        let cover = tokio::spawn(async move {
+            let (mut stream, _) = cover_listener.accept().await.unwrap();
+            let mut received = vec![0u8; expected_len];
+            stream.read_exact(&mut received).await.unwrap();
+            stream.write_all(&cover_response).await.unwrap();
+            stream.shutdown().await.unwrap();
+            received
+        });
+
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let psk = psk_alpha();
 
         let client_handle = tokio::spawn(async move {
             let mut c = TcpStream::connect(addr).await.unwrap();
-            c.write_all(b"GET / HTTP/1.1\r\nHost: x\r\n\r\n")
+            c.write_all(&payload).await.unwrap();
+            let mut response = Vec::new();
+            tokio::time::timeout(Duration::from_millis(500), c.read_to_end(&mut response))
                 .await
+                .expect("plaintext probe must not wait for the 3s sniff timeout")
                 .unwrap();
-            c.shutdown().await.unwrap();
+            response
         });
 
         let (server_stream, _) = listener.accept().await.unwrap();
         let cfg = DispatchConfig {
             psk: Some(psk),
-            cover_endpoint: Some("127.0.0.1:1".to_string()), // unused
+            cover_endpoint: Some(cover_addr.to_string()),
             peek_limit: DEFAULT_PEEK_LIMIT,
             peek_timeout: DEFAULT_PEEK_TIMEOUT,
             ..Default::default()
         };
         let routing = dispatch_or_local_terminate(server_stream, &cfg, 1_715_900_000u64).await;
         match routing {
-            PathARouting::Dropped { reason } => {
+            PathARouting::RoutedToCover {
+                reason,
+                splice_outcome,
+            } => {
                 assert!(
-                    matches!(reason, DropReason::NotTls { .. }),
+                    matches!(reason, CoverReason::MalformedClientHello { .. }),
                     "got {reason:?}"
                 );
+                splice_outcome.unwrap();
             }
-            other => panic!("expected Dropped, got {other:?}"),
+            other => panic!("expected RoutedToCover, got {other:?}"),
         }
-        client_handle.await.unwrap();
+        assert_eq!(client_handle.await.unwrap(), expected_response);
+        assert_eq!(cover.await.unwrap(), expected);
     }
 
     #[tokio::test]
