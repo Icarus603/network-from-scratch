@@ -54,6 +54,7 @@ pub mod brutal;
 pub mod client;
 pub mod datagram;
 pub mod error;
+pub mod probe;
 pub mod recovery;
 pub mod server;
 

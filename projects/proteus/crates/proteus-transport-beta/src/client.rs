@@ -163,6 +163,8 @@ pub struct BetaClientConnection {
     connection: quinn::Connection,
     endpoint: quinn::Endpoint,
     server_addr: SocketAddr,
+    authenticated: Arc<std::sync::atomic::AtomicBool>,
+    probe_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 /// Stable, transport-owned subset of Quinn's cumulative connection
@@ -251,6 +253,118 @@ impl BetaClientConnection {
             .set_loss_detection_thresholds(packet_threshold.max(3), time_threshold.max(1.125));
     }
 
+    /// Run one bounded matched probe on this already-authenticated carrier.
+    ///
+    /// Probes are serialized because Quinn's counters are connection-wide;
+    /// overlapping probes would make their before/after deltas ambiguous.
+    /// The server refuses this control stream until a normal inner Proteus
+    /// handshake has authenticated the carrier.
+    pub async fn run_authenticated_probe(
+        &self,
+        direction: crate::recovery::RecoveryDirection,
+        profile: crate::recovery::RecoveryProfile,
+        payload_bytes: u32,
+    ) -> Result<crate::probe::ProbeResult, BetaError> {
+        if !self
+            .authenticated
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(BetaError::Io(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "β: matched probe requires an authenticated carrier",
+            )));
+        }
+        let _guard = self.probe_lock.lock().await;
+        tokio::time::timeout(
+            crate::probe::PROBE_TIMEOUT,
+            crate::probe::run_client_probe(&self.connection, direction, profile, payload_bytes),
+        )
+        .await
+        .map_err(|_| {
+            BetaError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "β: matched probe timed out",
+            ))
+        })?
+        .map_err(BetaError::Io)
+    }
+
+    /// Execute one alternating A/B matched round and apply its fail-closed
+    /// decision to the endpoint that sends in `selector.direction()`.
+    pub async fn run_matched_recovery_round(
+        &self,
+        selector: &mut crate::recovery::RecoverySelector,
+        round: u64,
+    ) -> Result<crate::recovery::RecoveryDecision, BetaError> {
+        let direction = selector.direction();
+        let mut decision = crate::recovery::RecoveryDecision::Collecting {
+            matched_rounds: 0,
+            required_rounds: 1,
+        };
+        for profile in crate::recovery::RecoverySelector::profile_order(round) {
+            let result = self
+                .run_authenticated_probe(direction, profile, crate::probe::PROBE_PAYLOAD_BYTES)
+                .await;
+            let observation = match result {
+                Ok(probe) => crate::recovery::RecoveryObservation {
+                    round,
+                    profile,
+                    payload_bytes: probe.payload_bytes,
+                    completion_time: Some(probe.completion_time),
+                    counters: probe.counters,
+                },
+                Err(error) => {
+                    tracing::warn!(
+                        ?direction,
+                        ?profile,
+                        %error,
+                        "β matched recovery probe failed; recording fail-closed observation"
+                    );
+                    crate::recovery::RecoveryObservation {
+                        round,
+                        profile,
+                        payload_bytes: u64::from(crate::probe::PROBE_PAYLOAD_BYTES),
+                        completion_time: None,
+                        counters: crate::recovery::RecoveryCounters::default(),
+                    }
+                }
+            };
+            decision = selector.observe(observation).map_err(|error| {
+                BetaError::Io(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("β recovery selector rejected observation: {error:?}"),
+                ))
+            })?;
+        }
+
+        let selected = decision.profile();
+        match direction {
+            crate::recovery::RecoveryDirection::ClientToServer => {
+                let thresholds = selector.thresholds_for(selected);
+                self.set_loss_detection_thresholds(
+                    thresholds.packet_threshold,
+                    thresholds.time_threshold,
+                );
+            }
+            crate::recovery::RecoveryDirection::ServerToClient => {
+                let _guard = self.probe_lock.lock().await;
+                tokio::time::timeout(
+                    crate::probe::PROBE_TIMEOUT,
+                    crate::probe::apply_remote_profile(&self.connection, selected),
+                )
+                .await
+                .map_err(|_| {
+                    BetaError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "β: remote recovery profile apply timed out",
+                    ))
+                })?
+                .map_err(BetaError::Io)?;
+            }
+        }
+        Ok(decision)
+    }
+
     /// Open one independently authenticated Proteus session.
     ///
     /// The stream ID is included as TLS-exporter context. A relay
@@ -289,7 +403,7 @@ impl BetaClientConnection {
                 ))
             })?;
 
-        tokio::time::timeout(
+        let session = tokio::time::timeout(
             handshake_timeout,
             handshake_over_split_bound(recv, send, &cfg, Some(*binding)),
         )
@@ -300,7 +414,10 @@ impl BetaClientConnection {
                 "β: inner Proteus handshake timed out",
             ))
         })?
-        .map_err(BetaError::from)
+        .map_err(BetaError::from)?;
+        self.authenticated
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(session)
     }
 
     /// Close the carrier with the wire-indistinguishable normal code.
@@ -326,6 +443,8 @@ impl BetaClientSession {
                 connection: self.connection,
                 endpoint: self.endpoint,
                 server_addr: self.server_addr,
+                authenticated: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                probe_lock: Arc::new(tokio::sync::Mutex::new(())),
             },
         )
     }
@@ -784,5 +903,7 @@ pub async fn connect_carrier_with_timeout_perf_cached_crypto(
         connection: conn,
         endpoint,
         server_addr,
+        authenticated: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        probe_lock: Arc::new(tokio::sync::Mutex::new(())),
     })
 }

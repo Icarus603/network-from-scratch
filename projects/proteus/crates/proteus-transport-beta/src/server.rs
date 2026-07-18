@@ -8,9 +8,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use proteus_transport_alpha::client::{CHANNEL_BINDING_LEN, TLS_EXPORTER_LABEL};
-use proteus_transport_alpha::server::{
-    admission_ok, handshake_over_split_bound, user_admission_ok, ConnGate, ServerCtx,
-};
+use proteus_transport_alpha::server::{admission_ok, user_admission_ok, ConnGate, ServerCtx};
 use proteus_transport_alpha::session::AlphaSession;
 
 /// Record one β-profile "would have cover-forwarded" event in the
@@ -371,7 +369,7 @@ where
                                 }
                             }
                         };
-                        let (send, recv) = match accepted {
+                        let (mut send, mut recv) = match accepted {
                             Ok(pair) => pair,
                             Err(quinn::ConnectionError::LocallyClosed) => return,
                             Err(e) => {
@@ -425,6 +423,83 @@ where
                             let stats_before =
                                 beta_session_stats_enabled().then(|| stream_conn.stats());
 
+                            // Read only the fixed dispatch marker. Ordinary
+                            // inner-handshake bytes are restored through the
+                            // prefix-aware driver below. A probe marker is
+                            // honored only after this exact QUIC carrier has
+                            // completed and admitted a full Proteus handshake.
+                            let mut dispatch_prefix = vec![0u8; crate::probe::CONTROL_MARKER.len()];
+                            match tokio::time::timeout(
+                                stream_ctx.handshake_deadline(),
+                                recv.read_exact(&mut dispatch_prefix),
+                            )
+                            .await
+                            {
+                                Ok(Ok(_)) => {}
+                                Ok(Err(error)) => {
+                                    warn!(
+                                        remote = %remote,
+                                        stream = %stream_id,
+                                        error = %error,
+                                        "β: stream closed before dispatch marker"
+                                    );
+                                    return;
+                                }
+                                Err(_) => {
+                                    warn!(
+                                        remote = %remote,
+                                        stream = %stream_id,
+                                        "β: stream dispatch marker exceeded deadline"
+                                    );
+                                    record_probe_anomaly(&stream_ctx, &remote);
+                                    return;
+                                }
+                            }
+
+                            if dispatch_prefix == crate::probe::CONTROL_MARKER {
+                                if !stream_authenticated.load(std::sync::atomic::Ordering::Acquire)
+                                {
+                                    let notified = stream_authenticated_notify.notified();
+                                    if tokio::time::timeout(
+                                        stream_ctx.handshake_deadline(),
+                                        notified,
+                                    )
+                                    .await
+                                    .is_err()
+                                        || !stream_authenticated
+                                            .load(std::sync::atomic::Ordering::Acquire)
+                                    {
+                                        record_probe_anomaly(&stream_ctx, &remote);
+                                        return;
+                                    }
+                                }
+                                if let Err(error) = tokio::time::timeout(
+                                    crate::probe::PROBE_TIMEOUT,
+                                    crate::probe::handle_control_stream(
+                                        &mut recv,
+                                        &mut send,
+                                        &stream_conn,
+                                    ),
+                                )
+                                .await
+                                .map_err(|_| {
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::TimedOut,
+                                        "β matched probe timed out",
+                                    )
+                                })
+                                .and_then(std::convert::identity)
+                                {
+                                    warn!(
+                                        remote = %remote,
+                                        stream = %stream_id,
+                                        error = %error,
+                                        "β: authenticated matched probe failed"
+                                    );
+                                }
+                                return;
+                            }
+
                             let context = crate::stream_exporter_context(stream_id);
                             let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
                             if stream_conn
@@ -447,7 +522,13 @@ where
 
                             let hs_start = std::time::Instant::now();
                             let hs_fut =
-                                handshake_over_split_bound(recv, send, &stream_ctx, Some(*binding));
+                                proteus_transport_alpha::server::handshake_over_split_bound_with_prefix(
+                                    recv,
+                                    send,
+                                    &stream_ctx,
+                                    Some(*binding),
+                                    dispatch_prefix,
+                                );
                             let session =
                                 match tokio::time::timeout(stream_ctx.handshake_deadline(), hs_fut)
                                     .await

@@ -238,6 +238,11 @@ impl RecoverySelector {
         self.direction
     }
 
+    #[must_use]
+    pub fn thresholds_for(&self, profile: RecoveryProfile) -> RecoveryThresholds {
+        self.policy.thresholds(profile)
+    }
+
     /// Deterministically alternates A/B order to remove a fixed warm-cache
     /// advantage from either profile.
     #[must_use]

@@ -73,6 +73,16 @@ async fn one_carrier_hosts_warm_and_concurrent_sessions() {
         profile_hint: ProfileHint::Beta,
     };
 
+    let pre_auth_probe = carrier
+        .run_authenticated_probe(
+            proteus_transport_beta::recovery::RecoveryDirection::ClientToServer,
+            proteus_transport_beta::recovery::RecoveryProfile::Standard,
+            proteus_transport_beta::probe::PROBE_PAYLOAD_BYTES,
+        )
+        .await
+        .unwrap_err();
+    assert!(pre_auth_probe.to_string().contains("authenticated carrier"));
+
     async fn round_trip(
         mut session: proteus_transport_alpha::session::AlphaSession<
             quinn::RecvStream,
@@ -95,6 +105,62 @@ async fn one_carrier_hosts_warm_and_concurrent_sessions() {
     .unwrap()
     .unwrap();
     round_trip(first, b"first").await;
+
+    for direction in [
+        proteus_transport_beta::recovery::RecoveryDirection::ClientToServer,
+        proteus_transport_beta::recovery::RecoveryDirection::ServerToClient,
+    ] {
+        let probe = timeout(
+            STEP,
+            carrier.run_authenticated_probe(
+                direction,
+                proteus_transport_beta::recovery::RecoveryProfile::Standard,
+                proteus_transport_beta::probe::PROBE_PAYLOAD_BYTES,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(probe.direction, direction);
+        assert_eq!(
+            probe.payload_bytes,
+            u64::from(proteus_transport_beta::probe::PROBE_PAYLOAD_BYTES)
+        );
+        assert!(probe.completion_time > Duration::ZERO);
+        assert!(probe.counters.sent_packets > 0);
+    }
+
+    for direction in [
+        proteus_transport_beta::recovery::RecoveryDirection::ClientToServer,
+        proteus_transport_beta::recovery::RecoveryDirection::ServerToClient,
+    ] {
+        let mut selector = proteus_transport_beta::recovery::RecoverySelector::new(
+            direction,
+            proteus_transport_beta::recovery::RecoveryPolicy::default(),
+        )
+        .unwrap();
+        let mut decision = None;
+        for round in 1..=3 {
+            decision = Some(
+                timeout(
+                    STEP,
+                    carrier.run_matched_recovery_round(&mut selector, round),
+                )
+                .await
+                .unwrap()
+                .unwrap(),
+            );
+        }
+        let decision = decision.unwrap();
+        assert_eq!(
+            decision.profile(),
+            proteus_transport_beta::recovery::RecoveryProfile::Standard
+        );
+        assert!(!matches!(
+            decision,
+            proteus_transport_beta::recovery::RecoveryDecision::Collecting { .. }
+        ));
+    }
 
     // This exceeds the inner-handshake deadline. The carrier must
     // remain reusable; only an in-progress handshake is deadline

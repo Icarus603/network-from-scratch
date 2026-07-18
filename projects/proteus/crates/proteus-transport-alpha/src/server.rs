@@ -2804,9 +2804,30 @@ where
     R: tokio::io::AsyncRead + Unpin,
     W: tokio::io::AsyncWrite + Unpin,
 {
+    handshake_over_split_bound_with_prefix(read, write, ctx, channel_binding, Vec::new()).await
+}
+
+/// Server-side bound handshake with bytes already consumed from `read`.
+///
+/// Profile β uses this to distinguish an authenticated carrier-control
+/// stream from an ordinary independently authenticated Proteus stream.
+/// Ordinary handshake bytes are restored here, so transport dispatch does
+/// not alter the inner transcript or discard a coalesced frame tail.
+pub async fn handshake_over_split_bound_with_prefix<R, W>(
+    read: R,
+    write: W,
+    ctx: &Arc<ServerCtx>,
+    channel_binding: Option<[u8; crate::client::CHANNEL_BINDING_LEN]>,
+    prefix: Vec<u8>,
+) -> AlphaResult<AlphaSession<R, W>>
+where
+    R: tokio::io::AsyncRead + Unpin,
+    W: tokio::io::AsyncWrite + Unpin,
+{
     let mut write = write;
     let mut read = read;
-    let mut rx_buf: Vec<u8> = Vec::with_capacity(2048);
+    let mut rx_buf: Vec<u8> = Vec::with_capacity(2048.max(prefix.len()));
+    rx_buf.extend_from_slice(&prefix);
 
     // State machine starts at Init (spec §5.1).
     let mut state = State::Init;
