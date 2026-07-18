@@ -73,7 +73,8 @@ x509-parser = "0.18"
 # bounded packet/time-threshold spurious-loss counters; the exact commit
 # is pinned so production builds remain reproducible.
 [patch.crates-io]
-quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "318a05f7e286f9f2b577c77c1b3ce44a414eabc3" }
+quinn = { git = "https://github.com/Icarus603/quinn", rev = "1945574e35cb8bc8612c776d89afba9aacb7ab9f" }
+quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "1945574e35cb8bc8612c776d89afba9aacb7ab9f" }
 
 [profile.release]
 opt-level = 3

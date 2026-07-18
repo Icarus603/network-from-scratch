@@ -54,6 +54,7 @@ pub mod brutal;
 pub mod client;
 pub mod datagram;
 pub mod error;
+pub mod recovery;
 pub mod server;
 
 pub use brutal::{Brutal, BrutalConfig, DEFAULT_TARGET_BPS};

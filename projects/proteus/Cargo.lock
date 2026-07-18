@@ -1505,8 +1505,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
+source = "git+https://github.com/Icarus603/quinn?rev=1945574e35cb8bc8612c776d89afba9aacb7ab9f#1945574e35cb8bc8612c776d89afba9aacb7ab9f"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1525,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/Icarus603/quinn?rev=318a05f7e286f9f2b577c77c1b3ce44a414eabc3#318a05f7e286f9f2b577c77c1b3ce44a414eabc3"
+source = "git+https://github.com/Icarus603/quinn?rev=1945574e35cb8bc8612c776d89afba9aacb7ab9f#1945574e35cb8bc8612c776d89afba9aacb7ab9f"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -1546,8 +1545,7 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "35a133f956daabe89a61a685c2649f13d82d5aa4bd5d12d1277e1072a21c0694"
+source = "git+https://github.com/Icarus603/quinn?rev=1945574e35cb8bc8612c776d89afba9aacb7ab9f#1945574e35cb8bc8612c776d89afba9aacb7ab9f"
 dependencies = [
  "cfg_aliases",
  "libc",

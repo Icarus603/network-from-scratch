@@ -243,6 +243,14 @@ impl BetaClientConnection {
         }
     }
 
+    /// Update loss-detection tolerance for packets sent by this client
+    /// without rebuilding the carrier. The peer's send direction is
+    /// unaffected and must make its own decision.
+    pub fn set_loss_detection_thresholds(&self, packet_threshold: u32, time_threshold: f32) {
+        self.connection
+            .set_loss_detection_thresholds(packet_threshold.max(3), time_threshold.max(1.125));
+    }
+
     /// Open one independently authenticated Proteus session.
     ///
     /// The stream ID is included as TLS-exporter context. A relay
