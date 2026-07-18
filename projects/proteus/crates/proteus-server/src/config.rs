@@ -49,6 +49,11 @@ pub struct ServerConfig {
     /// Ignored when `listen_beta` is unset.
     #[serde(default)]
     pub beta_initial_mtu: Option<u16>,
+
+    /// β QUIC minimum MTU after black-hole recovery. Default 1200.
+    /// Raise only when the complete path MTU is known.
+    #[serde(default)]
+    pub beta_minimum_mtu: Option<u16>,
     /// β QUIC: pad every application UDP datagram to current
     /// path-MTU. Defense-in-depth on top of the cell-split AEAD
     /// padding (spec §4.6). **OFF by default** because bandwidth

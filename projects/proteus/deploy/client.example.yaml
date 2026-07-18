@@ -108,6 +108,7 @@ server_endpoint: "vps.example.com:8443"
 #
 # β QUIC performance / traffic-analysis tunables. Defaults:
 #   beta_initial_mtu = 1350              (conservative; covers most paths)
+#   beta_minimum_mtu = 1200              (safe black-hole fallback)
 #   beta_pad_quic_to_mtu = false         (max throughput; UDP wire-length leaks)
 #   beta_allow_spin_bit = false          (PRIVACY: defeats passive on-path RTT
 #                                         inference; quinn upstream defaults to true)
@@ -120,10 +121,19 @@ server_endpoint: "vps.example.com:8443"
 # Production anti-censorship config (match server-side settings —
 # the choices interact with quinn's path-MTU discovery):
 #   beta_initial_mtu: 1452          (max under 1500-byte Ethernet MTU)
+#   beta_minimum_mtu: 1200          (keep fallback safe on Internet paths)
 #   beta_pad_quic_to_mtu: true      (UDP-layer length-uniformity defeats
 #                                    GFW QUIC datagram-size analysis)
 # beta_initial_mtu: 1350
+# beta_minimum_mtu: 1200
 # beta_pad_quic_to_mtu: false
+#
+# On a completely controlled path whose end-to-end UDP payload MTU
+# has been measured, minimum may equal initial. This prevents random
+# congestion loss from being mistaken for an MTU black hole. Never
+# pin this on an unknown mobile/VPN/Internet path.
+# beta_initial_mtu: 1350
+# beta_minimum_mtu: 1350
 #
 # High-loss β paths may opt into the rate-targeted controller. Use the
 # measured client uplink, in Mbit/s. Brutal is intentionally

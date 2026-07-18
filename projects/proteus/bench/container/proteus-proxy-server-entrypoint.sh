@@ -44,5 +44,9 @@ sed -i \
     "s/^beta_ack_eliciting_threshold:.*/beta_ack_eliciting_threshold: ${ACK_ELICITING_THRESHOLD:-10}/" \
     "$config"
 sed -i "s/^beta_initial_mtu:.*/beta_initial_mtu: ${INITIAL_MTU:-1350}/" "$config"
+sed -i "s/^beta_minimum_mtu:.*/beta_minimum_mtu: ${MINIMUM_MTU:-1350}/" "$config"
+sed -i \
+    "s/^beta_mtu_upper_bound:.*/beta_mtu_upper_bound: ${MTU_UPPER_BOUND:-1452}/" \
+    "$config"
 
 exec proteus-server run --config "$config"

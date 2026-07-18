@@ -2,6 +2,7 @@
 //! the production-config exposure commits:
 //!
 //!   - beta_initial_mtu: Option<u16>
+//!   - beta_minimum_mtu: Option<u16>
 //!   - beta_pad_quic_to_mtu: Option<bool>
 //!   - beta_allow_spin_bit: Option<bool>        (privacy)
 //!   - beta_ack_eliciting_threshold: Option<u32> (RFC 9802 speed knob)
@@ -39,6 +40,7 @@ async fn yaml_round_trips_beta_perf_fields_when_set() {
             "listen_alpha: \"127.0.0.1:0\"\n\
              listen_beta: \"127.0.0.1:0\"\n\
              beta_initial_mtu: 1452\n\
+             beta_minimum_mtu: 1350\n\
              beta_pad_quic_to_mtu: true\n\
              keys:\n  \
                  mlkem_pk: {dir}/mlkem.pk\n  \
@@ -52,6 +54,7 @@ async fn yaml_round_trips_beta_perf_fields_when_set() {
 
     let cfg = ServerConfig::load(&yaml_path).await.expect("load");
     assert_eq!(cfg.beta_initial_mtu, Some(1452));
+    assert_eq!(cfg.beta_minimum_mtu, Some(1350));
     assert_eq!(cfg.beta_pad_quic_to_mtu, Some(true));
 
     let _ = std::fs::remove_dir_all(&dir);
@@ -82,6 +85,7 @@ async fn yaml_defaults_beta_perf_fields_to_none_when_absent() {
 
     let cfg = ServerConfig::load(&yaml_path).await.expect("load");
     assert_eq!(cfg.beta_initial_mtu, None);
+    assert_eq!(cfg.beta_minimum_mtu, None);
     assert_eq!(cfg.beta_pad_quic_to_mtu, None);
 
     let _ = std::fs::remove_dir_all(&dir);

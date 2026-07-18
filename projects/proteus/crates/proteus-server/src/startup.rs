@@ -324,6 +324,7 @@ mod tests {
             beta_cert_chain: None,
             beta_private_key: None,
             beta_initial_mtu: None,
+            beta_minimum_mtu: None,
             beta_pad_quic_to_mtu: None,
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,

@@ -1055,6 +1055,60 @@ async fn iter94_client_drain_zero_warns() {
 
 // ---------- iter-92: beta_mtu_upper_bound + beta_ack_eliciting_threshold ----------
 
+#[tokio::test]
+async fn beta_minimum_mtu_below_quic_floor_fails() {
+    let dir = tempdir("mtu-min-low");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_minimum_mtu: 1199\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "minimum MTU < 1200 MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn beta_minimum_mtu_above_initial_fails() {
+    let dir = tempdir("mtu-min-vs-init");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_initial_mtu: 1350\n\
+         beta_minimum_mtu: 1452\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "minimum MTU > initial MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn beta_minimum_mtu_above_upper_bound_fails() {
+    let dir = tempdir("mtu-min-vs-upper");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_initial_mtu: 1350\n\
+         beta_minimum_mtu: 1350\n\
+         beta_mtu_upper_bound: 1300\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "minimum MTU > upper bound MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Iter-92: server_endpoint_beta must be set for these β-knobs
 /// to take effect, but the validation should fire regardless of
 /// whether β is used (the operator's typo is a typo).

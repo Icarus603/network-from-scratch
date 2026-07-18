@@ -999,6 +999,26 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    if let Some(minimum) = cfg.beta_minimum_mtu {
+        if minimum < 1200 {
+            r.push_fail(format!(
+                "beta_minimum_mtu = {minimum} < 1200 (QUIC v1 minimum)"
+            ));
+        } else if let Some(initial) = cfg.beta_initial_mtu {
+            if minimum > initial {
+                r.push_fail(format!(
+                    "beta_minimum_mtu = {minimum} is GREATER than \
+                     beta_initial_mtu = {initial}. Black-hole recovery cannot \
+                     fall back above the configured starting MTU."
+                ));
+            }
+        } else if minimum > 1350 {
+            r.push_fail(format!(
+                "beta_minimum_mtu = {minimum} exceeds the default \
+                 beta_initial_mtu = 1350; set beta_initial_mtu explicitly"
+            ));
+        }
+    }
     if let Some(ub) = cfg.beta_mtu_upper_bound {
         if ub < 1200 {
             r.push_fail(format!(
@@ -1018,6 +1038,14 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
                      the starting MTU."
                 ));
             }
+        }
+    }
+    if let (Some(minimum), Some(ub)) = (cfg.beta_minimum_mtu, cfg.beta_mtu_upper_bound) {
+        if minimum > ub {
+            r.push_fail(format!(
+                "beta_minimum_mtu = {minimum} is GREATER than \
+                 beta_mtu_upper_bound = {ub}"
+            ));
         }
     }
     if let Some(thr) = cfg.beta_ack_eliciting_threshold {
@@ -2354,6 +2382,7 @@ mod tests {
             beta_cert_chain: None,
             beta_private_key: None,
             beta_initial_mtu: None,
+            beta_minimum_mtu: None,
             beta_pad_quic_to_mtu: None,
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
@@ -2739,6 +2768,48 @@ mod tests {
         cfg.beta_initial_mtu = Some(1000);
         let report = preflight(&cfg);
         assert!(report.has_failures(), "MTU=1000 MUST FAIL: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_minimum_mtu_below_quic_floor_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_minimum_mtu = Some(1199);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "minimum MTU < 1200 MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_minimum_mtu_above_initial_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_initial_mtu = Some(1350);
+        cfg.beta_minimum_mtu = Some(1452);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "minimum MTU > initial MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_minimum_mtu_above_upper_bound_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_initial_mtu = Some(1350);
+        cfg.beta_minimum_mtu = Some(1350);
+        cfg.beta_mtu_upper_bound = Some(1300);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "minimum MTU > upper bound MUST FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

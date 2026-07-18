@@ -165,6 +165,27 @@ pub struct BetaClientConnection {
     server_addr: SocketAddr,
 }
 
+/// Stable, transport-owned subset of Quinn's cumulative connection
+/// counters. Keeping this type inside `proteus-transport-beta` avoids
+/// making every caller depend directly on Quinn merely to emit
+/// benchmark diagnostics.
+#[derive(Debug, Clone, Copy)]
+pub struct BetaConnectionStats {
+    pub tx_datagrams: u64,
+    pub tx_bytes: u64,
+    pub rx_datagrams: u64,
+    pub rx_bytes: u64,
+    pub sent_packets: u64,
+    pub lost_packets: u64,
+    pub lost_bytes: u64,
+    pub congestion_events: u64,
+    pub stream_data_blocked: u64,
+    pub data_blocked: u64,
+    pub rtt: std::time::Duration,
+    pub cwnd_bytes: u64,
+    pub mtu: u16,
+}
+
 impl BetaClientConnection {
     /// Whether quinn still considers the carrier open.
     #[must_use]
@@ -182,6 +203,32 @@ impl BetaClientConnection {
     #[must_use]
     pub fn stable_id(&self) -> usize {
         self.connection.stable_id()
+    }
+
+    /// Snapshot cumulative QUIC statistics for this carrier.
+    ///
+    /// Production normally has no reason to poll these counters.
+    /// The matched proxy benchmark takes before/after snapshots so
+    /// it can distinguish application throughput gaps from packet
+    /// loss, flow-control stalls, or asymmetric recovery behavior.
+    #[must_use]
+    pub fn stats(&self) -> BetaConnectionStats {
+        let stats = self.connection.stats();
+        BetaConnectionStats {
+            tx_datagrams: stats.udp_tx.datagrams,
+            tx_bytes: stats.udp_tx.bytes,
+            rx_datagrams: stats.udp_rx.datagrams,
+            rx_bytes: stats.udp_rx.bytes,
+            sent_packets: stats.path.sent_packets,
+            lost_packets: stats.path.lost_packets,
+            lost_bytes: stats.path.lost_bytes,
+            congestion_events: stats.path.congestion_events,
+            stream_data_blocked: stats.frame_tx.stream_data_blocked,
+            data_blocked: stats.frame_tx.data_blocked,
+            rtt: stats.path.rtt,
+            cwnd_bytes: stats.path.cwnd,
+            mtu: stats.path.current_mtu,
+        }
     }
 
     /// Open one independently authenticated Proteus session.

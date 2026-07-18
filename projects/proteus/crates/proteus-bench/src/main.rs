@@ -901,6 +901,7 @@ async fn run_soak_cmd(args: SoakArgs) -> Result<(), Box<dyn std::error::Error>> 
 async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
     let perf = PerfProfile {
         initial_mtu: args.initial_mtu,
+        minimum_mtu: 1200,
         pad_quic_datagrams_to_mtu: args.pad_mtu,
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,
@@ -998,6 +999,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
 
     let perf = PerfProfile {
         initial_mtu: args.initial_mtu,
+        minimum_mtu: 1200,
         pad_quic_datagrams_to_mtu: args.pad_mtu,
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,

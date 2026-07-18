@@ -51,6 +51,54 @@ fn pool_entry_beta_fail_throttle() -> &'static Throttle {
     T.get_or_init(|| Throttle::new(3, 0.2))
 }
 
+fn beta_session_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PROTEUS_BETA_SESSION_STATS")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+    })
+}
+
+fn log_beta_session_stats(
+    before: proteus_transport_beta::client::BetaConnectionStats,
+    after: proteus_transport_beta::client::BetaConnectionStats,
+    carrier_id: usize,
+) {
+    let tx_datagrams = after.tx_datagrams.saturating_sub(before.tx_datagrams);
+    let tx_bytes = after.tx_bytes.saturating_sub(before.tx_bytes);
+    let rx_datagrams = after.rx_datagrams.saturating_sub(before.rx_datagrams);
+    let rx_bytes = after.rx_bytes.saturating_sub(before.rx_bytes);
+    let sent_packets = after.sent_packets.saturating_sub(before.sent_packets);
+    let lost_packets = after.lost_packets.saturating_sub(before.lost_packets);
+    let lost_bytes = after.lost_bytes.saturating_sub(before.lost_bytes);
+    let congestion_events = after
+        .congestion_events
+        .saturating_sub(before.congestion_events);
+    let stream_data_blocked = after
+        .stream_data_blocked
+        .saturating_sub(before.stream_data_blocked);
+    let data_blocked = after.data_blocked.saturating_sub(before.data_blocked);
+
+    tracing::info!(
+        carrier_id,
+        tx_datagrams,
+        tx_bytes,
+        rx_datagrams,
+        rx_bytes,
+        sent_packets,
+        lost_packets,
+        lost_bytes,
+        congestion_events,
+        stream_data_blocked,
+        data_blocked,
+        rtt_ms = after.rtt.as_secs_f64() * 1000.0,
+        cwnd_bytes = after.cwnd_bytes,
+        mtu = after.mtu,
+        "β session QUIC delta (client path)"
+    );
+}
+
 /// Iter-27: drain + reset the per-call-site suppression counts
 /// for the iter-23 client-side throttles. Returns a `(site,
 /// suppressed_in_window)` list with only the non-zero entries.
@@ -979,6 +1027,9 @@ async fn try_beta(
     if let Some(v) = cfg.beta_initial_mtu {
         perf.initial_mtu = v;
     }
+    if let Some(v) = cfg.beta_minimum_mtu {
+        perf.minimum_mtu = v;
+    }
     if let Some(v) = cfg.beta_pad_quic_to_mtu {
         perf.pad_quic_datagrams_to_mtu = v;
     }
@@ -1113,6 +1164,12 @@ async fn try_beta(
         mut receiver,
         ..
     } = beta_session;
+    let stats_carrier = pooled_carrier.as_ref().or(one_shot_carrier.as_ref());
+    let stats_before = if beta_session_stats_enabled() {
+        stats_carrier.map(|carrier| (carrier.stable_id(), carrier.stats()))
+    } else {
+        None
+    };
     if let Some(q) = cfg.pad_quantum {
         if q > 0 {
             sender.set_pad_quantum(q);
@@ -1123,6 +1180,9 @@ async fn try_beta(
     sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
         .await?;
     pump(sock, &mut sender, &mut receiver).await;
+    if let (Some((carrier_id, before)), Some(carrier)) = (stats_before, stats_carrier) {
+        log_beta_session_stats(before, carrier.stats(), carrier_id);
+    }
     drop(pooled_carrier);
     drop(one_shot_carrier);
 
@@ -1330,7 +1390,7 @@ async fn try_alpha(
 /// On `server_to_client` EOF, shut down the SOCKS5 socket so the
 /// client's read returns EOF.
 ///
-/// ## Adaptive flush (iter 12)
+/// ## Bounded flush (correctness after iter 12)
 ///
 /// Pre-iter-12 this function flushed after every `send_record`,
 /// which defeated the 64 KiB `BufWriter` inside `AlphaSender`. On
@@ -1340,13 +1400,13 @@ async fn try_alpha(
 /// The result was wasted syscalls, fragmented TCP segments, and
 /// throughput much lower than the underlying carrier could carry.
 ///
-/// New behavior: flush ONLY when the upstream read returned LESS
-/// than the buffer's capacity. The intuition mirrors `TCP_CORK` /
-/// nginx `tcp_nopush`: a full-buffer read implies more bytes are
-/// queued at the source, so coalesce with the next chunk; a
-/// partial read implies the source paused, so flush now to keep
-/// interactive RPC latency low. Bulk transfers see large coalesced
-/// writes; interactive sessions see no added latency.
+/// The original adaptive version skipped flush when a read filled
+/// the buffer exactly. That creates a liveness hole: an application
+/// may pause on the 64 KiB boundary while waiting for its echoed
+/// response, leaving both peers waiting until QUIC's idle timeout.
+/// We now flush after every 64 KiB application record. The sender's
+/// internal buffer still coalesces each record's header and body,
+/// while a completed logical record is never retained indefinitely.
 ///
 /// The receiver side is unchanged — `recv_record` already wakes
 /// per logical record; we simply forward each one to the SOCKS5
@@ -1427,18 +1487,13 @@ async fn pump<R, W>(
                         tracing::warn!(error = %e, "β client→server record send failed");
                         break;
                     }
-                    // Adaptive flush: only if the read returned LESS
-                    // than the buffer (=> source paused, batch boundary)
-                    // OR the buffer is near-full inside the sender.
-                    // A full-capacity read means more bytes are likely
-                    // queued at the source — coalesce with the next
-                    // chunk by skipping the flush, letting the
-                    // BufWriter accumulate.
-                    if n < buf.len() {
-                        if let Err(e) = sender.flush().await {
-                            tracing::warn!(error = %e, "β client→server flush failed");
-                            break;
-                        }
+                    // Never retain a complete application record
+                    // merely because it landed exactly on the 64 KiB
+                    // read boundary. The peer may be waiting for this
+                    // response before producing another byte.
+                    if let Err(e) = sender.flush().await {
+                        tracing::warn!(error = %e, "β client→server flush failed");
+                        break;
                     }
                 }
             }
@@ -1475,7 +1530,6 @@ async fn pump<R, W>(
             match receiver.recv_record_into(&mut plaintext.0).await {
                 Ok(Some(())) if !plaintext.is_empty() => {
                     let buf = &mut *plaintext;
-                    let buf_len = buf.len();
                     let write_result = sock_w.write_all(buf).await;
                     // Iter-184: scrub the decrypted-plaintext Vec
                     // immediately after the downstream-socket
@@ -1492,18 +1546,13 @@ async fn pump<R, W>(
                         tracing::warn!(error = %e, "SOCKS5 downstream write failed");
                         break;
                     }
-                    // Iter-63: adaptive flush, symmetric with the
-                    // upstream→client server-side direction. Flush
-                    // when the record is smaller than the BufWriter
-                    // capacity (natural batch boundary; downstream
-                    // wants the bytes without waiting for the next
-                    // record). Coalesce when the record is at
-                    // capacity — more inbound bytes likely queued.
-                    if buf_len < 64 * 1024 {
-                        if let Err(e) = sock_w.flush().await {
-                            tracing::warn!(error = %e, "SOCKS5 downstream flush failed");
-                            break;
-                        }
+                    // A full-capacity record can be the final record
+                    // in an application request/response phase.
+                    // Flush it instead of waiting for a byte that the
+                    // downstream peer will only send after receipt.
+                    if let Err(e) = sock_w.flush().await {
+                        tracing::warn!(error = %e, "SOCKS5 downstream flush failed");
+                        break;
                     }
                 }
                 Ok(Some(())) => {} // keepalive (plaintext empty)

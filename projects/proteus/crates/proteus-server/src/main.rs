@@ -3175,6 +3175,9 @@ fn build_beta_endpoint(
     if let Some(v) = cfg.beta_initial_mtu {
         perf.initial_mtu = v;
     }
+    if let Some(v) = cfg.beta_minimum_mtu {
+        perf.minimum_mtu = v;
+    }
     if let Some(v) = cfg.beta_pad_quic_to_mtu {
         perf.pad_quic_datagrams_to_mtu = v;
     }

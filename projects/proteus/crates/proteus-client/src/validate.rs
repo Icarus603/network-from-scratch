@@ -602,6 +602,30 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        if let Some(minimum) = cfg.beta_minimum_mtu {
+            if minimum < 1200 {
+                r.push_fail(format!(
+                    "beta_minimum_mtu = {minimum} < 1200 (QUIC v1 minimum)"
+                ));
+            } else if let Some(initial) = cfg.beta_initial_mtu {
+                if minimum > initial {
+                    r.push_fail(format!(
+                        "beta_minimum_mtu = {minimum} is GREATER than \
+                         beta_initial_mtu = {initial}. Black-hole recovery cannot \
+                         fall back above the configured starting MTU."
+                    ));
+                } else {
+                    r.push_pass(format!("beta_minimum_mtu = {minimum}"));
+                }
+            } else if minimum > 1350 {
+                r.push_fail(format!(
+                    "beta_minimum_mtu = {minimum} exceeds the default \
+                     beta_initial_mtu = 1350; set beta_initial_mtu explicitly"
+                ));
+            } else {
+                r.push_pass(format!("beta_minimum_mtu = {minimum}"));
+            }
+        }
         // Iter-92: beta_mtu_upper_bound sanity.
         //
         // The MTU discovery upper bound caps how aggressively
@@ -631,6 +655,14 @@ pub async fn run(path: &Path) -> PreflightReport {
                          raise upper_bound or lower initial_mtu.",
                     ));
                 }
+            }
+        }
+        if let (Some(minimum), Some(ub)) = (cfg.beta_minimum_mtu, cfg.beta_mtu_upper_bound) {
+            if minimum > ub {
+                r.push_fail(format!(
+                    "beta_minimum_mtu = {minimum} is GREATER than \
+                     beta_mtu_upper_bound = {ub}"
+                ));
             }
         }
         // Iter-92: beta_ack_eliciting_threshold sanity.

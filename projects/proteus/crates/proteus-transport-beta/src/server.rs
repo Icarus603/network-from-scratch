@@ -65,6 +65,47 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
 use zeroize::Zeroizing;
 
+fn beta_session_stats_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("PROTEUS_BETA_SESSION_STATS")
+            .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+            .unwrap_or(false)
+    })
+}
+
+fn log_beta_session_stats(
+    before: quinn::ConnectionStats,
+    after: quinn::ConnectionStats,
+    carrier_id: usize,
+    stream_id: quinn::StreamId,
+) {
+    info!(
+        carrier_id,
+        stream = %stream_id,
+        tx_datagrams = after.udp_tx.datagrams.saturating_sub(before.udp_tx.datagrams),
+        tx_bytes = after.udp_tx.bytes.saturating_sub(before.udp_tx.bytes),
+        rx_datagrams = after.udp_rx.datagrams.saturating_sub(before.udp_rx.datagrams),
+        rx_bytes = after.udp_rx.bytes.saturating_sub(before.udp_rx.bytes),
+        sent_packets = after.path.sent_packets.saturating_sub(before.path.sent_packets),
+        lost_packets = after.path.lost_packets.saturating_sub(before.path.lost_packets),
+        lost_bytes = after.path.lost_bytes.saturating_sub(before.path.lost_bytes),
+        congestion_events = after.path.congestion_events.saturating_sub(
+            before.path.congestion_events
+        ),
+        stream_data_blocked = after.frame_tx.stream_data_blocked.saturating_sub(
+            before.frame_tx.stream_data_blocked
+        ),
+        data_blocked = after.frame_tx.data_blocked.saturating_sub(
+            before.frame_tx.data_blocked
+        ),
+        rtt_ms = after.path.rtt.as_secs_f64() * 1000.0,
+        cwnd_bytes = after.path.cwnd,
+        mtu = after.path.current_mtu,
+        "β session QUIC delta (server path)"
+    );
+}
+
 use crate::error::BetaError;
 use crate::ALPN;
 
@@ -364,6 +405,8 @@ where
                         tokio::spawn(async move {
                             // Hold through handshake + relay handler.
                             let _session_permit = session_permit;
+                            let stats_before =
+                                beta_session_stats_enabled().then(|| stream_conn.stats());
 
                             let context = crate::stream_exporter_context(stream_id);
                             let mut binding = Zeroizing::new([0u8; CHANNEL_BINDING_LEN]);
@@ -430,6 +473,14 @@ where
                             stream_authenticated.store(true, std::sync::atomic::Ordering::Release);
                             stream_authenticated_notify.notify_waiters();
                             stream_handler(session).await;
+                            if let Some(before) = stats_before {
+                                log_beta_session_stats(
+                                    before,
+                                    stream_conn.stats(),
+                                    stream_conn.stable_id(),
+                                    stream_id,
+                                );
+                            }
                         });
                     }
                 }

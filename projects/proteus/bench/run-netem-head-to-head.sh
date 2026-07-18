@@ -16,6 +16,8 @@ WORKLOAD_MODE="${WORKLOAD_MODE:-proxy}"
 PROTEUS_BRUTAL_TARGET_MBPS="${PROTEUS_BRUTAL_TARGET_MBPS:-1000}"
 PROTEUS_ACK_ELICITING_THRESHOLD="${PROTEUS_ACK_ELICITING_THRESHOLD:-10}"
 PROTEUS_INITIAL_MTU="${PROTEUS_INITIAL_MTU:-1350}"
+PROTEUS_MINIMUM_MTU="${PROTEUS_MINIMUM_MTU:-1350}"
+PROTEUS_MTU_UPPER_BOUND="${PROTEUS_MTU_UPPER_BOUND:-1452}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
         WARMUP_MIB=64
@@ -38,6 +40,8 @@ trap cleanup EXIT INT TERM
 export PAYLOAD_MIB RUNS_PER_CELL HY2_DATA_SIZE PROTEUS_BRUTAL_TARGET_MBPS
 export PROTEUS_ACK_ELICITING_THRESHOLD
 export PROTEUS_INITIAL_MTU
+export PROTEUS_MINIMUM_MTU
+export PROTEUS_MTU_UPPER_BOUND
 
 wait_for_log_marker() {
     service="$1"
@@ -214,6 +218,8 @@ done
     printf '"proteus_brutal_target_mbps":%s,' "$PROTEUS_BRUTAL_TARGET_MBPS"
     printf '"proteus_ack_eliciting_threshold":%s,' "$PROTEUS_ACK_ELICITING_THRESHOLD"
     printf '"proteus_initial_mtu":%s,' "$PROTEUS_INITIAL_MTU"
+    printf '"proteus_minimum_mtu":%s,' "$PROTEUS_MINIMUM_MTU"
+    printf '"proteus_mtu_upper_bound":%s,' "$PROTEUS_MTU_UPPER_BOUND"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \
         "$WARMUP_MIB"

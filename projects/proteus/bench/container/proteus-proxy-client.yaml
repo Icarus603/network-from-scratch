@@ -5,6 +5,7 @@ beta_first_timeout_secs: 10
 beta_congestion: brutal
 beta_brutal_target_mbps: 1000
 beta_initial_mtu: 1350
+beta_minimum_mtu: 1350
 beta_mtu_upper_bound: 1452
 beta_pad_quic_to_mtu: false
 beta_allow_spin_bit: false

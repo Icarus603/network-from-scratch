@@ -606,17 +606,13 @@ where
                         set_reason(&reason_c2u, "upstream_write_fail");
                         break;
                     }
-                    // Iter-62: adaptive flush. If this record is
-                    // smaller than the BufWriter capacity (64 KiB),
-                    // it's a natural batch boundary — flush so the
-                    // upstream sees the bytes without waiting for
-                    // another record to pack them. If the record
-                    // is exactly capacity-sized, more bytes may
-                    // be in flight — coalesce by skipping the
-                    // flush and letting BufWriter accumulate.
-                    // Mirrors the upstream→client adaptive flush
-                    // semantics (line ~618).
-                    if buf_len < 64 * 1024 && up_w.flush().await.is_err() {
+                    // A record that exactly fills the 64 KiB buffer
+                    // may still be the application's final record.
+                    // Retaining it until another record arrives can
+                    // deadlock request/response protocols at the
+                    // integer boundary, so every completed logical
+                    // record gets a bounded flush.
+                    if up_w.flush().await.is_err() {
                         set_reason(&reason_c2u, "upstream_write_fail");
                         break;
                     }
@@ -730,15 +726,11 @@ where
                 set_reason(&reason_u2c, "client_send_err");
                 break;
             }
-            // Adaptive flush (iter 12): only when the read returned
-            // LESS than the buffer (= source paused, natural batch
-            // boundary). A full-capacity read implies more bytes are
-            // queued at the source — coalesce with the next chunk by
-            // skipping the flush and letting the BufWriter
-            // accumulate. Interactive RPC sees no added latency
-            // because its reads are short; bulk transfer reclaims
-            // the syscall + record-framing overhead it was wasting.
-            if n < buf.len() && sender.flush().await.is_err() {
+            // Flush every completed logical record. A read that
+            // fills the buffer exactly does not prove more input is
+            // coming; the upstream may already be waiting for this
+            // response before it writes again.
+            if sender.flush().await.is_err() {
                 set_reason(&reason_u2c, "client_send_err");
                 break;
             }

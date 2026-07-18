@@ -135,6 +135,13 @@ pub struct PerfProfile {
     /// `1452` is the maximum that fits under a 1500-byte Ethernet
     /// MTU with IPv6 + UDP headers (matches Hy2 / TUIC5).
     pub initial_mtu: u16,
+
+    /// Smallest UDP payload size that black-hole recovery may fall
+    /// back to. Keep 1200 on unknown Internet paths. Operators who
+    /// control the complete path (for example a 1500-byte Ethernet
+    /// VPS benchmark) can pin this to `initial_mtu` so unrelated
+    /// random loss is not misclassified as an MTU black hole.
+    pub minimum_mtu: u16,
     /// When true, quinn pads every application UDP datagram to the
     /// current path-MTU. Defense-in-depth on top of the cell-split
     /// AEAD padding (commit 105268f) — defeats UDP-packet-length
@@ -259,6 +266,7 @@ impl Default for PerfProfile {
     fn default() -> Self {
         Self {
             initial_mtu: 1350,
+            minimum_mtu: 1200,
             pad_quic_datagrams_to_mtu: false,
             // PRIVACY: deliberately diverge from quinn's `true`
             // default. The spin bit is a wire-visible RTT side
@@ -417,6 +425,7 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         .send_window(64 * 1024 * 1024)
         // MTU bump — see PerfProfile docs.
         .initial_mtu(profile.initial_mtu)
+        .min_mtu(profile.minimum_mtu)
         // Optional UDP-layer padding — see PerfProfile docs.
         .pad_to_mtu(profile.pad_quic_datagrams_to_mtu)
         // PRIVACY: spin bit off by default. See PerfProfile docs.
@@ -526,6 +535,13 @@ mod perf_profile_defaults {
             "initial_mtu must be in [1200, 1452]; got {}",
             p.initial_mtu,
         );
+    }
+
+    #[test]
+    fn minimum_mtu_default_preserves_unknown_path_safety() {
+        let p = PerfProfile::default();
+        assert_eq!(p.minimum_mtu, 1200);
+        assert!(p.minimum_mtu <= p.initial_mtu);
     }
 
     /// Pad-to-MTU defaults to OFF for raw throughput. The traffic-

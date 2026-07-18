@@ -21,6 +21,7 @@ listen_alpha: "0.0.0.0:8443"
 #
 # β QUIC performance / traffic-analysis / privacy tunables. Defaults:
 #   beta_initial_mtu = 1350              (conservative; covers most paths)
+#   beta_minimum_mtu = 1200              (safe black-hole fallback)
 #   beta_pad_quic_to_mtu = false         (max throughput, wire-byte-length leaks)
 #   beta_allow_spin_bit = false          (PRIVACY: defeats passive on-path
 #                                         RTT inference; quinn upstream
@@ -36,12 +37,21 @@ listen_alpha: "0.0.0.0:8443"
 # For production anti-censorship deployments where bandwidth >>
 # detectability:
 #   beta_initial_mtu: 1452          (max under 1500-byte Ethernet MTU)
+#   beta_minimum_mtu: 1200          (keep fallback safe on Internet paths)
 #   beta_pad_quic_to_mtu: true      (UDP-layer padding defeats GFW
 #                                    QUIC packet-length traffic analysis;
 #                                    defense-in-depth on top of cell-split
 #                                    AEAD padding)
 # beta_initial_mtu: 1350
+# beta_minimum_mtu: 1200
 # beta_pad_quic_to_mtu: false
+#
+# On a completely controlled path whose end-to-end UDP payload MTU
+# has been measured, minimum may equal initial. This prevents random
+# congestion loss from being mistaken for an MTU black hole. Never
+# pin this on an unknown mobile/VPN/Internet path.
+# beta_initial_mtu: 1350
+# beta_minimum_mtu: 1350
 #
 # For known jumbo-frame paths (intra-DC, IPv6 tunnels):
 #   beta_mtu_upper_bound: 9000      (lets MTU discovery probe up to 9k)
