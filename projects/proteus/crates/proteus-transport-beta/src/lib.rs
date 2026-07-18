@@ -199,6 +199,13 @@ pub struct PerfProfile {
     /// Regression source: tests/throughput_smoke.rs went from
     /// 107 MiB/s → 0.5 MiB/s on loopback when this defaulted to 10.
     pub ack_eliciting_threshold: u32,
+    /// QUIC packet-number reordering tolerated before declaring loss.
+    ///
+    /// RFC 9002's default is 3. Raising this can prevent spurious
+    /// retransmission on paths that reorder packets, at the cost of
+    /// slower recovery from real loss. Production therefore stays at
+    /// 3; measured paths may opt into a higher value.
+    pub packet_threshold: u32,
     /// Upper bound that MTU discovery will probe up to (bytes).
     ///
     /// quinn's default is 1452 — fits under a 1500-byte Ethernet
@@ -277,6 +284,7 @@ impl Default for PerfProfile {
             // loopback / LAN / intra-DC catastrophic-throughput
             // footgun.
             ack_eliciting_threshold: 1,
+            packet_threshold: 3,
             // SPEED: explicit MTU discovery upper bound — matches
             // quinn's current default but pins it so a future quinn
             // upgrade can't silently regress paths that depend on it.
@@ -430,6 +438,8 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         // PRIVACY: spin bit off by default. See PerfProfile docs.
         .allow_spin(profile.allow_spin_bit);
 
+    transport.packet_threshold(profile.packet_threshold.max(3));
+
     // SPEED (opt-in): ACK-frequency reduction (RFC 9802). Only set
     // when operator explicitly raised the threshold > 1 — the
     // default of `1` ships disabled because the BBR / low-RTT
@@ -507,6 +517,11 @@ mod perf_profile_defaults {
              when ACKs are bunched on a sub-ms RTT path); operators opt into the \
              long-fat-pipe optimization via `beta_ack_eliciting_threshold` in YAML.",
         );
+    }
+
+    #[test]
+    fn packet_threshold_defaults_to_rfc_recovery_value() {
+        assert_eq!(PerfProfile::default().packet_threshold, 3);
     }
 
     /// MTU discovery upper bound is pinned, not relying on quinn's

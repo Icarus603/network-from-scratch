@@ -779,6 +779,18 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        if let Some(thr) = cfg.beta_packet_threshold {
+            if thr < 3 {
+                r.push_fail(format!(
+                    "beta_packet_threshold = {thr} is below the RFC recovery minimum 3."
+                ));
+            } else if thr > 100 {
+                r.push_warn(format!(
+                    "beta_packet_threshold = {thr} is extreme; real packet loss may \
+                     take too long to recover. Use 3 unless reordering is measured."
+                ));
+            }
+        }
         match cfg.beta_congestion.as_deref() {
             None | Some("bbr") => {
                 if cfg.beta_brutal_target_mbps.is_some() {

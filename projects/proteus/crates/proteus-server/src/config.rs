@@ -76,13 +76,16 @@ pub struct ServerConfig {
     /// β QUIC: ACK-frequency reduction (RFC 9802 /
     /// draft-ietf-quic-ack-frequency-04). Asks the peer to bundle up
     /// to N ack-eliciting packets per ACK instead of every other one.
-    /// Default 10 — same value Hysteria2 and other quinn-based
-    /// stacks tune for bulk throughput. Set 1 to disable (= quinn
-    /// default of ACK per 2 packets). Set higher for known long-
+    /// Default 1 (disabled). Set higher only for known long-
     /// fat-pipe paths where you've measured the ACK overhead.
     /// Peers without the extension silently ignore it.
     #[serde(default)]
     pub beta_ack_eliciting_threshold: Option<u32>,
+    /// β QUIC packet-number reordering threshold before declaring
+    /// loss. Default 3; higher values trade slower real-loss recovery
+    /// for fewer spurious retransmissions on reordered paths.
+    #[serde(default)]
+    pub beta_packet_threshold: Option<u32>,
     /// β QUIC: MTU discovery upper bound. quinn searches up to this
     /// value during path-MTU probes. Default 1452 (Ethernet under
     /// IPv6+UDP). Raise to 9000 on known jumbo-frame paths

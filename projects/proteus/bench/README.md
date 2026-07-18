@@ -135,6 +135,12 @@ therefore remains available only as an explicit experiment, never an
 implicit benchmark advantage or production recommendation. The
 three-run screen selects a candidate; publication claims still require
 the documented 7/30-run gates below.
+
+`PROTEUS_PACKET_THRESHOLD` controls Quinn's packet-number loss-detection
+threshold. It defaults to `3`, matching RFC recovery behavior and both
+Quinn and Hysteria2's quic-go fork. Raising it is a reordering A/B only:
+every promoted value must also rerun real-loss cells because delayed
+loss detection can trade away the gains.
 The default warmup is `min(PAYLOAD_MIB, 64)` MiB so the congestion
 controller reaches a meaningful state rather than merely completing
 the handshake. Override it with `WARMUP_MIB`, but do not use zero

@@ -328,6 +328,7 @@ mod tests {
             beta_pad_quic_to_mtu: None,
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
+            beta_packet_threshold: None,
             beta_mtu_upper_bound: None,
             beta_stream_receive_window_mib: None,
             beta_connection_receive_window_mib: None,

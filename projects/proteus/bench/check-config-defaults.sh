@@ -24,6 +24,12 @@ assert_contains "$root/bench/container/proteus-proxy-client.yaml" \
     'beta_ack_eliciting_threshold: 1'
 assert_contains "$root/bench/container/proteus-proxy-server.yaml" \
     'beta_ack_eliciting_threshold: 1'
+assert_contains "$root/bench/run-netem-head-to-head.sh" \
+    'PROTEUS_PACKET_THRESHOLD="${PROTEUS_PACKET_THRESHOLD:-3}"'
+assert_contains "$root/bench/container/proteus-proxy-client.yaml" \
+    'beta_packet_threshold: 3'
+assert_contains "$root/bench/container/proteus-proxy-server.yaml" \
+    'beta_packet_threshold: 3'
 
 if grep -R -E \
     'ACK_ELICITING_THRESHOLD:-10|beta_ack_eliciting_threshold: 10' \

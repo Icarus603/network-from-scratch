@@ -27,6 +27,16 @@ case "${ACK_ELICITING_THRESHOLD:-1}" in
         exit 2
         ;;
 esac
+case "${PACKET_THRESHOLD:-3}" in
+    *[!0-9]*|"")
+        echo "PACKET_THRESHOLD must be an integer of at least 3" >&2
+        exit 2
+        ;;
+    0|1|2)
+        echo "PACKET_THRESHOLD must be at least 3" >&2
+        exit 2
+        ;;
+esac
 case "${INITIAL_MTU:-1350}" in
     *[!0-9]*|"")
         echo "INITIAL_MTU must be a positive integer" >&2
@@ -71,6 +81,9 @@ sed -i \
     "$config"
 sed -i \
     "s/^beta_ack_eliciting_threshold:.*/beta_ack_eliciting_threshold: ${ACK_ELICITING_THRESHOLD:-1}/" \
+    "$config"
+sed -i \
+    "s/^beta_packet_threshold:.*/beta_packet_threshold: ${PACKET_THRESHOLD:-3}/" \
     "$config"
 sed -i "s/^beta_initial_mtu:.*/beta_initial_mtu: ${INITIAL_MTU:-1350}/" "$config"
 sed -i "s/^beta_minimum_mtu:.*/beta_minimum_mtu: ${MINIMUM_MTU:-1350}/" "$config"

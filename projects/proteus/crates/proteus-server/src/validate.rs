@@ -1138,6 +1138,18 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    if let Some(thr) = cfg.beta_packet_threshold {
+        if thr < 3 {
+            r.push_fail(format!(
+                "beta_packet_threshold = {thr} is below the RFC recovery minimum 3."
+            ));
+        } else if thr > 100 {
+            r.push_warn(format!(
+                "beta_packet_threshold = {thr} is extreme; real packet loss may \
+                 take too long to recover. Use 3 unless reordering is measured."
+            ));
+        }
+    }
     match cfg.beta_congestion.as_deref() {
         None | Some("bbr") => {
             if cfg.beta_brutal_target_mbps.is_some() {
@@ -2483,6 +2495,7 @@ mod tests {
             beta_pad_quic_to_mtu: None,
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
+            beta_packet_threshold: None,
             beta_mtu_upper_bound: None,
             beta_stream_receive_window_mib: None,
             beta_connection_receive_window_mib: None,
@@ -3014,6 +3027,19 @@ mod tests {
             matches!(c, Check::Warn(s) if s.contains("beta_ack_eliciting_threshold = 500") && s.contains("BBR"))
         });
         assert!(warn, "ack=500 must WARN: {report}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_packet_threshold_below_three_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_packet_threshold = Some(2);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "packet threshold below 3 MUST FAIL: {report}"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -112,13 +112,19 @@ pub struct ClientConfig {
     #[serde(default)]
     pub beta_allow_spin_bit: Option<bool>,
     /// β QUIC: ACK-frequency reduction (RFC 9802 /
-    /// draft-ietf-quic-ack-frequency-04). Default 10. Tells the
+    /// draft-ietf-quic-ack-frequency-04). Default 1 (disabled). Tells the
     /// peer it may bundle up to N ack-eliciting packets per ACK
     /// frame. Cuts ACK overhead by ~5-10× on high-bandwidth flows.
     /// Set 1 to disable (= quinn default of ACK per 2 packets);
     /// peers without the extension silently ignore it.
     #[serde(default)]
     pub beta_ack_eliciting_threshold: Option<u32>,
+    /// β QUIC packet-number reordering threshold before loss
+    /// detection retransmits. Default 3 (RFC 9002). Raise only after
+    /// measuring packet reordering; higher values delay real-loss
+    /// recovery.
+    #[serde(default)]
+    pub beta_packet_threshold: Option<u32>,
     /// β QUIC: MTU discovery upper bound. quinn probes path-MTU up
     /// to this value. Default 1452. Raise to 9000 on known jumbo-
     /// frame paths for a real throughput win.

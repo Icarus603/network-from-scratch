@@ -17,6 +17,7 @@ SKIP_BUILD="${SKIP_BUILD:-0}"
 WORKLOAD_MODE="${WORKLOAD_MODE:-proxy}"
 PROTEUS_BRUTAL_TARGET_MBPS="${PROTEUS_BRUTAL_TARGET_MBPS:-1000}"
 PROTEUS_ACK_ELICITING_THRESHOLD="${PROTEUS_ACK_ELICITING_THRESHOLD:-1}"
+PROTEUS_PACKET_THRESHOLD="${PROTEUS_PACKET_THRESHOLD:-3}"
 PROTEUS_INITIAL_MTU="${PROTEUS_INITIAL_MTU:-1350}"
 PROTEUS_MINIMUM_MTU="${PROTEUS_MINIMUM_MTU:-1350}"
 PROTEUS_MTU_UPPER_BOUND="${PROTEUS_MTU_UPPER_BOUND:-1452}"
@@ -46,6 +47,7 @@ trap cleanup EXIT INT TERM
 
 export PAYLOAD_MIB RUNS_PER_CELL HY2_DATA_SIZE PROTEUS_BRUTAL_TARGET_MBPS
 export PROTEUS_ACK_ELICITING_THRESHOLD
+export PROTEUS_PACKET_THRESHOLD
 export PROTEUS_INITIAL_MTU
 export PROTEUS_MINIMUM_MTU
 export PROTEUS_MTU_UPPER_BOUND
@@ -136,16 +138,30 @@ reset_and_warm_proxy_clients() {
     fi
 
     mkdir -p "${cell_dir}/warmup"
+    : > "${cell_dir}/warmup/status.jsonl"
+    proteus_status=0
     warm_proxy_driver \
         proteus-proxy-bench-driver 10.77.1.14:1080 \
-        "${cell_dir}/warmup/proteus.jsonl"
+        "${cell_dir}/warmup/proteus.jsonl" || proteus_status=$?
+    printf '{"kind":"warmup","implementation":"proteus-beta-brutal","exit_status":%d}\n' \
+        "$proteus_status" >> "${cell_dir}/warmup/status.jsonl"
+    hy2_status=0
     warm_proxy_driver \
         hy2-proxy-bench-driver 10.77.1.10:1080 \
-        "${cell_dir}/warmup/hy2.jsonl"
+        "${cell_dir}/warmup/hy2.jsonl" || hy2_status=$?
+    printf '{"kind":"warmup","implementation":"hysteria2","exit_status":%d}\n' \
+        "$hy2_status" >> "${cell_dir}/warmup/status.jsonl"
+    tuic_status=0
     if [ "$INCLUDE_TUIC" = "1" ]; then
         warm_proxy_driver \
             tuic-bench-driver 10.77.1.12:1080 \
-            "${cell_dir}/warmup/tuic.jsonl"
+            "${cell_dir}/warmup/tuic.jsonl" || tuic_status=$?
+        printf '{"kind":"warmup","implementation":"official-tuic-v5-1.0.0","exit_status":%d}\n' \
+            "$tuic_status" >> "${cell_dir}/warmup/status.jsonl"
+    fi
+    if [ "$proteus_status" -ne 0 ] || [ "$hy2_status" -ne 0 ] || [ "$tuic_status" -ne 0 ]; then
+        echo "benchmark warmup failed in ${cell}; see warmup/status.jsonl" >&2
+        return 1
     fi
 }
 
@@ -261,6 +277,7 @@ done
     printf '"workload_mode":"%s",' "$WORKLOAD_MODE"
     printf '"proteus_brutal_target_mbps":%s,' "$PROTEUS_BRUTAL_TARGET_MBPS"
     printf '"proteus_ack_eliciting_threshold":%s,' "$PROTEUS_ACK_ELICITING_THRESHOLD"
+    printf '"proteus_packet_threshold":%s,' "$PROTEUS_PACKET_THRESHOLD"
     printf '"proteus_initial_mtu":%s,' "$PROTEUS_INITIAL_MTU"
     printf '"proteus_minimum_mtu":%s,' "$PROTEUS_MINIMUM_MTU"
     printf '"proteus_mtu_upper_bound":%s,' "$PROTEUS_MTU_UPPER_BOUND"
