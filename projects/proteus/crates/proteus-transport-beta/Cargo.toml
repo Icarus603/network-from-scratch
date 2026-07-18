@@ -32,7 +32,7 @@ quinn = { version = "0.11", default-features = false, features = ["runtime-tokio
 # quinn-proto: needed only for `RttEstimator` in the custom Brutal
 # congestion controller (Controller trait method signature). Version
 # must stay in lockstep with whatever quinn 0.11 pulls.
-quinn-proto = { version = "=0.11.14", default-features = false }
+quinn-proto = { version = "=0.11.16", default-features = false }
 rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
