@@ -376,3 +376,22 @@ loss/burst 格的雙向 qdisc 都留下實際 drop。IID 與 moderate burst
 sustained-bulk throughput 與 RSS 優勢，不宣稱每格、每個資源維度
 皆勝。逐輪 throughput、image digest、commit、qdisc counters 與
 摘要保存在 `2026-07-18-ack1-recovery-head-to-head.jsonl`。
+
+## 2026-07-18 ACK=1 小流封頂格
+
+同一條 warm production SOCKS5 carrier 上，每個 observation 建立
+新的 SOCKS stream 並 round-trip 1 MiB payload。5% IID loss 與
+severe Gilbert–Elliott burst 都使用 100 ms RTT、64 MiB warmup，
+各跑 30 次：
+
+| cell | Proteus | Hy2 | uplift (95% bootstrap) | p | CPU P/H | RSS P/H |
+|---|---:|---:|---:|---:|---:|---:|
+| 5% IID | 2.924 | 1.812 | **+61.34%** (+27.16%, +80.42%) | <0.00001 | 0.023 / 0.109 s | 31.64 / 88.70 MiB |
+| severe burst | 2.917 | 1.799 | **+62.11%** (+7.20%, +71.25%) | 0.02099 | 0.023 / 0.107 s | 31.64 / 70.33 MiB |
+
+兩格雙方皆 30/30 成功，兩向 qdisc 都記錄實際 drop。1 MiB
+throughput 可換算為約 342/552 ms（IID）與 343/556 ms（severe
+burst）的 median completion time。Severe burst 的 probability of
+superiority 只有 0.678，顯示逐次分布仍重疊；可支持的是中位數與
+分布檢驗勝出，不能宣稱每一條小流都更快。逐次觀測與完整環境指紋
+保存在 `2026-07-18-ack1-short-flow-head-to-head.jsonl`。
