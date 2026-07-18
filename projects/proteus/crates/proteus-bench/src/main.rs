@@ -479,6 +479,12 @@ struct BetaClientArgs {
     /// direction after the timed payload. Zero disables the audit.
     #[arg(long, default_value = "0")]
     recovery_probe_rounds: u32,
+    /// Packet threshold used by the reorder-tolerant audit candidate.
+    #[arg(long, default_value = "10")]
+    recovery_tolerant_packet_threshold: u32,
+    /// Time threshold used by the reorder-tolerant audit candidate.
+    #[arg(long, default_value = "1.125")]
+    recovery_tolerant_time_threshold: f32,
 }
 
 /// Iter-126: shared validator for `--*-secs` / `--runs` /
@@ -764,6 +770,8 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
             a.recovery_probe_rounds
         ));
     }
+    reject_packet_threshold(a.recovery_tolerant_packet_threshold)?;
+    reject_time_threshold(a.recovery_tolerant_time_threshold)?;
     Ok(())
 }
 
@@ -1101,6 +1109,8 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
             connect_timeout,
             total_timeout,
             args.recovery_probe_rounds,
+            args.recovery_tolerant_packet_threshold,
+            args.recovery_tolerant_time_threshold,
         )
         .await?;
         print!("{}", report.to_json());

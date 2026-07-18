@@ -221,6 +221,8 @@ pub async fn run_cross_host_bench(
     connect_timeout: Duration,
     total_timeout: Duration,
     recovery_probe_rounds: u32,
+    recovery_tolerant_packet_threshold: u32,
+    recovery_tolerant_time_threshold: f32,
 ) -> Result<RunReport, BenchError> {
     // Sanity-check the pq_fingerprint matches the supplied mlkem_pk.
     // Without this a typo / mismatched copy-paste would only surface
@@ -287,11 +289,16 @@ pub async fn run_cross_host_bench(
             proteus_transport_beta::recovery::RecoveryDirection::ClientToServer,
             proteus_transport_beta::recovery::RecoveryDirection::ServerToClient,
         ] {
-            let mut selector = proteus_transport_beta::recovery::RecoverySelector::new(
-                direction,
-                proteus_transport_beta::recovery::RecoveryPolicy::default(),
-            )
-            .map_err(|error| BenchError::Connect(format!("recovery policy: {error:?}")))?;
+            let policy = proteus_transport_beta::recovery::RecoveryPolicy {
+                reorder_tolerant: proteus_transport_beta::recovery::RecoveryThresholds {
+                    packet_threshold: recovery_tolerant_packet_threshold,
+                    time_threshold: recovery_tolerant_time_threshold,
+                },
+                ..proteus_transport_beta::recovery::RecoveryPolicy::default()
+            };
+            let mut selector =
+                proteus_transport_beta::recovery::RecoverySelector::new(direction, policy)
+                    .map_err(|error| BenchError::Connect(format!("recovery policy: {error:?}")))?;
             for round in 1..=u64::from(recovery_probe_rounds) {
                 let decision = carrier
                     .run_matched_recovery_round(&mut selector, round)
@@ -867,6 +874,8 @@ mod tests {
                 Duration::from_secs(1),
                 Duration::from_secs(1),
                 0,
+                10,
+                1.125,
             )
             .await
             .expect_err("must fail on fingerprint mismatch")
@@ -909,6 +918,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             0,
+            10,
+            1.125,
         )
         .await
         .expect("cross-host bench should succeed on loopback");
@@ -950,6 +961,8 @@ mod tests {
             Duration::from_secs(30),
             Duration::from_secs(30),
             0,
+            10,
+            1.125,
         )
         .await
         .expect("Brutal cross-host bench should succeed on loopback");

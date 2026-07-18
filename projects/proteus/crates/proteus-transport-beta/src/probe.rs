@@ -13,7 +13,7 @@ use crate::recovery::{RecoveryCounters, RecoveryDirection, RecoveryProfile};
 
 pub(crate) const CONTROL_MARKER: [u8; 16] = *b"proteus-probe-v1";
 const RESPONSE_MARKER: [u8; 8] = *b"prb-res1";
-const HEADER_TAIL_LEN: usize = 8;
+const HEADER_TAIL_LEN: usize = 16;
 const RESPONSE_LEN: usize = 33;
 pub const PROBE_PAYLOAD_BYTES: u32 = 4 * 1024 * 1024;
 pub const MAX_PROBE_PAYLOAD_BYTES: u32 = PROBE_PAYLOAD_BYTES;
@@ -65,30 +65,50 @@ fn parse_profile(value: u8) -> Option<RecoveryProfile> {
 pub(crate) fn encode_command(
     direction: RecoveryDirection,
     profile: RecoveryProfile,
+    thresholds: crate::recovery::RecoveryThresholds,
     payload_bytes: u32,
-) -> [u8; 24] {
-    let mut command = [0u8; 24];
+) -> [u8; 32] {
+    let mut command = [0u8; 32];
     command[..CONTROL_MARKER.len()].copy_from_slice(&CONTROL_MARKER);
     command[16] = 1;
     command[17] = direction_byte(direction);
     command[18] = profile_byte(profile);
-    command[20..24].copy_from_slice(&payload_bytes.to_be_bytes());
+    command[20..24].copy_from_slice(&thresholds.packet_threshold.to_be_bytes());
+    command[24..28].copy_from_slice(&thresholds.time_threshold.to_bits().to_be_bytes());
+    command[28..32].copy_from_slice(&payload_bytes.to_be_bytes());
     command
 }
 
-fn decode_header(tail: [u8; HEADER_TAIL_LEN]) -> Option<(RecoveryDirection, RecoveryProfile, u32)> {
+fn decode_header(
+    tail: [u8; HEADER_TAIL_LEN],
+) -> Option<(
+    RecoveryDirection,
+    RecoveryProfile,
+    crate::recovery::RecoveryThresholds,
+    u32,
+)> {
     if tail[0] != 1 || tail[3] != 0 {
         return None;
     }
     let direction = parse_direction(tail[1])?;
     let profile = parse_profile(tail[2])?;
-    let payload_bytes = u32::from_be_bytes(tail[4..8].try_into().ok()?);
+    let thresholds = crate::recovery::RecoveryThresholds {
+        packet_threshold: u32::from_be_bytes(tail[4..8].try_into().ok()?),
+        time_threshold: f32::from_bits(u32::from_be_bytes(tail[8..12].try_into().ok()?)),
+    };
+    if !(3..=64).contains(&thresholds.packet_threshold)
+        || !thresholds.time_threshold.is_finite()
+        || !(1.125..=4.0).contains(&thresholds.time_threshold)
+    {
+        return None;
+    }
+    let payload_bytes = u32::from_be_bytes(tail[12..16].try_into().ok()?);
     if payload_bytes > MAX_PROBE_PAYLOAD_BYTES
         || (payload_bytes == 0 && !matches!(direction, RecoveryDirection::ServerToClient))
     {
         return None;
     }
-    Some((direction, profile, payload_bytes))
+    Some((direction, profile, thresholds, payload_bytes))
 }
 
 fn delta(before: &quinn::ConnectionStats, after: &quinn::ConnectionStats) -> RecoveryCounters {
@@ -136,9 +156,8 @@ pub(crate) async fn handle_control_stream(
 ) -> std::io::Result<()> {
     let mut tail = [0u8; HEADER_TAIL_LEN];
     recv.read_exact(&mut tail).await.map_err(read_error)?;
-    let (direction, profile, payload_bytes) = decode_header(tail)
+    let (direction, _profile, thresholds, payload_bytes) = decode_header(tail)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid probe"))?;
-    let thresholds = crate::recovery::RecoveryPolicy::default().thresholds(profile);
     let chunk = [0x5au8; 64 * 1024];
     let mut received = vec![0u8; chunk.len()];
     let mut remaining = payload_bytes as usize;
@@ -219,6 +238,7 @@ pub(crate) async fn run_client_probe(
     connection: &quinn::Connection,
     direction: RecoveryDirection,
     profile: RecoveryProfile,
+    thresholds: crate::recovery::RecoveryThresholds,
     payload_bytes: u32,
 ) -> std::io::Result<ProbeResult> {
     if payload_bytes == 0 || payload_bytes > MAX_PROBE_PAYLOAD_BYTES {
@@ -227,7 +247,6 @@ pub(crate) async fn run_client_probe(
             "probe payload outside bounded range",
         ));
     }
-    let thresholds = crate::recovery::RecoveryPolicy::default().thresholds(profile);
     if matches!(direction, RecoveryDirection::ClientToServer) {
         connection
             .set_loss_detection_thresholds(thresholds.packet_threshold, thresholds.time_threshold);
@@ -242,8 +261,13 @@ pub(crate) async fn run_client_probe(
     let started = Instant::now();
     let mut completion_time = None;
     let (mut send, mut recv) = connection.open_bi().await?;
-    send.write_all(&encode_command(direction, profile, payload_bytes))
-        .await?;
+    send.write_all(&encode_command(
+        direction,
+        profile,
+        thresholds,
+        payload_bytes,
+    ))
+    .await?;
     let chunk = [0x5au8; 64 * 1024];
 
     match direction {
@@ -308,11 +332,13 @@ pub(crate) async fn run_client_probe(
 pub(crate) async fn apply_remote_profile(
     connection: &quinn::Connection,
     profile: RecoveryProfile,
+    thresholds: crate::recovery::RecoveryThresholds,
 ) -> std::io::Result<()> {
     let (mut send, mut recv) = connection.open_bi().await?;
     send.write_all(&encode_command(
         RecoveryDirection::ServerToClient,
         profile,
+        thresholds,
         0,
     ))
     .await?;
@@ -337,6 +363,7 @@ mod tests {
         let command = encode_command(
             RecoveryDirection::ServerToClient,
             RecoveryProfile::ReorderTolerant,
+            crate::recovery::RecoveryPolicy::default().reorder_tolerant,
             PROBE_PAYLOAD_BYTES,
         );
         assert_eq!(&command[..16], &CONTROL_MARKER);
@@ -345,6 +372,7 @@ mod tests {
             Some((
                 RecoveryDirection::ServerToClient,
                 RecoveryProfile::ReorderTolerant,
+                crate::recovery::RecoveryPolicy::default().reorder_tolerant,
                 PROBE_PAYLOAD_BYTES
             ))
         );
@@ -355,6 +383,7 @@ mod tests {
         let command = encode_command(
             RecoveryDirection::ServerToClient,
             RecoveryProfile::Standard,
+            crate::recovery::RecoveryPolicy::default().standard,
             0,
         );
         assert_eq!(
@@ -362,15 +391,47 @@ mod tests {
             Some((
                 RecoveryDirection::ServerToClient,
                 RecoveryProfile::Standard,
+                crate::recovery::RecoveryPolicy::default().standard,
                 0
             ))
         );
         let invalid = encode_command(
             RecoveryDirection::ClientToServer,
             RecoveryProfile::Standard,
+            crate::recovery::RecoveryPolicy::default().standard,
             0,
         );
         assert_eq!(decode_header(invalid[16..].try_into().unwrap()), None);
+    }
+
+    #[test]
+    fn command_rejects_out_of_range_or_non_finite_thresholds() {
+        for thresholds in [
+            crate::recovery::RecoveryThresholds {
+                packet_threshold: 2,
+                time_threshold: 1.125,
+            },
+            crate::recovery::RecoveryThresholds {
+                packet_threshold: 65,
+                time_threshold: 1.125,
+            },
+            crate::recovery::RecoveryThresholds {
+                packet_threshold: 10,
+                time_threshold: f32::NAN,
+            },
+            crate::recovery::RecoveryThresholds {
+                packet_threshold: 10,
+                time_threshold: 4.001,
+            },
+        ] {
+            let command = encode_command(
+                RecoveryDirection::ServerToClient,
+                RecoveryProfile::ReorderTolerant,
+                thresholds,
+                PROBE_PAYLOAD_BYTES,
+            );
+            assert_eq!(decode_header(command[16..].try_into().unwrap()), None);
+        }
     }
 
     #[test]

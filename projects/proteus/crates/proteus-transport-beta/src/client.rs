@@ -265,6 +265,18 @@ impl BetaClientConnection {
         profile: crate::recovery::RecoveryProfile,
         payload_bytes: u32,
     ) -> Result<crate::probe::ProbeResult, BetaError> {
+        let thresholds = crate::recovery::RecoveryPolicy::default().thresholds(profile);
+        self.run_authenticated_probe_with_thresholds(direction, profile, thresholds, payload_bytes)
+            .await
+    }
+
+    async fn run_authenticated_probe_with_thresholds(
+        &self,
+        direction: crate::recovery::RecoveryDirection,
+        profile: crate::recovery::RecoveryProfile,
+        thresholds: crate::recovery::RecoveryThresholds,
+        payload_bytes: u32,
+    ) -> Result<crate::probe::ProbeResult, BetaError> {
         if !self
             .authenticated
             .load(std::sync::atomic::Ordering::Acquire)
@@ -277,7 +289,13 @@ impl BetaClientConnection {
         let _guard = self.probe_lock.lock().await;
         tokio::time::timeout(
             crate::probe::PROBE_TIMEOUT,
-            crate::probe::run_client_probe(&self.connection, direction, profile, payload_bytes),
+            crate::probe::run_client_probe(
+                &self.connection,
+                direction,
+                profile,
+                thresholds,
+                payload_bytes,
+            ),
         )
         .await
         .map_err(|_| {
@@ -302,8 +320,14 @@ impl BetaClientConnection {
             required_rounds: 1,
         };
         for profile in crate::recovery::RecoverySelector::profile_order(round) {
+            let thresholds = selector.thresholds_for(profile);
             let result = self
-                .run_authenticated_probe(direction, profile, crate::probe::PROBE_PAYLOAD_BYTES)
+                .run_authenticated_probe_with_thresholds(
+                    direction,
+                    profile,
+                    thresholds,
+                    crate::probe::PROBE_PAYLOAD_BYTES,
+                )
                 .await;
             let observation = match result {
                 Ok(probe) => {
@@ -360,10 +384,11 @@ impl BetaClientConnection {
                 );
             }
             crate::recovery::RecoveryDirection::ServerToClient => {
+                let thresholds = selector.thresholds_for(selected);
                 let _guard = self.probe_lock.lock().await;
                 tokio::time::timeout(
                     crate::probe::PROBE_TIMEOUT,
-                    crate::probe::apply_remote_profile(&self.connection, selected),
+                    crate::probe::apply_remote_profile(&self.connection, selected, thresholds),
                 )
                 .await
                 .map_err(|_| {
