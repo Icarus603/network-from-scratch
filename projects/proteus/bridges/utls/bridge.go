@@ -74,9 +74,16 @@ func buildUTLSClient(raw net.Conn, serverName string, cfg *bridgeConfig) (*utls.
 		tlsConfig.MinVersion = utls.VersionTLS13
 	}
 
-	conn := utls.UClient(raw, tlsConfig, utls.HelloChrome_133)
+	spec, err := chrome150Spec()
+	if err != nil {
+		return nil, err
+	}
+	conn := utls.UClient(raw, tlsConfig, utls.HelloCustom)
+	if err := conn.ApplyPreset(&spec); err != nil {
+		return nil, fmt.Errorf("apply %s ClientHello profile: %w", browserProfileID, err)
+	}
 	if err := conn.BuildHandshakeState(); err != nil {
-		return nil, fmt.Errorf("build Chrome 133 ClientHello: %w", err)
+		return nil, fmt.Errorf("build %s ClientHello: %w", browserProfileID, err)
 	}
 	// Chrome advertises renegotiation_info for compatibility. uTLS's
 	// profile also enables actual renegotiation by default, which makes

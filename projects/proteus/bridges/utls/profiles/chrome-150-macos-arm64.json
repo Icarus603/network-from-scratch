@@ -1,0 +1,99 @@
+{
+  "schema_version": 1,
+  "profile_id": "chrome-150-macos-arm64",
+  "browser_version": "150.0.7871.128",
+  "captured_on": "2026-07-18",
+  "capture_platform": "macOS arm64",
+  "capture_host": "profile.example",
+  "capture_method": "fresh Chrome headless profile to a loopback OpenSSL ClientHello sink with QUIC and proxying disabled",
+  "handshake_length": {
+    "min": 1722,
+    "max": 1818,
+    "step": 32
+  },
+  "ech_payload_length": {
+    "min": 186,
+    "max": 282,
+    "step": 32
+  },
+  "profile": {
+    "record_version": "0301",
+    "legacy_version": "0303",
+    "handshake_length": 0,
+    "session_id_length": 32,
+    "cipher_suites": [
+      "GREASE",
+      "1301",
+      "1302",
+      "1303",
+      "c02b",
+      "c02f",
+      "c02c",
+      "c030",
+      "cca9",
+      "cca8",
+      "c013",
+      "c014",
+      "009c",
+      "009d",
+      "002f",
+      "0035"
+    ],
+    "compression_methods": [0],
+    "extensions": [
+      "0000",
+      "0005",
+      "000a",
+      "000b",
+      "000d",
+      "0010",
+      "0012",
+      "0017",
+      "001b",
+      "0023",
+      "002b",
+      "002d",
+      "0033",
+      "44cd",
+      "GREASE",
+      "GREASE",
+      "fe0d",
+      "ff01"
+    ],
+    "grease_extension_lengths": [0, 1],
+    "server_name": "profile.example",
+    "supported_groups": ["GREASE", "11ec", "001d", "0017", "0018"],
+    "point_formats": [0],
+    "signature_algorithms": [
+      "0904",
+      "0905",
+      "0906",
+      "0403",
+      "0804",
+      "0401",
+      "0503",
+      "0805",
+      "0501",
+      "0806",
+      "0601"
+    ],
+    "alpn": ["h2", "http/1.1"],
+    "alps": ["h2"],
+    "supported_versions": ["GREASE", "0304", "0303"],
+    "key_shares": [
+      {"group": "GREASE", "key_length": 1},
+      {"group": "11ec", "key_length": 1216},
+      {"group": "001d", "key_length": 32}
+    ],
+    "certificate_compression": [2],
+    "psk_key_exchange_modes": [1],
+    "fixed_extension_data": {
+      "0005": "0100000000",
+      "0012": "",
+      "0017": "",
+      "0023": "",
+      "ff01": "00"
+    },
+    "ech_payload_length": 0
+  }
+}

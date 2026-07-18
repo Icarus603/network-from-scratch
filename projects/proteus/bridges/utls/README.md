@@ -2,8 +2,9 @@
 
 This small local transport adapter gives the Rust client a
 version-locked uTLS ClientHello without vendoring or forking the whole
-TLS implementation. It currently locks `HelloChrome_133`, the profile
-used by uTLS v1.8.2 and its `HelloChrome_Auto` alias.
+TLS implementation. It starts from uTLS v1.8.2
+`HelloChrome_133`, then applies the narrow signature-algorithm delta
+observed in a real Chrome 150.0.7871.128 macOS arm64 capture.
 
 The bridge listens on a mode-`0600` Unix socket. A trusted local
 Proteus client asks it to dial one server address and DNS certificate
@@ -28,6 +29,24 @@ go build -trimpath -o proteus-utls-bridge .
   --listen /run/proteus/utls.sock \
   --knock-psk /etc/proteus/keys/server.knock_psk \
   --trusted-ca /etc/proteus/keys/tls/self-signed-ca.pem
+```
+
+The checked fixture at
+`profiles/chrome-150-macos-arm64.json` is a normalized real-browser
+capture, not a copy of uTLS's own spec. The release gate checks the
+complete cipher and extension skeleton, GREASE shapes, groups,
+signature algorithms, ALPN/ALPS, key-share groups and lengths,
+certificate compression, fixed extension payloads, ECH envelope,
+and all structural length invariants over 32 randomized handshakes.
+It also proves the prebuilt ClientHello equals the bytes actually
+written to the transport.
+
+Refresh the evidence against the installed Chrome without public
+network access:
+
+```bash
+PROTEUS_CAPTURE_BROWSER_PROFILE=1 \
+  go test -run TestCaptureInstalledChromeProfile -count=1 -v
 ```
 
 Enable it in the Rust client with:

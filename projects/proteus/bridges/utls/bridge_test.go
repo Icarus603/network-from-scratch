@@ -13,11 +13,13 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/json"
 	"io"
 	"math/big"
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -58,7 +60,7 @@ func TestMakeKnockSessionIDMatchesRustWireContract(t *testing.T) {
 	}
 }
 
-func TestBuildUTLSClientUsesChrome133AndKnock(t *testing.T) {
+func TestBuildUTLSClientUsesChrome150AndKnock(t *testing.T) {
 	clientSide, serverSide := net.Pipe()
 	defer clientSide.Close()
 	defer serverSide.Close()
@@ -73,10 +75,10 @@ func TestBuildUTLSClientUsesChrome133AndKnock(t *testing.T) {
 	}
 	hello := conn.HandshakeState.Hello
 	if got := len(hello.CipherSuites); got != 16 {
-		t.Fatalf("Chrome 133 cipher suite count including GREASE = %d, want 16", got)
+		t.Fatalf("Chrome 150 cipher suite count including GREASE = %d, want 16", got)
 	}
 	if got := len(conn.Extensions); got != 18 {
-		t.Fatalf("Chrome 133 extension count including GREASE = %d, want 18", got)
+		t.Fatalf("Chrome 150 extension count including GREASE = %d, want 18", got)
 	}
 	var sawRenegotiationInfo bool
 	for _, extension := range conn.Extensions {
@@ -88,7 +90,7 @@ func TestBuildUTLSClientUsesChrome133AndKnock(t *testing.T) {
 		}
 	}
 	if !sawRenegotiationInfo {
-		t.Fatal("Chrome 133 wire profile lost renegotiation_info extension")
+		t.Fatal("Chrome 150 wire profile lost renegotiation_info extension")
 	}
 	if got := len(hello.SessionId); got != 32 {
 		t.Fatalf("session ID length = %d, want 32", got)
@@ -100,7 +102,228 @@ func TestBuildUTLSClientUsesChrome133AndKnock(t *testing.T) {
 		t.Fatalf("SNI = %q", hello.ServerName)
 	}
 	if len(hello.SupportedCurves) < 4 {
-		t.Fatalf("Chrome 133 supported groups unexpectedly short: %v", hello.SupportedCurves)
+		t.Fatalf("Chrome 150 supported groups unexpectedly short: %v", hello.SupportedCurves)
+	}
+}
+
+type profileLengthRange struct {
+	Min  int `json:"min"`
+	Max  int `json:"max"`
+	Step int `json:"step"`
+}
+
+type versionedProfileFixture struct {
+	SchemaVersion    int                `json:"schema_version"`
+	ProfileID        string             `json:"profile_id"`
+	BrowserVersion   string             `json:"browser_version"`
+	CapturedOn       string             `json:"captured_on"`
+	CapturePlatform  string             `json:"capture_platform"`
+	CaptureHost      string             `json:"capture_host"`
+	CaptureMethod    string             `json:"capture_method"`
+	HandshakeLength  profileLengthRange `json:"handshake_length"`
+	ECHPayloadLength profileLengthRange `json:"ech_payload_length"`
+	Profile          clientHelloProfile `json:"profile"`
+}
+
+func TestChrome150WireProfileMatchesCapturedFixture(t *testing.T) {
+	body, err := os.ReadFile(filepath.Join("profiles", browserProfileID+".json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fixture versionedProfileFixture
+	if err := json.Unmarshal(body, &fixture); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.SchemaVersion != 1 ||
+		fixture.ProfileID != browserProfileID ||
+		fixture.BrowserVersion != browserProfileVersion ||
+		fixture.CaptureHost == "" ||
+		fixture.CaptureMethod == "" {
+		t.Fatalf("fixture metadata is stale or incomplete: %#v", fixture)
+	}
+
+	var psk knockPSK
+	for i := range psk {
+		psk[i] = byte(0x20 + i)
+	}
+	for sample := 0; sample < 32; sample++ {
+		clientSide, serverSide := net.Pipe()
+		cfg := &bridgeConfig{knockPSK: psk}
+		conn, err := buildUTLSClient(clientSide, fixture.CaptureHost, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		raw := conn.HandshakeState.Hello.Raw
+		record := make([]byte, 5+len(raw))
+		record[0] = 0x16
+		record[1] = 0x03
+		record[2] = 0x01
+		binary.BigEndian.PutUint16(record[3:5], uint16(len(raw)))
+		copy(record[5:], raw)
+		profile, err := parseClientHelloProfile(record)
+		if err != nil {
+			t.Fatalf("sample %d: %v", sample, err)
+		}
+		assertLengthRange(t, "handshake", profile.HandshakeLength, fixture.HandshakeLength)
+		assertLengthRange(t, "ECH payload", profile.ECHPayloadLength, fixture.ECHPayloadLength)
+		profile.HandshakeLength = 0
+		profile.ECHPayloadLength = 0
+		if !reflect.DeepEqual(profile, fixture.Profile) {
+			got, _ := json.MarshalIndent(profile, "", "  ")
+			want, _ := json.MarshalIndent(fixture.Profile, "", "  ")
+			t.Fatalf("sample %d profile drift\nwant:\n%s\ngot:\n%s", sample, want, got)
+		}
+
+		if sample == 0 {
+			handshakeDone := make(chan error, 1)
+			go func() {
+				handshakeDone <- conn.Handshake()
+			}()
+			wireHeader := make([]byte, 5)
+			if _, err := io.ReadFull(serverSide, wireHeader); err != nil {
+				t.Fatal(err)
+			}
+			wirePayload := make([]byte, int(binary.BigEndian.Uint16(wireHeader[3:5])))
+			if _, err := io.ReadFull(serverSide, wirePayload); err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(wirePayload, raw) {
+				t.Fatal("BuildHandshakeState raw ClientHello differs from transmitted wire payload")
+			}
+			_ = serverSide.Close()
+			if err := <-handshakeDone; err == nil {
+				t.Fatal("handshake against capture-only sink unexpectedly succeeded")
+			}
+		} else {
+			_ = serverSide.Close()
+		}
+		_ = clientSide.Close()
+	}
+}
+
+func TestClientHelloProfileParserFailsClosed(t *testing.T) {
+	raw := testChrome150Raw(t)
+
+	truncated := bytes.Clone(raw[:len(raw)-1])
+	if _, err := parseClientHelloProfile(truncated); err == nil {
+		t.Fatal("truncated ClientHello must be rejected")
+	}
+
+	duplicateSNI := bytes.Clone(raw)
+	sctTypeOffset, _, _ := findExtension(t, duplicateSNI, 0x0012)
+	binary.BigEndian.PutUint16(duplicateSNI[sctTypeOffset:sctTypeOffset+2], 0x0000)
+	if _, err := parseClientHelloProfile(duplicateSNI); err == nil {
+		t.Fatal("duplicate non-GREASE extension must be rejected")
+	}
+
+	badECHLength := bytes.Clone(raw)
+	_, echDataOffset, echDataLength := findExtension(t, badECHLength, 0xfe0d)
+	if echDataLength < 42 {
+		t.Fatalf("unexpected ECH data length %d", echDataLength)
+	}
+	payloadLength := binary.BigEndian.Uint16(badECHLength[echDataOffset+40 : echDataOffset+42])
+	binary.BigEndian.PutUint16(
+		badECHLength[echDataOffset+40:echDataOffset+42],
+		payloadLength+1,
+	)
+	if _, err := parseClientHelloProfile(badECHLength); err == nil {
+		t.Fatal("forged GREASE ECH ciphertext length must be rejected")
+	}
+
+	oddCipherVector := bytes.Clone(raw)
+	cipherLengthOffset := 4 + 2 + 32 + 1 + int(oddCipherVector[4+2+32])
+	cipherLength := binary.BigEndian.Uint16(
+		oddCipherVector[cipherLengthOffset : cipherLengthOffset+2],
+	)
+	binary.BigEndian.PutUint16(
+		oddCipherVector[cipherLengthOffset:cipherLengthOffset+2],
+		cipherLength-1,
+	)
+	if _, err := parseClientHelloProfile(oddCipherVector); err == nil {
+		t.Fatal("odd cipher-suite vector must be rejected")
+	}
+}
+
+func testChrome150Raw(t *testing.T) []byte {
+	t.Helper()
+	clientSide, serverSide := net.Pipe()
+	defer clientSide.Close()
+	defer serverSide.Close()
+	var psk knockPSK
+	for i := range psk {
+		psk[i] = byte(0x60 + i)
+	}
+	conn, err := buildUTLSClient(
+		clientSide,
+		"profile.example",
+		&bridgeConfig{knockPSK: psk},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return bytes.Clone(conn.HandshakeState.Hello.Raw)
+}
+
+func findExtension(t *testing.T, raw []byte, wanted uint16) (typeOffset, dataOffset, dataLength int) {
+	t.Helper()
+	if len(raw) < 4+2+32+1 {
+		t.Fatal("ClientHello too short")
+	}
+	offset := 4 + 2 + 32
+	sessionIDLength := int(raw[offset])
+	offset += 1 + sessionIDLength
+	if offset+2 > len(raw) {
+		t.Fatal("truncated cipher length")
+	}
+	cipherLength := int(binary.BigEndian.Uint16(raw[offset : offset+2]))
+	offset += 2 + cipherLength
+	if offset >= len(raw) {
+		t.Fatal("truncated compression length")
+	}
+	compressionLength := int(raw[offset])
+	offset += 1 + compressionLength
+	if offset+2 > len(raw) {
+		t.Fatal("truncated extension length")
+	}
+	extensionsLength := int(binary.BigEndian.Uint16(raw[offset : offset+2]))
+	offset += 2
+	end := offset + extensionsLength
+	if end != len(raw) {
+		t.Fatalf("extension vector ends at %d, raw length %d", end, len(raw))
+	}
+	for offset < end {
+		if offset+4 > end {
+			t.Fatal("truncated extension header")
+		}
+		extensionType := binary.BigEndian.Uint16(raw[offset : offset+2])
+		length := int(binary.BigEndian.Uint16(raw[offset+2 : offset+4]))
+		if offset+4+length > end {
+			t.Fatal("truncated extension data")
+		}
+		if extensionType == wanted {
+			return offset, offset + 4, length
+		}
+		offset += 4 + length
+	}
+	t.Fatalf("extension %04x not found", wanted)
+	return 0, 0, 0
+}
+
+func assertLengthRange(t *testing.T, name string, got int, expected profileLengthRange) {
+	t.Helper()
+	if expected.Step <= 0 ||
+		got < expected.Min ||
+		got > expected.Max ||
+		(got-expected.Min)%expected.Step != 0 {
+		t.Fatalf(
+			"%s length %d outside captured range [%d,%d] step %d",
+			name,
+			got,
+			expected.Min,
+			expected.Max,
+			expected.Step,
+		)
 	}
 }
 

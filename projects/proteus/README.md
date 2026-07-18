@@ -9,7 +9,7 @@ honest carrier-comparison table further down.
 
 **Status: M2.** α-profile (TCP+TLS 1.3) and β-profile (QUIC+BBR)
 carriers both work end-to-end. The opt-in α uTLS bridge now emits a
-version-locked Chrome 133 profile while preserving the Path A knock
+version-locked Chrome 150 profile while preserving the Path A knock
 and exporter-bound hybrid handshake. Multipath QUIC, real ECH
 termination, MASQUE (γ-profile), and a cross-host adversarial
 benchmark against Hy2/TUIC-v5 remain M3+ work.
@@ -74,7 +74,7 @@ VLESS+REALITY who need:
 | O(1) Ed25519 verify (no timing/DoS) | ✅ AEAD-indexed allowlist | n/a | n/a |
 | Anti-DoS proof-of-work | ✅ tunable | ❌ none | ❌ none |
 | Memory exhaustion cap (handshake + post) | ✅ 64 KiB + 16 MiB | reliant on TCP | reliant on UDP |
-| Real TLS 1.3 outer | ✅ rustls or pinned uTLS Chrome 133 | ✅ REALITY tunnel | ❌ QUIC |
+| Real TLS 1.3 outer | ✅ rustls or pinned uTLS-derived Chrome 150 | ✅ REALITY tunnel | ❌ QUIC |
 | Cover-server splice on auth fail | ✅ | ✅ | ❌ |
 | Mechanical mutual auth | ✅ Finished MAC chain | ⚠ short-id only | ⚠ trust on certificate |
 | `cargo deny` / `cargo audit` clean | ✅ | n/a | n/a |
@@ -90,7 +90,7 @@ SNI-based QUIC Censorship of the Great Firewall of China" — applied to β only
 | Prefix-noise before QUIC Initial (#2) | ✅ 16 random bytes first-flight | n/a (TCP) | ❌ |
 | Connection migration (#4 — 180 s 5-tuple drop escape) | ✅ `migrate()` + low source-port rebind | n/a (TCP) | ⚠ supported but no GFW-specific port pick |
 | UDP datagram length uniformity | ✅ pad-to-MTU (operator opt-in) | n/a | ❌ |
-| α browser-profile ClientHello | ✅ opt-in uTLS Chrome 133; full raw-profile drift gate pending | ✅ uTLS | n/a (no TLS handshake on wire) |
+| α browser-profile ClientHello | ✅ opt-in Chrome 150 real-capture fixture + full normalized wire-profile gate | ✅ uTLS | n/a (no TLS handshake on wire) |
 | α Path A knock inside browser session ID | ✅ same HMAC contract on rustls + uTLS paths | ✅ REALITY auth field | n/a |
 | compress_certificate (ext 0x001b) | ✅ rustls `brotli` feature | ❌ | n/a |
 | ML-KEM-768 hybrid handshake (PQ) | ✅ X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
@@ -111,7 +111,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 
 | # | Attack line | Status | Proteus coverage |
 |---|---|---|---|
-| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ✅ opt-in pinned uTLS Chrome 133 ClientHello; ⚠ full raw-profile drift gate and field deployment evidence pending |
+| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ✅ opt-in Chrome 150 real-capture ClientHello with full normalized wire-profile gate; ⚠ field deployment evidence pending |
 | 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; ✅ `deploy/README.md` "Deployment topology" section + security-checklist topology items; ✅ **multi-VPS HA client** (2026-05-18 — EndpointPool + EndpointHealth + YAML `server_endpoints:` with auto failover); ✅ **TLS cert-expiry + reload observability** (2026-05-18 — `proteus_tls_cert_not_after_unix_seconds` gauge + `_reload_attempts/_succeeded_total` counters + `admin status` "TLS cert" block with RENEW NOW / EXPIRED warnings; closes the silent-certbot-failure case that has killed multiple production Hy2/TUIC nodes) |
 | 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ✅ **malformed, partial, slow, and non-TLS α probes preserve their consumed prefix and route to cover** (obvious non-TLS headers are rejected immediately, avoiding the 3 s sniff-timeout oracle); ✅ **cover-endpoint pool with per-src-IP /24 affinity** (no rotation signal); ✅ **probe-anomaly detector wired across both α and β** (sliding-window per-/24 counter + Prometheus alert); ✅ **detector recent-fires ring exposed via `/metrics` + admin CLI** (operator sees WHICH /24 fired in PromQL/Grafana AND in-terminal); ✅ **operator-opt-in auto-deny loop** (TTL-bounded in-binary deny list; entries auto-expire so false positives heal); ✅ **β pre-QUIC-handshake auto-deny short-circuit** (denied /24s get `Incoming::ignore()` BEFORE quinn pays the TLS+QUIC handshake cost; prober's wire view = server unreachable, no response packet at all); ✅ **auto-deny *current-state* surface** (2026-05-18 — Prometheus `proteus_auto_deny_active_prefixes`/`inserted_total`/`refused_inserts_total` + per-entry `proteus_auto_deny_remaining_secs{prefix=…}` labelled gauge AND `admin status` text/JSON block showing who is blocked right now + TTL countdown; closes the gap where long-TTL entries persisted past the recent-fires ring) |
@@ -122,7 +122,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 **Roadmap priorities driven by this threat intel**:
 
 - **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, ~~`deploy/README.md` anti-relay topology warning~~ ✅ **done 2026-05-18**. **4 of 5 P0 done**; only ECH (multi-week, rustls-fork) remains.
-- **P1** (M3): ~~uTLS-grade browser-profile ClientHello~~ ✅ opt-in Chrome 133 bridge done 2026-07-18 (full raw-profile drift gate remains), ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
+- **P1** (M3): ~~uTLS-grade browser-profile ClientHello~~ ✅ opt-in Chrome 150 bridge + real-capture fixture + normalized raw-wire gate done 2026-07-18, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
 The single most important update is conceptual: the adversary is no longer
@@ -1037,8 +1037,8 @@ browser reference table.
 **Exit codes** — wire into CI / deploy gates:
 
 - `0` — live JA4 matches `EXPECTED_BASELINE` (safe to deploy)
-- `1` — drift (rustls upgrade, dependency bump, intentional
-  uTLS-replay milestone — operator decides)
+- `1` — standard rustls-path drift (rustls upgrade, dependency
+  bump, or an intentional rustls profile change — operator decides)
 
 **JSON Lines mode** for scripted alerting:
 
@@ -1063,11 +1063,11 @@ row. It is not proof of a byte-perfect ClientHello: JA4 omits random
 values, session IDs, GREASE values, key-share payloads, padding, and
 other raw encoding details. As of α it is `false` for every entry
 on the standard rustls path. The optional bridge delegates assembly
-to pinned uTLS `HelloChrome_133`; its tests lock ciphers, extensions,
-groups, session-ID knock, renegotiation policy, and exporter parity.
-A remaining release gate must capture the bridge's raw ClientHello
-and compare a versioned browser profile across the complete parsed
-message and encoding invariants, not only JA4.
+to a pinned uTLS base plus the measured Chrome 150 delta. Its
+versioned real-browser fixture locks ciphers, extensions, GREASE,
+groups, signature algorithms, ALPN/ALPS, key-share shapes,
+session-ID knock, ECH envelope, renegotiation policy, exporter
+parity, and raw framing invariants across randomized handshakes.
 
 ### `GET /diagnose` — one-shot self-check
 
@@ -1839,17 +1839,16 @@ latest hardening pass:
 
 ### Not yet done (the remaining gap)
 
-- 🟡 **Browser-profile release gate and rotation**: the opt-in local
-  bridge uses pinned uTLS v1.8.2 `HelloChrome_133`, injects the
+- 🟡 **Browser-profile rotation**: the opt-in local bridge uses pinned
+  uTLS v1.8.2 plus a measured Chrome 150 signature-scheme delta, injects the
   existing Path A knock before transcript hashing, returns the TLS
   exporter, and has passed the Rust-client → Go-uTLS → Rust-server
   cross-language handshake. It deliberately avoids a rustls fork.
-  The current tests lock important structural fields, yet do not
-  compare every raw ClientHello encoding invariant against a
-  captured Chrome release. Before a production-grade camouflage
-  claim, add complete profile fixtures, drift detection, and at
-  least two current browser profiles with an explicit rotation
-  policy. REALITY still has the stronger deployment history here.
+  A complete normalized raw-wire fixture and drift gate now use a
+  real Chrome release. Before a broad production camouflage claim,
+  add at least one more current browser family and an explicit
+  rotation policy. REALITY still has the stronger deployment history
+  here.
 - ❌ **Multipath QUIC** (spec §10.4): not started.
 - ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
   publication. Needed to hide `proteus-β-v1` ALPN in flight.

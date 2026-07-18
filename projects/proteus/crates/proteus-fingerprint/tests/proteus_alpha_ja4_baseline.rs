@@ -273,8 +273,9 @@ async fn proteus_alpha_clienthello_ja4_baseline() {
         "JA4 baseline drift detected.\n\
          Current:  {}\n\
          Expected: {}\n\
-         If this is intentional (rustls upgrade, uTLS replay landed,\n\
-         etc.) update EXPECTED_BASELINE in this test.",
+         If this is an intentional standard rustls-path profile change,\n\
+         update EXPECTED_BASELINE in this test. The external uTLS bridge\n\
+         has its own full-profile fixture and must not alter this value.",
         ja4,
         EXPECTED_BASELINE,
     );

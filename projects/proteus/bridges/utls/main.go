@@ -88,7 +88,12 @@ func run(socketPath string, cfg *bridgeConfig) error {
 		_ = listener.Close()
 	}()
 
-	log.Printf("proteus-utls-bridge listening on %s with locked Chrome 133 profile", socketPath)
+	log.Printf(
+		"proteus-utls-bridge listening on %s with locked %s profile (browser %s)",
+		socketPath,
+		browserProfileID,
+		browserProfileVersion,
+	)
 	for {
 		conn, err := listener.AcceptUnix()
 		if err != nil {

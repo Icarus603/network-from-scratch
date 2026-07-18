@@ -120,8 +120,8 @@ pub struct FingerprintSection {
 
 impl FingerprintSection {
     /// Map to the same severity grammar the other sub-checks use:
-    /// matching baseline = PASS; drift = WARN (it may be expected
-    /// uTLS-replay progress; not strictly a FAIL since the binary
+    /// matching baseline = PASS; drift = WARN (it may be an expected
+    /// standard rustls-profile change; not strictly a FAIL since the binary
     /// itself emits a warn log line at startup explaining both
     /// possibilities).
     fn severity(&self) -> Severity {

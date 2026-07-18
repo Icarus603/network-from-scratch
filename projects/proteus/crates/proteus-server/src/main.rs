@@ -263,7 +263,7 @@ enum PreflightCmd {
     ///   - `1` when any sub-check reports FAIL.
     ///
     /// Fingerprint drift is treated as WARN (not FAIL) — operators
-    /// may have intentionally landed uTLS-replay; the
+    /// may have intentionally changed the standard rustls profile; the
     /// `EXPECTED_BASELINE` constant in `tls_fingerprint_observer.rs`
     /// is the single source of truth they update when promoting.
     All {
@@ -1593,7 +1593,7 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
                 expected_baseline = %observed.expected_baseline,
                 "live TLS ClientHello JA4 does NOT match the locked baseline — \
                  either a dep drift (rustls upgrade) regressed the fingerprint OR \
-                 uTLS-replay work landed (update EXPECTED_BASELINE in BOTH \
+                 the standard rustls profile changed intentionally (update EXPECTED_BASELINE in BOTH \
                  tls_fingerprint_observer.rs AND the proteus-fingerprint \
                  baseline test, then rebuild)."
             );
