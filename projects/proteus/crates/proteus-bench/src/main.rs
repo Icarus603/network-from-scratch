@@ -237,6 +237,11 @@ struct BetaArgs {
     /// LAN throughput when applied universally.
     #[arg(long, default_value = "1")]
     ack_eliciting_threshold: u32,
+    /// `PerfProfile.packet_threshold`. 3 is the RFC 9002 default.
+    /// Raise only for a measured reordered path because higher
+    /// values delay recovery from genuine packet loss.
+    #[arg(long, default_value = "3")]
+    packet_threshold: u32,
     /// `PerfProfile.allow_spin_bit`. false = privacy-default (no
     /// wire-visible RTT side channel); true = matches quinn upstream.
     #[arg(long, default_value = "false")]
@@ -374,6 +379,10 @@ struct BetaServerArgs {
     /// Brutal target rate in Mbit/s. Ignored for BBR.
     #[arg(long, default_value = "100")]
     brutal_target_mbps: u64,
+    /// Server-side `PerfProfile.packet_threshold`. Use the same value
+    /// on both peers when running a bidirectional reordering study.
+    #[arg(long, default_value = "3")]
+    packet_threshold: u32,
 }
 
 #[derive(clap::Args, Debug)]
@@ -431,6 +440,9 @@ struct BetaClientArgs {
     /// `PerfProfile.ack_eliciting_threshold`.
     #[arg(long, default_value = "1")]
     ack_eliciting_threshold: u32,
+    /// `PerfProfile.packet_threshold`. 3 is the production default.
+    #[arg(long, default_value = "3")]
+    packet_threshold: u32,
     /// `PerfProfile.allow_spin_bit`.
     #[arg(long, default_value = "false")]
     allow_spin_bit: bool,
@@ -494,6 +506,17 @@ fn reject_zero_usize(name: &str, value: usize, hint: &str) -> Result<(), String>
         return Err(format!(
             "{name} = 0 is not a useful bench value — {hint}. \
              Re-run with a positive value (or omit the flag to use the default)."
+        ));
+    }
+    Ok(())
+}
+
+fn reject_packet_threshold(value: u32) -> Result<(), String> {
+    if value < 3 {
+        return Err(format!(
+            "--packet-threshold = {value} is below RFC 9002's packet \
+             reordering threshold of 3. Use 3 for ordinary paths; raise \
+             it only when a measured path reorders packets."
         ));
     }
     Ok(())
@@ -657,6 +680,7 @@ fn validate_beta_args(a: &BetaArgs) -> Result<(), String> {
         ));
     }
     reject_invalid_loss_pct(a.loss_pct)?;
+    reject_packet_threshold(a.packet_threshold)?;
     reject_zero_u64(
         "--brutal-target-mbps",
         a.brutal_target_mbps,
@@ -702,6 +726,7 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
             a.mtu_upper_bound, a.initial_mtu
         ));
     }
+    reject_packet_threshold(a.packet_threshold)?;
     reject_zero_u64(
         "--brutal-target-mbps",
         a.brutal_target_mbps,
@@ -715,7 +740,8 @@ fn validate_beta_server_args(a: &BetaServerArgs) -> Result<(), String> {
         "--brutal-target-mbps",
         a.brutal_target_mbps,
         "Brutal needs a positive pacing target",
-    )
+    )?;
+    reject_packet_threshold(a.packet_threshold)
 }
 
 fn validate_udp_forwarder_args(a: &UdpForwarderArgs) -> Result<(), String> {
@@ -905,6 +931,7 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
         pad_quic_datagrams_to_mtu: args.pad_mtu,
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,
+        packet_threshold: args.packet_threshold,
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
@@ -962,6 +989,7 @@ async fn run_beta_server(args: BetaServerArgs) -> Result<(), Box<dyn std::error:
     let perf = PerfProfile {
         congestion: args.congestion.into(),
         brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
+        packet_threshold: args.packet_threshold,
         ..PerfProfile::default()
     };
     let (local, identity, server_fut) = beta::spawn_echo_server(bind, cert, perf).await?;
@@ -1004,6 +1032,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
         pad_quic_datagrams_to_mtu: args.pad_mtu,
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,
+        packet_threshold: args.packet_threshold,
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
