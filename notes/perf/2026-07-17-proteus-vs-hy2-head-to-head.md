@@ -395,3 +395,41 @@ burst）的 median completion time。Severe burst 的 probability of
 superiority 只有 0.678，顯示逐次分布仍重疊；可支持的是中位數與
 分布檢驗勝出，不能宣稱每一條小流都更快。逐次觀測與完整環境指紋
 保存在 `2026-07-18-ack1-short-flow-head-to-head.jsonl`。
+
+## 2026-07-18 kernel 重排序反證與 threshold A/B
+
+netem router 對兩個 egress 同時施加 5% packet reordering、25%
+correlation 與 50 ms one-way delay；qdisc 前後快照證實兩向都有
+數百萬至數千萬 packets 穿過 impairment，drop 維持為零。這是純
+重排序格，不以丟包代替重排序。
+
+生產默認 packet threshold `3` 的 64 MiB、30-run 格中，Proteus
+median 24.65 MiB/s，Hy2 25.21 MiB/s，差 −2.25%；95% bootstrap
+interval 為 −28.53% 至 +65.30%，p=0.594。它是明確反證：既有
+loss/burst 優勢不能外推到 reordered path。
+
+乾淨 commit `85c4339` 隨後比較 threshold `3`、`10`、`20`，每格
+七次。對 Hy2 的中位數差依次為 −18.87%、−0.35%、−20.55%；
+threshold `10` 是唯一值得晉級的候選，`20` 的三次小樣本假性大勝
+在七次格消失。threshold `10` 的 30-run 正式格得到：
+
+| metric | Proteus | Hy2 |
+|---|---:|---:|
+| median throughput | 26.17 MiB/s | 25.88 MiB/s |
+| success | 30/30 | 30/30 |
+| client CPU / run | 0.852 s | 1.191 s |
+| client RSS | 28.53 MiB | 74.04 MiB |
+
+throughput 表面 +1.14%，95% interval 卻是 −26.07% 至 +49.71%，
+p=0.936，probability of superiority=0.508。因此可支持的結論只有
+CPU/RSS 優勢與中位數劣勢被消除；沒有統計證據能宣稱 throughput
+超越 Hy2。另以 256 MiB、5% IID loss 做三次 guard screen，
+threshold `10` 仍為 118.94 對 86.74 MiB/s，兩向 qdisc 均有真實
+drop，未見災難性 real-loss regression，但三次不足以晉級為正式
+安全門檻。
+
+逐輪 observation、兩個 30-run 反證、七次 threshold screen、
+commit/image identity 與 qdisc counters 保存在
+`2026-07-18-reordering-threshold-head-to-head.jsonl`。靜態 threshold
+掃描到此停止；下一階段必須觀測 spurious loss，並以自適應
+reordering tolerance 降低長尾，而非繼續提高固定數值。

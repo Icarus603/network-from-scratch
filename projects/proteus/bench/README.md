@@ -141,6 +141,12 @@ threshold. It defaults to `3`, matching RFC recovery behavior and both
 Quinn and Hysteria2's quic-go fork. Raising it is a reordering A/B only:
 every promoted value must also rerun real-loss cells because delayed
 loss detection can trade away the gains.
+The first 30-run 5% reordering experiment found threshold `10`
+statistically tied with Hysteria2 (+1.14% median, 95% bootstrap
+interval −26.07% to +49.71%, p=0.936). It is therefore an experimental
+diagnostic, not a production default or a superiority claim. Further
+work must instrument spurious loss and adapt to measured reordering
+instead of sweeping larger static thresholds.
 The default warmup is `min(PAYLOAD_MIB, 64)` MiB so the congestion
 controller reaches a meaningful state rather than merely completing
 the handshake. Override it with `WARMUP_MIB`, but do not use zero
