@@ -76,6 +76,38 @@ warm_proxy_driver() {
         > "$output" 2>&1
 }
 
+proxy_resource_snapshot() {
+    "${COMPOSE[@]}" exec -T "$1" /bench/cgroup-snapshot.sh
+}
+
+append_proxy_resource() {
+    implementation="$1"
+    run_number="$2"
+    before="$3"
+    after="$4"
+    exit_status="$5"
+    output="$6"
+    jq -cn \
+        --arg implementation "$implementation" \
+        --argjson run "$run_number" \
+        --argjson before "$before" \
+        --argjson after "$after" \
+        --argjson exit_status "$exit_status" \
+        '{
+            kind:"resource",
+            implementation:$implementation,
+            run:$run,
+            cpu_usage_usec:($after.cpu_usage_usec - $before.cpu_usage_usec),
+            rss_before_kib:$before.process_rss_kib,
+            rss_after_kib:$after.process_rss_kib,
+            rss_delta_kib:($after.process_rss_kib - $before.process_rss_kib),
+            cgroup_memory_before_bytes:$before.memory_current_bytes,
+            cgroup_memory_after_bytes:$after.memory_current_bytes,
+            process_count_after:$after.process_count,
+            exit_status:$exit_status
+        }' >> "$output"
+}
+
 reset_and_warm_proxy_clients() {
     cell_dir="$1"
     clients=(proteus-proxy-client hy2-proxy-client)
@@ -259,67 +291,87 @@ run_cell() {
         : > "${cell_dir}/proteus.jsonl"
         : > "${cell_dir}/proteus.stderr"
         : > "${cell_dir}/hy2.jsonl"
+        if [ "$WORKLOAD_MODE" = "proxy" ]; then
+            : > "${cell_dir}/proteus-resources.jsonl"
+            : > "${cell_dir}/hy2-resources.jsonl"
+        fi
         if [ "$INCLUDE_TUIC" = "1" ]; then
             : > "${cell_dir}/tuic.jsonl"
+            if [ "$WORKLOAD_MODE" = "proxy" ]; then
+                : > "${cell_dir}/tuic-resources.jsonl"
+            fi
         fi
 
         run_proteus() {
+            status=0
             printf '{"kind":"run_start","run":%d}\n' "$run" \
                 >> "${cell_dir}/proteus.jsonl"
             if [ "$WORKLOAD_MODE" = "proxy" ]; then
                 service=proteus-proxy-bench-driver
+                resource_before="$(proxy_resource_snapshot proteus-proxy-client)"
             else
                 service=proteus-client
             fi
-            if "${COMPOSE[@]}" run --rm -T \
+            "${COMPOSE[@]}" run --rm -T \
                 -e RUNS_PER_CELL=1 \
                 -e RESOURCE_RUN="$run" \
                 "$service" \
                 >> "${cell_dir}/proteus.jsonl" \
-                2>> "${cell_dir}/proteus.stderr"; then
-                return 0
-            else
-                status=$?
+                2>> "${cell_dir}/proteus.stderr" || status=$?
+            if [ "$WORKLOAD_MODE" = "proxy" ]; then
+                resource_after="$(proxy_resource_snapshot proteus-proxy-client)"
+                append_proxy_resource "proteus-beta-brutal" "$run" \
+                    "$resource_before" "$resource_after" "$status" \
+                    "${cell_dir}/proteus-resources.jsonl"
             fi
+            [ "$status" -eq 0 ] && return 0
             printf '{"kind":"run_failure","run":%d,"exit_status":%d}\n' \
                 "$run" "$status" >> "${cell_dir}/proteus.jsonl"
             return 0
         }
 
         run_hy2() {
+            status=0
             printf '{"kind":"run_start","run":%d}\n' "$run" \
                 >> "${cell_dir}/hy2.jsonl"
             if [ "$WORKLOAD_MODE" = "proxy" ]; then
                 service=hy2-proxy-bench-driver
+                resource_before="$(proxy_resource_snapshot hy2-proxy-client)"
             else
                 service=hy2-client
             fi
-            if "${COMPOSE[@]}" run --rm -T \
+            "${COMPOSE[@]}" run --rm -T \
                 -e RESOURCE_RUN="$run" \
                 "$service" \
                 >> "${cell_dir}/hy2.jsonl" \
-                2>&1; then
-                return 0
-            else
-                status=$?
+                2>&1 || status=$?
+            if [ "$WORKLOAD_MODE" = "proxy" ]; then
+                resource_after="$(proxy_resource_snapshot hy2-proxy-client)"
+                append_proxy_resource "hysteria2" "$run" \
+                    "$resource_before" "$resource_after" "$status" \
+                    "${cell_dir}/hy2-resources.jsonl"
             fi
+            [ "$status" -eq 0 ] && return 0
             printf '{"kind":"run_failure","run":%d,"exit_status":%d}\n' \
                 "$run" "$status" >> "${cell_dir}/hy2.jsonl"
             return 0
         }
 
         run_tuic() {
+            status=0
             printf '{"kind":"run_start","run":%d}\n' "$run" \
                 >> "${cell_dir}/tuic.jsonl"
-            if "${COMPOSE[@]}" run --rm -T \
+            resource_before="$(proxy_resource_snapshot tuic-client)"
+            "${COMPOSE[@]}" run --rm -T \
                 -e PAYLOAD_MIB="$PAYLOAD_MIB" \
                 tuic-bench-driver \
                 >> "${cell_dir}/tuic.jsonl" \
-                2>&1; then
-                return 0
-            else
-                status=$?
-            fi
+                2>&1 || status=$?
+            resource_after="$(proxy_resource_snapshot tuic-client)"
+            append_proxy_resource "official-tuic-v5-1.0.0" "$run" \
+                "$resource_before" "$resource_after" "$status" \
+                "${cell_dir}/tuic-resources.jsonl"
+            [ "$status" -eq 0 ] && return 0
             printf '{"kind":"run_failure","run":%d,"exit_status":%d}\n' \
                 "$run" "$status" >> "${cell_dir}/tuic.jsonl"
             return 0

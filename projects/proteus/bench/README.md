@@ -74,9 +74,11 @@ non-zero configured loss that produced no kernel drop. Valid runs also
 produce `summary.jsonl`, where both protocols use the same round-trip
 equivalent MiB/s definition.
 Legacy mode samples client CPU time and peak RSS inside each one-shot
-container. Proxy mode keeps the real daemons alive and omits resource
-fields until per-run cgroup deltas land; it never mixes process-lifetime
-and one-shot measurements.
+container. Proxy mode records per-request cgroup CPU deltas and
+after-run daemon RSS for every long-lived Proteus, Hy2, and TUIC client.
+It does not call the latter a peak: Docker Desktop exposes
+`memory.peak` read-only, so the runner reports the reproducible
+post-observation process RSS instead of inventing resettable peaks.
 
 `STREAM_WINDOW_MIB` and `CONNECTION_WINDOW_MIB` override the Proteus
 client's flow-control windows for memory/throughput sweeps. Their

@@ -308,10 +308,19 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
         proteus_attempts = attempt_ids(proteus_raw)
         hy2_attempts = attempt_ids(hy2_raw)
         tuic_attempts = attempt_ids(tuic_raw) if tuic_raw else set()
+        proteus_resource_path = cell_dir / "proteus-resources.jsonl"
+        if not proteus_resource_path.exists():
+            proteus_resource_path = cell_dir / "proteus.stderr"
+        hy2_resource_path = cell_dir / "hy2-resources.jsonl"
+        if not hy2_resource_path.exists():
+            hy2_resource_path = cell_dir / "hy2.jsonl"
         proteus_resources = resource_rows(
-            cell_dir / "proteus.stderr", "proteus-beta-brutal"
+            proteus_resource_path, "proteus-beta-brutal"
         )
-        hy2_resources = resource_rows(cell_dir / "hy2.jsonl", "hysteria2")
+        hy2_resources = resource_rows(hy2_resource_path, "hysteria2")
+        tuic_resources = resource_rows(
+            cell_dir / "tuic-resources.jsonl", "official-tuic-v5-1.0.0"
+        )
         if proteus_attempts != hy2_attempts:
             failures.append(
                 f"{cell_dir.name}: attempt-id mismatch "
@@ -467,6 +476,7 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
         if (
             len(proteus_resources) == len(proteus_rows)
             and len(hy2_resources) == len(hy2_rows)
+            and (not tuic_raw or len(tuic_resources) == len(tuic_rows))
         ):
             summary.update(
                 {
@@ -478,19 +488,52 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                         float(row["cpu_usage_usec"]) / 1_000_000
                         for row in hy2_resources
                     ),
-                    "proteus_client_peak_rss_mib": statistics.median(
-                        float(row["peak_rss_kib"]) / 1024
-                        for row in proteus_resources
-                    ),
-                    "hy2_client_peak_rss_mib": statistics.median(
-                        float(row["peak_rss_kib"]) / 1024 for row in hy2_resources
-                    ),
                 }
             )
-        elif proteus_resources or hy2_resources:
+            if "rss_after_kib" in proteus_resources[0]:
+                summary.update(
+                    {
+                        "proteus_client_rss_after_run_mib": statistics.median(
+                            float(row["rss_after_kib"]) / 1024
+                            for row in proteus_resources
+                        ),
+                        "hy2_client_rss_after_run_mib": statistics.median(
+                            float(row["rss_after_kib"]) / 1024
+                            for row in hy2_resources
+                        ),
+                    }
+                )
+                if tuic_resources:
+                    summary.update(
+                        {
+                            "tuic_client_cpu_sec_per_run": statistics.median(
+                                float(row["cpu_usage_usec"]) / 1_000_000
+                                for row in tuic_resources
+                            ),
+                            "tuic_client_rss_after_run_mib": statistics.median(
+                                float(row["rss_after_kib"]) / 1024
+                                for row in tuic_resources
+                            ),
+                        }
+                    )
+            else:
+                summary.update(
+                    {
+                        "proteus_client_peak_rss_mib": statistics.median(
+                            float(row["peak_rss_kib"]) / 1024
+                            for row in proteus_resources
+                        ),
+                        "hy2_client_peak_rss_mib": statistics.median(
+                            float(row["peak_rss_kib"]) / 1024
+                            for row in hy2_resources
+                        ),
+                    }
+                )
+        elif proteus_resources or hy2_resources or tuic_resources:
             failures.append(
                 f"{cell_dir.name}: resource-count mismatch "
-                f"Proteus={len(proteus_resources)} Hy2={len(hy2_resources)}"
+                f"Proteus={len(proteus_resources)} Hy2={len(hy2_resources)} "
+                f"TUIC={len(tuic_resources)}"
             )
         output.append(summary)
 
