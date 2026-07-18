@@ -26,7 +26,7 @@
 //!      answers that in one line.
 //!   3. **uTLS milestone gating.** When the eventual rustls-fork /
 //!      BoringSSL-swap lands and the JA4 changes to a Chrome
-//!      bit-perfect value, operators can verify the deploy by
+//!      browser-profile value, operators can verify the deploy by
 //!      reading the gauge. No tshark required.
 //!
 //! ## How it works
@@ -172,7 +172,7 @@ pub async fn observe_live_ja4(leaf: rustls::pki_types::CertificateDer<'static>) 
 
 /// Capture the live ClientHello AND parse it into both `Ja4` and
 /// `Ja4Components`. Used by `proteus-server fingerprint --target
-/// chrome-124` to surface a byte-level diff vs Chrome — the JA4
+/// chrome-124` to surface a component-level diff vs Chrome — the JA4
 /// hash alone tells you "they differ"; the components diff tells
 /// you "ADD extension 0x4469, REMOVE cipher 0x1303 from position
 /// 2, swap sig_alg positions 0↔2".

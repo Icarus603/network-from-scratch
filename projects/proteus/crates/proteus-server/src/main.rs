@@ -786,7 +786,7 @@ async fn run_fingerprint_cmd(
                 println!(
                     "  Identical: {}",
                     if exact {
-                        "YES — bit-perfect ClientHello match (uTLS-grade)"
+                        "YES — exact JA4 match (raw ClientHello not proven)"
                     } else {
                         "no — ext_count and/or hashes still differ"
                     }

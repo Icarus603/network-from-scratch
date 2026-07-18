@@ -308,8 +308,12 @@ pub struct ComponentDiff {
     pub alpn_offered: FieldDiff,
     /// Diff for the supported_versions list.
     pub supported_versions: FieldDiff,
-    /// True iff EVERY component matches exactly. This is the
-    /// uTLS-bit-perfect gate.
+    /// True iff every component represented by [`Ja4Components`]
+    /// matches exactly.
+    ///
+    /// This is deliberately not called a byte-perfect ClientHello
+    /// gate: JA4 components do not retain random values, session IDs,
+    /// GREASE values, key-share payloads, padding, or raw encoding.
     pub all_match: bool,
 }
 
@@ -363,7 +367,7 @@ impl ComponentDiff {
         ] {
             let _ = write!(s, "\n  [{}] ", diff.field);
             if diff.is_match() {
-                let _ = writeln!(s, "MATCH (bit-perfect)");
+                let _ = writeln!(s, "MATCH (component-exact)");
                 continue;
             }
             let _ = writeln!(s, "DIFFER");
@@ -394,9 +398,9 @@ impl ComponentDiff {
             s,
             "Verdict: {}",
             if self.all_match {
-                "BIT-PERFECT MATCH — uTLS-grade replay achieved"
+                "COMPONENT-EXACT MATCH — JA4-visible fields align; raw bytes not proven"
             } else {
-                "differences remain; see per-field bullets above for the byte-level fix list"
+                "differences remain; see per-field bullets above for the component fix list"
             }
         );
         s
@@ -625,16 +629,16 @@ mod tests {
     }
 
     #[test]
-    fn diff_text_render_calls_out_bit_perfect_when_matched() {
+    fn diff_text_render_calls_out_component_exact_when_matched() {
         let ours = ours_match_chrome_exactly();
         let d = ComponentDiff::compute(&ours, &CHROME_124);
         let s = d.render_text();
-        assert!(s.contains("BIT-PERFECT MATCH"), "{s}");
-        assert!(s.contains("uTLS-grade"));
+        assert!(s.contains("COMPONENT-EXACT MATCH"), "{s}");
+        assert!(s.contains("raw bytes not proven"));
     }
 
     #[test]
-    fn diff_text_render_lists_byte_level_fixes_when_differing() {
+    fn diff_text_render_lists_component_fixes_when_differing() {
         let mut ours = ours_match_chrome_exactly();
         ours.ciphers.pop();
         ours.extensions.push(0x4242); // synthetic extra extension
@@ -695,13 +699,13 @@ mod tests {
         assert_eq!(SAFARI_17_4_ALPN_OFFERED.len(), 2);
     }
 
-    /// Identity check: each target compares bit-perfect against
+    /// Identity check: each target compares component-exact against
     /// itself. If a future iteration silently breaks
     /// `ComponentDiff::compute` (e.g. introduces a
     /// false-positive on a reordered list that's actually
     /// identical), this test fires immediately.
     #[test]
-    fn each_target_matches_itself_bit_perfect() {
+    fn each_target_matches_itself_component_exact() {
         for tgt in [&CHROME_124, &FIREFOX_124, &SAFARI_17_4] {
             let synth = Ja4Components {
                 ciphers: tgt.ciphers.to_vec(),
@@ -716,7 +720,7 @@ mod tests {
             let d = ComponentDiff::compute(&synth, tgt);
             assert!(
                 d.all_match,
-                "{} {} should match itself bit-perfect, got diff:\n{}",
+                "{} {} should match itself component-exact, got diff:\n{}",
                 tgt.name,
                 tgt.version,
                 d.render_text(),

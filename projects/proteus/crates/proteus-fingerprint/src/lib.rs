@@ -8,10 +8,10 @@
 //!
 //! ## Why this crate exists
 //!
-//! REALITY's entire stealth advantage is that its TLS ClientHello is
-//! a bit-perfect replay of a real Chrome (or Firefox) ClientHello —
-//! so JA4 = `t13d1517h2_8daaf6152771_b0da82dd1658` (Chrome 124 JA4
-//! at time of writing), indistinguishable from the genuine browser.
+//! REALITY obtains a major part of its stealth advantage by emitting
+//! a versioned uTLS browser profile rather than a library-default
+//! ClientHello. Matching JA4 is useful evidence of profile alignment,
+//! but is not proof that two ClientHellos are byte-identical.
 //!
 //! Proteus α currently uses rustls's default ClientHello — which
 //! emits its own distinctive JA4 signature, NOT a Chrome/Firefox one.

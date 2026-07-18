@@ -109,7 +109,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 
 | # | Attack line | Status | Proteus coverage |
 |---|---|---|---|
-| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ❌ uTLS bit-perfect ClientHello still gap |
+| 1 | Geedge / Tiangou commercial DPI (cross-deployment shared IP blocklist; 9 commercial VPNs flagged "resolved" in leak) | active, iterating | ✅ `proteus-server preflight check-ip-reputation` offline classifier (special-use detection + commercial-cloud table + operator watchlist); ❌ uTLS-grade browser-profile ClientHello still gap |
 | 2 | 2026-04 mass commercial-node death (IDC physical disconnection, ISP cooperation; SS / V2Ray / Trojan / VMess wiped) | active, ongoing | ✅ direct-dial architecture immune by design; ✅ `deploy/README.md` "Deployment topology" section + security-checklist topology items; ✅ **multi-VPS HA client** (2026-05-18 — EndpointPool + EndpointHealth + YAML `server_endpoints:` with auto failover); ✅ **TLS cert-expiry + reload observability** (2026-05-18 — `proteus_tls_cert_not_after_unix_seconds` gauge + `_reload_attempts/_succeeded_total` counters + `admin status` "TLS cert" block with RENEW NOW / EXPIRED warnings; closes the silent-certbot-failure case that has killed multiple production Hy2/TUIC nodes) |
 | 3 | QUIC SNI inspection (USENIX Sec '25 #1/#2/#4) | nationally deployed | ✅ all three evasions wired; ❌ ECH (P0 upgrade — only ECH actually *hides* SNI) |
 | 4 | Application-layer active probing + timing analysis on cover URLs | escalating | ✅ cover-server splice + NO_ERROR closes; ✅ **malformed, partial, slow, and non-TLS α probes preserve their consumed prefix and route to cover** (obvious non-TLS headers are rejected immediately, avoiding the 3 s sniff-timeout oracle); ✅ **cover-endpoint pool with per-src-IP /24 affinity** (no rotation signal); ✅ **probe-anomaly detector wired across both α and β** (sliding-window per-/24 counter + Prometheus alert); ✅ **detector recent-fires ring exposed via `/metrics` + admin CLI** (operator sees WHICH /24 fired in PromQL/Grafana AND in-terminal); ✅ **operator-opt-in auto-deny loop** (TTL-bounded in-binary deny list; entries auto-expire so false positives heal); ✅ **β pre-QUIC-handshake auto-deny short-circuit** (denied /24s get `Incoming::ignore()` BEFORE quinn pays the TLS+QUIC handshake cost; prober's wire view = server unreachable, no response packet at all); ✅ **auto-deny *current-state* surface** (2026-05-18 — Prometheus `proteus_auto_deny_active_prefixes`/`inserted_total`/`refused_inserts_total` + per-entry `proteus_auto_deny_remaining_secs{prefix=…}` labelled gauge AND `admin status` text/JSON block showing who is blocked right now + TTL countdown; closes the gap where long-TTL entries persisted past the recent-fires ring) |
@@ -120,7 +120,7 @@ Leak precis: [`notes/gfw/2025-09-11-geedge-mesa-leak.md`](../../notes/gfw/2025-0
 **Roadmap priorities driven by this threat intel**:
 
 - **P0** (must precede any "production-ready" claim): ECH integration, ~~IP reputation preflight tool~~ ✅ **done 2026-05-17**, ~~`bootstrap_dns: direct_ip`~~ ✅ **done 2026-05-17**, ~~β prefix-noise printable-byte tweak~~ ✅ **done 2026-05-17**, ~~`deploy/README.md` anti-relay topology warning~~ ✅ **done 2026-05-18**. **4 of 5 P0 done**; only ECH (multi-week, rustls-fork) remains.
-- **P1** (M3): uTLS bit-perfect ClientHello, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
+- **P1** (M3): uTLS-grade browser-profile ClientHello, ~~cover-endpoint pool~~ ✅ done 2026-05-18, ~~carrier auto-switch~~ ✅ done 2026-05-18 (`CarrierHealth`), ~~**multi-VPS HA client**~~ ✅ done 2026-05-18 (`EndpointPool` + `EndpointHealth` + YAML `server_endpoints:` + validate guidance + dispatch wired through SOCKS path + 18 tests including 2 real-server fall-to-backup e2e).
 - **P2** (M3+): γ profile (MASQUE), β cover-forward, multipath QUIC.
 
 The single most important update is conceptual: the adversary is no longer
@@ -1055,11 +1055,13 @@ jq pipelines don't break.
 3. JA4 ext_hash exact match → +100
 4. Penalty `-|cipher_count_delta|` and `-|ext_count_delta|`
 
-`closest_exact == true` is the uTLS bit-perfect milestone — when
-Proteus's wire shape matches a real browser byte-for-byte. As
-of α it's `false` for every entry (Proteus emits rustls's
-shape, not Chrome's); the gap will close when uTLS-replay
-lands.
+`closest_exact == true` means the full JA4 string matches a reference
+row. It is not proof of a byte-perfect ClientHello: JA4 omits random
+values, session IDs, GREASE values, key-share payloads, padding, and
+other raw encoding details. As of α it is `false` for every entry
+(Proteus emits rustls's shape, not Chrome's). A future uTLS-grade gate
+must compare a versioned browser profile across the complete parsed
+ClientHello and raw encoding invariants, not only JA4.
 
 ### `GET /diagnose` — one-shot self-check
 
@@ -1831,7 +1833,7 @@ latest hardening pass:
 
 ### Not yet done (the remaining gap)
 
-- ❌ **uTLS-grade ClientHello bit-perfect replay**: cipher_count
+- ❌ **uTLS-grade ClientHello profile replay**: cipher_count
   and ext_count still differ from Chrome (`09`/`12` vs the official
   FoxIO current generic Chrome example's `15`/`16`; the frozen
   Chrome-124 PSK-bearing reference remains `15`/`17`). Closing this
@@ -1839,7 +1841,7 @@ latest hardening pass:
   ClientHello assembler — multi-week build. **This is the one
   street REALITY still leads on.** Operator-actionable via
   `proteus-server fingerprint --target {chrome-124, firefox-124,
-  safari-17.4}` which prints a **byte-level diff** vs that
+  safari-17.4}` which prints a **component-level diff** vs that
   browser's reference ClientHello — exact list of
   ciphers/extensions/sig_algs to add/remove and per-item
   wire-position mismatches. The diff goes to "all_match" the

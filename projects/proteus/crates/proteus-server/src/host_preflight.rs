@@ -780,7 +780,12 @@ fn disk_free_bytes(path: &Path) -> std::io::Result<u64> {
     unsafe {
         let mut s: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(cpath.as_ptr(), &mut s) == 0 {
-            Ok(s.f_bavail.saturating_mul(s.f_frsize))
+            // libc exposes these as u32 on macOS and u64 on Linux.
+            #[allow(clippy::unnecessary_cast)]
+            let available_blocks = s.f_bavail as u64;
+            #[allow(clippy::unnecessary_cast)]
+            let fragment_size = s.f_frsize as u64;
+            Ok(available_blocks.saturating_mul(fragment_size))
         } else {
             Err(std::io::Error::last_os_error())
         }
