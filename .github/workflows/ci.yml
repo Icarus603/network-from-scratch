@@ -99,19 +99,25 @@ jobs:
           ./target/release/proteus-client --help
       - name: Smoke-test keygen + gencert
         run: |
-          mkdir -p /tmp/smoke/keys /tmp/smoke/keys/tls /tmp/smoke/client-keys
+          mkdir -p /tmp/smoke/keys /tmp/smoke/keys/tls /tmp/smoke/keys/ech /tmp/smoke/client-keys
           ./target/release/proteus-server keygen --out /tmp/smoke/keys
           ./target/release/proteus-server gencert --dns-name proteus.test --out /tmp/smoke/keys/tls
+          ./target/release/proteus-server ech-keygen --public-name public.example --config-id 7 --out /tmp/smoke/keys/ech
           ./target/release/proteus-client keygen --out /tmp/smoke/client-keys
           test -f /tmp/smoke/keys/server_lt.mlkem768.pk
           test -f /tmp/smoke/keys/server_lt.mlkem768.sk
           test -f /tmp/smoke/keys/server_lt.pq.fingerprint
           test -f /tmp/smoke/keys/tls/fullchain.pem
           test -f /tmp/smoke/keys/tls/privkey.pem
+          test -f /tmp/smoke/keys/ech/ech-7.config
+          test -f /tmp/smoke/keys/ech/ech-7.config-list
+          test -f /tmp/smoke/keys/ech/ech-7.config-list.b64
+          test -f /tmp/smoke/keys/ech/ech-7.key
           test -f /tmp/smoke/client-keys/client.ed25519.sk
           # Verify 0600 mode on secrets.
           [ "$(stat -c %a /tmp/smoke/keys/server_lt.mlkem768.sk)" = "600" ]
           [ "$(stat -c %a /tmp/smoke/keys/tls/privkey.pem)" = "600" ]
+          [ "$(stat -c %a /tmp/smoke/keys/ech/ech-7.key)" = "600" ]
 
   audit:
     name: cargo audit (RustSec advisories)

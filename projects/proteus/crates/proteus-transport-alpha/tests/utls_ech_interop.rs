@@ -21,8 +21,6 @@ use proteus_transport_alpha::server::{self, ServerCtx, ServerKeys};
 use rand_core::OsRng;
 use rcgen::{CertificateParams, KeyPair};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use x25519_dalek::{PublicKey, StaticSecret};
-use zeroize::Zeroizing;
 
 const PUBLIC_NAME: &str = "public.example";
 const INNER_NAME: &str = "secret.example";
@@ -69,39 +67,11 @@ impl Drop for TempDir {
 }
 
 fn ech_material(config_id: u8, retry_config: bool) -> (EchKey, Vec<u8>) {
-    let secret = StaticSecret::random_from_rng(OsRng);
-    let public = PublicKey::from(&secret);
-    let mut contents = Vec::new();
-    contents.push(config_id);
-    contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM(X25519, HKDF-SHA256)
-    contents.extend_from_slice(&32u16.to_be_bytes());
-    contents.extend_from_slice(public.as_bytes());
-    contents.extend_from_slice(&8u16.to_be_bytes());
-    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
-    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // AES-128-GCM
-    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
-    contents.extend_from_slice(&0x0003u16.to_be_bytes()); // ChaCha20-Poly1305
-    contents.push(INNER_NAME.len() as u8);
-    contents.push(PUBLIC_NAME.len() as u8);
-    contents.extend_from_slice(PUBLIC_NAME.as_bytes());
-    contents.extend_from_slice(&0u16.to_be_bytes()); // ECHConfig extensions
-
-    let mut config = Vec::new();
-    config.extend_from_slice(&0xfe0du16.to_be_bytes());
-    config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
-    config.extend_from_slice(&contents);
-
-    let mut list = Vec::new();
-    list.extend_from_slice(&(config.len() as u16).to_be_bytes());
-    list.extend_from_slice(&config);
-    (
-        EchKey {
-            ech_config: config,
-            private_key: Zeroizing::new(secret.to_bytes().to_vec()),
-            retry_config,
-        },
-        list,
-    )
+    let mut generated =
+        proteus_ech::generate_ech_key(config_id, PUBLIC_NAME, INNER_NAME.len() as u8)
+            .expect("generate ECH interop material");
+    generated.key.retry_config = retry_config;
+    (generated.key, generated.config_list)
 }
 
 fn write_public(path: &Path, bytes: &[u8]) {

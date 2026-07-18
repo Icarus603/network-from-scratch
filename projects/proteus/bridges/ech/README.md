@@ -16,26 +16,24 @@ connection as application-capable.
 
 ## Generate and stage a key
 
-Use the `bssl` binary built from the same BoringSSL revision pinned by
-`boring-sys 5.1.0`:
+Use the production server binary. It emits the exact config format
+consumed by the BoringSSL terminator and a DNS-publishable list:
 
 ```bash
-bssl generate-ech \
-  -public-name public.example \
-  -config-id 7 \
-  -max-name-length 64 \
-  -out-ech-config-list current.echconfiglist \
-  -out-ech-config current.echconfig \
-  -out-private-key current.key
-
-chmod 0600 current.key
+proteus-server ech-keygen \
+  --public-name public.example \
+  --config-id 7 \
+  --max-name-length 64 \
+  --out /etc/proteus/keys/ech
 ```
 
-`current.echconfig` and `current.echconfiglist` are public wire
-artifacts. `current.key` is a raw 32-byte X25519 HPKE private key and
-must remain secret. Publish the ECHConfigList through the DNS HTTPS
-record defined by RFC 9848 only after every server instance has the
-matching private key.
+`ech-7.config` and `ech-7.config-list` are public wire artifacts.
+`ech-7.config-list.b64` is the bridge-ready encoding. `ech-7.key` is a
+raw 32-byte X25519 HPKE private key created mode `0600` and must remain
+secret. The command refuses to overwrite an existing config ID unless
+`--force` is explicit. Publish the binary ECHConfigList through the DNS
+HTTPS record defined by RFC 9848 only after every server instance has
+the matching private key.
 
 Configure the server with the single `ECHConfig`:
 
@@ -47,21 +45,19 @@ tls:
   private_key: /etc/proteus/keys/tls/privkey.pem
   ech:
     keys:
-      - config: /etc/proteus/keys/ech/current.echconfig
-        private_key: /etc/proteus/keys/ech/current.key
+      - config: /etc/proteus/keys/ech/ech-7.config
+        private_key: /etc/proteus/keys/ech/ech-7.key
         retry_config: true
 ```
 
-Give the base64-encoded `ECHConfigList` to the uTLS bridge:
+Give the generated base64 `ECHConfigList` to the uTLS bridge:
 
 ```bash
-base64 < current.echconfiglist > current.echconfiglist.b64
-
 proteus-utls-bridge \
   --listen /run/proteus/utls.sock \
   --knock-psk /etc/proteus/keys/server.knock_psk \
   --trusted-ca /etc/proteus/keys/tls/fullchain.pem \
-  --ech-config-list /etc/proteus/keys/ech/current.echconfiglist.b64
+  --ech-config-list /etc/proteus/keys/ech/ech-7.config-list.b64
 ```
 
 For Docker Compose, set `PROTEUS_ECH_CONFIG_LIST` to the in-container

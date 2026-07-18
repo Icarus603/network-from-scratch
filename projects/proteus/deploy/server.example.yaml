@@ -555,11 +555,11 @@ tls:
   # mandatory.
   # ech:
   #   keys:
-  #     - config: /etc/proteus/keys/ech/current.echconfig
-  #       private_key: /etc/proteus/keys/ech/current.key
+  #     - config: /etc/proteus/keys/ech/ech-7.config
+  #       private_key: /etc/proteus/keys/ech/ech-7.key
   #       retry_config: true
-  #     - config: /etc/proteus/keys/ech/previous.echconfig
-  #       private_key: /etc/proteus/keys/ech/previous.key
+  #     - config: /etc/proteus/keys/ech/ech-6.config
+  #       private_key: /etc/proteus/keys/ech/ech-6.key
   #       retry_config: false
 
 # Cover endpoint for auth-fail forwarding (spec §7.5). The server pipes

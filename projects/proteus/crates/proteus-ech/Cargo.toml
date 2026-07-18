@@ -13,11 +13,11 @@ tokio-boring.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["io-util", "rt", "macros"] }
 zeroize.workspace = true
+rand_core = { workspace = true, features = ["getrandom"] }
+x25519-dalek.workspace = true
 
 [dev-dependencies]
 rcgen = "0.13"
-rand_core = { workspace = true, features = ["getrandom"] }
-x25519-dalek.workspace = true
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -16,7 +16,9 @@ use boring::hpke::HpkeKey;
 use boring::pkey::{PKey, Private};
 use boring::ssl::{SslAcceptor, SslEchKeys, SslFiletype, SslMethod, SslVersion};
 use boring::x509::X509;
+use rand_core::OsRng;
 use tokio::io::{AsyncRead, AsyncWrite};
+use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 /// TLS exporter label shared with the Proteus α client and server.
@@ -39,6 +41,85 @@ pub struct EchKey {
     pub ech_config: Vec<u8>,
     pub private_key: Zeroizing<Vec<u8>>,
     pub retry_config: bool,
+}
+
+/// Fresh RFC 9849 server material ready for disk publication.
+#[derive(Debug)]
+pub struct GeneratedEchKey {
+    /// Single server config and matching private key.
+    pub key: EchKey,
+    /// Length-prefixed ECHConfigList published through DNS HTTPS.
+    pub config_list: Vec<u8>,
+}
+
+/// Generate an X25519 ECHConfig and matching private key.
+///
+/// The config advertises HKDF-SHA256 with AES-128-GCM and
+/// ChaCha20-Poly1305, the mandatory-to-implement ECH cipher suites.
+/// The returned key is marked as a retry config; operators retaining
+/// an old overlap key must explicitly set that old key's flag false.
+pub fn generate_ech_key(
+    config_id: u8,
+    public_name: &str,
+    max_name_length: u8,
+) -> Result<GeneratedEchKey, EchError> {
+    validate_public_name(public_name)?;
+    if max_name_length == 0 {
+        return Err(EchError::BadMaxNameLength);
+    }
+
+    let secret = StaticSecret::random_from_rng(OsRng);
+    let public = PublicKey::from(&secret);
+    let mut contents = Vec::with_capacity(64 + public_name.len());
+    contents.push(config_id);
+    contents.extend_from_slice(&0x0020u16.to_be_bytes()); // DHKEM(X25519, HKDF-SHA256)
+    contents.extend_from_slice(&32u16.to_be_bytes());
+    contents.extend_from_slice(public.as_bytes());
+    contents.extend_from_slice(&8u16.to_be_bytes());
+    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
+    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // AES-128-GCM
+    contents.extend_from_slice(&0x0001u16.to_be_bytes()); // HKDF-SHA256
+    contents.extend_from_slice(&0x0003u16.to_be_bytes()); // ChaCha20-Poly1305
+    contents.push(max_name_length);
+    contents.push(public_name.len() as u8);
+    contents.extend_from_slice(public_name.as_bytes());
+    contents.extend_from_slice(&0u16.to_be_bytes()); // ECHConfig extensions
+
+    let mut config = Vec::with_capacity(contents.len() + 4);
+    config.extend_from_slice(&0xfe0du16.to_be_bytes());
+    config.extend_from_slice(&(contents.len() as u16).to_be_bytes());
+    config.extend_from_slice(&contents);
+    let mut config_list = Vec::with_capacity(config.len() + 2);
+    config_list.extend_from_slice(&(config.len() as u16).to_be_bytes());
+    config_list.extend_from_slice(&config);
+
+    Ok(GeneratedEchKey {
+        key: EchKey {
+            ech_config: config,
+            private_key: Zeroizing::new(secret.to_bytes().to_vec()),
+            retry_config: true,
+        },
+        config_list,
+    })
+}
+
+fn validate_public_name(name: &str) -> Result<(), EchError> {
+    if name.is_empty() || name.len() > 253 || !name.is_ascii() {
+        return Err(EchError::BadPublicName);
+    }
+    for label in name.split('.') {
+        if label.is_empty()
+            || label.len() > 63
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(EchError::BadPublicName);
+        }
+    }
+    Ok(())
 }
 
 impl std::fmt::Debug for EchKey {
@@ -170,6 +251,10 @@ pub enum EchError {
     NoRetryKey,
     #[error("ECH X25519 private key must be 32 bytes, got {0}")]
     BadPrivateKeyLength(usize),
+    #[error("ECH public_name must be a 1..253-byte ASCII DNS name with valid labels")]
+    BadPublicName,
+    #[error("ECH max_name_length must be in 1..255")]
+    BadMaxNameLength,
     #[error("ECH backend negotiated a TLS version other than TLS 1.3")]
     TlsVersion,
     #[error("ECH was not accepted; refusing cleartext-SNI fallback")]
@@ -382,5 +467,42 @@ mod tests {
             .err()
             .expect("short X25519 key must fail");
         assert!(matches!(err, EchError::BadPrivateKeyLength(31)));
+    }
+
+    #[test]
+    fn generated_material_is_accepted_and_dns_list_is_exact() {
+        let generated = generate_ech_key(42, PUBLIC_NAME, 64).unwrap();
+        assert_eq!(
+            &generated.config_list[2..],
+            generated.key.ech_config.as_slice()
+        );
+        assert_eq!(
+            usize::from(u16::from_be_bytes(
+                generated.config_list[..2].try_into().unwrap()
+            )),
+            generated.key.ech_config.len()
+        );
+        let (cert, private_key) = certificate();
+        EchAcceptor::from_certificate(cert, vec![], private_key, &[generated.key]).unwrap();
+    }
+
+    #[test]
+    fn generation_rejects_non_dns_names_and_zero_padding_limit() {
+        for name in [
+            "",
+            "-bad.example",
+            "bad-.example",
+            "bad..example",
+            "例.example",
+        ] {
+            assert!(matches!(
+                generate_ech_key(1, name, 64),
+                Err(EchError::BadPublicName)
+            ));
+        }
+        assert!(matches!(
+            generate_ech_key(1, PUBLIC_NAME, 0),
+            Err(EchError::BadMaxNameLength)
+        ));
     }
 }

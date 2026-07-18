@@ -27,6 +27,7 @@ use proteus_transport_alpha::server::{self, ServerCtx};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+mod ech_keygen;
 mod gencert;
 mod keygen;
 // knock_keygen is now exposed via the lib (iter-54: validate
@@ -112,6 +113,26 @@ enum Cmd {
         /// rotate (every client must re-receive the new PSK or
         /// they STOP CONNECTING — make sure your distribution
         /// channel is ready).
+        #[arg(long, default_value = "false")]
+        force: bool,
+    },
+    /// Generate RFC 9849 ECH server material and its DNS-publishable
+    /// ECHConfigList. The private X25519 key is created mode 0600.
+    EchKeygen {
+        /// Public cover name carried by ClientHelloOuter.
+        #[arg(long)]
+        public_name: String,
+        /// One-byte ECH config identifier. Use a fresh value during
+        /// each overlap rotation.
+        #[arg(long)]
+        config_id: u8,
+        /// ClientHelloInner padding target advertised in ECHConfig.
+        #[arg(long, default_value_t = 64)]
+        max_name_length: u8,
+        /// Directory receiving versioned config/list/key files.
+        #[arg(long, default_value = "./keys/ech")]
+        out: PathBuf,
+        /// Deliberately replace files for this config ID.
         #[arg(long, default_value = "false")]
         force: bool,
     },
@@ -435,6 +456,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         Cmd::KnockKeygen { out, force } => {
             knock_keygen::run_with_force(&out, force)?;
+        }
+        Cmd::EchKeygen {
+            public_name,
+            config_id,
+            max_name_length,
+            out,
+            force,
+        } => {
+            ech_keygen::run(&public_name, config_id, max_name_length, &out, force)?;
         }
         Cmd::Run { config } => run(&config).await?,
         Cmd::Validate { config } => {
