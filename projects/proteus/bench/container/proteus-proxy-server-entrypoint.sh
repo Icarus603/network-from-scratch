@@ -17,7 +17,7 @@ case "${BRUTAL_TARGET_MBPS:-1000}" in
         exit 2
         ;;
 esac
-case "${ACK_ELICITING_THRESHOLD:-10}" in
+case "${ACK_ELICITING_THRESHOLD:-1}" in
     *[!0-9]*|"")
         echo "ACK_ELICITING_THRESHOLD must be a positive integer" >&2
         exit 2
@@ -57,7 +57,7 @@ sed -i \
     "s/^beta_brutal_target_mbps:.*/beta_brutal_target_mbps: ${BRUTAL_TARGET_MBPS:-1000}/" \
     "$config"
 sed -i \
-    "s/^beta_ack_eliciting_threshold:.*/beta_ack_eliciting_threshold: ${ACK_ELICITING_THRESHOLD:-10}/" \
+    "s/^beta_ack_eliciting_threshold:.*/beta_ack_eliciting_threshold: ${ACK_ELICITING_THRESHOLD:-1}/" \
     "$config"
 sed -i "s/^beta_initial_mtu:.*/beta_initial_mtu: ${INITIAL_MTU:-1350}/" "$config"
 sed -i "s/^beta_minimum_mtu:.*/beta_minimum_mtu: ${MINIMUM_MTU:-1350}/" "$config"

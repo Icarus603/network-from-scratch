@@ -12,7 +12,7 @@ beta_connection_receive_window_mib: 256
 beta_send_window_mib: 64
 beta_pad_quic_to_mtu: false
 beta_allow_spin_bit: false
-beta_ack_eliciting_threshold: 10
+beta_ack_eliciting_threshold: 1
 socks_listen: "0.0.0.0:1080"
 user_id: bench
 pow_difficulty: 0

@@ -109,10 +109,15 @@ in `metadata.jsonl`; Hysteria2 stays at its checked-in 1 Gbit/s bandwidth
 setting.
 
 `PROTEUS_ACK_ELICITING_THRESHOLD` controls the Proteus RFC 9802 ACK
-request for matched recovery experiments. Values `1` and `2` model
-standard immediate/default QUIC ACK behavior; the prior benchmark
-override `10` is retained only as an explicit high-throughput experiment
-until it passes the loss matrix.
+request for matched recovery experiments. The benchmark default is `1`,
+matching the production-safe default. A controlled 5% IID loss / 100 ms
+RTT / 256 MiB screening cell measured Proteus medians of 116.4, 111.8,
+and 99.0 MiB/s at thresholds `1`, `2`, and `10`, respectively; all three
+cells completed 3/3 runs for both implementations. Threshold `10`
+therefore remains available only as an explicit experiment, never an
+implicit benchmark advantage or production recommendation. The
+three-run screen selects a candidate; publication claims still require
+the documented 7/30-run gates below.
 The default warmup is `min(PAYLOAD_MIB, 64)` MiB so the congestion
 controller reaches a meaningful state rather than merely completing
 the handshake. Override it with `WARMUP_MIB`, but do not use zero

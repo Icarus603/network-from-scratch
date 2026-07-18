@@ -29,6 +29,8 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Check benchmark defaults
+        run: ./bench/check-config-defaults.sh
 
   clippy:
     name: clippy (-D warnings)
