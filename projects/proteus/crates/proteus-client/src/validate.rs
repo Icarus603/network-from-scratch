@@ -563,6 +563,60 @@ pub async fn run(path: &Path) -> PreflightReport {
                     }
                 }
             }
+            if let Some(socket) = &tls.utls_bridge_socket {
+                if cfg.knock_psk_file.is_none() {
+                    r.push_fail(
+                        "tls.utls_bridge_socket is set but knock_psk_file is unset — \
+                         browser-profile mode must not silently disable the Path A knock",
+                    );
+                }
+                if !socket.is_absolute() {
+                    r.push_fail(format!(
+                        "tls.utls_bridge_socket must be absolute: {}",
+                        socket.display()
+                    ));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+                    match std::fs::symlink_metadata(socket) {
+                        Ok(meta) if meta.file_type().is_symlink() => r.push_fail(format!(
+                            "tls.utls_bridge_socket must not be a symlink: {}",
+                            socket.display()
+                        )),
+                        Ok(meta) if !meta.file_type().is_socket() => r.push_fail(format!(
+                            "tls.utls_bridge_socket exists but is not a Unix socket: {}",
+                            socket.display()
+                        )),
+                        Ok(meta) if meta.permissions().mode() & 0o077 != 0 => r.push_fail(format!(
+                            "tls.utls_bridge_socket permissions are broader than 0600: {}",
+                            socket.display()
+                        )),
+                        Ok(_) => r.push_pass(format!(
+                            "tls.utls_bridge_socket is a private Unix socket: {}",
+                            socket.display()
+                        )),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => r.push_warn(format!(
+                            "tls.utls_bridge_socket is configured but not running yet: {}",
+                            socket.display()
+                        )),
+                        Err(e) => r.push_fail(format!(
+                            "tls.utls_bridge_socket cannot be inspected: {} ({e})",
+                            socket.display()
+                        )),
+                    }
+                }
+                #[cfg(not(unix))]
+                r.push_fail("tls.utls_bridge_socket is supported only on Unix");
+
+                if let Some(ca) = &tls.trusted_ca {
+                    r.push_warn(format!(
+                        "uTLS bridge mode selected: launch the bridge with \
+                         `--trusted-ca {}` so its certificate roots match this client config",
+                        ca.display()
+                    ));
+                }
+            }
         }
         None => r.push_warn(
             "tls: block is unset — production deployments MUST set it (server uses TLS 1.3)",

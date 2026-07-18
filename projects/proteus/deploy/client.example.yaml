@@ -186,24 +186,24 @@ keys:
 tls:
   server_name: vps.example.com
   # trusted_ca: ./keys/tls/self-signed-ca.pem
+  # Production browser-profile mode: route outer TLS through the
+  # local uTLS bridge while Rust retains the exporter-bound hybrid
+  # Proteus handshake. The socket must be mode 0600 and the bridge
+  # must use the same trusted CA and knock PSK as this config.
+  #
+  # Docker: docker compose --profile utls -f docker-compose.full.yml up -d
+  # systemd: enable proteus-utls-bridge.service before the client.
+  # utls_bridge_socket: /run/proteus/utls.sock
 
 # Optional server-knock PSK file (32 bytes, base64-encoded).
 # Path A: REALITY-grade probe resistance.
 #
-# ⚠️ NOT YET WIRED ⚠️
-# The client config schema accepts this field and the loader
-# validates the file, but the client transport layer can't
-# actually inject the knock token into outbound ClientHellos
-# yet — that requires a thin rustls fork (iteration 10's
-# work, see crates/proteus-transport-alpha/src/knock_rewriter.rs
-# module header for the full reason: TLS 1.3 transcript-hash
-# binding rules out byte-level wire rewriting). With both
-# this field AND the server's knock_psk_file set today,
-# YOUR own connections will fail (the server's gate routes
-# you to cover because you didn't send a knock).
-# Leave this commented for now.
+# The standard rustls path injects the knock transcript-natively.
+# When `tls.utls_bridge_socket` is set, the bridge injects the same
+# wire format into its Chrome-profile ClientHello. Both paths are
+# accepted by the server's pre-TLS gate.
 #
-# Workflow once iteration 10 lands:
+# Provisioning workflow:
 #   1. Server operator runs `proteus-server knock-keygen` and
 #      gets `/etc/proteus/keys/server.knock_psk`.
 #   2. Operator distributes the EXACT same file to you out-of-band

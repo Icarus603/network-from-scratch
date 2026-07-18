@@ -253,71 +253,139 @@ async fn run_against_endpoint(
 
     // ---- TCP connect (bounded) ----
     let tcp_t0 = Instant::now();
-    let tcp_result =
-        tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(addr)).await;
-    let tcp = match tcp_result {
-        Ok(Ok(s)) => s,
-        Ok(Err(e)) => {
-            return Ok(failed_report(
-                endpoint,
-                addr,
-                via,
-                dns_dur,
-                tcp_t0.elapsed(),
-                Duration::ZERO,
-                started.elapsed(),
-                format!("tcp_connect: {e}"),
-            ));
-        }
-        Err(_) => {
-            return Ok(failed_report(
-                endpoint,
-                addr,
-                via,
-                dns_dur,
-                connect_timeout,
-                Duration::ZERO,
-                started.elapsed(),
-                format!("tcp_connect timed out after {}s", connect_timeout.as_secs()),
-            ));
-        }
+    #[cfg(unix)]
+    let uses_utls_bridge = cfg
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.utls_bridge_socket.as_ref())
+        .is_some();
+    #[cfg(not(unix))]
+    let uses_utls_bridge = false;
+
+    let tcp = if uses_utls_bridge {
+        None
+    } else {
+        let tcp_result =
+            tokio::time::timeout(connect_timeout, tokio::net::TcpStream::connect(addr)).await;
+        Some(match tcp_result {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                return Ok(failed_report(
+                    endpoint,
+                    addr,
+                    via,
+                    dns_dur,
+                    tcp_t0.elapsed(),
+                    Duration::ZERO,
+                    started.elapsed(),
+                    format!("tcp_connect: {e}"),
+                ));
+            }
+            Err(_) => {
+                return Ok(failed_report(
+                    endpoint,
+                    addr,
+                    via,
+                    dns_dur,
+                    connect_timeout,
+                    Duration::ZERO,
+                    started.elapsed(),
+                    format!("tcp_connect timed out after {}s", connect_timeout.as_secs()),
+                ));
+            }
+        })
     };
     let tcp_dur = tcp_t0.elapsed();
 
     // ---- Handshake (bounded) ----
     let hs_t0 = Instant::now();
     let hs_result = if let Some(tls_cfg) = cfg.tls.as_ref() {
-        let connector = match tls_cfg.trusted_ca.as_ref() {
-            Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
-                .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
-            None => proteus_transport_alpha::tls::build_connector_webpki_roots()
-                .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
-        };
-        let h = tokio::time::timeout(
-            connect_timeout,
-            proteus_transport_alpha::client::handshake_over_tls(
-                tcp,
-                &connector,
-                &tls_cfg.server_name,
-                hs_cfg,
-            ),
-        )
-        .await;
-        match h {
-            Ok(Ok(session)) => Ok(format!(
-                "handshake ok over TLS (SNI={})",
-                tls_cfg.server_name
-            ))
-            .map(|_| {
-                drop(session);
-            }),
-            Ok(Err(e)) => Err(format!("handshake: {e}")),
-            Err(_) => Err(format!(
-                "handshake timed out after {}s",
-                connect_timeout.as_secs()
-            )),
+        #[cfg(unix)]
+        if let Some(socket_path) = tls_cfg.utls_bridge_socket.as_ref() {
+            let h = tokio::time::timeout(
+                connect_timeout,
+                crate::utls_bridge::handshake(
+                    socket_path,
+                    &addr.to_string(),
+                    &tls_cfg.server_name,
+                    hs_cfg,
+                ),
+            )
+            .await;
+            match h {
+                Ok(Ok(session)) => {
+                    drop(session);
+                    Ok(())
+                }
+                Ok(Err(e)) => Err(format!("uTLS bridge handshake: {e}")),
+                Err(_) => Err(format!(
+                    "uTLS bridge handshake timed out after {}s",
+                    connect_timeout.as_secs()
+                )),
+            }
+        } else {
+            let tcp = tcp.expect("direct TLS path performs the TCP dial above");
+            let connector = match tls_cfg.trusted_ca.as_ref() {
+                Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
+                    .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
+                None => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                    .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
+            };
+            let h = tokio::time::timeout(
+                connect_timeout,
+                proteus_transport_alpha::client::handshake_over_tls(
+                    tcp,
+                    &connector,
+                    &tls_cfg.server_name,
+                    hs_cfg,
+                ),
+            )
+            .await;
+            match h {
+                Ok(Ok(session)) => {
+                    drop(session);
+                    Ok(())
+                }
+                Ok(Err(e)) => Err(format!("handshake: {e}")),
+                Err(_) => Err(format!(
+                    "handshake timed out after {}s",
+                    connect_timeout.as_secs()
+                )),
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let tcp = tcp.expect("uTLS bridge is Unix-only");
+            let connector = match tls_cfg.trusted_ca.as_ref() {
+                Some(ca) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
+                    .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
+                None => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                    .map_err(|e| ConnectTestError::Tls(e.to_string()))?,
+            };
+            let h = tokio::time::timeout(
+                connect_timeout,
+                proteus_transport_alpha::client::handshake_over_tls(
+                    tcp,
+                    &connector,
+                    &tls_cfg.server_name,
+                    hs_cfg,
+                ),
+            )
+            .await;
+            match h {
+                Ok(Ok(session)) => {
+                    drop(session);
+                    Ok(())
+                }
+                Ok(Err(e)) => Err(format!("handshake: {e}")),
+                Err(_) => Err(format!(
+                    "handshake timed out after {}s",
+                    connect_timeout.as_secs()
+                )),
+            }
         }
     } else {
+        let tcp = tcp.expect("plaintext path performs the TCP dial above");
         let h = tokio::time::timeout(
             connect_timeout,
             proteus_transport_alpha::client::handshake_over_tcp(tcp, hs_cfg),

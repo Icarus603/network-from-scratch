@@ -19,4 +19,6 @@ pub mod host_preflight;
 pub mod knock_psk;
 pub mod process_panic_counter;
 pub mod socks;
+#[cfg(unix)]
+pub mod utls_bridge;
 pub mod validate;

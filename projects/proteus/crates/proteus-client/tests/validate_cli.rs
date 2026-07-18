@@ -384,6 +384,99 @@ fn write_minimal_green_yaml(dir: &std::path::Path, extra: &str) -> PathBuf {
     yaml
 }
 
+#[cfg(unix)]
+fn write_utls_bridge_yaml(
+    dir: &std::path::Path,
+    socket: &std::path::Path,
+    include_knock: bool,
+) -> PathBuf {
+    use base64::Engine as _;
+
+    let mlkem_pk = write_mlkem_pk(dir, "server.mlkem.pk");
+    let x25519_pk = write_32b_key(dir, "server.x25519.pk");
+    let fp = write_32b_key(dir, "server.fp");
+    let ed_sk = write_32b_key(dir, "client.ed25519.sk");
+    let knock = dir.join("server.knock_psk");
+    std::fs::write(
+        &knock,
+        base64::engine::general_purpose::STANDARD.encode([0x5au8; 32]),
+    )
+    .unwrap();
+    let knock_line = if include_knock {
+        format!("knock_psk_file: {}\n", knock.display())
+    } else {
+        String::new()
+    };
+
+    let yaml = dir.join("client.yaml");
+    std::fs::write(
+        &yaml,
+        format!(
+            "server_endpoint: \"198.51.100.42:8443\"\n\
+             bootstrap_dns: system\n\
+             socks_listen: \"127.0.0.1:1080\"\n\
+             user_id: \"alice001\"\n\
+             {knock_line}\
+             tls:\n  \
+                 server_name: vps.example.com\n  \
+                 utls_bridge_socket: {socket}\n\
+             keys:\n  \
+                 server_mlkem_pk: {mlkem}\n  \
+                 server_x25519_pk: {x25519}\n  \
+                 server_pq_fingerprint: {fp}\n  \
+                 client_ed25519_sk: {ed}\n",
+            socket = socket.display(),
+            mlkem = mlkem_pk.display(),
+            x25519 = x25519_pk.display(),
+            fp = fp.display(),
+            ed = ed_sk.display(),
+        ),
+    )
+    .unwrap();
+    yaml
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn utls_bridge_without_knock_psk_fails_closed() {
+    let dir = tempdir("utls_bridge_no_knock");
+    let yaml = write_utls_bridge_yaml(&dir, &dir.join("bridge.sock"), false);
+    let report = validate::run(&yaml).await;
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|check| matches!(check, validate::Check::Fail(s) if s.contains("knock_psk_file"))),
+        "bridge without Path A knock must fail validation: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn private_utls_bridge_socket_with_knock_passes_gate() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempdir("utls_bridge_private");
+    let socket = dir.join("bridge.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let yaml = write_utls_bridge_yaml(&dir, &socket, true);
+    let report = validate::run(&yaml).await;
+    assert!(
+        !report.has_failures(),
+        "private bridge + knock should pass validation: {report}"
+    );
+    assert!(
+        report.checks.iter().any(
+            |check| matches!(check, validate::Check::Pass(s) if s.contains("private Unix socket"))
+        ),
+        "bridge privacy gate missing: {report}"
+    );
+    drop(listener);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Operator config with a HOSTNAME endpoint and no bootstrap_dns
 /// override — the dangerous default. validate MUST surface a WARN
 /// pointing at `bootstrap_dns: direct_ip`.

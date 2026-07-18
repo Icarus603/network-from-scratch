@@ -92,6 +92,7 @@ services:
     volumes:
       - ./client.yaml:/etc/proteus/client.yaml:ro
       - ./keys:/etc/proteus/keys:ro
+      - proteus_utls_socket:/run/proteus
     environment:
       RUST_LOG: "proteus_client=info,proteus_transport_alpha=info"
       MIMALLOC_PURGE_DELAY: "${MIMALLOC_PURGE_DELAY:-0}"
@@ -101,6 +102,44 @@ services:
     tmpfs:
       - /tmp
     stop_grace_period: 20s
+
+  proteus-utls-bridge:
+    profiles: ["utls"]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: utls-bridge
+    image: proteus/utls-bridge:0.1.0
+    container_name: proteus-utls-bridge
+    restart: unless-stopped
+    depends_on:
+      proteus-server:
+        condition: service_healthy
+    networks:
+      - proteus-net
+    volumes:
+      - ./keys:/etc/proteus/keys:ro
+      - proteus_utls_socket:/run/proteus
+    command:
+      - /usr/local/bin/proteus-utls-bridge
+      - --listen
+      - /run/proteus/utls.sock
+      - --knock-psk
+      - /etc/proteus/keys/server.knock_psk
+      - --trusted-ca
+      - /etc/proteus/keys/tls/fullchain.pem
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs:
+      - /tmp
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/proteus/utls.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 5s
+    stop_grace_period: 10s
 
   prometheus:
     image: prom/prometheus:v2.55.1
@@ -160,6 +199,7 @@ services:
 volumes:
   proteus_logs:
   proteus_state:
+  proteus_utls_socket:
   prometheus_data:
   grafana_data:
 

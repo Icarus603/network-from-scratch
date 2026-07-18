@@ -773,36 +773,52 @@ async fn run(config_path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     // per-request build path.
     let cached_tls_connector: Option<Arc<proteus_transport_alpha::tls::TlsConnector>> =
         if let Some(tls_cfg) = cfg.tls.as_ref() {
-            let connector = match (tls_cfg.trusted_ca.as_ref(), knock_psk.as_deref()) {
-                (Some(ca), Some(psk)) => {
-                    proteus_transport_alpha::tls::build_connector_with_ca_and_knock(ca, psk.clone())
+            if let Some(socket) = tls_cfg.utls_bridge_socket.as_ref() {
+                info!(
+                    server_name = %tls_cfg.server_name,
+                    socket = %socket.display(),
+                    "uTLS bridge selected — outer TLS uses locked browser profile and Rust keeps the exporter-bound inner handshake"
+                );
+                None
+            } else {
+                let connector = match (tls_cfg.trusted_ca.as_ref(), knock_psk.as_deref()) {
+                    (Some(ca), Some(psk)) => {
+                        proteus_transport_alpha::tls::build_connector_with_ca_and_knock(
+                            ca,
+                            psk.clone(),
+                        )
                         .map_err(|e| {
                             format!(
                                 "failed to build cached knock-aware TLS connector (pinned CA): {e}"
                             )
                         })?
-                }
-                (None, Some(psk)) => {
-                    proteus_transport_alpha::tls::build_connector_webpki_roots_with_knock(
-                        psk.clone(),
-                    )
-                    .map_err(|e| {
-                        format!("failed to build cached knock-aware TLS connector (webpki): {e}")
-                    })?
-                }
-                (Some(ca), None) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
-                    .map_err(|e| {
+                    }
+                    (None, Some(psk)) => {
+                        proteus_transport_alpha::tls::build_connector_webpki_roots_with_knock(
+                            psk.clone(),
+                        )
+                        .map_err(|e| {
+                            format!(
+                                "failed to build cached knock-aware TLS connector (webpki): {e}"
+                            )
+                        })?
+                    }
+                    (Some(ca), None) => proteus_transport_alpha::tls::build_connector_with_ca(ca)
+                        .map_err(|e| {
                         format!("failed to build cached TLS connector (pinned CA): {e}")
                     })?,
-                (None, None) => proteus_transport_alpha::tls::build_connector_webpki_roots()
-                    .map_err(|e| format!("failed to build cached TLS connector (webpki): {e}"))?,
-            };
-            info!(
-                server_name = %tls_cfg.server_name,
-                knock_enabled = knock_psk.is_some(),
-                "cached TLS connector built — SOCKS5 requests will reuse it instead of rebuilding per request"
-            );
-            Some(Arc::new(connector))
+                    (None, None) => proteus_transport_alpha::tls::build_connector_webpki_roots()
+                        .map_err(|e| {
+                            format!("failed to build cached TLS connector (webpki): {e}")
+                        })?,
+                };
+                info!(
+                    server_name = %tls_cfg.server_name,
+                    knock_enabled = knock_psk.is_some(),
+                    "cached TLS connector built — SOCKS5 requests will reuse it instead of rebuilding per request"
+                );
+                Some(Arc::new(connector))
+            }
         } else {
             info!(
                 "no tls: config — α handshakes will run in plaintext mode (dev/test only); \

@@ -1,0 +1,50 @@
+[Unit]
+Description=Proteus uTLS browser-profile transport bridge
+Documentation=https://github.com/Icarus603/network-from-scratch
+After=network-online.target
+Wants=network-online.target
+Before=proteus-client.service
+
+[Service]
+Type=simple
+User=proteus
+Group=proteus
+RuntimeDirectory=proteus
+RuntimeDirectoryMode=0700
+ExecStart=/usr/local/bin/proteus-utls-bridge \
+  --listen /run/proteus/utls.sock \
+  --knock-psk /etc/proteus/keys/server.knock_psk
+Restart=on-failure
+RestartSec=2s
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @debug @mount @cpu-emulation @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadOnlyPaths=/etc/proteus
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LimitNOFILE=65536
+LimitCORE=0
+TasksMax=1024
+MemoryHigh=128M
+MemoryMax=256M
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

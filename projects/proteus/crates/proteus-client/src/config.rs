@@ -403,6 +403,17 @@ pub struct TlsClientCfg {
     /// the trust store. When absent the client uses webpki-roots.
     #[serde(default)]
     pub trusted_ca: Option<PathBuf>,
+    /// Optional local Unix socket for the version-locked uTLS
+    /// transport adapter. When set, α asks the bridge to dial the
+    /// already-resolved server IP, perform the outer TLS handshake
+    /// with the Chrome profile, and return the TLS exporter before
+    /// the existing inner Proteus handshake begins.
+    ///
+    /// This is Unix-only and requires `knock_psk_file`. The bridge
+    /// must be launched with the same knock key and, when
+    /// `trusted_ca` is set, the same CA file.
+    #[serde(default)]
+    pub utls_bridge_socket: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]

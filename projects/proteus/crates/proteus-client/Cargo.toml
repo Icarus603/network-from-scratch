@@ -51,6 +51,7 @@ ed25519-dalek.workspace = true
 # directly. rcgen accepts time::OffsetDateTime but doesn't
 # re-export the time crate.
 time = "0.3"
+tempfile = "3.27"
 
 [lints.rust]
 unsafe_code = "forbid"

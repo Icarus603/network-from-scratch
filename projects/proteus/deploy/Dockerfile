@@ -27,6 +27,20 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     cp /src/target/release/proteus-client /usr/local/bin/proteus-client && \
     cp /src/target/release/proteus-bench /usr/local/bin/proteus-bench
 
+# ---- uTLS bridge builder ----
+# Kept separate from the Rust builder so the browser-profile adapter
+# can be rebuilt and audited without copying Go or uTLS sources into
+# the Rust image. The multi-arch digest resolves to Go 1.24.13.
+FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS utls-builder
+WORKDIR /src/bridges/utls
+COPY bridges/utls/go.mod bridges/utls/go.sum ./
+RUN --mount=type=cache,target=/go/pkg/mod go mod download
+COPY bridges/utls ./
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" \
+      -o /usr/local/bin/proteus-utls-bridge .
+
 # ---- runtime: server ----
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS server
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -71,6 +85,24 @@ ENV RUST_LOG=proteus_client=info,proteus_transport_alpha=info
 EXPOSE 1080/tcp
 ENTRYPOINT ["/usr/bin/dumb-init", "--"]
 CMD ["/usr/local/bin/proteus-client", "run", "--config", "/etc/proteus/client.yaml"]
+
+# ---- runtime: uTLS browser-profile bridge ----
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS utls-bridge
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates dumb-init \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r -g 911 proteus \
+    && useradd -r -u 911 -g proteus -s /usr/sbin/nologin proteus \
+    && mkdir -p /run/proteus /etc/proteus \
+    && chown -R proteus:proteus /run/proteus /etc/proteus
+
+COPY --from=utls-builder /usr/local/bin/proteus-utls-bridge /usr/local/bin/proteus-utls-bridge
+
+USER proteus:proteus
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["/usr/local/bin/proteus-utls-bridge", \
+     "--listen", "/run/proteus/utls.sock", \
+     "--knock-psk", "/etc/proteus/keys/server.knock_psk"]
 
 # ---- benchmark participant ----
 # Same Rust builder as production, with only the cross-host benchmark

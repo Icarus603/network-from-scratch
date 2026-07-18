@@ -1239,6 +1239,42 @@ async fn try_alpha(
     }
 
     if let Some(tls_cfg) = cfg.tls.as_ref() {
+        let alpha_timeout =
+            std::time::Duration::from_secs(cfg.alpha_dial_timeout_secs.unwrap_or(10));
+
+        #[cfg(unix)]
+        if let Some(socket_path) = tls_cfg.utls_bridge_socket.as_ref() {
+            let bridge_target = server_addr.to_string();
+            let session = tokio::time::timeout(
+                alpha_timeout,
+                crate::utls_bridge::handshake(
+                    socket_path,
+                    &bridge_target,
+                    &tls_cfg.server_name,
+                    &hs_cfg,
+                ),
+            )
+            .await
+            .map_err(|_| SocksError::Socks("α uTLS bridge + Proteus handshake timed out"))?
+            .map_err(|e| SocksError::Io(std::io::Error::other(e.to_string())))?;
+            let proteus_transport_alpha::session::AlphaSession {
+                mut sender,
+                mut receiver,
+                ..
+            } = session;
+            if let Some(q) = cfg.pad_quantum {
+                if q > 0 {
+                    sender.set_pad_quantum(q);
+                }
+            }
+            sender.send_record(target_bytes).await?;
+            sender.flush().await?;
+            sock.write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+                .await?;
+            pump(sock, &mut sender, &mut receiver).await;
+            return Ok(());
+        }
+
         // Prefer the ctx-cached connector (built ONCE at startup) so
         // we don't pay for `build_connector_*` per request. Falls back
         // to per-request construction when ctx didn't attach one
@@ -1263,9 +1299,6 @@ async fn try_alpha(
         // then sat silent on TLS would wedge the SOCKS5 CONNECT
         // indefinitely (until the downstream browser/app fired
         // its own 30-60 s timeout). β had this; α didn't.
-        let alpha_timeout =
-            std::time::Duration::from_secs(cfg.alpha_dial_timeout_secs.unwrap_or(10));
-
         // Dial the IP literal we just resolved. The TLS SNI continues
         // to be `tls_cfg.server_name` (hostname) so cert verification
         // still works against the operator's Let's Encrypt cert.
