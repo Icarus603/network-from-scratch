@@ -163,7 +163,7 @@ impl CarrierHealth {
         let n = self
             .suppressed_connect_count
             .fetch_add(1, Ordering::Relaxed);
-        if n.is_multiple_of(PROBE_INTERVAL) {
+        if n.checked_rem(PROBE_INTERVAL) == Some(0) {
             // Log at DEBUG (not INFO) — a probe attempt is routine
             // operator-curiosity material, not actionable. The actual
             // outcome (success/failure) is logged by

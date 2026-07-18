@@ -101,7 +101,7 @@ pub fn solve_with_deadline(
         if counter > (1u64 << 56) {
             return None;
         }
-        if counter.is_multiple_of(CHECK_INTERVAL) && start.elapsed() > deadline {
+        if counter.checked_rem(CHECK_INTERVAL) == Some(0) && start.elapsed() > deadline {
             return None;
         }
     }
