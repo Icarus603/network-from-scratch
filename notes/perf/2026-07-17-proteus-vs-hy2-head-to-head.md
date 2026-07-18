@@ -318,3 +318,35 @@ counter 與完整環境 metadata 保存在
 same-host Linux/OrbStack、單一 IID cell；它證明該 cell 同時勝過
 Hy2 的 throughput、CPU 與 RSS，不能代替多 RTT、burst matrix、
 physical dual-host 與 short-flow 證據。
+
+## 2026-07-18 AES/mimalloc 擴展矩陣
+
+`16fdf2f` 的乾淨 worktree 與同一組 version-pinned image 再覆蓋
+0/15/30% IID、兩種 Gilbert-Elliott burst、20/300 ms RTT，以及
+1200-byte QUIC minimum MTU。所有格皆為 512 MiB production SOCKS5
+round-trip、64 MiB warmup、七次 matched observations；除 MTU
+fallback 格外，Proteus 固定使用已知路徑的 1452-byte MTU。
+
+| cell | Proteus | Hy2 | uplift (95% bootstrap) | CPU P/H | RSS P/H |
+|---|---:|---:|---:|---:|---:|
+| 0% IID, 100 ms RTT | 199.85 | 110.18 | **+81.38%** (+77.50%, +85.63%) | 2.284 / 2.360 s | 30.75 / 91.59 MiB |
+| 15% IID, 100 ms RTT | 90.67 | 69.96 | **+29.61%** (+20.56%, +33.24%) | 2.682 / 3.365 s | 32.68 / 198.55 MiB |
+| 30% IID, 100 ms RTT | 59.30 | 49.55 | **+19.68%** (+15.29%, +34.02%) | 2.999 / 4.412 s | 33.28 / 204.29 MiB |
+| moderate burst, 100 ms RTT | 160.25 | 104.05 | **+54.00%** (+48.47%, +58.26%) | 2.467 / 2.525 s | 32.15 / 146.37 MiB |
+| severe burst, 100 ms RTT | 108.36 | 88.56 | **+22.35%** (+14.52%, +29.84%) | 2.560 / 2.816 s | 30.84 / 202.67 MiB |
+| 5% IID, 20 ms RTT | 178.03 | 112.85 | **+57.76%** (+56.45%, +59.77%) | 2.199 / 2.401 s | 31.13 / 57.84 MiB |
+| 5% IID, 300 ms RTT | 48.33 | 40.71 | **+18.71%** (+13.38%, +28.56%) | 2.830 / 5.033 s | 29.42 / 253.09 MiB |
+| 5% IID, 100 ms RTT, MTU 1200 | 126.50 | 95.36 | **+32.65%** (+27.66%, +37.88%) | 2.840 / **2.631 s** | 33.76 / 180.90 MiB |
+
+八格 throughput interval 全部高於零，雙方皆 7/7 成功；所有非零
+loss/burst 格的兩向 qdisc 都有實際 drop。1452-byte 七格中，
+Proteus 同時降低 client CPU 與 RSS。1200-byte 安全 fallback 是必須
+保留的反例：吞吐與 RSS 仍勝，較多 packets 使 Proteus client CPU
+比 Hy2 高約 8%。因此 current evidence 支持跨 loss、burst 與 RTT
+的 sustained-bulk 優勢，不支持每一種 MTU 下所有資源維度都勝。
+
+`2026-07-18-aes-mimalloc-expanded-matrix.jsonl` 每格保存七輪原始
+throughput、CPU、RSS 陣列、bootstrap/permutation 統計、qdisc
+counters、commit 與 image digest；以一格一行避免把 container logs
+膨脹成數萬行。physical dual-host、reordering、short-flow 與至少
+30 observations 的最終 promoted matrix 仍是封頂前置條件。
