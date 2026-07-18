@@ -1361,14 +1361,17 @@ An early version-pinned official-Hysteria2 comparison found Proteus
 ahead by 8–24% in six normalized same-host cells. That matrix compared
 different application workloads and is retained only as exploratory
 controller evidence. The corrected production SOCKS workload reuses
-the β carrier across requests: at 64 MiB / 100 ms RTT / seven runs,
-Proteus led at 0% loss but remained about 5% behind Hy2 at 5% loss,
-with the latter difference statistically unresolved.
+the β carrier across requests. After fixing a 64 KiB exact-boundary
+flush stall, the 30-run 512 MiB / 100 ms RTT matrix measured Proteus
+at +24.45% (95% CI +22.88% to +25.62%) with no loss and +7.92%
+(+6.03% to +9.89%) at 5% IID loss. The 64 MiB / 5% cell remains
+statistically unresolved at −0.64% (−4.92% to +3.32%), so the
+promoted claim is limited to sustained bulk throughput.
 The method, commit and raw evidence live in
 [`notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md`](../../notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md).
-This is evidence of parity in part of the local matrix, not a cap
-claim. More loss regimes, burst loss, resource cost, TUIC-v5 and true
-cross-host reproduction remain required.
+This proves sustained-bulk superiority in two local cells, not a
+universal cap claim. More loss regimes, burst loss, resource cost,
+TUIC-v5 and true cross-host reproduction remain required.
 
 ---
 
@@ -1851,10 +1854,12 @@ latest hardening pass:
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2
   commit `f2ad1de5` is version-pinned, and all protocols use the same
   byte-verified SOCKS workload through the isolated Linux netem
-  router. Warm pooled Proteus leads the seven-run 0%-loss cell, but
-  remains about 5% behind Hy2 at 5% IID loss with an unresolved
-  interval. More loss regimes, burst-loss, CPU/memory, TUIC-v5 and
-  true cross-host validation remain open.
+  router. Warm pooled Proteus now leads two promoted 512 MiB,
+  30-run cells: +24.45% at 0% loss and +7.92% at 5% IID loss, both
+  with positive 95% bootstrap intervals and 30/30 success. The
+  64 MiB / 5% cell remains parity rather than a win. More loss
+  regimes, burst-loss, CPU/memory, TUIC-v5 and true cross-host
+  validation remain open.
 
 **Several cryptographic, traffic-analysis, and production-stability
 components are now stronger in isolation than their VLESS+REALITY or

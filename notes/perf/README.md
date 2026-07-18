@@ -199,10 +199,12 @@ same-host cells, Proteus led the normalized round-trip calculation by
 [`2026-07-17-proteus-vs-hy2-head-to-head.md`](2026-07-17-proteus-vs-hy2-head-to-head.md).
 Because that matrix used different application workloads, it is now
 classified as exploratory controller evidence. The corrected
-production SOCKS workload reuses daemon carriers and currently shows
-a clear 0%-loss win but roughly a 5% deficit to Hy2 at 5% IID loss;
-the latter interval crosses zero. No universal performance claim is
-supported.
+production SOCKS workload reuses daemon carriers. Its promoted
+512 MiB / 100 ms RTT / 30-run cells lead Hy2 by 24.45% at 0% loss
+and 7.92% at 5% IID loss, both with positive 95% bootstrap intervals.
+The 64 MiB / 5% cell remains statistically unresolved at −0.64%, so
+the supported claim is sustained-bulk superiority in these same-host
+cells, not universal performance dominance.
 
 ### How to reproduce
 

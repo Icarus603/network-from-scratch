@@ -203,3 +203,32 @@ idle timeout，長流會以 `TimedOut` 提前中止。現在 dial deadline
 
 上述 pooled production 矩陣的逐次結果與統計摘要保存在
 `2026-07-18-pooled-production-head-to-head.jsonl`。
+
+## 2026-07-18 64 KiB liveness 修正與 30-run 長流晉升
+
+30-run 診斷矩陣揭露一個與 congestion controller 無關的可靠性缺陷：
+client 與 server relay 在 application read 恰好填滿 64 KiB buffer 時
+跳過 flush，假定後面必有更多資料。request/response workload 若停在
+這個整數邊界，兩端會互相等待，最後由 QUIC 60 秒 idle timeout 終止。
+`3434b8d` 改為每個完整 logical record 都有 bounded flush，並加入
+環境開關式 per-session QUIC counters。修正前 1350 與 1452 MTU
+長跑都能復現 `early eof`；修正後下列三格全部 30/30。
+
+| payload | impairment | Proteus | Hy2 | uplift (95% bootstrap) |
+|---:|---|---:|---:|---:|
+| 64 MiB | 5% IID, 100 ms RTT | 55.41 | 55.77 | −0.64% (−4.92%, +3.32%) |
+| 512 MiB | 5% IID, 100 ms RTT | 104.62 | 96.94 | **+7.92%** (**+6.03%, +9.89%**) |
+| 512 MiB | 0% loss, 100 ms RTT | 136.54 | 109.72 | **+24.45%** (**+22.88%, +25.62%**) |
+
+三格使用相同 byte-verified SOCKS5 round-trip driver、1 Gbit/s target、
+AB/BA 交替順序、64 MiB warmup、1452-byte 已知路徑 MTU，Proteus
+commit 固定為 `3434b8d`，Hy2 固定為 `f2ad1de5`。512 MiB 的兩格已
+達到至少 30 observations 與正向信賴區間的晉升門檻，證明 Proteus
+在這個 same-host Linux netem 拓撲的 sustained bulk workload 超越
+Hy2。64 MiB 反例仍然必須並列：短流只證明統計 parity，不能宣稱
+Proteus 對所有 workload 都更快。
+
+這仍不是 universal cap。尚缺 Gilbert-Elliott 長流、15%/30% IID、
+多 RTT、TUIC-v5、server/client CPU 與 RSS、真正兩機 cross-host。
+1452 minimum MTU 也只適用於已量測並完全控制的路徑；未知 Internet、
+mobile 或 VPN path 必須保留安全的 1200 fallback。
