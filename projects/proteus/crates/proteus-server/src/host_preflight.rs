@@ -500,7 +500,7 @@ fn get_rlimit_nofile() -> std::io::Result<(u64, u64)> {
     unsafe {
         let mut rl: libc::rlimit = std::mem::zeroed();
         if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rl) == 0 {
-            Ok((rl.rlim_cur as u64, rl.rlim_max as u64))
+            Ok((rl.rlim_cur, rl.rlim_max))
         } else {
             Err(std::io::Error::last_os_error())
         }
@@ -780,7 +780,7 @@ fn disk_free_bytes(path: &Path) -> std::io::Result<u64> {
     unsafe {
         let mut s: libc::statvfs = std::mem::zeroed();
         if libc::statvfs(cpath.as_ptr(), &mut s) == 0 {
-            Ok((s.f_bavail as u64).saturating_mul(s.f_frsize as u64))
+            Ok(s.f_bavail.saturating_mul(s.f_frsize))
         } else {
             Err(std::io::Error::last_os_error())
         }

@@ -32,6 +32,7 @@
 
 use sha2::{Digest, Sha256};
 use std::fmt;
+use std::fmt::Write as _;
 use thiserror::Error;
 
 /// Errors from JA4 parsing.
@@ -518,8 +519,10 @@ fn sha256_prefix_12(data: &[u8]) -> String {
     // 6 bytes → 12 hex chars
     out.iter()
         .take(6)
-        .map(|b| format!("{b:02x}"))
-        .collect::<String>()
+        .fold(String::with_capacity(12), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("writing to String is infallible");
+            hex
+        })
 }
 
 struct Cursor<'a> {

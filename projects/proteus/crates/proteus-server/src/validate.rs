@@ -19,6 +19,7 @@
 //! CI / Ansible / Terraform pre-deploy gating.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 
@@ -479,11 +480,13 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             .into_iter()
             .filter_map(|(pk, users)| {
                 if users.len() > 1 {
-                    let pk_short = pk
-                        .iter()
-                        .take(8)
-                        .map(|b| format!("{b:02x}"))
-                        .collect::<String>();
+                    let pk_short =
+                        pk.iter()
+                            .take(8)
+                            .fold(String::with_capacity(16), |mut hex, byte| {
+                                write!(hex, "{byte:02x}").expect("writing to String is infallible");
+                                hex
+                            });
                     Some(format!(
                         "users {users:?} share ed25519_pk (pk[..8]={pk_short}…)"
                     ))
@@ -2174,6 +2177,26 @@ fn check_parent_writable(report: &mut PreflightReport, label: &str, path: &Path)
             if !md.is_dir() {
                 report.push_fail(format!("{label} parent {parent:?} is not a directory"));
                 return;
+            }
+            // A privileged validator can create files even when the
+            // directory has no Unix write bit. The service runs as an
+            // unprivileged account in production, so accepting that
+            // root-only probe would produce a false green preflight.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode();
+                if mode & 0o222 == 0 {
+                    report.push_fail(format!(
+                        "{label} parent {parent:?} exists but is NOT writable \
+                         (mode {:#o} has no write bits). Runtime writes to this path \
+                         will fail under the unprivileged service account. Fix: \
+                         `sudo chown -R proteus:proteus {parent:?}` and grant the \
+                         owner write permission.",
+                        mode & 0o7777
+                    ));
+                    return;
+                }
             }
             let probe_name = format!(
                 ".proteus-validate-probe-{}-{}",

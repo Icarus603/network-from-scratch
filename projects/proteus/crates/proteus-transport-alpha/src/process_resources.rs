@@ -127,7 +127,7 @@ fn open_fds() -> Option<u64> {
 
 /// Parse `VmRSS:` from `/proc/self/status`. Linux-only.
 ///
-/// The line shape is `VmRSS:\t <kB>` (e.g. `VmRSS:	  12345 kB`).
+/// The line shape is `VmRSS:\t <kB>` (e.g. `VmRSS:\t  12345 kB`).
 /// We return bytes (= kB × 1024) so the Prometheus gauge name
 /// matches the canonical `process_resident_memory_bytes` shape
 /// (vs. Go's `process_resident_memory_bytes` etc.).

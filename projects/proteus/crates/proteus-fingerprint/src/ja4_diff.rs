@@ -45,6 +45,7 @@
 //! same way the BROWSERS table evolves.
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use crate::ja4::Ja4Components;
 
@@ -513,11 +514,13 @@ fn diff_bytes_list(field: &'static str, ours: &[Vec<u8>], theirs: &[&[u8]]) -> F
         if b.iter().all(|c| c.is_ascii_graphic() || *c == b' ') {
             format!("\"{}\"", String::from_utf8_lossy(b))
         } else {
-            format!(
-                "<{}B: {}>",
-                b.len(),
-                b.iter().map(|x| format!("{x:02x}")).collect::<String>()
-            )
+            let hex = b
+                .iter()
+                .fold(String::with_capacity(b.len() * 2), |mut hex, byte| {
+                    write!(hex, "{byte:02x}").expect("writing to String is infallible");
+                    hex
+                });
+            format!("<{}B: {hex}>", b.len())
         }
     };
     let only_in_ours = ours_set
