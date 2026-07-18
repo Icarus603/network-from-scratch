@@ -66,6 +66,14 @@ class ReorderValidationTest(unittest.TestCase):
                 sent=100, lost=60, lost_bytes=72000, events=4, rtt=100.0
             )
         )
+        (cell / "proteus-server-daemon.log").write_text(
+            stats_line.replace("client path", "server path").format(
+                sent=20, lost=2, lost_bytes=2400, events=2, rtt=55.0
+            )
+            + stats_line.replace("client path", "server path").format(
+                sent=200, lost=100, lost_bytes=120000, events=5, rtt=101.0
+            )
+        )
         return cell
 
     def test_reorder_accepts_packets_without_drops(self) -> None:
@@ -82,6 +90,12 @@ class ReorderValidationTest(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 summary["proteus_quic_declared_loss_ratio_total"], 0.6
+            )
+            self.assertEqual(
+                summary["proteus_server_quic_sent_packets_total"], 200
+            )
+            self.assertAlmostEqual(
+                summary["proteus_server_quic_declared_loss_ratio_total"], 0.5
             )
 
     def test_recovery_rows_require_exactly_one_warmup(self) -> None:
