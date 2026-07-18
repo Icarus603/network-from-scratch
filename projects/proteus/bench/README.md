@@ -41,17 +41,20 @@ RUNS_PER_CELL=7 \
 
 The default `WORKLOAD_MODE=proxy` runs the real production-shaped
 `proteus-client` SOCKS5 inbound and `proteus-server` CONNECT relay.
-Proteus, Hysteria2, and sing-box TUIC v5 therefore receive the same
+Proteus, Hysteria2, and official TUIC v5 therefore receive the same
 SOCKS5 CONNECT, stream the same deterministic bytes to the same TCP
 echo server, and verify every echoed byte. `WORKLOAD_MODE=legacy`
 exists only to reproduce older heterogeneous evidence.
 
-Set `INCLUDE_TUIC=1` to add sing-box 1.13.12's version-pinned TUIC v5
-client/server to this protocol-neutral SOCKS5 workload. The
-minimal 2023 protocol-reference binaries remain available as explicit
-Compose services, but are not used for the headline current-competitor
-matrix. Set `SKIP_BUILD=1` only after the images have been built; the
-runner still records every reused image ID in `metadata.jsonl`.
+Set `INCLUDE_TUIC=1` to add the upstream TUIC v5 1.0.0 client/server
+to this protocol-neutral SOCKS5 workload. The release is checksum
+pinned, uses explicit 64 MiB send/receive windows, and remains the
+upstream project's latest reference release. The sing-box 1.13.12
+TUIC services remain available as a compatibility control, but are
+not used by the headline runner because their default QUIC flow-control
+windows cap the 100 ms RTT workload far below the upstream reference.
+Set `SKIP_BUILD=1` only after the images have been built; the runner
+still records every reused image ID in `metadata.jsonl`.
 
 Add Gilbert-Elliott burst-loss cells without changing the topology:
 

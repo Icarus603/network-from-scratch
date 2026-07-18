@@ -80,7 +80,7 @@ reset_and_warm_proxy_clients() {
     cell_dir="$1"
     clients=(proteus-proxy-client hy2-proxy-client)
     if [ "$INCLUDE_TUIC" = "1" ]; then
-        clients+=(singbox-tuic-client)
+        clients+=(tuic-client)
     fi
 
     # No carrier or congestion-controller state may leak from the
@@ -90,7 +90,7 @@ reset_and_warm_proxy_clients() {
     wait_for_log_marker proteus-proxy-client 'SOCKS5 inbound bound'
     wait_for_log_marker hy2-proxy-client 'SOCKS5 server listening'
     if [ "$INCLUDE_TUIC" = "1" ]; then
-        wait_for_log_marker singbox-tuic-client 'inbound/socks.*tcp server started'
+        wait_for_log_marker tuic-client 'server started, listening'
     fi
 
     mkdir -p "${cell_dir}/warmup"
@@ -102,7 +102,7 @@ reset_and_warm_proxy_clients() {
         "${cell_dir}/warmup/hy2.jsonl"
     if [ "$INCLUDE_TUIC" = "1" ]; then
         warm_proxy_driver \
-            singbox-tuic-bench-driver 10.77.1.13:1180 \
+            tuic-bench-driver 10.77.1.12:1080 \
             "${cell_dir}/warmup/tuic.jsonl"
     fi
 }
@@ -122,8 +122,8 @@ else
     server_services=(netem proteus-server hy2-server)
 fi
 if [ "$INCLUDE_TUIC" = "1" ]; then
-    build_services+=(singbox-tuic-server)
-    server_services+=(singbox-tuic-server singbox-tuic-client tcp-echo-server)
+    build_services+=(tuic-server)
+    server_services+=(tuic-server tuic-client tcp-echo-server)
 fi
 if [ "$SKIP_BUILD" != "1" ]; then
     "${COMPOSE[@]}" build "${build_services[@]}"
@@ -152,7 +152,7 @@ for service in "${server_services[@]}"; do
 done
 
 if [ "$INCLUDE_TUIC" = "1" ]; then
-    wait_for_log_marker singbox-tuic-client 'inbound/socks.*tcp server started'
+    wait_for_log_marker tuic-client 'server started, listening'
 fi
 
 if [ "$WORKLOAD_MODE" = "proxy" ]; then
@@ -200,7 +200,7 @@ done
         "$([[ -n "$(git -C "$ROOT" status --short)" ]] && echo true || echo false)"
     printf '"hy2_git_commit":"%s",' "f2ad1de5da52a1da9622285a1d61553ddaa41f21"
     printf '"tuic_version":"%s",' \
-        "$([[ "$INCLUDE_TUIC" = "1" ]] && echo "sing-box-1.13.12+1086ab256332" || echo "not-run")"
+        "$([[ "$INCLUDE_TUIC" = "1" ]] && echo "official-tuic-v5-1.0.0" || echo "not-run")"
     if [ "$WORKLOAD_MODE" = "proxy" ]; then
         proteus_image_ref=proteus/proxy-bench:local
     else
@@ -213,7 +213,7 @@ done
         "$(docker image inspect proteus/hysteria-bench:f2ad1de --format '{{.Id}}')"
     if [ "$INCLUDE_TUIC" = "1" ]; then
         printf '"tuic_image_id":"%s",' \
-            "$(docker image inspect proteus/sing-box-tuic-bench:1.13.12 --format '{{.Id}}')"
+            "$(docker image inspect proteus/tuic-bench:1.0.0 --format '{{.Id}}')"
     fi
     printf '"payload_mib":%s,"runs_per_cell":%s,' "$PAYLOAD_MIB" "$RUNS_PER_CELL"
     printf '"workload_mode":"%s",' "$WORKLOAD_MODE"
@@ -313,7 +313,7 @@ run_cell() {
                 >> "${cell_dir}/tuic.jsonl"
             if "${COMPOSE[@]}" run --rm -T \
                 -e PAYLOAD_MIB="$PAYLOAD_MIB" \
-                singbox-tuic-bench-driver \
+                tuic-bench-driver \
                 >> "${cell_dir}/tuic.jsonl" \
                 2>&1; then
                 return 0
@@ -358,6 +358,12 @@ run_cell() {
                 > "${cell_dir}/hy2-client-daemon.log" 2>&1
             "${COMPOSE[@]}" logs --no-color hy2-server \
                 > "${cell_dir}/hy2-server-daemon.log" 2>&1
+            if [ "$INCLUDE_TUIC" = "1" ]; then
+                "${COMPOSE[@]}" logs --no-color tuic-client \
+                    > "${cell_dir}/tuic-client-daemon.log" 2>&1
+                "${COMPOSE[@]}" logs --no-color tuic-server \
+                    > "${cell_dir}/tuic-server-daemon.log" 2>&1
+            fi
             if grep -q 'falling back to α' \
                 "${cell_dir}/proteus-client-daemon.log"; then
                 echo "benchmark invalid: Proteus β fell back to α in ${cell}" >&2

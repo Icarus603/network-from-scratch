@@ -347,7 +347,7 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
             output.append(
                 {
                     "kind": "run",
-                    "implementation": "sing-box-tuic-v5",
+                    "implementation": "official-tuic-v5-1.0.0",
                     **common,
                     **row,
                 }
