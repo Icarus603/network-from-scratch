@@ -118,6 +118,8 @@ server_endpoint: "vps.example.com:8443"
 #                                         long-fat-pipe deploys)
 #   beta_packet_threshold = 3            (RFC loss detection; raise only on
 #                                         measured packet-reordering paths)
+#   beta_time_threshold = 1.125           (RFC 9002 9/8; raise only on delayed
+#                                         packet-reordering paths)
 #   beta_mtu_upper_bound = 1452          (Ethernet max under IPv6+UDP)
 #   beta_stream_receive_window_mib = 64  (per-stream flow control)
 #   beta_connection_receive_window_mib = 256 (aggregate flow control)

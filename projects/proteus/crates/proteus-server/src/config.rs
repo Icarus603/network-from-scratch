@@ -86,6 +86,11 @@ pub struct ServerConfig {
     /// for fewer spurious retransmissions on reordered paths.
     #[serde(default)]
     pub beta_packet_threshold: Option<u32>,
+    /// β QUIC time-based loss threshold as an RTT multiplier.
+    /// Default 1.125; higher values trade slower genuine-loss
+    /// recovery for tolerance of delayed packet reordering.
+    #[serde(default)]
+    pub beta_time_threshold: Option<f32>,
     /// β QUIC: MTU discovery upper bound. quinn searches up to this
     /// value during path-MTU probes. Default 1452 (Ethernet under
     /// IPv6+UDP). Raise to 9000 on known jumbo-frame paths

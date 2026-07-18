@@ -147,6 +147,10 @@ interval −26.07% to +49.71%, p=0.936). It is therefore an experimental
 diagnostic, not a production default or a superiority claim. Further
 work must instrument spurious loss and adapt to measured reordering
 instead of sweeping larger static thresholds.
+`PROTEUS_TIME_THRESHOLD` controls the companion time-based loss
+threshold and defaults to RFC 9002's `1.125` RTT. Any raised value is
+subject to the same reordering A/B and real-loss guard; it is not a
+production recommendation.
 The default warmup is `min(PAYLOAD_MIB, 64)` MiB so the congestion
 controller reaches a meaningful state rather than merely completing
 the handshake. Override it with `WARMUP_MIB`, but do not use zero

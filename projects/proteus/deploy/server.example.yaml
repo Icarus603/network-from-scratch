@@ -34,6 +34,8 @@ listen_alpha: "0.0.0.0:8443"
 #                                         ONLY for measured long-fat-pipe)
 #   beta_packet_threshold = 3            (RFC loss detection; raising delays
 #                                         real-loss recovery)
+#   beta_time_threshold = 1.125           (RFC 9002 9/8; raising delays
+#                                         real-loss recovery)
 #   beta_mtu_upper_bound = 1452          (Ethernet max under IPv6+UDP)
 #   beta_stream_receive_window_mib = 64  (per-stream flow control)
 #   beta_connection_receive_window_mib = 256 (aggregate flow control)
@@ -76,6 +78,7 @@ listen_alpha: "0.0.0.0:8443"
 # beta_allow_spin_bit: false
 # beta_ack_eliciting_threshold: 1
 # beta_packet_threshold: 3
+# beta_time_threshold: 1.125
 # beta_mtu_upper_bound: 1452
 #
 # High-loss, operator-provisioned links can opt into Proteus Brutal.

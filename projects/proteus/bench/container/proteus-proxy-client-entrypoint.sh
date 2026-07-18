@@ -83,7 +83,8 @@ sed -i \
     "s/^beta_ack_eliciting_threshold:.*/beta_ack_eliciting_threshold: ${ACK_ELICITING_THRESHOLD:-1}/" \
     "$config"
 sed -i \
-    "s/^beta_packet_threshold:.*/beta_packet_threshold: ${PACKET_THRESHOLD:-3}/" \
+    -e "s/^beta_packet_threshold:.*/beta_packet_threshold: ${PACKET_THRESHOLD:-3}/" \
+    -e "s/^beta_time_threshold:.*/beta_time_threshold: ${TIME_THRESHOLD:-1.125}/" \
     "$config"
 sed -i "s/^beta_initial_mtu:.*/beta_initial_mtu: ${INITIAL_MTU:-1350}/" "$config"
 sed -i "s/^beta_minimum_mtu:.*/beta_minimum_mtu: ${MINIMUM_MTU:-1350}/" "$config"

@@ -125,6 +125,11 @@ pub struct ClientConfig {
     /// recovery.
     #[serde(default)]
     pub beta_packet_threshold: Option<u32>,
+    /// β QUIC time-based loss threshold as an RTT multiplier.
+    /// Default 1.125 (RFC 9002). Raise only on measured delayed-
+    /// reordering paths; higher values delay genuine-loss recovery.
+    #[serde(default)]
+    pub beta_time_threshold: Option<f32>,
     /// β QUIC: MTU discovery upper bound. quinn probes path-MTU up
     /// to this value. Default 1452. Raise to 9000 on known jumbo-
     /// frame paths for a real throughput win.

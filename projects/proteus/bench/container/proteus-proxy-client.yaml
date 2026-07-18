@@ -14,6 +14,7 @@ beta_pad_quic_to_mtu: false
 beta_allow_spin_bit: false
 beta_ack_eliciting_threshold: 1
 beta_packet_threshold: 3
+beta_time_threshold: 1.125
 socks_listen: "0.0.0.0:1080"
 user_id: bench
 pow_difficulty: 0

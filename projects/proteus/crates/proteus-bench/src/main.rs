@@ -242,6 +242,10 @@ struct BetaArgs {
     /// values delay recovery from genuine packet loss.
     #[arg(long, default_value = "3")]
     packet_threshold: u32,
+    /// `PerfProfile.time_threshold`. 1.125 is RFC 9002's 9/8
+    /// default. Raise only for measured delayed reordering.
+    #[arg(long, default_value = "1.125")]
+    time_threshold: f32,
     /// `PerfProfile.allow_spin_bit`. false = privacy-default (no
     /// wire-visible RTT side channel); true = matches quinn upstream.
     #[arg(long, default_value = "false")]
@@ -383,6 +387,9 @@ struct BetaServerArgs {
     /// on both peers when running a bidirectional reordering study.
     #[arg(long, default_value = "3")]
     packet_threshold: u32,
+    /// Server-side `PerfProfile.time_threshold`.
+    #[arg(long, default_value = "1.125")]
+    time_threshold: f32,
 }
 
 #[derive(clap::Args, Debug)]
@@ -443,6 +450,9 @@ struct BetaClientArgs {
     /// `PerfProfile.packet_threshold`. 3 is the production default.
     #[arg(long, default_value = "3")]
     packet_threshold: u32,
+    /// `PerfProfile.time_threshold`.
+    #[arg(long, default_value = "1.125")]
+    time_threshold: f32,
     /// `PerfProfile.allow_spin_bit`.
     #[arg(long, default_value = "false")]
     allow_spin_bit: bool,
@@ -517,6 +527,16 @@ fn reject_packet_threshold(value: u32) -> Result<(), String> {
             "--packet-threshold = {value} is below RFC 9002's packet \
              reordering threshold of 3. Use 3 for ordinary paths; raise \
              it only when a measured path reorders packets."
+        ));
+    }
+    Ok(())
+}
+
+fn reject_time_threshold(value: f32) -> Result<(), String> {
+    if !value.is_finite() || value < 1.125 {
+        return Err(format!(
+            "--time-threshold = {value} is below RFC 9002's 9/8 \
+             recovery threshold or is non-finite."
         ));
     }
     Ok(())
@@ -681,6 +701,7 @@ fn validate_beta_args(a: &BetaArgs) -> Result<(), String> {
     }
     reject_invalid_loss_pct(a.loss_pct)?;
     reject_packet_threshold(a.packet_threshold)?;
+    reject_time_threshold(a.time_threshold)?;
     reject_zero_u64(
         "--brutal-target-mbps",
         a.brutal_target_mbps,
@@ -727,6 +748,7 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
         ));
     }
     reject_packet_threshold(a.packet_threshold)?;
+    reject_time_threshold(a.time_threshold)?;
     reject_zero_u64(
         "--brutal-target-mbps",
         a.brutal_target_mbps,
@@ -741,7 +763,8 @@ fn validate_beta_server_args(a: &BetaServerArgs) -> Result<(), String> {
         a.brutal_target_mbps,
         "Brutal needs a positive pacing target",
     )?;
-    reject_packet_threshold(a.packet_threshold)
+    reject_packet_threshold(a.packet_threshold)?;
+    reject_time_threshold(a.time_threshold)
 }
 
 fn validate_udp_forwarder_args(a: &UdpForwarderArgs) -> Result<(), String> {
@@ -932,6 +955,7 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,
         packet_threshold: args.packet_threshold,
+        time_threshold: args.time_threshold,
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
@@ -990,6 +1014,7 @@ async fn run_beta_server(args: BetaServerArgs) -> Result<(), Box<dyn std::error:
         congestion: args.congestion.into(),
         brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
         packet_threshold: args.packet_threshold,
+        time_threshold: args.time_threshold,
         ..PerfProfile::default()
     };
     let (local, identity, server_fut) = beta::spawn_echo_server(bind, cert, perf).await?;
@@ -1033,6 +1058,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
         allow_spin_bit: args.allow_spin_bit,
         ack_eliciting_threshold: args.ack_eliciting_threshold,
         packet_threshold: args.packet_threshold,
+        time_threshold: args.time_threshold,
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),

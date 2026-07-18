@@ -1042,6 +1042,9 @@ async fn try_beta(
     if let Some(v) = cfg.beta_packet_threshold {
         perf.packet_threshold = v;
     }
+    if let Some(v) = cfg.beta_time_threshold {
+        perf.time_threshold = v;
+    }
     if let Some(v) = cfg.beta_mtu_upper_bound {
         perf.mtu_upper_bound = v;
     }

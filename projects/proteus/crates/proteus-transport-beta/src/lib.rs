@@ -206,6 +206,13 @@ pub struct PerfProfile {
     /// slower recovery from real loss. Production therefore stays at
     /// 3; measured paths may opt into a higher value.
     pub packet_threshold: u32,
+    /// Time-based QUIC loss threshold as a multiple of the
+    /// conservative RTT estimate. RFC 9002 recommends 9/8 (1.125).
+    ///
+    /// Raising this can tolerate paths where reordered packets arrive
+    /// substantially later than their successors, but delays recovery
+    /// from genuine loss. Production therefore remains at 1.125.
+    pub time_threshold: f32,
     /// Upper bound that MTU discovery will probe up to (bytes).
     ///
     /// quinn's default is 1452 — fits under a 1500-byte Ethernet
@@ -285,6 +292,7 @@ impl Default for PerfProfile {
             // footgun.
             ack_eliciting_threshold: 1,
             packet_threshold: 3,
+            time_threshold: 1.125,
             // SPEED: explicit MTU discovery upper bound — matches
             // quinn's current default but pins it so a future quinn
             // upgrade can't silently regress paths that depend on it.
@@ -439,6 +447,7 @@ pub fn apply_perf_tuning_with(transport: &mut quinn::TransportConfig, profile: P
         .allow_spin(profile.allow_spin_bit);
 
     transport.packet_threshold(profile.packet_threshold.max(3));
+    transport.time_threshold(profile.time_threshold.max(1.125));
 
     // SPEED (opt-in): ACK-frequency reduction (RFC 9802). Only set
     // when operator explicitly raised the threshold > 1 — the
@@ -522,6 +531,7 @@ mod perf_profile_defaults {
     #[test]
     fn packet_threshold_defaults_to_rfc_recovery_value() {
         assert_eq!(PerfProfile::default().packet_threshold, 3);
+        assert_eq!(PerfProfile::default().time_threshold, 1.125);
     }
 
     /// MTU discovery upper bound is pinned, not relying on quinn's

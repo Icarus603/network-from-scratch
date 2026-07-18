@@ -791,6 +791,19 @@ pub async fn run(path: &Path) -> PreflightReport {
                 ));
             }
         }
+        if let Some(thr) = cfg.beta_time_threshold {
+            if !thr.is_finite() || thr < 1.125 {
+                r.push_fail(format!(
+                    "beta_time_threshold = {thr} is below RFC 9002's 9/8 \
+                     recovery threshold or is non-finite."
+                ));
+            } else if thr > 4.0 {
+                r.push_warn(format!(
+                    "beta_time_threshold = {thr} is extreme; genuine packet loss \
+                     may take several RTTs to recover."
+                ));
+            }
+        }
         match cfg.beta_congestion.as_deref() {
             None | Some("bbr") => {
                 if cfg.beta_brutal_target_mbps.is_some() {

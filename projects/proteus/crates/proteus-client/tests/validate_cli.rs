@@ -1371,6 +1371,23 @@ async fn beta_packet_threshold_below_three_fails() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[tokio::test]
+async fn beta_time_threshold_below_nine_eighths_fails() {
+    let dir = tempdir("time-threshold-low");
+    let yaml = write_minimal_green_yaml(
+        &dir,
+        "server_endpoint: \"vps.example.com:8443\"\n\
+         server_endpoint_beta: \"vps.example.com:8443\"\n\
+         beta_time_threshold: 1.0\n",
+    );
+    let report = validate::run(&yaml).await;
+    assert!(
+        report.has_failures(),
+        "time threshold below 9/8 MUST FAIL: {report}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ---------- iter-91: tcp_keepalive_secs / alpha_dial_timeout_secs / healthz_staleness_secs ----------
 
 #[tokio::test]

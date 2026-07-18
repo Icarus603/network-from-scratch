@@ -1150,6 +1150,19 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
             ));
         }
     }
+    if let Some(thr) = cfg.beta_time_threshold {
+        if !thr.is_finite() || thr < 1.125 {
+            r.push_fail(format!(
+                "beta_time_threshold = {thr} is below RFC 9002's 9/8 \
+                 recovery threshold or is non-finite."
+            ));
+        } else if thr > 4.0 {
+            r.push_warn(format!(
+                "beta_time_threshold = {thr} is extreme; genuine packet loss may \
+                 take several RTTs to recover."
+            ));
+        }
+    }
     match cfg.beta_congestion.as_deref() {
         None | Some("bbr") => {
             if cfg.beta_brutal_target_mbps.is_some() {
@@ -2496,6 +2509,7 @@ mod tests {
             beta_allow_spin_bit: None,
             beta_ack_eliciting_threshold: None,
             beta_packet_threshold: None,
+            beta_time_threshold: None,
             beta_mtu_upper_bound: None,
             beta_stream_receive_window_mib: None,
             beta_connection_receive_window_mib: None,
@@ -3039,6 +3053,19 @@ mod tests {
         assert!(
             report.has_failures(),
             "packet threshold below 3 MUST FAIL: {report}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn beta_time_threshold_below_nine_eighths_fails() {
+        let dir = tmpdir();
+        let mut cfg = minimal_cfg(&dir);
+        cfg.beta_time_threshold = Some(1.0);
+        let report = preflight(&cfg);
+        assert!(
+            report.has_failures(),
+            "time threshold below 9/8 MUST FAIL: {report}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
