@@ -16,6 +16,9 @@
 //! proteus-server run --config /etc/proteus/server.yaml
 //! ```
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 

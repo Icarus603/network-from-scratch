@@ -22,6 +22,7 @@ PROTEUS_STREAM_RECEIVE_WINDOW_MIB="${PROTEUS_STREAM_RECEIVE_WINDOW_MIB:-64}"
 PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB="${PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB:-256}"
 PROTEUS_SEND_WINDOW_MIB="${PROTEUS_SEND_WINDOW_MIB:-64}"
 PROTEUS_BETA_FIRST_TIMEOUT_SECS="${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
+PROTEUS_MIMALLOC_PURGE_DELAY="${PROTEUS_MIMALLOC_PURGE_DELAY:-0}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
         WARMUP_MIB=64
@@ -50,6 +51,7 @@ export PROTEUS_STREAM_RECEIVE_WINDOW_MIB
 export PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB
 export PROTEUS_SEND_WINDOW_MIB
 export PROTEUS_BETA_FIRST_TIMEOUT_SECS
+export PROTEUS_MIMALLOC_PURGE_DELAY
 
 wait_for_log_marker() {
     service="$1"
@@ -264,6 +266,7 @@ done
     printf '"proteus_connection_receive_window_mib":%s,' "$PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB"
     printf '"proteus_send_window_mib":%s,' "$PROTEUS_SEND_WINDOW_MIB"
     printf '"proteus_beta_first_timeout_secs":%s,' "$PROTEUS_BETA_FIRST_TIMEOUT_SECS"
+    printf '"proteus_mimalloc_purge_delay_ms":%s,' "$PROTEUS_MIMALLOC_PURGE_DELAY"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \
         "$WARMUP_MIB"

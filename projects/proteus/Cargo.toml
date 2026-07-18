@@ -55,6 +55,7 @@ tokio = { version = "1.40", default-features = false }
 rustls = { version = "0.23", default-features = false, features = ["ring", "aws_lc_rs", "std", "tls12", "brotli"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 webpki-roots = "1"
+mimalloc = "0.1.52"
 
 # X.509 parser — used by the α transport's cert-expiry observability
 # surface to extract `notAfter` from a loaded cert chain. We pin the

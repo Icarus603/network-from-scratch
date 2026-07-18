@@ -87,6 +87,11 @@ Legacy one-shot mode uses `STREAM_WINDOW_MIB` and
 `PROTEUS_SEND_WINDOW_MIB` symmetrically on both Proteus peers. Their
 defaults remain 64, 256, and 64 MiB; `metadata.jsonl` records every
 selected value so a memory/throughput sweep cannot silently drift.
+The production binaries use mimalloc, and the container matrix sets
+`PROTEUS_MIMALLOC_PURGE_DELAY=0` by default so freed burst pages are
+returned to the OS before the post-run RSS snapshot. The selected delay
+is recorded in `metadata.jsonl`; set it to `1000` to reproduce mimalloc
+v3's upstream asynchronous-purge default.
 
 Each workload driver is fresh, with deterministic AB/BA alternation.
 In proxy mode every impairment cell force-recreates all long-lived

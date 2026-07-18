@@ -51,6 +51,7 @@ services:
       - proteus_state:/var/lib/proteus
     environment:
       RUST_LOG: "proteus_server=info,proteus_transport_alpha=info"
+      MIMALLOC_PURGE_DELAY: "${MIMALLOC_PURGE_DELAY:-0}"
     cap_drop: [ALL]
     cap_add: [NET_BIND_SERVICE]
     security_opt: [no-new-privileges:true]
@@ -93,6 +94,7 @@ services:
       - ./keys:/etc/proteus/keys:ro
     environment:
       RUST_LOG: "proteus_client=info,proteus_transport_alpha=info"
+      MIMALLOC_PURGE_DELAY: "${MIMALLOC_PURGE_DELAY:-0}"
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     read_only: true

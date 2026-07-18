@@ -278,3 +278,43 @@ Proteus 對 TUIC uplift 為 **+48.86%**，bootstrap 95% interval
 **+4.94% 到 +11.08%**。這證明 5% IID sustained-bulk cell 同時
 超越兩個 version-pinned 對手。0% TUIC cell 仍只有七次，短流、多
 RTT 與 cross-host 仍不得外推。
+
+## 2026-07-18 AES v1.1 與 allocator/RSS 校正
+
+authenticated AEAD agility 把 inner DATA/CLOSE/RATCHET 從固定
+ChaCha20-Poly1305 升級為 transcript-bound negotiation；v1.1 client
+offer、server selection、identity signature、HMAC 與 Finished 均涵蓋
+suite，server 在雙方支援時選擇 AWS-LC AES-256-GCM。相同 64 KiB
+microbenchmark 中，硬體 AES seal/open 約 7.98/8.11 GiB/s，
+ChaCha20-Poly1305 約 628 MiB/s。這只證明 primitive headroom；
+production proxy 數據才是協議層判準。
+
+512 MiB、5% IID loss、100 ms RTT、64 MiB warmup、固定 1452 MTU、
+64/256/64 MiB QUIC window 與 1 Gbit/s target 的七輪 matched cell
+得到以下結果：
+
+| implementation | throughput median | client CPU median | post-run RSS median |
+|---|---:|---:|---:|
+| Proteus β + AES v1.1 + mimalloc purge=0 | **129.88 MiB/s** | **2.542 s** | **31.27 MiB** |
+| Hysteria2 `f2ad1de5` | 95.53 MiB/s | 2.583 s | 175.91 MiB |
+
+Proteus throughput uplift 是 **+35.97%**，20,000-resample bootstrap
+95% interval 為 **+30.08% 到 +38.36%**，exact two-sided permutation
+`p=0.00058275`，probability of superiority 為 1.0，兩邊皆 7/7
+成功。Proteus 每輪 RSS 為 33.14、35.48、28.56、29.31、29.91、
+31.27、32.10 MiB，沒有持續爬升。
+
+診斷 A/B 也保留失敗邊界。glibc allocator 的同條件舊 cell 在七輪後
+post-run RSS median 約 263.86 MiB；mimalloc 使用 v3 預設 1000 ms
+非同步 purge 時，頁面會在約 46–194 MiB 間依採樣時點擺動，median
+仍為 182.99 MiB。設定官方 `MIMALLOC_PURGE_DELAY=0` 後，free page
+在觀測前歸還 OS，吞吐優勢沒有消失，RSS 才穩定落到 28.56–35.48
+MiB。這支持 allocator high-water diagnosis，並反駁「QUIC payload
+buffer 永久洩漏」假說。
+
+原始逐輪 throughput、CPU、RSS、image digest、commit、qdisc drop
+counter 與完整環境 metadata 保存在
+`2026-07-18-mimalloc-aes-v11-head-to-head.jsonl`。這仍是單一
+same-host Linux/OrbStack、單一 IID cell；它證明該 cell 同時勝過
+Hy2 的 throughput、CPU 與 RSS，不能代替多 RTT、burst matrix、
+physical dual-host 與 short-flow 證據。

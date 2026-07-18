@@ -200,6 +200,7 @@ services:
       STREAM_RECEIVE_WINDOW_MIB: "${PROTEUS_STREAM_RECEIVE_WINDOW_MIB:-64}"
       CONNECTION_RECEIVE_WINDOW_MIB: "${PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB:-256}"
       SEND_WINDOW_MIB: "${PROTEUS_SEND_WINDOW_MIB:-64}"
+      MIMALLOC_PURGE_DELAY: "${PROTEUS_MIMALLOC_PURGE_DELAY:-0}"
     volumes:
       - ./container:/bench:ro
       - proteus_proxy_state:/run/proteus-proxy
@@ -230,6 +231,7 @@ services:
       CONNECTION_RECEIVE_WINDOW_MIB: "${PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB:-256}"
       SEND_WINDOW_MIB: "${PROTEUS_SEND_WINDOW_MIB:-64}"
       BETA_FIRST_TIMEOUT_SECS: "${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
+      MIMALLOC_PURGE_DELAY: "${PROTEUS_MIMALLOC_PURGE_DELAY:-0}"
     volumes:
       - ./container:/bench:ro
       - proteus_proxy_state:/run/proteus-proxy

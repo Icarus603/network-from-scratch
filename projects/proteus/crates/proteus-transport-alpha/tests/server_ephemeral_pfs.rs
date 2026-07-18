@@ -63,9 +63,13 @@ async fn run_sniff_proxy(
                 while !buf.is_empty() {
                     match alpha::decode_frame(&buf) {
                         Ok((frame, consumed)) => {
-                            if frame.kind == FRAME_SERVER_HELLO && frame.body.len() == 32 {
+                            // v1.1 appends the transcript-bound selected AEAD
+                            // suite after the 32-byte ephemeral X25519 share.
+                            // This regression test compares the key share, not
+                            // the negotiated suite byte.
+                            if frame.kind == FRAME_SERVER_HELLO && frame.body.len() == 33 {
                                 let mut out = [0u8; 32];
-                                out.copy_from_slice(frame.body);
+                                out.copy_from_slice(&frame.body[..32]);
                                 if let Some(tx) = sh_tx.take() {
                                     let _ = tx.send(out);
                                 }

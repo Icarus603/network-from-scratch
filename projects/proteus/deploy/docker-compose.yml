@@ -14,6 +14,10 @@ services:
       - proteus_logs:/var/log/proteus
     environment:
       RUST_LOG: "proteus_server=info,proteus_transport_alpha=info"
+      # Return free mimalloc pages to the OS immediately. This keeps RSS
+      # bounded after large QUIC receive bursts instead of waiting for the
+      # allocator's default asynchronous purge interval.
+      MIMALLOC_PURGE_DELAY: "${MIMALLOC_PURGE_DELAY:-0}"
     cap_drop:
       - ALL
     cap_add:

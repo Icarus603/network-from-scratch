@@ -9,6 +9,9 @@
 //! curl --socks5 127.0.0.1:1080 https://example.com/
 //! ```
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
