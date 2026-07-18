@@ -53,6 +53,19 @@ class ReorderValidationTest(unittest.TestCase):
             "server_qdisc": [applied_entry],
         }
         (cell / "qdisc-applied.json").write_text(json.dumps(applied_qdisc))
+        stats_line = (
+            "β session QUIC delta (client path) sent_packets={sent} "
+            "lost_packets={lost} lost_bytes={lost_bytes} "
+            "congestion_events={events} rtt_ms={rtt}\n"
+        )
+        (cell / "proteus-client-daemon.log").write_text(
+            stats_line.format(
+                sent=10, lost=1, lost_bytes=1200, events=1, rtt=50.0
+            )
+            + stats_line.format(
+                sent=100, lost=60, lost_bytes=72000, events=4, rtt=100.0
+            )
+        )
         return cell
 
     def test_reorder_accepts_packets_without_drops(self) -> None:
@@ -63,6 +76,21 @@ class ReorderValidationTest(unittest.TestCase):
             self.assertEqual(summary["loss_model"], "reorder")
             self.assertEqual(summary["reorder_pct"], 5.0)
             self.assertEqual(summary["client_qdisc_drop_delta"], 0)
+            self.assertEqual(summary["proteus_quic_sent_packets_total"], 100)
+            self.assertEqual(
+                summary["proteus_quic_declared_lost_packets_total"], 60
+            )
+            self.assertAlmostEqual(
+                summary["proteus_quic_declared_loss_ratio_total"], 0.6
+            )
+
+    def test_recovery_rows_require_exactly_one_warmup(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            cell = self.make_fixture(Path(directory))
+            log = cell / "proteus-client-daemon.log"
+            log.write_text(log.read_text().splitlines()[0] + "\n")
+            with self.assertRaisesRegex(ValueError, "one warmup plus 1"):
+                MODULE.summarize(Path(directory))
 
     def test_reorder_rejects_unapplied_kernel_qdisc(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

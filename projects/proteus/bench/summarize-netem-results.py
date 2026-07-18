@@ -16,6 +16,12 @@ from typing import Any
 
 
 SPEED_RE = re.compile(r"^(?P<value>[0-9.]+) (?P<unit>[KMGT]?B/s)$")
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
+BETA_STATS_MARKER = "β session QUIC delta (client path)"
+BETA_STATS_FIELD_RE = re.compile(
+    r"\b(sent_packets|lost_packets|lost_bytes|congestion_events|rtt_ms)"
+    r"=([0-9.]+)"
+)
 DECIMAL_MULTIPLIER = {
     "B/s": 1,
     "KB/s": 1_000,
@@ -191,6 +197,53 @@ def resource_rows(path: Path, implementation: str) -> list[dict[str, Any]]:
     ]
 
 
+def beta_recovery_rows(path: Path, expected_runs: int) -> list[dict[str, Any]]:
+    """Parse one warmup plus per-observation Quinn recovery counters."""
+    if not path.exists():
+        return []
+    rows: list[dict[str, Any]] = []
+    for raw_line in path.read_text().splitlines():
+        line = ANSI_ESCAPE_RE.sub("", raw_line)
+        if BETA_STATS_MARKER not in line:
+            continue
+        fields = dict(BETA_STATS_FIELD_RE.findall(line))
+        required = {
+            "sent_packets",
+            "lost_packets",
+            "lost_bytes",
+            "congestion_events",
+            "rtt_ms",
+        }
+        if set(fields) != required:
+            raise ValueError(
+                f"{path}: incomplete beta recovery row: "
+                f"missing {sorted(required - set(fields))}"
+            )
+        sent_packets = int(fields["sent_packets"])
+        lost_packets = int(fields["lost_packets"])
+        rows.append(
+            {
+                "quic_sent_packets": sent_packets,
+                "quic_declared_lost_packets": lost_packets,
+                "quic_declared_lost_bytes": int(fields["lost_bytes"]),
+                "quic_congestion_events": int(fields["congestion_events"]),
+                "quic_rtt_ms": float(fields["rtt_ms"]),
+                "quic_declared_loss_ratio": (
+                    lost_packets / sent_packets if sent_packets else 0.0
+                ),
+            }
+        )
+    if not rows:
+        return []
+    expected_with_warmup = expected_runs + 1
+    if len(rows) != expected_with_warmup:
+        raise ValueError(
+            f"{path}: expected one warmup plus {expected_runs} recovery rows, "
+            f"found {len(rows)}"
+        )
+    return rows[1:]
+
+
 def percentile(values: list[float], probability: float) -> float:
     ordered = sorted(values)
     position = (len(ordered) - 1) * probability
@@ -315,6 +368,18 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
         proteus_attempts = attempt_ids(proteus_raw)
         hy2_attempts = attempt_ids(hy2_raw)
         tuic_attempts = attempt_ids(tuic_raw) if tuic_raw else set()
+        proteus_recovery = beta_recovery_rows(
+            cell_dir / "proteus-client-daemon.log", len(proteus_attempts)
+        )
+        if proteus_recovery:
+            if len(proteus_recovery) != len(proteus_rows):
+                failures.append(
+                    f"{cell_dir.name}: recovery-count mismatch "
+                    f"Proteus={len(proteus_rows)} recovery={len(proteus_recovery)}"
+                )
+                continue
+            for row, recovery in zip(proteus_rows, proteus_recovery, strict=True):
+                row.update(recovery)
         proteus_resource_path = cell_dir / "proteus-resources.jsonl"
         if not proteus_resource_path.exists():
             proteus_resource_path = cell_dir / "proteus.stderr"
@@ -491,6 +556,32 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                 "server_qdisc_packet_delta": qdisc_deltas["server_qdisc"]["packets"],
                 "server_qdisc_drop_delta": qdisc_deltas["server_qdisc"]["drops"],
         }
+        if proteus_recovery:
+            total_sent_packets = sum(
+                int(row["quic_sent_packets"]) for row in proteus_recovery
+            )
+            total_lost_packets = sum(
+                int(row["quic_declared_lost_packets"]) for row in proteus_recovery
+            )
+            summary.update(
+                {
+                    "proteus_quic_declared_loss_ratio_median": statistics.median(
+                        float(row["quic_declared_loss_ratio"])
+                        for row in proteus_recovery
+                    ),
+                    "proteus_quic_declared_loss_ratio_total": (
+                        total_lost_packets / total_sent_packets
+                        if total_sent_packets
+                        else 0.0
+                    ),
+                    "proteus_quic_sent_packets_total": total_sent_packets,
+                    "proteus_quic_declared_lost_packets_total": total_lost_packets,
+                    "proteus_quic_congestion_events_median": statistics.median(
+                        int(row["quic_congestion_events"])
+                        for row in proteus_recovery
+                    ),
+                }
+            )
         if tuic_raw:
             summary.update(
                 {
