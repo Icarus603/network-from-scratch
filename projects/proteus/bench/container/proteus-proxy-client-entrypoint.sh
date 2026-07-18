@@ -37,6 +37,19 @@ case "${INITIAL_MTU:-1350}" in
         exit 2
         ;;
 esac
+case "${BETA_FIRST_TIMEOUT_SECS:-60}" in
+    *[!0-9]*|"")
+        echo "BETA_FIRST_TIMEOUT_SECS must be a positive integer" >&2
+        exit 2
+        ;;
+    0)
+        echo "BETA_FIRST_TIMEOUT_SECS must be greater than zero" >&2
+        exit 2
+        ;;
+esac
+sed -i \
+    "s/^beta_first_timeout_secs:.*/beta_first_timeout_secs: ${BETA_FIRST_TIMEOUT_SECS:-60}/" \
+    "$config"
 sed -i \
     "s/^beta_brutal_target_mbps:.*/beta_brutal_target_mbps: ${BRUTAL_TARGET_MBPS:-1000}/" \
     "$config"

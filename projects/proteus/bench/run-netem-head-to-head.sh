@@ -18,6 +18,7 @@ PROTEUS_ACK_ELICITING_THRESHOLD="${PROTEUS_ACK_ELICITING_THRESHOLD:-10}"
 PROTEUS_INITIAL_MTU="${PROTEUS_INITIAL_MTU:-1350}"
 PROTEUS_MINIMUM_MTU="${PROTEUS_MINIMUM_MTU:-1350}"
 PROTEUS_MTU_UPPER_BOUND="${PROTEUS_MTU_UPPER_BOUND:-1452}"
+PROTEUS_BETA_FIRST_TIMEOUT_SECS="${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
         WARMUP_MIB=64
@@ -42,6 +43,7 @@ export PROTEUS_ACK_ELICITING_THRESHOLD
 export PROTEUS_INITIAL_MTU
 export PROTEUS_MINIMUM_MTU
 export PROTEUS_MTU_UPPER_BOUND
+export PROTEUS_BETA_FIRST_TIMEOUT_SECS
 
 wait_for_log_marker() {
     service="$1"
@@ -220,6 +222,7 @@ done
     printf '"proteus_initial_mtu":%s,' "$PROTEUS_INITIAL_MTU"
     printf '"proteus_minimum_mtu":%s,' "$PROTEUS_MINIMUM_MTU"
     printf '"proteus_mtu_upper_bound":%s,' "$PROTEUS_MTU_UPPER_BOUND"
+    printf '"proteus_beta_first_timeout_secs":%s,' "$PROTEUS_BETA_FIRST_TIMEOUT_SECS"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \
         "$WARMUP_MIB"
@@ -355,6 +358,11 @@ run_cell() {
                 > "${cell_dir}/hy2-client-daemon.log" 2>&1
             "${COMPOSE[@]}" logs --no-color hy2-server \
                 > "${cell_dir}/hy2-server-daemon.log" 2>&1
+            if grep -q 'falling back to α' \
+                "${cell_dir}/proteus-client-daemon.log"; then
+                echo "benchmark invalid: Proteus β fell back to α in ${cell}" >&2
+                return 1
+            fi
         fi
 }
 

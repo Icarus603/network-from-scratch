@@ -223,6 +223,7 @@ services:
       INITIAL_MTU: "${PROTEUS_INITIAL_MTU:-1350}"
       MINIMUM_MTU: "${PROTEUS_MINIMUM_MTU:-1350}"
       MTU_UPPER_BOUND: "${PROTEUS_MTU_UPPER_BOUND:-1452}"
+      BETA_FIRST_TIMEOUT_SECS: "${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
     volumes:
       - ./container:/bench:ro
       - proteus_proxy_state:/run/proteus-proxy
