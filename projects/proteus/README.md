@@ -1367,10 +1367,14 @@ at +24.45% (95% CI +22.88% to +25.62%) with no loss and +7.92%
 (+6.03% to +9.89%) at 5% IID loss. The 64 MiB / 5% cell remains
 statistically unresolved at −0.64% (−4.92% to +3.32%), so the
 promoted claim is limited to sustained bulk throughput.
+Under severe Gilbert-Elliott burst loss, the promoted 512 MiB
+30-run cell adds +6.09% (+3.90% to +8.59%) with 30/30 success and
+zero β-to-α fallback; the earlier 64 MiB severe-burst cell remains
+statistically unresolved and is retained as a short-flow counterexample.
 The method, commit and raw evidence live in
 [`notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md`](../../notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md).
-This proves sustained-bulk superiority in two local cells, not a
-universal cap claim. More loss regimes, burst loss, resource cost,
+This proves sustained-bulk superiority in three local impairment
+regimes, not a universal cap claim. More loss regimes, resource cost,
 TUIC-v5 and true cross-host reproduction remain required.
 
 ---
@@ -1856,10 +1860,12 @@ latest hardening pass:
   byte-verified SOCKS workload through the isolated Linux netem
   router. Warm pooled Proteus now leads two promoted 512 MiB,
   30-run cells: +24.45% at 0% loss and +7.92% at 5% IID loss, both
-  with positive 95% bootstrap intervals and 30/30 success. The
+  with positive 95% bootstrap intervals and 30/30 success. A third
+  promoted 512 MiB severe Gilbert-Elliott cell leads by +6.09%
+  (+3.90% to +8.59%) with 30/30 success and no α fallback. The
   64 MiB / 5% cell remains parity rather than a win. More loss
-  regimes, burst-loss, CPU/memory, TUIC-v5 and true cross-host
-  validation remain open.
+  regimes, CPU/memory, TUIC-v5 and true cross-host validation remain
+  open.
 
 **Several cryptographic, traffic-analysis, and production-stability
 components are now stronger in isolation than their VLESS+REALITY or

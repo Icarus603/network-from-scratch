@@ -202,6 +202,9 @@ classified as exploratory controller evidence. The corrected
 production SOCKS workload reuses daemon carriers. Its promoted
 512 MiB / 100 ms RTT / 30-run cells lead Hy2 by 24.45% at 0% loss
 and 7.92% at 5% IID loss, both with positive 95% bootstrap intervals.
+The promoted 30-run severe Gilbert-Elliott cell also leads by 6.09%
+(95% bootstrap interval +3.90% to +8.59%), with 30/30 successes and
+no β-to-α fallback.
 The 64 MiB / 5% cell remains statistically unresolved at −0.64%, so
 the supported claim is sustained-bulk superiority in these same-host
 cells, not universal performance dominance.

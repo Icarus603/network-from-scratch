@@ -2,8 +2,9 @@
 
 **Date**: 2026-07-17
 **Status**: same-host, isolated Linux kernel-netem, burst-loss, and
-client-resource evidence; a severe burst cell falsifies universal
-performance dominance, and physical cross-host evidence remains pending
+client-resource evidence; 512 MiB sustained bulk now wins promoted IID
+and severe-burst cells, while short-flow and physical cross-host
+dominance remain unproven
 
 ## Implementations
 
@@ -228,7 +229,29 @@ commit 固定為 `3434b8d`，Hy2 固定為 `f2ad1de5`。512 MiB 的兩格已
 Hy2。64 MiB 反例仍然必須並列：短流只證明統計 parity，不能宣稱
 Proteus 對所有 workload 都更快。
 
-這仍不是 universal cap。尚缺 Gilbert-Elliott 長流、15%/30% IID、
-多 RTT、TUIC-v5、server/client CPU 與 RSS、真正兩機 cross-host。
+這仍不是 universal cap。尚缺 15%/30% IID 長流、多 RTT、TUIC-v5、
+server/client CPU 與 RSS、真正兩機 cross-host。
 1452 minimum MTU 也只適用於已量測並完全控制的路徑；未知 Internet、
 mobile 或 VPN path 必須保留安全的 1200 fallback。
+
+## 2026-07-18 Gilbert-Elliott 長流晉升
+
+相同 production SOCKS5 路徑再加入兩種 Gilbert-Elliott burst cell。
+512 MiB、100 ms RTT、64 MiB warmup 與固定 1452 MTU 均保持不變。
+
+| burst cell | runs | Proteus | Hy2 | uplift (95% bootstrap) |
+|---|---:|---:|---:|---:|
+| P=1%, R=20%, 1-H=50%, 1-K=0% | 7 | 116.20 | 103.65 | **+12.11%** (**+9.65%, +15.86%**) |
+| P=2%, R=10%, 1-H=75%, 1-K=0.1% | 30 | 91.57 | 86.31 | **+6.09%** (**+3.90%, +8.59%**) |
+
+兩邊在 moderate cell 都是 7/7，在 severe cell 都是 30/30。第一次
+severe 30-run 嘗試於第 3 對揭露 benchmark client 的十秒
+`beta_first_timeout_secs` 會在長 bad-state 中觸發 β→α fallback，
+因此整輪拒收。`0954eeb` 把 benchmark timeout 顯式化為 60 秒、
+寫入 metadata，並把任何 α fallback 升格為 cell failure。重跑日誌
+的 fallback count 為零，故表內 severe 結果是純 β 對 Hy2。
+
+這組 512 MiB 結果推翻了「severe burst 必然落後」的猜想，卻沒有
+抹去前述 64 MiB severe-burst 反例：短流當時為 −1.7%，信賴區間
+跨零。現有證據支持 sustained-bulk burst superiority，仍不支持
+所有 payload、RTT 與路徑上的 universal dominance。
