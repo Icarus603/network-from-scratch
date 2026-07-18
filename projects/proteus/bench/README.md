@@ -151,6 +151,27 @@ instead of sweeping larger static thresholds.
 threshold and defaults to RFC 9002's `1.125` RTT. Any raised value is
 subject to the same reordering A/B and real-loss guard; it is not a
 production recommendation.
+
+Run the authenticated, direction-local recovery audit separately from
+the competitor matrix:
+
+```bash
+RECOVERY_PROBE_ROUNDS=7 \
+RECOVERY_TOLERANT_PACKET_THRESHOLD=64 \
+AUDIT_CELLS='reorder,20,25,50;iid,5,50' \
+./bench/run-recovery-audit.sh
+```
+
+This runner force-recreates the benchmark server from the selected
+image, executes every candidate through the authenticated matched-probe
+wire, and retains stdout, stderr, server logs, exit status, image ID,
+Git commit, and qdisc snapshots under
+`bench/results/recovery-audit-<UTC timestamp>/`. Its exit trap always
+clears both qdiscs. A failed cell remains in the evidence directory
+instead of disappearing behind `set -e`; it is therefore evidence of a
+failed hypothesis, not an omitted sample. `SKIP_BUILD=1` is allowed only
+when intentionally reusing an already-recorded local image.
+
 The default warmup is `min(PAYLOAD_MIB, 64)` MiB so the congestion
 controller reaches a meaningful state rather than merely completing
 the handshake. Override it with `WARMUP_MIB`, but do not use zero
