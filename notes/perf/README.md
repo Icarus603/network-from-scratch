@@ -206,9 +206,10 @@ The promoted 30-run severe Gilbert-Elliott cell also leads by 6.09%
 (95% bootstrap interval +3.90% to +8.59%), with 30/30 successes and
 no β-to-α fallback.
 Against the upstream TUIC v5 1.0.0 reference with matched 64 MiB
-flow-control windows, the first seven-run 512 MiB cells lead by
-102.92% at 0% loss and 42.63% at 5% IID loss. These TUIC results are
-directional until promoted to at least 30 observations.
+flow-control windows, the promoted 30-run 512 MiB / 5% IID cell leads
+by 48.86% (95% bootstrap interval +40.82% to +52.85%), with 30/30
+success. The 0% TUIC cell leads by 102.92% but remains a seven-run
+directional result.
 The 64 MiB / 5% cell remains statistically unresolved at −0.64%, so
 the supported claim is sustained-bulk superiority in these same-host
 cells, not universal performance dominance.

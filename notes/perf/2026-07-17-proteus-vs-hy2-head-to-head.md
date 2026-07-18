@@ -270,7 +270,11 @@ client/server，兩端顯式使用 64 MiB send/receive window，並保存
 | 0% loss, 100 ms RTT | 139.16 | 110.37 | 68.58 | **+102.92%** (**+82.69%, +114.52%**) |
 | 5% IID, 100 ms RTT | 104.94 | 96.12 | 73.57 | **+42.63%** (**+37.46%, +51.54%**) |
 
-三方在兩格都是 7/7，沒有 α fallback 或 run failure。這是通過配置
-反證後的方向性證據，尚未達 30 observations 晉升門檻；目前只能說
-Proteus 在這兩個 sustained-bulk cell 顯著領先 upstream TUIC
-reference，不能把 TUIC-v5 驗證標成完成。
+三方在初篩兩格都是 7/7，沒有 α fallback 或 run failure。5% IID
+cell 隨後從乾淨的 `519bd6d` 晉升到 30 observations：Proteus
+105.32、Hy2 96.92、official TUIC 70.75 MiB/s，三方皆 30/30。
+Proteus 對 TUIC uplift 為 **+48.86%**，bootstrap 95% interval
+**+40.82% 到 +52.85%**；對 Hy2 則為 **+8.66%**，interval
+**+4.94% 到 +11.08%**。這證明 5% IID sustained-bulk cell 同時
+超越兩個 version-pinned 對手。0% TUIC cell 仍只有七次，短流、多
+RTT 與 cross-host 仍不得外推。

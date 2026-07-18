@@ -1375,9 +1375,10 @@ The method, commit and raw evidence live in
 [`notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md`](../../notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md).
 This proves sustained-bulk superiority in three local impairment
 regimes, not a universal cap claim. More loss regimes, resource cost,
-30-run TUIC-v5 promotion and true cross-host reproduction remain
-required. A seven-run upstream TUIC v5 1.0.0 screen already leads by
-102.92% at 0% loss and 42.63% at 5% IID loss, but remains directional.
+0% TUIC-v5 promotion and true cross-host reproduction remain required.
+The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
+48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
+but remains a seven-run directional result.
 
 ---
 
@@ -1866,10 +1867,10 @@ latest hardening pass:
   promoted 512 MiB severe Gilbert-Elliott cell leads by +6.09%
   (+3.90% to +8.59%) with 30/30 success and no α fallback. The
   64 MiB / 5% cell remains parity rather than a win. More loss
-  regimes, CPU/memory, 30-run TUIC-v5 promotion and true cross-host
-  validation remain open. The first upstream TUIC v5 1.0.0 screen
-  leads by +102.92% at 0% loss and +42.63% at 5% IID loss, with seven
-  observations per cell; it is not promoted evidence yet.
+  regimes, CPU/memory, 0% TUIC-v5 promotion and true cross-host
+  validation remain open. The promoted upstream TUIC v5 1.0.0
+  5% IID cell leads by +48.86% (+40.82% to +52.85%) with 30/30
+  success; its 0% cell is still a seven-run screen.
 
 **Several cryptographic, traffic-analysis, and production-stability
 components are now stronger in isolation than their VLESS+REALITY or
