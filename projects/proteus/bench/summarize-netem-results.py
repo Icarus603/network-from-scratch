@@ -20,7 +20,10 @@ ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 BETA_CLIENT_STATS_MARKER = "β session QUIC delta (client path)"
 BETA_SERVER_STATS_MARKER = "β session QUIC delta (server path)"
 BETA_STATS_FIELD_RE = re.compile(
-    r"\b(sent_packets|lost_packets|lost_bytes|congestion_events|rtt_ms)"
+    r"\b(sent_packets|lost_packets|lost_bytes|packet_threshold_lost_packets|"
+    r"time_threshold_lost_packets|spurious_lost_packets|"
+    r"spurious_packet_threshold_lost_packets|"
+    r"spurious_time_threshold_lost_packets|congestion_events|rtt_ms)"
     r"=([0-9.]+)"
 )
 DECIMAL_MULTIPLIER = {
@@ -217,25 +220,61 @@ def beta_recovery_rows(
             "congestion_events",
             "rtt_ms",
         }
-        if set(fields) != required:
+        optional_spurious = {
+            "packet_threshold_lost_packets",
+            "time_threshold_lost_packets",
+            "spurious_lost_packets",
+            "spurious_packet_threshold_lost_packets",
+            "spurious_time_threshold_lost_packets",
+        }
+        present_spurious = set(fields) & optional_spurious
+        if not required.issubset(fields) or (
+            present_spurious and present_spurious != optional_spurious
+        ):
+            missing = required - set(fields)
+            if present_spurious:
+                missing |= optional_spurious - present_spurious
             raise ValueError(
                 f"{path}: incomplete beta recovery row: "
-                f"missing {sorted(required - set(fields))}"
+                f"missing {sorted(missing)}"
             )
         sent_packets = int(fields["sent_packets"])
         lost_packets = int(fields["lost_packets"])
-        rows.append(
-            {
-                "quic_sent_packets": sent_packets,
-                "quic_declared_lost_packets": lost_packets,
-                "quic_declared_lost_bytes": int(fields["lost_bytes"]),
-                "quic_congestion_events": int(fields["congestion_events"]),
-                "quic_rtt_ms": float(fields["rtt_ms"]),
-                "quic_declared_loss_ratio": (
-                    lost_packets / sent_packets if sent_packets else 0.0
-                ),
-            }
-        )
+        row = {
+            "quic_sent_packets": sent_packets,
+            "quic_declared_lost_packets": lost_packets,
+            "quic_declared_lost_bytes": int(fields["lost_bytes"]),
+            "quic_congestion_events": int(fields["congestion_events"]),
+            "quic_rtt_ms": float(fields["rtt_ms"]),
+            "quic_declared_loss_ratio": (
+                lost_packets / sent_packets if sent_packets else 0.0
+            ),
+        }
+        if present_spurious:
+            spurious_lost_packets = int(fields["spurious_lost_packets"])
+            row.update(
+                {
+                    "quic_packet_threshold_lost_packets": int(
+                        fields["packet_threshold_lost_packets"]
+                    ),
+                    "quic_time_threshold_lost_packets": int(
+                        fields["time_threshold_lost_packets"]
+                    ),
+                    "quic_spurious_lost_packets": spurious_lost_packets,
+                    "quic_spurious_packet_threshold_lost_packets": int(
+                        fields["spurious_packet_threshold_lost_packets"]
+                    ),
+                    "quic_spurious_time_threshold_lost_packets": int(
+                        fields["spurious_time_threshold_lost_packets"]
+                    ),
+                    "quic_spurious_loss_ratio": (
+                        spurious_lost_packets / lost_packets
+                        if lost_packets
+                        else 0.0
+                    ),
+                }
+            )
+        rows.append(row)
     if not rows:
         return []
     expected_with_warmup = expected_runs + 1
@@ -605,6 +644,45 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                     ),
                 }
             )
+            if "quic_spurious_lost_packets" in proteus_recovery[0]:
+                client_spurious_packets = sum(
+                    int(row["quic_spurious_lost_packets"])
+                    for row in proteus_recovery
+                )
+                summary.update(
+                    {
+                        "proteus_quic_packet_threshold_lost_packets_total": sum(
+                            int(row["quic_packet_threshold_lost_packets"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_time_threshold_lost_packets_total": sum(
+                            int(row["quic_time_threshold_lost_packets"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_spurious_lost_packets_total": (
+                            client_spurious_packets
+                        ),
+                        "proteus_quic_spurious_packet_threshold_lost_packets_total": sum(
+                            int(
+                                row[
+                                    "quic_spurious_packet_threshold_lost_packets"
+                                ]
+                            )
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_spurious_time_threshold_lost_packets_total": sum(
+                            int(
+                                row["quic_spurious_time_threshold_lost_packets"]
+                            )
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_spurious_loss_ratio_total": (
+                            client_spurious_packets / client_lost_packets
+                            if client_lost_packets
+                            else 0.0
+                        ),
+                    }
+                )
         if server_recovery:
             server_sent_packets = sum(
                 int(row["quic_sent_packets"]) for row in server_recovery
@@ -637,6 +715,45 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                     ),
                 }
             )
+            if "quic_spurious_lost_packets" in server_recovery[0]:
+                server_spurious_packets = sum(
+                    int(row["quic_spurious_lost_packets"])
+                    for row in server_recovery
+                )
+                summary.update(
+                    {
+                        "proteus_server_quic_packet_threshold_lost_packets_total": sum(
+                            int(row["quic_packet_threshold_lost_packets"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_time_threshold_lost_packets_total": sum(
+                            int(row["quic_time_threshold_lost_packets"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_spurious_lost_packets_total": (
+                            server_spurious_packets
+                        ),
+                        "proteus_server_quic_spurious_packet_threshold_lost_packets_total": sum(
+                            int(
+                                row[
+                                    "quic_spurious_packet_threshold_lost_packets"
+                                ]
+                            )
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_spurious_time_threshold_lost_packets_total": sum(
+                            int(
+                                row["quic_spurious_time_threshold_lost_packets"]
+                            )
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_spurious_loss_ratio_total": (
+                            server_spurious_packets / server_lost_packets
+                            if server_lost_packets
+                            else 0.0
+                        ),
+                    }
+                )
         if tuic_raw:
             summary.update(
                 {

@@ -72,6 +72,21 @@ fn log_beta_session_stats(
     let sent_packets = after.sent_packets.saturating_sub(before.sent_packets);
     let lost_packets = after.lost_packets.saturating_sub(before.lost_packets);
     let lost_bytes = after.lost_bytes.saturating_sub(before.lost_bytes);
+    let packet_threshold_lost_packets = after
+        .packet_threshold_lost_packets
+        .saturating_sub(before.packet_threshold_lost_packets);
+    let time_threshold_lost_packets = after
+        .time_threshold_lost_packets
+        .saturating_sub(before.time_threshold_lost_packets);
+    let spurious_lost_packets = after
+        .spurious_lost_packets
+        .saturating_sub(before.spurious_lost_packets);
+    let spurious_packet_threshold_lost_packets = after
+        .spurious_packet_threshold_lost_packets
+        .saturating_sub(before.spurious_packet_threshold_lost_packets);
+    let spurious_time_threshold_lost_packets = after
+        .spurious_time_threshold_lost_packets
+        .saturating_sub(before.spurious_time_threshold_lost_packets);
     let congestion_events = after
         .congestion_events
         .saturating_sub(before.congestion_events);
@@ -89,6 +104,11 @@ fn log_beta_session_stats(
         sent_packets,
         lost_packets,
         lost_bytes,
+        packet_threshold_lost_packets,
+        time_threshold_lost_packets,
+        spurious_lost_packets,
+        spurious_packet_threshold_lost_packets,
+        spurious_time_threshold_lost_packets,
         congestion_events,
         stream_data_blocked,
         data_blocked,

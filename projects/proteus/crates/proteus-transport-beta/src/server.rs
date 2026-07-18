@@ -90,6 +90,23 @@ fn log_beta_session_stats(
         sent_packets = after.path.sent_packets.saturating_sub(before.path.sent_packets),
         lost_packets = after.path.lost_packets.saturating_sub(before.path.lost_packets),
         lost_bytes = after.path.lost_bytes.saturating_sub(before.path.lost_bytes),
+        packet_threshold_lost_packets = after.path.packet_threshold_lost_packets.saturating_sub(
+            before.path.packet_threshold_lost_packets
+        ),
+        time_threshold_lost_packets = after.path.time_threshold_lost_packets.saturating_sub(
+            before.path.time_threshold_lost_packets
+        ),
+        spurious_lost_packets = after.path.spurious_lost_packets.saturating_sub(
+            before.path.spurious_lost_packets
+        ),
+        spurious_packet_threshold_lost_packets = after
+            .path
+            .spurious_packet_threshold_lost_packets
+            .saturating_sub(before.path.spurious_packet_threshold_lost_packets),
+        spurious_time_threshold_lost_packets = after
+            .path
+            .spurious_time_threshold_lost_packets
+            .saturating_sub(before.path.spurious_time_threshold_lost_packets),
         congestion_events = after.path.congestion_events.saturating_sub(
             before.path.congestion_events
         ),

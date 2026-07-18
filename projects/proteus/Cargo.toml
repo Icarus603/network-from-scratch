@@ -67,6 +67,14 @@ tokio-boring = "5.0.0"
 # MIT-licensed, the de-facto choice in the rustls/quinn ecosystem.
 x509-parser = "0.18"
 
+# Quinn does not expose whether a packet declared lost was later
+# acknowledged, so an adaptive recovery controller cannot distinguish
+# genuine loss from severe reordering. This focused 0.11.16 fork adds
+# bounded packet/time-threshold spurious-loss counters; the exact commit
+# is pinned so production builds remain reproducible.
+[patch.crates-io]
+quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "318a05f7e286f9f2b577c77c1b3ce44a414eabc3" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
