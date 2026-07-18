@@ -220,6 +220,7 @@ pub async fn run_cross_host_bench(
     perf: PerfProfile,
     connect_timeout: Duration,
     total_timeout: Duration,
+    recovery_probe_rounds: u32,
 ) -> Result<RunReport, BenchError> {
     // Sanity-check the pq_fingerprint matches the supplied mlkem_pk.
     // Without this a typo / mismatched copy-paste would only surface
@@ -248,7 +249,7 @@ pub async fn run_cross_host_bench(
         profile_hint: ProfileHint::Beta,
     };
 
-    let mut client = tokio::time::timeout(
+    let client = tokio::time::timeout(
         connect_timeout,
         beta_client::connect_with_timeout_and_perf(
             server_name,
@@ -263,9 +264,10 @@ pub async fn run_cross_host_bench(
     .map_err(|_| BenchError::Connect(format!("handshake timed out after {connect_timeout:?}")))?
     .map_err(|e| BenchError::Connect(e.to_string()))?;
 
+    let (mut session, carrier) = client.into_session_and_carrier();
     let elapsed = blast_drain_once(
-        &mut client.session.sender,
-        &mut client.session.receiver,
+        &mut session.sender,
+        &mut session.receiver,
         payload_bytes,
         chunk_bytes,
         total_timeout,
@@ -277,10 +279,40 @@ pub async fn run_cross_host_bench(
     let gbps = bytes_per_sec * 8.0 / 1_000_000_000.0;
 
     // Best-effort teardown.
-    let proteus_transport_alpha::session::AlphaSession { sender, .. } = client.session;
+    let proteus_transport_alpha::session::AlphaSession { sender, .. } = session;
     let _ = sender.shutdown().await;
-    client.connection.close(0u32.into(), b"bench-done");
-    drop(client.endpoint);
+
+    if recovery_probe_rounds > 0 {
+        for direction in [
+            proteus_transport_beta::recovery::RecoveryDirection::ClientToServer,
+            proteus_transport_beta::recovery::RecoveryDirection::ServerToClient,
+        ] {
+            let mut selector = proteus_transport_beta::recovery::RecoverySelector::new(
+                direction,
+                proteus_transport_beta::recovery::RecoveryPolicy::default(),
+            )
+            .map_err(|error| BenchError::Connect(format!("recovery policy: {error:?}")))?;
+            for round in 1..=u64::from(recovery_probe_rounds) {
+                let decision = carrier
+                    .run_matched_recovery_round(&mut selector, round)
+                    .await
+                    .map_err(|error| {
+                        BenchError::Connect(format!(
+                            "matched recovery probe round {round}: {error}"
+                        ))
+                    })?;
+                tracing::info!(
+                    round,
+                    ?direction,
+                    ?decision,
+                    selected_profile = ?decision.profile(),
+                    "β matched recovery decision"
+                );
+            }
+        }
+    }
+
+    carrier.close();
 
     Ok(RunReport {
         profile: "beta",
@@ -834,6 +866,7 @@ mod tests {
                 PerfProfile::default(),
                 Duration::from_secs(1),
                 Duration::from_secs(1),
+                0,
             )
             .await
             .expect_err("must fail on fingerprint mismatch")
@@ -875,6 +908,7 @@ mod tests {
             PerfProfile::default(),
             Duration::from_secs(30),
             Duration::from_secs(30),
+            0,
         )
         .await
         .expect("cross-host bench should succeed on loopback");
@@ -915,6 +949,7 @@ mod tests {
             perf,
             Duration::from_secs(30),
             Duration::from_secs(30),
+            0,
         )
         .await
         .expect("Brutal cross-host bench should succeed on loopback");

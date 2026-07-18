@@ -140,7 +140,7 @@ async fn one_carrier_hosts_warm_and_concurrent_sessions() {
         )
         .unwrap();
         let mut decision = None;
-        for round in 1..=3 {
+        for round in 1..=7 {
             decision = Some(
                 timeout(
                     STEP,

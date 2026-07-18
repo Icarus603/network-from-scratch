@@ -306,13 +306,26 @@ impl BetaClientConnection {
                 .run_authenticated_probe(direction, profile, crate::probe::PROBE_PAYLOAD_BYTES)
                 .await;
             let observation = match result {
-                Ok(probe) => crate::recovery::RecoveryObservation {
-                    round,
-                    profile,
-                    payload_bytes: probe.payload_bytes,
-                    completion_time: Some(probe.completion_time),
-                    counters: probe.counters,
-                },
+                Ok(probe) => {
+                    tracing::info!(
+                        round,
+                        ?direction,
+                        ?profile,
+                        payload_bytes = probe.payload_bytes,
+                        completion_ms = probe.completion_time.as_secs_f64() * 1000.0,
+                        sent_packets = probe.counters.sent_packets,
+                        declared_lost_packets = probe.counters.declared_lost_packets,
+                        spurious_lost_packets = probe.counters.spurious_lost_packets,
+                        "β matched recovery probe observation"
+                    );
+                    crate::recovery::RecoveryObservation {
+                        round,
+                        profile,
+                        payload_bytes: probe.payload_bytes,
+                        completion_time: Some(probe.completion_time),
+                        counters: probe.counters,
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(
                         ?direction,

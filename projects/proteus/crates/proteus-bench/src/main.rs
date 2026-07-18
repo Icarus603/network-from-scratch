@@ -475,6 +475,10 @@ struct BetaClientArgs {
     /// connection (cold-start cost included).
     #[arg(long, default_value = "1")]
     runs: u32,
+    /// Run this many authenticated A/B recovery-probe rounds in each
+    /// direction after the timed payload. Zero disables the audit.
+    #[arg(long, default_value = "0")]
+    recovery_probe_rounds: u32,
 }
 
 /// Iter-126: shared validator for `--*-secs` / `--runs` /
@@ -754,6 +758,12 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
         a.brutal_target_mbps,
         "Brutal needs a positive pacing target",
     )?;
+    if a.recovery_probe_rounds > 32 {
+        return Err(format!(
+            "--recovery-probe-rounds ({}) exceeds the bounded audit maximum 32",
+            a.recovery_probe_rounds
+        ));
+    }
     Ok(())
 }
 
@@ -1090,6 +1100,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
             perf,
             connect_timeout,
             total_timeout,
+            args.recovery_probe_rounds,
         )
         .await?;
         print!("{}", report.to_json());

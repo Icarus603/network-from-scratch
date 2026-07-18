@@ -28,6 +28,7 @@ set -- proteus-bench beta-client \
     --stream-window-mib "${STREAM_WINDOW_MIB:-64}" \
     --connection-window-mib "${CONNECTION_WINDOW_MIB:-256}" \
     --runs "${RUNS_PER_CELL:-3}" \
+    --recovery-probe-rounds "${RECOVERY_PROBE_ROUNDS:-0}" \
     --congestion "${CONGESTION:-brutal}" \
     --brutal-target-mbps "${BRUTAL_TARGET_MBPS:-1000}" \
     --connect-timeout-secs 180 \

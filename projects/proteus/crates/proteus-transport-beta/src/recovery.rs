@@ -87,8 +87,8 @@ impl Default for RecoveryPolicy {
                 packet_threshold: 10,
                 time_threshold: 1.125,
             },
-            minimum_matched_rounds: 3,
-            maximum_retained_rounds: 9,
+            minimum_matched_rounds: 7,
+            maximum_retained_rounds: 21,
             minimum_probe_bytes: 4 * 1024 * 1024,
             minimum_completion_gain: 0.05,
             minimum_loss_evidence_packets: 32,
@@ -439,7 +439,7 @@ mod tests {
         let mut selector =
             RecoverySelector::new(RecoveryDirection::ClientToServer, RecoveryPolicy::default())
                 .unwrap();
-        for round in 1..=2 {
+        for round in 1..=6 {
             assert!(matches!(
                 feed_round(
                     &mut selector,
@@ -454,7 +454,7 @@ mod tests {
         assert!(matches!(
             feed_round(
                 &mut selector,
-                3,
+                7,
                 Some(100),
                 Some(75),
                 (10_000, 5_000, 100)
@@ -475,9 +475,9 @@ mod tests {
         let mut selector =
             RecoverySelector::new(RecoveryDirection::ServerToClient, RecoveryPolicy::default())
                 .unwrap();
-        for round in 1..=3 {
+        for round in 1..=7 {
             let decision = feed_round(&mut selector, round, Some(100), Some(70), (10_000, 500, 0));
-            if round == 3 {
+            if round == 7 {
                 assert!(matches!(
                     decision,
                     RecoveryDecision::StandardRealLossVeto {
@@ -494,7 +494,7 @@ mod tests {
         let mut selector =
             RecoverySelector::new(RecoveryDirection::ClientToServer, RecoveryPolicy::default())
                 .unwrap();
-        for round in 1..=3 {
+        for round in 1..=7 {
             let decision = feed_round(
                 &mut selector,
                 round,
@@ -502,7 +502,7 @@ mod tests {
                 Some(105),
                 (10_000, 5_000, 100),
             );
-            if round == 3 {
+            if round == 7 {
                 assert!(matches!(
                     decision,
                     RecoveryDecision::StandardNoCompletionGain { completion_gain }
@@ -517,9 +517,9 @@ mod tests {
         let mut selector =
             RecoverySelector::new(RecoveryDirection::ClientToServer, RecoveryPolicy::default())
                 .unwrap();
-        for round in 1..=3 {
+        for round in 1..=7 {
             let decision = feed_round(&mut selector, round, Some(100), None, (10_000, 5_000, 100));
-            if round == 3 {
+            if round == 7 {
                 assert_eq!(decision, RecoveryDecision::StandardTolerantProbeFailed);
             }
         }

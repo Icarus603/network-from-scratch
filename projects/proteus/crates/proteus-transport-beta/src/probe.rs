@@ -139,7 +139,6 @@ pub(crate) async fn handle_control_stream(
     let (direction, profile, payload_bytes) = decode_header(tail)
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid probe"))?;
     let thresholds = crate::recovery::RecoveryPolicy::default().thresholds(profile);
-    let before = connection.stats();
     let chunk = [0x5au8; 64 * 1024];
     let mut received = vec![0u8; chunk.len()];
     let mut remaining = payload_bytes as usize;
@@ -176,6 +175,13 @@ pub(crate) async fn handle_control_stream(
                 thresholds.packet_threshold,
                 thresholds.time_threshold,
             );
+            tokio::time::sleep(
+                connection
+                    .rtt()
+                    .clamp(Duration::from_millis(1), Duration::from_millis(500)),
+            )
+            .await;
+            let before = connection.stats();
             while remaining > 0 {
                 let take = remaining.min(chunk.len());
                 send.write_all(&chunk[..take]).await?;
@@ -225,6 +231,12 @@ pub(crate) async fn run_client_probe(
     if matches!(direction, RecoveryDirection::ClientToServer) {
         connection
             .set_loss_detection_thresholds(thresholds.packet_threshold, thresholds.time_threshold);
+        tokio::time::sleep(
+            connection
+                .rtt()
+                .clamp(Duration::from_millis(1), Duration::from_millis(500)),
+        )
+        .await;
     }
     let before = connection.stats();
     let started = Instant::now();
@@ -271,6 +283,15 @@ pub(crate) async fn run_client_probe(
     let remote_counters = decode_response(response).ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid probe response")
     })?;
+    if matches!(direction, RecoveryDirection::ClientToServer) {
+        completion_time = Some(started.elapsed());
+        tokio::time::sleep(
+            connection
+                .rtt()
+                .clamp(Duration::from_millis(1), Duration::from_millis(500)),
+        )
+        .await;
+    }
     let local_counters = delta(&before, &connection.stats());
     Ok(ProbeResult {
         direction,
