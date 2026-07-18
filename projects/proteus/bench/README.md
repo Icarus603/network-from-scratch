@@ -66,6 +66,23 @@ RUNS_PER_CELL=7 \
 ./bench/run-netem-head-to-head.sh
 ```
 
+Add bidirectional packet-reordering cells with the same router and
+workload. Each entry is
+`REORDER_PCT,CORRELATION_PCT,ONE_WAY_DELAY_MS`:
+
+```bash
+LOSS_PCT_LIST='' \
+REORDER_CELLS='5,25,50;25,50,50' \
+./bench/run-netem-head-to-head.sh
+```
+
+The runner records the requested reorder probability and correlation in
+the cell config and summary. The summarizer also validates both egress
+objects in `qdisc-applied.json`; a benchmark claim requires the kernel
+qdisc to show the intended reorder, correlation, and delay options, not
+merely an environment variable. Reordering does not imply packet loss,
+so zero qdisc drops remain valid for these cells.
+
 Raw outputs are placed under `bench/results/<UTC timestamp>/`. Every
 cell contains the two protocol outputs plus `tc -s -j qdisc` snapshots
 before and after the runs. `summarize-netem-results.py` rejects missing

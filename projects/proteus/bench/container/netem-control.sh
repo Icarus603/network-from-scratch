@@ -58,8 +58,21 @@ case "$command" in
         done
         show_stats
         ;;
+    reorder)
+        reorder_pct="${2:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
+        correlation_pct="${3:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
+        delay_ms="${4:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
+        clear_qdiscs
+        for iface in "$CLIENT_IFACE" "$SERVER_IFACE"; do
+            tc qdisc add dev "$iface" root netem \
+                limit 100000 \
+                delay "${delay_ms}ms" \
+                reorder "${reorder_pct}%" "${correlation_pct}%"
+        done
+        show_stats
+        ;;
     *)
-        echo "usage: netem-control.sh {clear|stats|iid|gemodel} ..." >&2
+        echo "usage: netem-control.sh {clear|stats|iid|gemodel|reorder} ..." >&2
         exit 2
         ;;
 esac

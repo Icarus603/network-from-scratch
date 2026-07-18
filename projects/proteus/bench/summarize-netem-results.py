@@ -289,6 +289,13 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                 "one_minus_h_pct": float(str(arguments[3]).rstrip("%")),
                 "one_minus_k_pct": float(str(arguments[4]).rstrip("%")),
             }
+        elif model == "reorder" and len(arguments) == 4:
+            loss_pct = None
+            one_way_delay_ms = float(arguments[3])
+            model_parameters = {
+                "reorder_pct": float(str(arguments[1]).rstrip("%")),
+                "correlation_pct": float(str(arguments[2]).rstrip("%")),
+            }
         else:
             failures.append(f"{cell_dir.name}: invalid cell config {config}")
             continue
@@ -388,6 +395,7 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
 
         before = json.loads((cell_dir / "qdisc-before.json").read_text())
         after = json.loads((cell_dir / "qdisc-after.json").read_text())
+        applied = json.loads((cell_dir / "qdisc-applied.json").read_text())
         qdisc_deltas: dict[str, dict[str, int]] = {}
         for side in ("client_qdisc", "server_qdisc"):
             before_packets, before_drops = qdisc_totals(before.get(side, []))
@@ -403,9 +411,11 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                     f"{cell_dir.name}: {side} saw no packets; path is invalid"
                 )
             expects_drops = (
-                loss_pct > 0
-                if loss_pct is not None
-                else any(float(value) > 0 for value in model_parameters.values())
+                (model == "iid" and loss_pct is not None and loss_pct > 0)
+                or (
+                    model == "gemodel"
+                    and any(float(value) > 0 for value in model_parameters.values())
+                )
             )
             if expects_drops and drop_delta <= 0:
                 failures.append(
@@ -416,6 +426,47 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                     f"{cell_dir.name}: {side} unexpectedly dropped {drop_delta} "
                     "packets under 0% configured loss; netem queue overflow is likely"
                 )
+            if model == "reorder":
+                expected_reorder = model_parameters["reorder_pct"] / 100
+                expected_correlation = model_parameters["correlation_pct"] / 100
+                expected_delay = one_way_delay_ms / 1000
+                qdiscs = applied.get(side, [])
+                matches = any(
+                    qdisc.get("kind") == "netem"
+                    and abs(
+                        float(
+                            qdisc.get("options", {})
+                            .get("reorder", {})
+                            .get("reorder", -1)
+                        )
+                        - expected_reorder
+                    )
+                    < 1e-9
+                    and abs(
+                        float(
+                            qdisc.get("options", {})
+                            .get("reorder", {})
+                            .get("correlation", -1)
+                        )
+                        - expected_correlation
+                    )
+                    < 1e-9
+                    and abs(
+                        float(
+                            qdisc.get("options", {})
+                            .get("delay", {})
+                            .get("delay", -1)
+                        )
+                        - expected_delay
+                    )
+                    < 1e-9
+                    for qdisc in qdiscs
+                )
+                if not matches:
+                    failures.append(
+                        f"{cell_dir.name}: {side} did not apply the requested "
+                        "reorder/correlation/delay qdisc"
+                    )
 
         summary: dict[str, Any] = {
                 "kind": "cell_summary",

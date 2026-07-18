@@ -8,6 +8,8 @@ DELAY_MS_LIST="${DELAY_MS_LIST-50}"
 # Semicolon-separated cells: P,R,1-H,1-K,ONE_WAY_DELAY_MS.
 # Percentages follow tc-netem's Gilbert-Elliott model syntax.
 GEMODEL_CELLS="${GEMODEL_CELLS:-}"
+# Semicolon-separated cells: REORDER_PCT,CORRELATION_PCT,ONE_WAY_DELAY_MS.
+REORDER_CELLS="${REORDER_CELLS:-}"
 PAYLOAD_MIB="${PAYLOAD_MIB:-64}"
 RUNS_PER_CELL="${RUNS_PER_CELL:-3}"
 INCLUDE_TUIC="${INCLUDE_TUIC:-0}"
@@ -458,6 +460,26 @@ if [ -n "$GEMODEL_CELLS" ]; then
                 | tr '.%' '__'
         )"
         run_cell "$cell" gemodel "$1" "$2" "$3" "$4" "$5"
+    done
+    IFS="$old_ifs"
+fi
+
+if [ -n "$REORDER_CELLS" ]; then
+    old_ifs="$IFS"
+    IFS=';'
+    for specification in $REORDER_CELLS; do
+        IFS=','
+        set -- $specification
+        IFS="$old_ifs"
+        if [ "$#" -ne 3 ]; then
+            echo "invalid REORDER_CELLS entry: ${specification}" >&2
+            exit 2
+        fi
+        cell="$(
+            printf 'reorder-p%s-c%s-delay%s' "$1" "$2" "$3" \
+                | tr '.%' '__'
+        )"
+        run_cell "$cell" reorder "$1" "$2" "$3"
     done
     IFS="$old_ifs"
 fi
