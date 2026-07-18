@@ -26,6 +26,65 @@ import (
 	utls "github.com/refraction-networking/utls"
 )
 
+// TestRustECHInteropClient is the Go half of the Rust-owned
+// cross-language ECH gate. It stays skipped during ordinary Go-only
+// tests; `cargo test -p proteus-transport-alpha --test
+// utls_ech_interop` supplies ephemeral paths and a loopback endpoint.
+func TestRustECHInteropClient(t *testing.T) {
+	target := os.Getenv("PROTEUS_UTLS_ECH_TARGET")
+	if target == "" {
+		t.Skip("Rust ECH interop harness is not running")
+	}
+	serverName := os.Getenv("PROTEUS_UTLS_ECH_SERVER_NAME")
+	caPath := os.Getenv("PROTEUS_UTLS_ECH_CA")
+	configPath := os.Getenv("PROTEUS_UTLS_ECH_CONFIG_LIST")
+	pskPath := os.Getenv("PROTEUS_UTLS_ECH_KNOCK_PSK")
+	exporterPath := os.Getenv("PROTEUS_UTLS_ECH_EXPORTER_OUT")
+	expect := os.Getenv("PROTEUS_UTLS_ECH_EXPECT")
+
+	psk, err := loadKnockPSK(pskPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, err := loadRootPool(caPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configList, err := loadECHConfigList(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &bridgeConfig{
+		knockPSK:         psk,
+		roots:            roots,
+		echConfigList:    configList,
+		dialTimeout:      5 * time.Second,
+		handshakeTimeout: 5 * time.Second,
+	}
+	conn, exporter, err := dialUTLS(
+		context.Background(),
+		dialRequest{target: target, serverName: serverName},
+		cfg,
+	)
+	if expect == "failure" {
+		if err == nil {
+			_ = conn.Close()
+			t.Fatal("stale ECH key unexpectedly entered the data plane")
+		}
+		return
+	}
+	if expect != "success" {
+		t.Fatalf("unknown PROTEUS_UTLS_ECH_EXPECT %q", expect)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if err := os.WriteFile(exporterPath, []byte(base64.StdEncoding.EncodeToString(exporter)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMakeKnockSessionIDMatchesRustWireContract(t *testing.T) {
 	var psk knockPSK
 	for i := range psk {

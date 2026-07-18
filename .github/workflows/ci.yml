@@ -53,10 +53,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # The transport-alpha suite contains a real Go-uTLS →
+      # Rust/BoringSSL ECH overlap-rotation gate. Pin Go explicitly
+      # so the cross-language proof does not depend on runner images.
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: projects/proteus/bridges/utls/go.sum
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: projects/proteus
       - run: cargo test --workspace --no-fail-fast
+
+  utls:
+    name: uTLS bridge (race + vet)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.26.5"
+          cache-dependency-path: projects/proteus/bridges/utls/go.sum
+      - run: go test -race ./...
+        working-directory: projects/proteus/bridges/utls
+      - run: go vet ./...
+        working-directory: projects/proteus/bridges/utls
 
   release-build:
     name: release build (Linux)

@@ -1435,6 +1435,7 @@ version = "0.1.0"
 name = "proteus-transport-alpha"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "criterion",
  "ed25519-dalek",
  "hmac",

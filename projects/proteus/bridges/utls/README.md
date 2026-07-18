@@ -70,10 +70,11 @@ and grants no permissions beyond mode `0600`. Browser-profile mode
 also requires `knock_psk_file`; it cannot silently fall back to an
 unguarded ClientHello.
 
-The checked cross-language gate runs
-`proteus-client connect-test` through this bridge into the Rust server.
-It covers the version-locked Chrome ClientHello, Path A knock,
-TLS-exporter transfer, and the existing exporter-bound
-ML-KEM/X25519/Ed25519 inner handshake. Docker Compose exposes the
-bridge through the opt-in `utls` profile, while the systemd unit must
-be enabled before `proteus-client.service`.
+The checked cross-language gates run `proteus-client connect-test` and
+the real-ECH overlap test through this bridge into the Rust server.
+Together they cover the version-locked Chrome ClientHello, Path A
+knock, BoringSSL ECH acceptance, TLS-exporter equality, the
+exporter-bound ML-KEM/X25519/Ed25519 inner handshake, encrypted record
+round trip, and fail-closed old-key retirement. Docker Compose exposes
+the bridge through the opt-in `utls` profile, while the systemd unit
+must be enabled before `proteus-client.service`.

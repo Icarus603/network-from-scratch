@@ -81,3 +81,23 @@ repeats that check before deployment.
 The normative protocol sources are
 [RFC 9849](https://www.rfc-editor.org/rfc/rfc9849.html) and
 [RFC 9848](https://www.rfc-editor.org/rfc/rfc9848.html).
+
+## Cross-language promotion gate
+
+The checked gate drives the production-shaped Go uTLS Chrome profile
+through the Rust Path-A sniffer and BoringSSL terminator, then completes
+the exporter-bound ML-KEM/X25519/Ed25519 inner handshake and an encrypted
+record round trip:
+
+```bash
+cargo test -p proteus-transport-alpha \
+  --test utls_ech_interop -- --nocapture
+```
+
+The same test exercises the rotation state machine. The old key must
+work while installed as a non-retry overlap key; the newly published
+retry key must work; after old-key retirement, the old ECHConfig must
+fail without exporting channel material or entering the data plane.
+For every accepted connection it also asserts that the exact
+ClientHelloOuter contains the public name and no cleartext copy of the
+inner SNI.

@@ -1863,11 +1863,13 @@ latest hardening pass:
   now wired behind the Path-A knock/replay gate. Correct ECH must be
   accepted, TLS must be 1.3, and its exporter is committed to the
   existing hybrid Finished transcript; plain/GREASE/stale-key
-  handshakes cannot enter the data plane. A deterministic wire recorder
-  proves that the public name remains visible while the real inner SNI
-  is absent, and both peers derive the same exporter. The remaining
-  promotion gates are live DNS HTTPS-record publication and an
-  old→new overlap rotation drill against the deployed uTLS client.
+  handshakes cannot enter the data plane. The checked Go-uTLS → Path-A
+  → BoringSSL gate proves that the public name remains visible while
+  the real inner SNI is absent, both peers derive the same exporter,
+  the hybrid inner handshake and encrypted record round trip complete,
+  and old→new overlap retirement fails closed. The remaining promotion
+  gate is live DNS HTTPS-record publication and the same rotation drill
+  across deployed hosts rather than loopback.
 - ✅ **`0xfe0d` ClientHello injection** (spec §4.2): α now uses
   rustls ECH GREASE with a fresh P-256 HPKE placeholder key. This
   removes one stable rustls-vs-browser extension classifier; it

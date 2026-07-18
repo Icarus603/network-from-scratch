@@ -187,6 +187,17 @@ impl PrependedStream {
         &mut self.inner
     }
 
+    /// Return the ClientHello bytes consumed by the Path-A sniffer.
+    ///
+    /// This is intentionally read-only. Production callers normally
+    /// ignore it; cross-implementation gates use the exact captured
+    /// prefix to prove that ECH kept the inner name off the wire after
+    /// the knock was injected.
+    #[must_use]
+    pub fn sniffed_prefix(&self) -> &[u8] {
+        &self.prefix
+    }
+
     /// Consume self, returning the underlying socket. Drops
     /// any unread prefix bytes — callers should `read_to_end`
     /// first if the prefix mattered.

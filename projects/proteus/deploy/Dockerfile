@@ -30,8 +30,8 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # ---- uTLS bridge builder ----
 # Kept separate from the Rust builder so the browser-profile adapter
 # can be rebuilt and audited without copying Go or uTLS sources into
-# the Rust image. The multi-arch digest resolves to Go 1.24.13.
-FROM golang:1.24-bookworm@sha256:1a6d4452c65dea36aac2e2d606b01b4a029ec90cc1ae53890540ce6173ea77ac AS utls-builder
+# the Rust image. The multi-arch digest resolves to Go 1.26.5.
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS utls-builder
 WORKDIR /src/bridges/utls
 COPY bridges/utls/go.mod bridges/utls/go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod go mod download
