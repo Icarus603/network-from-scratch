@@ -1,0 +1,37 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "socks",
+      "tag": "socks-in",
+      "listen": "0.0.0.0",
+      "listen_port": 1180
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "tuic",
+      "tag": "tuic-out",
+      "server": "10.77.2.13",
+      "server_port": 11443,
+      "uuid": "00000000-0000-0000-0000-000000000000",
+      "password": "benchmark-only-password",
+      "congestion_control": "bbr",
+      "udp_relay_mode": "native",
+      "zero_rtt_handshake": false,
+      "heartbeat": "10s",
+      "network": "tcp",
+      "tls": {
+        "enabled": true,
+        "server_name": "tuic.example.com",
+        "certificate_path": "/run/singbox-tuic/server.crt"
+      }
+    }
+  ],
+  "route": {
+    "final": "tuic-out"
+  }
+}

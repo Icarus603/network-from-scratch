@@ -293,6 +293,10 @@ pub async fn run_cross_host_bench(
         perf_profile: format_perf_profile(perf),
         idle_timeout_secs: connect_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
+        netem_c2s_packets_received: 0,
+        netem_c2s_packets_dropped: 0,
+        netem_s2c_packets_received: 0,
+        netem_s2c_packets_dropped: 0,
     })
 }
 
@@ -603,7 +607,7 @@ pub async fn run_same_host_bench_with_netem(
     // interpose a forwarder and dial THAT; otherwise dial the
     // server directly. Hold the NetemHandle for the lifetime of the
     // run so its tasks stay alive.
-    let (local, _netem_handle) = if netem.is_noop() {
+    let (local, netem_handle) = if netem.is_noop() {
         (server_real, None)
     } else {
         let h = crate::netem::spawn_forwarder(server_real, netem)
@@ -651,6 +655,16 @@ pub async fn run_same_host_bench_with_netem(
     let bytes_per_sec = (payload_bytes as f64) / elapsed_secs;
     let mib_per_sec = bytes_per_sec / (1024.0 * 1024.0);
     let gbps = bytes_per_sec * 8.0 / 1_000_000_000.0;
+    let (netem_c2s, netem_s2c) = match netem_handle.as_ref() {
+        Some(handle) => (
+            handle.c2s_stats.snapshot().await,
+            handle.s2c_stats.snapshot().await,
+        ),
+        None => (
+            crate::netem::NetemStats::default(),
+            crate::netem::NetemStats::default(),
+        ),
+    };
 
     // Best-effort teardown so a fast bench loop doesn't accumulate
     // file descriptors.
@@ -682,12 +696,16 @@ pub async fn run_same_host_bench_with_netem(
         perf_profile: perf_label,
         idle_timeout_secs: connect_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
+        netem_c2s_packets_received: netem_c2s.packets_received,
+        netem_c2s_packets_dropped: netem_c2s.packets_dropped,
+        netem_s2c_packets_received: netem_s2c.packets_received,
+        netem_s2c_packets_dropped: netem_s2c.packets_dropped,
     })
 }
 
 fn format_perf_profile(p: PerfProfile) -> String {
     format!(
-        "pad={},mtu_init={},mtu_max={},ack_threshold={},spin={},stream_win={},conn_win={}",
+        "pad={},mtu_init={},mtu_max={},ack_threshold={},spin={},stream_win={},conn_win={},cc={},brutal_target_mbps={}",
         p.pad_quic_datagrams_to_mtu,
         p.initial_mtu,
         p.mtu_upper_bound,
@@ -699,6 +717,11 @@ fn format_perf_profile(p: PerfProfile) -> String {
         p.connection_receive_window_override
             .map(|n| format!("{}M", n / (1024 * 1024)))
             .unwrap_or_else(|| "default".to_string()),
+        match p.congestion {
+            proteus_transport_beta::CongestionKind::Bbr => "bbr",
+            proteus_transport_beta::CongestionKind::Brutal => "brutal",
+        },
+        p.brutal_target_bps / 1_000_000,
     )
 }
 
@@ -715,7 +738,7 @@ mod tests {
             "self-signed should produce a 1-cert chain"
         );
         assert!(
-            !c.leaf_hex.is_empty() && c.leaf_hex.len().is_multiple_of(2),
+            !c.leaf_hex.is_empty() && c.leaf_hex.len() % 2 == 0,
             "leaf_hex should be even-length non-empty hex: len={}",
             c.leaf_hex.len()
         );
@@ -863,6 +886,42 @@ mod tests {
         // Server addr in the report matches what we dialed.
         assert_eq!(report.server_addr, local.to_string());
 
+        server_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cross_host_bench_round_trips_with_brutal_on_both_peers() {
+        let cert = mint_self_signed(None).expect("cert");
+        let leaf_for_client = cert.chain[0].clone();
+        let perf = PerfProfile {
+            congestion: proteus_transport_beta::CongestionKind::Brutal,
+            brutal_target_bps: 100_000_000,
+            ..PerfProfile::default()
+        };
+        let bind: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let (local, identity, server_fut) =
+            spawn_echo_server(bind, cert, perf).await.expect("server");
+        let server_task = tokio::spawn(server_fut);
+
+        let report = run_cross_host_bench(
+            "localhost",
+            local,
+            leaf_for_client,
+            identity.mlkem_pk_bytes.clone(),
+            identity.x25519_pub,
+            identity.pq_fingerprint,
+            4 * 1024 * 1024,
+            64 * 1024,
+            perf,
+            Duration::from_secs(30),
+            Duration::from_secs(30),
+        )
+        .await
+        .expect("Brutal cross-host bench should succeed on loopback");
+
+        assert_eq!(report.payload_bytes, 4 * 1024 * 1024);
+        assert!(report.perf_profile.contains("cc=brutal"));
+        assert!(report.mib_per_sec > 0.0);
         server_task.abort();
     }
 

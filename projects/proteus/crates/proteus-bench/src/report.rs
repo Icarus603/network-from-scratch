@@ -36,6 +36,15 @@ pub struct RunReport {
     pub idle_timeout_secs: u64,
     /// β connect timeout configured for the run.
     pub connect_timeout_secs: u64,
+    /// Packets observed/dropped by the in-process impairment
+    /// forwarder. Zero when no forwarder is active. These counters
+    /// make every persisted result self-auditing: a `loss=30%`
+    /// label without corresponding drops is no longer accepted as
+    /// evidence.
+    pub netem_c2s_packets_received: u64,
+    pub netem_c2s_packets_dropped: u64,
+    pub netem_s2c_packets_received: u64,
+    pub netem_s2c_packets_dropped: u64,
 }
 
 impl RunReport {
@@ -59,6 +68,30 @@ impl RunReport {
             &mut s,
             "connect_timeout_secs",
             self.connect_timeout_secs,
+            false,
+        );
+        push_u64_field(
+            &mut s,
+            "netem_c2s_packets_received",
+            self.netem_c2s_packets_received,
+            false,
+        );
+        push_u64_field(
+            &mut s,
+            "netem_c2s_packets_dropped",
+            self.netem_c2s_packets_dropped,
+            false,
+        );
+        push_u64_field(
+            &mut s,
+            "netem_s2c_packets_received",
+            self.netem_s2c_packets_received,
+            false,
+        );
+        push_u64_field(
+            &mut s,
+            "netem_s2c_packets_dropped",
+            self.netem_s2c_packets_dropped,
             false,
         );
         s.push_str("}\n");
@@ -132,6 +165,10 @@ mod tests {
             perf_profile: "padding=off,initial_mtu=1200".to_string(),
             idle_timeout_secs: 60,
             connect_timeout_secs: 5,
+            netem_c2s_packets_received: 0,
+            netem_c2s_packets_dropped: 0,
+            netem_s2c_packets_received: 0,
+            netem_s2c_packets_dropped: 0,
         }
     }
 
@@ -167,6 +204,10 @@ mod tests {
             r#""perf_profile""#,
             r#""idle_timeout_secs""#,
             r#""connect_timeout_secs""#,
+            r#""netem_c2s_packets_received""#,
+            r#""netem_c2s_packets_dropped""#,
+            r#""netem_s2c_packets_received""#,
+            r#""netem_s2c_packets_dropped""#,
         ]
         .iter()
         .map(|needle| {
@@ -218,6 +259,10 @@ mod tests {
             perf_profile: "y".into(),
             idle_timeout_secs: 1,
             connect_timeout_secs: 1,
+            netem_c2s_packets_received: 0,
+            netem_c2s_packets_dropped: 0,
+            netem_s2c_packets_received: 0,
+            netem_s2c_packets_dropped: 0,
         };
         let j = r.to_json();
         assert!(

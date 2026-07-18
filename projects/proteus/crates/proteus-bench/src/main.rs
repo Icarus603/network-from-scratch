@@ -40,9 +40,9 @@
 
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use proteus_bench::{alpha, beta};
-use proteus_transport_beta::PerfProfile;
+use proteus_transport_beta::{CongestionKind, PerfProfile};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -51,6 +51,21 @@ use tracing_subscriber::EnvFilter;
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum BenchCongestion {
+    Bbr,
+    Brutal,
+}
+
+impl From<BenchCongestion> for CongestionKind {
+    fn from(value: BenchCongestion) -> Self {
+        match value {
+            BenchCongestion::Bbr => Self::Bbr,
+            BenchCongestion::Brutal => Self::Brutal,
+        }
+    }
 }
 
 #[derive(Subcommand, Debug)]
@@ -88,6 +103,57 @@ enum Cmd {
     /// Cross-host α-TLS bench client. Consumes the
     /// `AlphaServerTls` banner via `--server-*-hex` flags.
     AlphaClientTls(AlphaClientTlsArgs),
+    /// Standalone bidirectional UDP impairment forwarder for
+    /// version-pinned external competitors such as Hysteria2 and
+    /// TUIC. Emits a ready banner immediately and a final JSON row
+    /// with measured packet/drop counters.
+    UdpForwarder(UdpForwarderArgs),
+    /// Protocol-neutral TCP echo endpoint for external SOCKS5 proxy
+    /// benchmarks such as TUIC v5.
+    TcpEchoServer(TcpEchoServerArgs),
+    /// Byte-verified round-trip workload through a SOCKS5 listener.
+    Socks5Roundtrip(Socks5RoundtripArgs),
+}
+
+#[derive(clap::Args, Debug)]
+struct TcpEchoServerArgs {
+    #[arg(long, default_value = "0.0.0.0:18080")]
+    bind: String,
+}
+
+#[derive(clap::Args, Debug)]
+struct Socks5RoundtripArgs {
+    #[arg(long)]
+    socks_addr: String,
+    #[arg(long)]
+    target_addr: String,
+    #[arg(long, default_value = "64")]
+    payload_mib: u64,
+    #[arg(long, default_value = "64")]
+    chunk_kib: u64,
+    #[arg(long, default_value = "300")]
+    timeout_secs: u64,
+    #[arg(long, default_value = "1")]
+    runs: u32,
+}
+
+#[derive(clap::Args, Debug)]
+struct UdpForwarderArgs {
+    /// Client-facing UDP address. Point the competitor client here.
+    #[arg(long)]
+    bind: String,
+    /// Real competitor server UDP address.
+    #[arg(long)]
+    target: String,
+    /// Independent per-packet loss percentage in each direction.
+    #[arg(long, default_value = "0")]
+    loss_pct: f64,
+    /// One-way delay applied to every forwarded packet.
+    #[arg(long, default_value = "0")]
+    delay_ms: u64,
+    /// How long to keep the forwarder alive before emitting stats.
+    #[arg(long, default_value = "30")]
+    duration_secs: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -203,6 +269,16 @@ struct BetaArgs {
     /// 200 (satellite).
     #[arg(long, default_value = "0")]
     delay_ms: u64,
+    /// QUIC congestion controller under test. `bbr` is the
+    /// production-safe default; `brutal` pins a target send rate and
+    /// deliberately does not reduce its window on ordinary loss.
+    #[arg(long, value_enum, default_value = "bbr")]
+    congestion: BenchCongestion,
+    /// Brutal target rate in Mbit/s. Ignored for BBR. Set this to the
+    /// measured path capacity; an unrealistically high value can
+    /// overwhelm a shared bottleneck and is not TCP-friendly.
+    #[arg(long, default_value = "100")]
+    brutal_target_mbps: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -291,6 +367,13 @@ struct BetaServerArgs {
     /// `--extra-san 203.0.113.4`.
     #[arg(long)]
     extra_san: Option<String>,
+    /// QUIC congestion controller used for server-to-client echo
+    /// traffic. Must match the client-side experiment setting.
+    #[arg(long, value_enum, default_value = "bbr")]
+    congestion: BenchCongestion,
+    /// Brutal target rate in Mbit/s. Ignored for BBR.
+    #[arg(long, default_value = "100")]
+    brutal_target_mbps: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -358,6 +441,14 @@ struct BetaClientArgs {
     /// Per-connection receive window override (MiB). Bench-only.
     #[arg(long)]
     connection_window_mib: Option<u32>,
+    /// QUIC congestion controller used for client-to-server traffic.
+    /// For a symmetric round-trip experiment, pass the same value to
+    /// `beta-server`.
+    #[arg(long, value_enum, default_value = "bbr")]
+    congestion: BenchCongestion,
+    /// Brutal target rate in Mbit/s. Ignored for BBR.
+    #[arg(long, default_value = "100")]
+    brutal_target_mbps: u64,
     /// Number of runs to repeat back-to-back. Each opens a fresh
     /// connection (cold-start cost included).
     #[arg(long, default_value = "1")]
@@ -566,6 +657,11 @@ fn validate_beta_args(a: &BetaArgs) -> Result<(), String> {
         ));
     }
     reject_invalid_loss_pct(a.loss_pct)?;
+    reject_zero_u64(
+        "--brutal-target-mbps",
+        a.brutal_target_mbps,
+        "Brutal needs a positive pacing target",
+    )?;
     Ok(())
 }
 
@@ -606,7 +702,37 @@ fn validate_beta_client_args(a: &BetaClientArgs) -> Result<(), String> {
             a.mtu_upper_bound, a.initial_mtu
         ));
     }
+    reject_zero_u64(
+        "--brutal-target-mbps",
+        a.brutal_target_mbps,
+        "Brutal needs a positive pacing target",
+    )?;
     Ok(())
+}
+
+fn validate_beta_server_args(a: &BetaServerArgs) -> Result<(), String> {
+    reject_zero_u64(
+        "--brutal-target-mbps",
+        a.brutal_target_mbps,
+        "Brutal needs a positive pacing target",
+    )
+}
+
+fn validate_udp_forwarder_args(a: &UdpForwarderArgs) -> Result<(), String> {
+    let _: std::net::SocketAddr = a
+        .bind
+        .parse()
+        .map_err(|e| format!("--bind must be an IP socket address: {e}"))?;
+    let _: std::net::SocketAddr = a
+        .target
+        .parse()
+        .map_err(|e| format!("--target must be an IP socket address: {e}"))?;
+    reject_invalid_loss_pct(a.loss_pct)?;
+    reject_zero_u64(
+        "--duration-secs",
+        a.duration_secs,
+        "the forwarder would exit before a competitor can connect",
+    )
 }
 
 #[tokio::main]
@@ -629,11 +755,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let validate_result = match &cli.cmd {
         Cmd::Soak(args) => validate_soak_args(args),
         Cmd::Beta(args) => validate_beta_args(args),
-        Cmd::BetaServer(_) => Ok(()), // no positive-required numeric args
+        Cmd::BetaServer(args) => validate_beta_server_args(args),
         Cmd::BetaClient(args) => validate_beta_client_args(args),
         Cmd::Alpha(args) => validate_alpha_args(args),
         Cmd::AlphaServerTls(_) => Ok(()),
         Cmd::AlphaClientTls(args) => validate_alpha_client_tls_args(args),
+        Cmd::UdpForwarder(args) => validate_udp_forwarder_args(args),
+        Cmd::TcpEchoServer(_) => Ok(()),
+        Cmd::Socks5Roundtrip(args) => {
+            if args.payload_mib == 0
+                || args.chunk_kib == 0
+                || args.timeout_secs == 0
+                || args.runs == 0
+            {
+                Err("SOCKS5 round-trip sizes, timeout, and runs must be non-zero".into())
+            } else {
+                Ok(())
+            }
+        }
     };
     if let Err(msg) = validate_result {
         eprintln!("error: {msg}");
@@ -647,7 +786,72 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Cmd::Alpha(args) => run_alpha(args).await?,
         Cmd::AlphaServerTls(args) => run_alpha_server_tls(args).await?,
         Cmd::AlphaClientTls(args) => run_alpha_client_tls(args).await?,
+        Cmd::UdpForwarder(args) => run_udp_forwarder(args).await?,
+        Cmd::TcpEchoServer(args) => run_tcp_echo_server(args).await?,
+        Cmd::Socks5Roundtrip(args) => run_socks5_roundtrip(args).await?,
     }
+    Ok(())
+}
+
+async fn run_tcp_echo_server(args: TcpEchoServerArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let listener = tokio::net::TcpListener::bind(&args.bind).await?;
+    println!("TCP_ECHO_LISTEN_ADDR={}", listener.local_addr()?);
+    proteus_bench::external::serve_tcp_echo(listener).await?;
+    Ok(())
+}
+
+async fn run_socks5_roundtrip(args: Socks5RoundtripArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let socks_addr: std::net::SocketAddr = args.socks_addr.parse()?;
+    let target_addr: std::net::SocketAddr = args.target_addr.parse()?;
+    let payload_bytes = usize::try_from(args.payload_mib)?
+        .checked_mul(1024 * 1024)
+        .ok_or("payload size overflow")?;
+    let chunk_bytes = usize::try_from(args.chunk_kib)?
+        .checked_mul(1024)
+        .ok_or("chunk size overflow")?;
+    let timeout = Duration::from_secs(args.timeout_secs);
+    for _ in 0..args.runs {
+        let report = proteus_bench::external::run_socks5_roundtrip(
+            socks_addr,
+            target_addr,
+            payload_bytes,
+            chunk_bytes,
+            timeout,
+        )
+        .await?;
+        print!("{}", report.to_json());
+    }
+    Ok(())
+}
+
+async fn run_udp_forwarder(args: UdpForwarderArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let bind: std::net::SocketAddr = args.bind.parse()?;
+    let target: std::net::SocketAddr = args.target.parse()?;
+    let cfg = proteus_bench::netem::NetemConfig {
+        loss_pct: args.loss_pct,
+        delay: Duration::from_millis(args.delay_ms),
+        seed: None,
+    };
+    let handle = proteus_bench::netem::spawn_forwarder_on(bind, target, cfg).await?;
+    println!("FORWARDER_LISTEN_ADDR={}", handle.listen_addr);
+    tokio::time::sleep(Duration::from_secs(args.duration_secs)).await;
+    let c2s = handle.c2s_stats.snapshot().await;
+    let s2c = handle.s2c_stats.snapshot().await;
+    println!(
+        "{{\"kind\":\"udp_forwarder\",\"listen_addr\":\"{}\",\"target_addr\":\"{}\",\
+         \"loss_pct\":{},\"delay_ms\":{},\"duration_secs\":{},\
+         \"c2s_packets_received\":{},\"c2s_packets_dropped\":{},\
+         \"s2c_packets_received\":{},\"s2c_packets_dropped\":{}}}",
+        handle.listen_addr,
+        target,
+        args.loss_pct,
+        args.delay_ms,
+        args.duration_secs,
+        c2s.packets_received,
+        c2s.packets_dropped,
+        s2c.packets_received,
+        s2c.packets_dropped,
+    );
     Ok(())
 }
 
@@ -703,6 +907,8 @@ async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
+        congestion: args.congestion.into(),
+        brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
     };
     let payload_bytes = (args.payload_mib as usize) * 1024 * 1024;
     let chunk_bytes = (args.chunk_kib as usize) * 1024;
@@ -751,8 +957,12 @@ async fn run_beta_server(args: BetaServerArgs) -> Result<(), Box<dyn std::error:
     let cert = beta::mint_self_signed(args.extra_san.as_deref())?;
     let leaf_hex = cert.leaf_hex.clone();
     let bind: std::net::SocketAddr = args.bind.parse()?;
-    let (local, identity, server_fut) =
-        beta::spawn_echo_server(bind, cert, PerfProfile::default()).await?;
+    let perf = PerfProfile {
+        congestion: args.congestion.into(),
+        brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
+        ..PerfProfile::default()
+    };
+    let (local, identity, server_fut) = beta::spawn_echo_server(bind, cert, perf).await?;
     info!(addr = %local, "bench β server bound");
     // ALL banner lines go to stdout in one print! call so the
     // operator can grep them as a unit (no interleaving with the
@@ -794,6 +1004,8 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
         mtu_upper_bound: args.mtu_upper_bound,
         stream_receive_window_override: args.stream_window_mib.map(|m| m * 1024 * 1024),
         connection_receive_window_override: args.connection_window_mib.map(|m| m * 1024 * 1024),
+        congestion: args.congestion.into(),
+        brutal_target_bps: args.brutal_target_mbps.saturating_mul(1_000_000),
     };
     let payload_bytes = (args.payload_mib as usize) * 1024 * 1024;
     let chunk_bytes = (args.chunk_kib as usize) * 1024;

@@ -10,7 +10,7 @@ honest carrier-comparison table further down.
 **Status: M2.** α-profile (TCP+TLS 1.3) and β-profile (QUIC+BBR)
 carriers both work end-to-end. Multipath QUIC, ECH binding,
 `0xfe0d` ClientHello injection, MASQUE (γ-profile), and a
-netem-based adversarial benchmark against Hy2/TUIC-v5 are M3+ work.
+version-pinned adversarial benchmark against Hy2/TUIC-v5 are M3+ work.
 **Not yet production-ready for arbitrary-user deployment** — see
 the gap analysis at the bottom of this README.
 
@@ -958,17 +958,24 @@ fast without thrashing on transient blips.
 
 The `proteus-fingerprint` crate ships a JA4 regression test
 that LOCKS the exact JA4 string Proteus α emits today
-(`t13d0911h2_f91f431d341e_165ef185bad8`). The test catches
+(`t13d0912h2_f91f431d341e_5130dee6fa12`). The test catches
 fingerprint drift at CI time — but only if the operator's
 release pipeline ran it.
+
+The browser table distinguishes the official FoxIO repository's
+current generic Chrome example
+(`t13d1516h2_8daaf6152771_02713d6af862`) from the older Chrome 124
+PSK-bearing sample. Browser JA4s evolve; Chrome 124 remains a
+component-level historical target, not an eternal definition of
+Chrome.
 
 For deployments built outside the canonical release flow
 (operator built from main, custom fork, etc.), the live JA4
 gauge surfaces the wire fingerprint in real time:
 
 ```
-proteus_tls_clienthello_ja4{value="t13d0911h2_f91f431d341e_165ef185bad8"} 1
-proteus_tls_clienthello_ja4_expected{value="t13d0911h2_f91f431d341e_165ef185bad8"} 1
+proteus_tls_clienthello_ja4{value="t13d0912h2_f91f431d341e_5130dee6fa12"} 1
+proteus_tls_clienthello_ja4_expected{value="t13d0912h2_f91f431d341e_5130dee6fa12"} 1
 proteus_tls_clienthello_ja4_baseline_match 1
 ```
 
@@ -1000,8 +1007,8 @@ that with zero network access and zero running server:
 $ proteus-server fingerprint
 Proteus α — live TLS ClientHello JA4 fingerprint
 =================================================
-  Live JA4:  t13d0911h2_f91f431d341e_165ef185bad8
-  Baseline:  t13d0911h2_f91f431d341e_165ef185bad8
+  Live JA4:  t13d0912h2_f91f431d341e_5130dee6fa12
+  Baseline:  t13d0912h2_f91f431d341e_5130dee6fa12
   Match:     yes (locked baseline)
 
 Closest browser in reference table:
@@ -1034,7 +1041,7 @@ browser reference table.
 
 ```bash
 $ proteus-server fingerprint --format json
-{"kind":"fingerprint","live_ja4":"t13d0911h2_...","expected_baseline":"...","matches_baseline":true,"closest_browser":"Firefox","closest_version":"124","closest_platform":"macOS / Windows / Linux desktop","closest_ja4":"t13d1714h2_...","closest_exact":false}
+{"kind":"fingerprint","live_ja4":"t13d0912h2_...","expected_baseline":"...","matches_baseline":true,"closest_browser":"Firefox","closest_version":"124","closest_platform":"macOS / Windows / Linux desktop","closest_ja4":"t13d1714h2_...","closest_exact":false}
 ```
 
 Schema is append-only — new fields land but `live_ja4`,
@@ -1340,12 +1347,28 @@ required — pure-Rust, portable):
 | 1  | 36.1 | 3 | Wi-Fi grade |
 | 5  | 21.7 | 3 | Cellular grade — half of baseline |
 | 15 | 20.9 | 3 | Long-haul degraded |
-| 30 |  0.4 | 2 | **BBR collapses — design point for Brutal CC (M3 work)** |
+| 30 |  0.4 | 2 | **BBR collapses — control curve for Proteus Brutal** |
 
 Up to 15 % loss, β keeps useful throughput (~20 MiB/s, the realistic
-2026 GFW QUIC-throttling regime). At 30 % loss BBR collapses;
-this is the headline gap between "Proteus today" and "Proteus
-with a Brutal-clone CC" — currently scoped M3.
+2026 GFW QUIC-throttling regime). At 30 % loss BBR collapses.
+Proteus now ships an operator-opt-in Brutal controller with 2×BDP
+headroom and bounded delivery-loss compensation. In the first
+15%-loss falsification matrix its median was 53.1 MiB/s versus
+BBR's 14.3 MiB/s (3.7×); raw packet/drop counters and all six runs
+are recorded in
+[`notes/perf/2026-07-17-brutal-vs-bbr-15pct.jsonl`](../../notes/perf/2026-07-17-brutal-vs-bbr-15pct.jsonl).
+An early version-pinned official-Hysteria2 comparison found Proteus
+ahead by 8–24% in six normalized same-host cells. That matrix compared
+different application workloads and is retained only as exploratory
+controller evidence. The corrected production SOCKS workload reuses
+the β carrier across requests: at 64 MiB / 100 ms RTT / seven runs,
+Proteus led at 0% loss but remained about 5% behind Hy2 at 5% loss,
+with the latter difference statistically unresolved.
+The method, commit and raw evidence live in
+[`notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md`](../../notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md).
+This is evidence of parity in part of the local matrix, not a cap
+claim. More loss regimes, burst loss, resource cost, TUIC-v5 and true
+cross-host reproduction remain required.
 
 ---
 
@@ -1378,7 +1401,9 @@ for trivial copy-paste or `grep | sed` piping:
 # On the server side (e.g. VPS):
 proteus-bench beta-server \
   --bind 0.0.0.0:8443 \
-  --extra-san my-vps.example.com
+  --extra-san my-vps.example.com \
+  --congestion brutal \
+  --brutal-target-mbps 1000
 # Prints (one shell line per banner key):
 #   BENCH_SERVER_LISTEN_ADDR=0.0.0.0:8443
 #   BENCH_SERVER_LEAF_CERT_HEX=<2120 hex chars of DER>
@@ -1394,12 +1419,17 @@ proteus-bench beta-client \
   --server-mlkem-pk-hex <hex> \
   --server-x25519-pub-hex <hex> \
   --server-pq-fingerprint-hex <hex> \
-  --payload-mib 64 --runs 3
+  --payload-mib 64 --runs 3 \
+  --congestion brutal \
+  --brutal-target-mbps 1000
 ```
 
 The client verifies the `pq_fingerprint` matches `SHA-256(mlkem_pk_bytes)`
 **before** opening a socket, so a copy-paste mistake fails with a clear
 "pq_fingerprint mismatch" error instead of an opaque handshake failure.
+Brutal is bidirectional: use the same `--congestion` and
+`--brutal-target-mbps` on both commands, otherwise the echo direction
+silently remains on BBR and the round-trip result is invalid.
 
 ## Test coverage
 
@@ -1776,12 +1806,23 @@ latest hardening pass:
   pads every application UDP datagram to `initial_mtu`. Wire-
   measured regression test asserts post-handshake datagrams are
   all the configured MTU.
+- ✅ **Transcript-native REALITY-style Path-A knock**: a fresh
+  PSK-authenticated token occupies Chrome's ordinary 32-byte TLS 1.3
+  compatibility `session_id` and is bound to that ClientHello's
+  `client_random`. rustls hashes the final bytes itself, so the gate
+  can inspect and re-feed the ClientHello without transcript
+  divergence. The shared server replay window cover-routes an exact
+  captured ClientHello on second use. End-to-end, exact-replay, and
+  32-way concurrent ClientHello tests pass; no rustls fork or
+  fingerprintable pre-TLS prefix is used.
 
 ### Not yet done (the remaining gap)
 
 - ❌ **uTLS-grade ClientHello bit-perfect replay**: cipher_count
-  and ext_count still differ from Chrome (`09`/`11` vs Chrome's
-  `15`/`17`). Closing this fully needs forking rustls's
+  and ext_count still differ from Chrome (`09`/`12` vs the official
+  FoxIO current generic Chrome example's `15`/`16`; the frozen
+  Chrome-124 PSK-bearing reference remains `15`/`17`). Closing this
+  fully needs forking rustls's
   ClientHello assembler — multi-week build. **This is the one
   street REALITY still leads on.** Operator-actionable via
   `proteus-server fingerprint --target {chrome-124, firefox-124,
@@ -1798,17 +1839,25 @@ latest hardening pass:
 - ❌ **Multipath QUIC** (spec §10.4): not started.
 - ❌ **ECH binding** (spec §7.4): cover-URL HTTPS RR + ECH key
   publication. Needed to hide `proteus-β-v1` ALPN in flight.
-- ❌ **`0xfe0d` ClientHello injection** (spec §4.2): needs rustls
-  fork or quinn raw-handshake hook.
+- ✅ **`0xfe0d` ClientHello injection** (spec §4.2): α now uses
+  rustls ECH GREASE with a fresh P-256 HPKE placeholder key. This
+  removes one stable rustls-vs-browser extension classifier; it
+  does not hide SNI, so full ECH remains open.
 - ❌ **γ-profile (MASQUE / H3-over-QUIC)**: not started.
 - ❌ **Formal verification** (ProVerif / Tamarin handshake proof,
   spec §11.10): placeholder only.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
-- ❌ **netem head-to-head benchmark vs Hy2/TUIC-v5**: not run.
-  Required before any "β beats Hy2" claim is defensible.
+- 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2
+  commit `f2ad1de5` is version-pinned, and all protocols use the same
+  byte-verified SOCKS workload through the isolated Linux netem
+  router. Warm pooled Proteus leads the seven-run 0%-loss cell, but
+  remains about 5% behind Hy2 at 5% IID loss with an unresolved
+  interval. More loss regimes, burst-loss, CPU/memory, TUIC-v5 and
+  true cross-host validation remain open.
 
-**Cryptographic core, traffic-analysis defense, and production-
-stability bug story are now strictly stronger than VLESS+REALITY
-and Hy2/TUIC-v5.** The remaining work is **adversarial validation
+**Several cryptographic, traffic-analysis, and production-stability
+components are now stronger in isolation than their VLESS+REALITY or
+Hy2/TUIC-v5 analogues; end-to-end superiority is not yet proven.**
+The remaining work is **adversarial validation
 + uTLS replay**, not protocol design.

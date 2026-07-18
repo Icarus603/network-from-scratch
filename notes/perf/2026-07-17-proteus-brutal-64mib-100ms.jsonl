@@ -1,0 +1,17 @@
+{"kind":"metadata","implementation":"Proteus beta","payload_bytes":67108864,"bandwidth_target_bps":1000000000,"flow_control_stream_bytes":67108864,"flow_control_connection_bytes":268435456,"delay_ms_one_way":50,"congestion":"brutal","note":"same-host loopback; three independent process runs per cell"}
+{"kind":"benchmark","cell":"loss0_delay50","run":1,"mib_per_sec":64.7885,"c2s_packets_received":53224,"c2s_packets_dropped":0,"s2c_packets_received":50497,"s2c_packets_dropped":0}
+{"kind":"benchmark","cell":"loss0_delay50","run":2,"mib_per_sec":64.5146,"c2s_packets_received":52084,"c2s_packets_dropped":0,"s2c_packets_received":49268,"s2c_packets_dropped":0}
+{"kind":"benchmark","cell":"loss0_delay50","run":3,"mib_per_sec":64.7532,"c2s_packets_received":51851,"c2s_packets_dropped":0,"s2c_packets_received":49049,"s2c_packets_dropped":0}
+{"kind":"summary","cell":"loss0_delay50","median_mib_per_sec":64.7532}
+{"kind":"benchmark","cell":"loss5_delay50","run":1,"mib_per_sec":39.5368}
+{"kind":"benchmark","cell":"loss5_delay50","run":2,"mib_per_sec":43.1779}
+{"kind":"benchmark","cell":"loss5_delay50","run":3,"mib_per_sec":40.3375}
+{"kind":"summary","cell":"loss5_delay50","median_mib_per_sec":40.3375}
+{"kind":"benchmark","cell":"loss15_delay50","run":1,"mib_per_sec":29.7696,"c2s_packets_received":73647,"c2s_packets_dropped":11082,"s2c_packets_received":74977,"s2c_packets_dropped":11419}
+{"kind":"benchmark","cell":"loss15_delay50","run":2,"mib_per_sec":26.3198,"c2s_packets_received":73254,"c2s_packets_dropped":10915,"s2c_packets_received":73289,"s2c_packets_dropped":10962}
+{"kind":"benchmark","cell":"loss15_delay50","run":3,"mib_per_sec":30.8822,"c2s_packets_received":72343,"c2s_packets_dropped":10721,"s2c_packets_received":74483,"s2c_packets_dropped":11109}
+{"kind":"summary","cell":"loss15_delay50","median_mib_per_sec":29.7696}
+{"kind":"benchmark","cell":"loss30_delay50","run":1,"mib_per_sec":19.9327}
+{"kind":"benchmark","cell":"loss30_delay50","run":2,"mib_per_sec":21.9970}
+{"kind":"benchmark","cell":"loss30_delay50","run":3,"mib_per_sec":19.6818}
+{"kind":"summary","cell":"loss30_delay50","median_mib_per_sec":19.9327}

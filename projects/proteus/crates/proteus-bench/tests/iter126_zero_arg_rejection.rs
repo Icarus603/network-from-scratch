@@ -168,6 +168,36 @@ fn iter126_beta_client_rejects_zero_runs() {
     );
 }
 
+#[test]
+fn beta_client_rejects_zero_brutal_target() {
+    expect_exit_2_with(
+        &[
+            "beta-client",
+            "--server-addr",
+            "127.0.0.1:1",
+            "--server-leaf-cert-hex",
+            "00",
+            "--server-mlkem-pk-hex",
+            "00",
+            "--server-x25519-pub-hex",
+            "00",
+            "--server-pq-fingerprint-hex",
+            "00",
+            "--brutal-target-mbps",
+            "0",
+        ],
+        &["--brutal-target-mbps = 0"],
+    );
+}
+
+#[test]
+fn beta_server_rejects_zero_brutal_target() {
+    expect_exit_2_with(
+        &["beta-server", "--brutal-target-mbps", "0"],
+        &["--brutal-target-mbps = 0"],
+    );
+}
+
 // ─── iter-127: MTU + loss-pct range gates ──────────────────────
 
 #[test]

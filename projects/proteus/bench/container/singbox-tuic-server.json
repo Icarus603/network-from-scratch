@@ -1,0 +1,37 @@
+{
+  "log": {
+    "level": "info",
+    "timestamp": true
+  },
+  "inbounds": [
+    {
+      "type": "tuic",
+      "tag": "tuic-in",
+      "listen": "0.0.0.0",
+      "listen_port": 11443,
+      "users": [
+        {
+          "name": "benchmark",
+          "uuid": "00000000-0000-0000-0000-000000000000",
+          "password": "benchmark-only-password"
+        }
+      ],
+      "congestion_control": "bbr",
+      "auth_timeout": "10s",
+      "zero_rtt_handshake": false,
+      "heartbeat": "10s",
+      "tls": {
+        "enabled": true,
+        "server_name": "tuic.example.com",
+        "certificate_path": "/run/singbox-tuic/server.crt",
+        "key_path": "/run/singbox-tuic/server.key"
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "type": "direct",
+      "tag": "direct"
+    }
+  ]
+}

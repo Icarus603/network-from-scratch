@@ -189,6 +189,10 @@ pub async fn run_same_host_raw_tcp_bench(
         perf_profile: "raw-tcp".to_string(),
         idle_timeout_secs: total_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
+        netem_c2s_packets_received: 0,
+        netem_c2s_packets_dropped: 0,
+        netem_s2c_packets_received: 0,
+        netem_s2c_packets_dropped: 0,
     })
 }
 
@@ -317,6 +321,10 @@ pub async fn run_same_host_tls_bench(
         perf_profile: "tls-1.3-h2-http/1.1".to_string(),
         idle_timeout_secs: total_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
+        netem_c2s_packets_received: 0,
+        netem_c2s_packets_dropped: 0,
+        netem_s2c_packets_received: 0,
+        netem_s2c_packets_dropped: 0,
     })
 }
 
@@ -482,6 +490,10 @@ pub async fn run_cross_host_tls_bench(
         perf_profile: "tls-1.3-h2-http/1.1".to_string(),
         idle_timeout_secs: total_timeout.as_secs(),
         connect_timeout_secs: connect_timeout.as_secs(),
+        netem_c2s_packets_received: 0,
+        netem_c2s_packets_dropped: 0,
+        netem_s2c_packets_received: 0,
+        netem_s2c_packets_dropped: 0,
     })
 }
 

@@ -1,0 +1,24 @@
+server_endpoint: "10.77.2.14:8444"
+server_endpoint_beta: "10.77.2.14:9444"
+beta_server_name: proteus.example.com
+beta_first_timeout_secs: 10
+beta_congestion: brutal
+beta_brutal_target_mbps: 1000
+beta_initial_mtu: 1350
+beta_mtu_upper_bound: 1452
+beta_pad_quic_to_mtu: false
+beta_allow_spin_bit: false
+beta_ack_eliciting_threshold: 10
+socks_listen: "0.0.0.0:1080"
+user_id: bench
+pow_difficulty: 0
+
+keys:
+  server_mlkem_pk: /run/proteus-proxy/keys/server_lt.mlkem768.pk
+  server_x25519_pk: /run/proteus-proxy/keys/server_lt.x25519.pk
+  server_pq_fingerprint: /run/proteus-proxy/keys/server_lt.pq.fingerprint
+  client_ed25519_sk: /run/proteus-proxy/keys/client/client.ed25519.sk
+
+tls:
+  server_name: proteus.example.com
+  trusted_ca: /run/proteus-proxy/keys/tls/fullchain.pem

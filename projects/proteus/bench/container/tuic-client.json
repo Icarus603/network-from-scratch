@@ -1,0 +1,23 @@
+{
+  "relay": {
+    "server": "tuic.example.com:10443",
+    "uuid": "00000000-0000-0000-0000-000000000000",
+    "password": "benchmark-only-password",
+    "ip": "10.77.2.12",
+    "certificates": ["/run/tuic/server.crt"],
+    "udp_relay_mode": "native",
+    "congestion_control": "bbr",
+    "alpn": ["h3"],
+    "zero_rtt_handshake": false,
+    "timeout": "30s",
+    "heartbeat": "3s",
+    "disable_native_certs": true,
+    "send_window": 67108864,
+    "receive_window": 67108864
+  },
+  "local": {
+    "server": "0.0.0.0:1080",
+    "max_packet_size": 1500
+  },
+  "log_level": "info"
+}

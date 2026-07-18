@@ -55,6 +55,7 @@
 
 pub mod alpha;
 pub mod beta;
+pub mod external;
 pub mod netem;
 pub mod report;
 pub mod soak;

@@ -1,0 +1,22 @@
+listen: :8443
+
+tls:
+  cert: /run/hysteria/server.crt
+  key: /run/hysteria/server.key
+
+auth:
+  type: password
+  password: benchmark-only-password
+
+bandwidth:
+  up: 1 gbps
+  down: 1 gbps
+
+speedTest: true
+
+quic:
+  initStreamReceiveWindow: 67108864
+  maxStreamReceiveWindow: 67108864
+  initConnReceiveWindow: 268435456
+  maxConnReceiveWindow: 268435456
+  maxIdleTimeout: 30s

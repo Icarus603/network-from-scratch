@@ -165,8 +165,19 @@ pub async fn spawn_forwarder(
     server_addr: SocketAddr,
     cfg: NetemConfig,
 ) -> std::io::Result<NetemHandle> {
+    spawn_forwarder_on("127.0.0.1:0".parse().expect("literal"), server_addr, cfg).await
+}
+
+/// Bind the client-facing side to an explicit address. This is the
+/// external-competitor path: Hysteria2/TUIC point at `listen_addr`,
+/// while their real server listens at `server_addr`.
+pub async fn spawn_forwarder_on(
+    listen_addr: SocketAddr,
+    server_addr: SocketAddr,
+    cfg: NetemConfig,
+) -> std::io::Result<NetemHandle> {
     // Bind the "client-facing" socket (operator dials this).
-    let client_facing = UdpSocket::bind("127.0.0.1:0").await?;
+    let client_facing = UdpSocket::bind(listen_addr).await?;
     let listen_addr = client_facing.local_addr()?;
     let client_facing = Arc::new(client_facing);
 
@@ -195,6 +206,18 @@ pub async fn spawn_forwarder(
     let cfg_c2s = cfg;
     let server_addr_c2s = server_addr;
     let shutdown_rx_c2s = Arc::clone(&shutdown_rx);
+    let (c2s_delay_tx, mut c2s_delay_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, tokio::time::Instant)>();
+    let c2s_delay_send = Arc::clone(&c2s_send);
+    let c2s_delay_stats = c2s_stats.clone();
+    tokio::spawn(async move {
+        while let Some((pkt, deadline)) = c2s_delay_rx.recv().await {
+            tokio::time::sleep_until(deadline).await;
+            if c2s_delay_send.send_to(&pkt, server_addr_c2s).await.is_ok() {
+                c2s_delay_stats.record_forward(pkt.len() as u64).await;
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         // Lock once; if shutdown fires we tear down.
@@ -221,17 +244,10 @@ pub async fn spawn_forwarder(
                         continue;
                     }
                     let pkt = buf[..n].to_vec();
-                    let send = Arc::clone(&c2s_send);
-                    let stats = c2s_stats_h.clone();
-                    let delay = cfg_c2s.delay;
-                    tokio::spawn(async move {
-                        if !delay.is_zero() {
-                            tokio::time::sleep(delay).await;
-                        }
-                        if send.send_to(&pkt, server_addr_c2s).await.is_ok() {
-                            stats.record_forward(pkt.len() as u64).await;
-                        }
-                    });
+                    let deadline = tokio::time::Instant::now() + cfg_c2s.delay;
+                    if c2s_delay_tx.send((pkt, deadline)).is_err() {
+                        break;
+                    }
                 }
             }
         }
@@ -243,6 +259,18 @@ pub async fn spawn_forwarder(
     let s2c_last_client = Arc::clone(&last_client);
     let s2c_stats_h = s2c_stats.clone();
     let cfg_s2c = cfg;
+    let (s2c_delay_tx, mut s2c_delay_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, SocketAddr, tokio::time::Instant)>();
+    let s2c_delay_send = Arc::clone(&s2c_send);
+    let s2c_delay_stats = s2c_stats.clone();
+    tokio::spawn(async move {
+        while let Some((pkt, client_addr, deadline)) = s2c_delay_rx.recv().await {
+            tokio::time::sleep_until(deadline).await;
+            if s2c_delay_send.send_to(&pkt, client_addr).await.is_ok() {
+                s2c_delay_stats.record_forward(pkt.len() as u64).await;
+            }
+        }
+    });
     tokio::spawn(async move {
         let mut buf = vec![0u8; 65535];
         loop {
@@ -263,17 +291,10 @@ pub async fn spawn_forwarder(
                 }
             };
             let pkt = buf[..n].to_vec();
-            let send = Arc::clone(&s2c_send);
-            let stats = s2c_stats_h.clone();
-            let delay = cfg_s2c.delay;
-            tokio::spawn(async move {
-                if !delay.is_zero() {
-                    tokio::time::sleep(delay).await;
-                }
-                if send.send_to(&pkt, client_addr).await.is_ok() {
-                    stats.record_forward(pkt.len() as u64).await;
-                }
-            });
+            let deadline = tokio::time::Instant::now() + cfg_s2c.delay;
+            if s2c_delay_tx.send((pkt, client_addr, deadline)).is_err() {
+                break;
+            }
         }
     });
 
@@ -512,5 +533,44 @@ mod tests {
         );
 
         echo_task.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn delayed_forwarder_preserves_packet_order_per_direction() {
+        let echo = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let echo_addr = echo.local_addr().unwrap();
+        let echo_task = tokio::spawn(async move {
+            let mut buf = [0u8; 1500];
+            for _ in 0..100u16 {
+                let (n, from) = echo.recv_from(&mut buf).await.unwrap();
+                echo.send_to(&buf[..n], from).await.unwrap();
+            }
+        });
+        let h = spawn_forwarder(
+            echo_addr,
+            NetemConfig {
+                delay: Duration::from_millis(10),
+                ..NetemConfig::default()
+            },
+        )
+        .await
+        .unwrap();
+        let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        for sequence in 0..100u16 {
+            client
+                .send_to(&sequence.to_be_bytes(), h.listen_addr)
+                .await
+                .unwrap();
+        }
+        let mut buf = [0u8; 2];
+        for expected in 0..100u16 {
+            let (n, _) = tokio::time::timeout(Duration::from_secs(2), client.recv_from(&mut buf))
+                .await
+                .expect("recv timeout")
+                .expect("recv ok");
+            assert_eq!(n, 2);
+            assert_eq!(u16::from_be_bytes(buf), expected);
+        }
+        echo_task.await.unwrap();
     }
 }

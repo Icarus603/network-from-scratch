@@ -138,10 +138,8 @@ netem / OrbStack VM required, portable across macOS / Windows.
   reliable carrier without Brutal CC.
 - **At 30% loss, BBR collapses to ~0.4 MiB/s.** This is the
   design point Hysteria2's Brutal congestion controller targets;
-  Proteus today uses quinn's default BBR which is not
-  loss-tolerant at that regime. **This is the headline gap
-  between "Proteus today" and "Proteus + Brutal-clone CC" (M3
-  work).**
+  this baseline predates Proteus Brutal and remains the control
+  curve for deciding whether the new controller actually helps.
 - The wide range at low-loss (44–117 MiB/s at 0%) is the
   BBR-warmup effect: first run pays the bandwidth-probing cost,
   later runs in the same process inherit the converged state.
@@ -150,12 +148,11 @@ netem / OrbStack VM required, portable across macOS / Windows.
 
 **What this does NOT say**:
 
-- **Not a head-to-head vs Hy2/TUIC.** We can't claim "Proteus
-  beats Hy2 at 5% loss" without running Hy2 through the same
-  forwarder under identical conditions. The harness is ready to
-  do that; what's missing is the operator running the Hy2 binary
-  against `proteus-bench`'s forwarder (which sits between any
-  UDP client and server, not just Proteus).
+- **This BBR baseline alone is not a head-to-head vs Hy2/TUIC.**
+  The later version-pinned Hysteria2 comparison is recorded in
+  [`2026-07-17-proteus-vs-hy2-head-to-head.md`](2026-07-17-proteus-vs-hy2-head-to-head.md);
+  keep the two experiments separate because they use different
+  controllers and answer different questions.
 - **Not a substitute for real netem.** The forwarder models
   independent uniform loss; netem additionally supports
   correlated loss (Gilbert-Elliott), reordering, and corruption.
@@ -165,6 +162,47 @@ netem / OrbStack VM required, portable across macOS / Windows.
 - **Not cross-validated against Linux netem yet.** That's the
   next-step honesty check. Until done, treat these as
   "directionally correct, magnitude-approximate".
+
+### Proteus Brutal: first falsification run
+
+[`2026-07-17-brutal-vs-bbr-15pct.jsonl`](2026-07-17-brutal-vs-bbr-15pct.jsonl)
+is the first same-harness comparison after adding a custom quinn
+congestion controller. Both cells use a 16 MiB payload, 64 KiB
+records, three independent runs, and the same in-process Bernoulli
+15% loss injector.
+
+| controller | target | n | median MiB/s | min | max |
+|---|---:|---:|---:|---:|---:|
+| quinn BBR | auto | 3 | 14.3 | 4.6 | 16.3 |
+| Proteus Brutal | 1000 Mbit/s | 3 | 53.1 | 51.3 | 56.4 |
+
+The median improvement over BBR is **3.7×**. The JSON rows include
+per-direction received/drop counters; every run observed roughly
+20k packets and 2.7k–3.2k drops, so the 15% impairment is measured
+evidence rather than a command-line label.
+
+The first implementation attempt failed this falsification: at a
+100 Mbit/s target it delivered only 0.82 MiB/s, versus BBR's
+10.25 MiB/s in the matching short run. Root cause was an incomplete
+`rate × RTT` window with neither Hysteria2's 2× BDP headroom nor
+bounded delivery-loss compensation. The corrected controller tracks
+five one-second delivery buckets, clamps `ack_rate` to at least 0.8,
+uses `2 × BDP / ack_rate`, and paces at `target / ack_rate`, following
+the current Hysteria2 contract at upstream commit
+`f2ad1de5da52a1da9622285a1d61553ddaa41f21`.
+
+This closes the internal “BBR collapses and Proteus has no answer”
+gap. The first version-pinned comparison ran official Hysteria2
+commit `f2ad1de5` through the same FIFO forwarder. Across six
+same-host cells, Proteus led the normalized round-trip calculation by
+8–24%; see
+[`2026-07-17-proteus-vs-hy2-head-to-head.md`](2026-07-17-proteus-vs-hy2-head-to-head.md).
+Because that matrix used different application workloads, it is now
+classified as exploratory controller evidence. The corrected
+production SOCKS workload reuses daemon carriers and currently shows
+a clear 0%-loss win but roughly a 5% deficit to Hy2 at 5% IID loss;
+the latter interval crosses zero. No universal performance claim is
+supported.
 
 ### How to reproduce
 
@@ -205,6 +243,12 @@ for loss in 0 1 5 15 30; do
       2>/dev/null | grep '^{'
   done
 done > netem-sweep.jsonl
+
+# Direct BBR vs Brutal falsification at 15% loss:
+./target/release/proteus-bench beta --payload-mib 16 --runs 3 \
+  --loss-pct 15 --congestion bbr
+./target/release/proteus-bench beta --payload-mib 16 --runs 3 \
+  --loss-pct 15 --congestion brutal --brutal-target-mbps 1000
 ```
 
 ```bash

@@ -33,6 +33,8 @@
 #   RATE_MBIT_LIST  - "0" = unlimited, default "0 100 1000"
 #   PAYLOAD_MIB     - default 64 (large enough to amortize handshake)
 #   RUNS_PER_CELL   - repeats per (loss, delay, rate), default 3
+#   CONGESTION      - "bbr" or "brutal", default "brutal"
+#   BRUTAL_TARGET_MBPS - operator-measured capacity, default 1000
 
 set -euo pipefail
 
@@ -41,7 +43,18 @@ DELAY_MS_LIST="${DELAY_MS_LIST:-0 10 50 200}"
 RATE_MBIT_LIST="${RATE_MBIT_LIST:-0 100 1000}"
 PAYLOAD_MIB="${PAYLOAD_MIB:-64}"
 RUNS_PER_CELL="${RUNS_PER_CELL:-3}"
+CONGESTION="${CONGESTION:-brutal}"
+BRUTAL_TARGET_MBPS="${BRUTAL_TARGET_MBPS:-1000}"
 IFACE="${IFACE:-lo}"
+
+if [[ "${CONGESTION}" != "bbr" && "${CONGESTION}" != "brutal" ]]; then
+  echo "CONGESTION must be bbr or brutal, got ${CONGESTION}" >&2
+  exit 1
+fi
+if [[ ! "${BRUTAL_TARGET_MBPS}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "BRUTAL_TARGET_MBPS must be a positive integer" >&2
+  exit 1
+fi
 
 # proteus-bench should be findable in the cargo build dir or PATH.
 BENCH_BIN="${BENCH_BIN:-./target/release/proteus-bench}"
@@ -93,6 +106,8 @@ for loss in ${LOSS_PCT_LIST}; do
         # otherwise fall back to a sed-based field injection.
         line=$("${BENCH_BIN}" beta \
           --payload-mib "${PAYLOAD_MIB}" \
+          --congestion "${CONGESTION}" \
+          --brutal-target-mbps "${BRUTAL_TARGET_MBPS}" \
           --connect-timeout-secs 180 \
           --total-timeout-secs 300 \
           2>/dev/null | tail -n 1)
@@ -102,10 +117,12 @@ for loss in ${LOSS_PCT_LIST}; do
             --argjson delay "${delay}" \
             --argjson rate "${rate}" \
             --argjson run "${run}" \
-            '. + {netem_loss_pct: $loss, netem_delay_ms: $delay, netem_rate_mbit: $rate, run_ix: $run}'
+            --arg congestion "${CONGESTION}" \
+            --argjson brutal_target_mbps "${BRUTAL_TARGET_MBPS}" \
+            '. + {netem_loss_pct: $loss, netem_delay_ms: $delay, netem_rate_mbit: $rate, run_ix: $run, congestion: $congestion, brutal_target_mbps: $brutal_target_mbps}'
         else
           # Strip the trailing `}` and append the netem fields.
-          echo "${line%\}},\"netem_loss_pct\":${loss},\"netem_delay_ms\":${delay},\"netem_rate_mbit\":${rate},\"run_ix\":${run}}"
+          echo "${line%\}},\"netem_loss_pct\":${loss},\"netem_delay_ms\":${delay},\"netem_rate_mbit\":${rate},\"run_ix\":${run},\"congestion\":\"${CONGESTION}\",\"brutal_target_mbps\":${BRUTAL_TARGET_MBPS}}"
         fi
       done
     done

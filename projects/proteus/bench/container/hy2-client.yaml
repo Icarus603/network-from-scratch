@@ -1,0 +1,17 @@
+server: 10.77.2.10:8443
+auth: benchmark-only-password
+
+tls:
+  sni: 10.77.2.10
+  insecure: true
+
+bandwidth:
+  up: 1 gbps
+  down: 1 gbps
+
+quic:
+  initStreamReceiveWindow: 67108864
+  maxStreamReceiveWindow: 67108864
+  initConnReceiveWindow: 268435456
+  maxConnReceiveWindow: 268435456
+  maxIdleTimeout: 30s

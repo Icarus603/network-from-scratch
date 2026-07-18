@@ -1,0 +1,509 @@
+name: proteus-netem
+
+x-hy2-build: &hy2-build
+  context: https://github.com/apernet/hysteria.git#f2ad1de5da52a1da9622285a1d61553ddaa41f21
+  dockerfile_inline: |
+    FROM golang:1-alpine@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+    ARG ALPINE_MIRROR
+    ARG GOPROXY=""
+    ENV GOPROXY=$${GOPROXY}
+    RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$${ALPINE_MIRROR}|g" \
+            /etc/apk/repositories \
+        && apk add --no-cache git
+    COPY . /go/src/github.com/apernet/hysteria
+    WORKDIR /go/src/github.com/apernet/hysteria
+    RUN APP_PKG=github.com/apernet/hysteria/app/v2/cmd \
+        && APP_VERSION="$$(git describe --tags --always --match 'app/v*')" \
+        && APP_VERSION="$${APP_VERSION##*/}" \
+        && APP_COMMIT="$$(git rev-parse HEAD)" \
+        && APP_DATE="$$(git show -s --format=%cI HEAD)" \
+        && APP_TOOLCHAIN="$$(go version | cut -d' ' -f3-)" \
+        && APP_PLATFORM="$$(go env GOOS)" \
+        && APP_ARCH="$$(go env GOARCH)" \
+        && LIB_VERSION="$$(awk '$$1 == "github.com/apernet/quic-go" { print $$2; exit }' core/go.mod)" \
+        && CGO_ENABLED=0 go build -trimpath \
+            -ldflags "-X $${APP_PKG}.appVersion=$${APP_VERSION} \
+                -X $${APP_PKG}.appDate=$${APP_DATE} \
+                -X $${APP_PKG}.appType=release \
+                -X \"$${APP_PKG}.appToolchain=$${APP_TOOLCHAIN}\" \
+                -X $${APP_PKG}.appCommit=$${APP_COMMIT} \
+                -X $${APP_PKG}.libVersion=$${LIB_VERSION} \
+                -s -w \
+                -X $${APP_PKG}.appPlatform=$${APP_PLATFORM} \
+                -X $${APP_PKG}.appArch=$${APP_ARCH}" \
+            -o /go/bin/hysteria ./app
+
+    FROM alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS dist
+    ARG ALPINE_MIRROR
+    RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$${ALPINE_MIRROR}|g" \
+            /etc/apk/repositories \
+        && if [ ! -e /etc/nsswitch.conf ]; then \
+            echo 'hosts: files dns' > /etc/nsswitch.conf; \
+        fi \
+        && apk upgrade \
+        && apk add --no-cache bash tzdata ca-certificates iptables nftables
+    COPY --from=builder /go/bin/hysteria /usr/local/bin/hysteria
+    ENTRYPOINT ["hysteria"]
+  args:
+    BUILDKIT_CONTEXT_KEEP_GIT_DIR: "1"
+    ALPINE_MIRROR: https://mirror.twds.com.tw/alpine
+
+x-tuic-build: &tuic-build
+  context: .
+  dockerfile_inline: |
+    FROM alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+    ARG TARGETARCH
+    ARG ALPINE_MIRROR
+    RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$${ALPINE_MIRROR}|g" \
+            /etc/apk/repositories \
+        && apk add --no-cache ca-certificates iproute2 openssl \
+        && case "$${TARGETARCH}" in \
+            arm64) \
+                triple=aarch64-unknown-linux-musl; \
+                server_sha=6ac43186b5197afaf0bc707c1241f2b3931d61356fc8354807884b68861a4892; \
+                client_sha=c29eaaf3bc05115acc7453ac26bacf9aff65211b1e8ca7f771b818248bec8601 ;; \
+            amd64) \
+                triple=x86_64-unknown-linux-musl; \
+                server_sha=adb808944ca829857bf408d2ee438a156e8171543dbbed3e94964b66b4135393; \
+                client_sha=180c562691247a7feddf553706bc8fd5b5b9de3027154f94a767ea907a45e2de ;; \
+            *) echo "unsupported TARGETARCH: $${TARGETARCH}" >&2; exit 2 ;; \
+        esac \
+        && wget -q -O /usr/local/bin/tuic-server \
+            "https://github.com/tuic-protocol/tuic/releases/download/tuic-server-1.0.0/tuic-server-1.0.0-$${triple}" \
+        && wget -q -O /usr/local/bin/tuic-client \
+            "https://github.com/tuic-protocol/tuic/releases/download/tuic-client-1.0.0/tuic-client-1.0.0-$${triple}" \
+        && echo "$${server_sha}  /usr/local/bin/tuic-server" | sha256sum -c - \
+        && echo "$${client_sha}  /usr/local/bin/tuic-client" | sha256sum -c - \
+        && chmod +x /usr/local/bin/tuic-server /usr/local/bin/tuic-client
+  args:
+    ALPINE_MIRROR: https://mirror.twds.com.tw/alpine
+
+x-singbox-build: &singbox-build
+  context: .
+  dockerfile_inline: |
+    FROM ghcr.io/sagernet/sing-box:v1.13.12@sha256:da0e2331395c9025a85fa58892772b4cdbe5f2e530e93defeec3968175d06c6d
+    ARG ALPINE_MIRROR
+    RUN sed -i "s|https://dl-cdn.alpinelinux.org/alpine|$${ALPINE_MIRROR}|g" \
+            /etc/apk/repositories \
+        && apk add --no-cache openssl
+  args:
+    ALPINE_MIRROR: https://mirror.twds.com.tw/alpine
+
+services:
+  netem:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: netem
+      args:
+        DEBIAN_MIRROR: http://mirror.twds.com.tw/debian
+        DEBIAN_SECURITY_MIRROR: http://mirror.twds.com.tw/debian-security
+    image: proteus/netem:bookworm
+    container_name: proteus-netem-router
+    cap_add:
+      - NET_ADMIN
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    networks:
+      client-net:
+        ipv4_address: 10.77.1.2
+      server-net:
+        ipv4_address: 10.77.2.2
+
+  proteus-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: bench
+      args:
+        DEBIAN_MIRROR: https://mirror.twds.com.tw/debian
+        DEBIAN_SECURITY_MIRROR: https://mirror.twds.com.tw/debian-security
+    image: proteus/bench:local
+    container_name: proteus-netem-proteus-server
+    depends_on:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-server-entrypoint.sh
+    environment:
+      CONGESTION: brutal
+      BRUTAL_TARGET_MBPS: "1000"
+      RESOURCE_MONITOR: "${RESOURCE_MONITOR:-1}"
+    volumes:
+      - proteus_bench_state:/run/proteus-bench
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.11
+
+  proteus-client:
+    image: proteus/bench:local
+    depends_on:
+      - netem
+      - proteus-server
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-client-entrypoint.sh
+    environment:
+      PAYLOAD_MIB: "${PAYLOAD_MIB:-64}"
+      RUNS_PER_CELL: "${RUNS_PER_CELL:-3}"
+      STREAM_WINDOW_MIB: "${STREAM_WINDOW_MIB:-64}"
+      CONNECTION_WINDOW_MIB: "${CONNECTION_WINDOW_MIB:-256}"
+      CONGESTION: brutal
+      BRUTAL_TARGET_MBPS: "1000"
+    volumes:
+      - proteus_bench_state:/run/proteus-bench
+    networks:
+      client-net: {}
+
+  proteus-proxy-setup:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: proxy-bench
+      args:
+        DEBIAN_MIRROR: https://mirror.twds.com.tw/debian
+        DEBIAN_SECURITY_MIRROR: https://mirror.twds.com.tw/debian-security
+    image: proteus/proxy-bench:local
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-proxy-setup.sh
+    volumes:
+      - proteus_proxy_state:/run/proteus-proxy
+    networks:
+      client-net: {}
+
+  proteus-proxy-server:
+    image: proteus/proxy-bench:local
+    container_name: proteus-netem-proteus-proxy-server
+    depends_on:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /bench/proteus-proxy-server-entrypoint.sh
+    environment:
+      BRUTAL_TARGET_MBPS: "${PROTEUS_BRUTAL_TARGET_MBPS:-1000}"
+      ACK_ELICITING_THRESHOLD: "${PROTEUS_ACK_ELICITING_THRESHOLD:-10}"
+      INITIAL_MTU: "${PROTEUS_INITIAL_MTU:-1350}"
+    volumes:
+      - ./container:/bench:ro
+      - proteus_proxy_state:/run/proteus-proxy
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.14
+
+  proteus-proxy-client:
+    image: proteus/proxy-bench:local
+    container_name: proteus-netem-proteus-proxy-client
+    depends_on:
+      - netem
+      - proteus-proxy-server
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /bench/proteus-proxy-client-entrypoint.sh
+    environment:
+      BRUTAL_TARGET_MBPS: "${PROTEUS_BRUTAL_TARGET_MBPS:-1000}"
+      ACK_ELICITING_THRESHOLD: "${PROTEUS_ACK_ELICITING_THRESHOLD:-10}"
+      INITIAL_MTU: "${PROTEUS_INITIAL_MTU:-1350}"
+    volumes:
+      - ./container:/bench:ro
+      - proteus_proxy_state:/run/proteus-proxy
+    networks:
+      client-net:
+        ipv4_address: 10.77.1.14
+
+  hy2-server:
+    build: *hy2-build
+    image: proteus/hysteria-bench:f2ad1de
+    container_name: proteus-netem-hy2-server
+    depends_on:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/hy2-server-entrypoint.sh
+    volumes:
+      - ./container:/bench:ro
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.10
+
+  hy2-client:
+    image: proteus/hysteria-bench:f2ad1de
+    depends_on:
+      - netem
+      - hy2-server
+    cap_add:
+      - NET_ADMIN
+    environment:
+      RESOURCE_MONITOR: "${RESOURCE_MONITOR:-1}"
+    entrypoint:
+      - /bin/sh
+      - /bench/hy2-client-entrypoint.sh
+    command:
+      - speedtest
+      - --disable-update-check
+      - -f
+      - json
+      - -c
+      - /bench/hy2-client.yaml
+      - --data-size
+      - "${HY2_DATA_SIZE:-67108864}"
+      - --use-bytes
+    volumes:
+      - ./container:/bench:ro
+    networks:
+      client-net: {}
+
+  hy2-proxy-client:
+    image: proteus/hysteria-bench:f2ad1de
+    container_name: proteus-netem-hy2-proxy-client
+    depends_on:
+      - netem
+      - hy2-server
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/hy2-client-entrypoint.sh
+    command:
+      - client
+      - --disable-update-check
+      - -f
+      - json
+      - -c
+      - /bench/hy2-proxy-client.yaml
+    volumes:
+      - ./container:/bench:ro
+    networks:
+      client-net:
+        ipv4_address: 10.77.1.10
+
+  tuic-server:
+    build: *tuic-build
+    image: proteus/tuic-bench:1.0.0
+    container_name: proteus-netem-tuic-server
+    depends_on:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/tuic-server-entrypoint.sh
+    volumes:
+      - ./container:/bench:ro
+      - tuic_bench_state:/run/tuic
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/tuic/server-ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.12
+
+  tuic-client:
+    image: proteus/tuic-bench:1.0.0
+    container_name: proteus-netem-tuic-client
+    depends_on:
+      netem:
+        condition: service_started
+      tuic-server:
+        condition: service_healthy
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/tuic-client-entrypoint.sh
+    volumes:
+      - ./container:/bench:ro
+      - tuic_bench_state:/run/tuic
+    networks:
+      client-net:
+        ipv4_address: 10.77.1.12
+
+  tcp-echo-server:
+    image: proteus/bench:local
+    container_name: proteus-netem-tcp-echo
+    depends_on:
+      - netem
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-bench
+      - tcp-echo-server
+      - --bind
+      - 0.0.0.0:18080
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.20
+
+  tuic-bench-driver:
+    image: proteus/bench:local
+    depends_on:
+      - netem
+      - tuic-client
+      - tcp-echo-server
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-bench
+      - socks5-roundtrip
+      - --socks-addr
+      - 10.77.1.12:1080
+      - --target-addr
+      - 10.77.2.20:18080
+      - --payload-mib
+      - "${PAYLOAD_MIB:-64}"
+      - --runs
+      - "1"
+      - --timeout-secs
+      - "300"
+    networks:
+      client-net: {}
+
+  singbox-tuic-server:
+    build: *singbox-build
+    image: proteus/sing-box-tuic-bench:1.13.12
+    container_name: proteus-netem-singbox-tuic-server
+    depends_on:
+      - netem
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/singbox-tuic-server-entrypoint.sh
+    volumes:
+      - ./container:/bench:ro
+      - singbox_tuic_state:/run/singbox-tuic
+    healthcheck:
+      test: ["CMD", "test", "-e", "/run/singbox-tuic/server-ready"]
+      interval: 1s
+      timeout: 1s
+      retries: 30
+    networks:
+      server-net:
+        ipv4_address: 10.77.2.13
+
+  singbox-tuic-client:
+    image: proteus/sing-box-tuic-bench:1.13.12
+    container_name: proteus-netem-singbox-tuic-client
+    depends_on:
+      netem:
+        condition: service_started
+      singbox-tuic-server:
+        condition: service_healthy
+    cap_add:
+      - NET_ADMIN
+    entrypoint:
+      - /bin/sh
+      - /bench/singbox-tuic-client-entrypoint.sh
+    volumes:
+      - ./container:/bench:ro
+      - singbox_tuic_state:/run/singbox-tuic
+    networks:
+      client-net:
+        ipv4_address: 10.77.1.13
+
+  singbox-tuic-bench-driver:
+    image: proteus/bench:local
+    depends_on:
+      - netem
+      - singbox-tuic-client
+      - tcp-echo-server
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-bench
+      - socks5-roundtrip
+      - --socks-addr
+      - 10.77.1.13:1180
+      - --target-addr
+      - 10.77.2.20:18080
+      - --payload-mib
+      - "${PAYLOAD_MIB:-64}"
+      - --runs
+      - "1"
+      - --timeout-secs
+      - "300"
+    networks:
+      client-net: {}
+
+  proteus-proxy-bench-driver:
+    image: proteus/bench:local
+    depends_on:
+      - proteus-proxy-client
+      - tcp-echo-server
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-bench
+      - socks5-roundtrip
+      - --socks-addr
+      - 10.77.1.14:1080
+      - --target-addr
+      - 10.77.2.20:18080
+      - --payload-mib
+      - "${PAYLOAD_MIB:-64}"
+      - --runs
+      - "1"
+      - --timeout-secs
+      - "300"
+    networks:
+      client-net: {}
+
+  hy2-proxy-bench-driver:
+    image: proteus/bench:local
+    depends_on:
+      - hy2-proxy-client
+      - tcp-echo-server
+    entrypoint:
+      - /usr/bin/dumb-init
+      - --
+      - /usr/local/bin/proteus-bench
+      - socks5-roundtrip
+      - --socks-addr
+      - 10.77.1.10:1080
+      - --target-addr
+      - 10.77.2.20:18080
+      - --payload-mib
+      - "${PAYLOAD_MIB:-64}"
+      - --runs
+      - "1"
+      - --timeout-secs
+      - "300"
+    networks:
+      client-net: {}
+
+volumes:
+  proteus_bench_state:
+  proteus_proxy_state:
+  tuic_bench_state:
+  singbox_tuic_state:
+
+networks:
+  client-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.77.1.0/24
+  server-net:
+    driver: bridge
+    internal: true
+    ipam:
+      config:
+        - subnet: 10.77.2.0/24

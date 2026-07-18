@@ -1,0 +1,27 @@
+listen_alpha: "0.0.0.0:8444"
+listen_beta: "0.0.0.0:9444"
+beta_congestion: brutal
+beta_brutal_target_mbps: 1000
+beta_initial_mtu: 1350
+beta_mtu_upper_bound: 1452
+beta_pad_quic_to_mtu: false
+beta_allow_spin_bit: false
+beta_ack_eliciting_threshold: 10
+pow_difficulty: 0
+
+tls:
+  cert_chain: /run/proteus-proxy/keys/tls/fullchain.pem
+  private_key: /run/proteus-proxy/keys/tls/privkey.pem
+
+keys:
+  mlkem_pk: /run/proteus-proxy/keys/server_lt.mlkem768.pk
+  mlkem_sk: /run/proteus-proxy/keys/server_lt.mlkem768.sk
+  x25519_pk: /run/proteus-proxy/keys/server_lt.x25519.pk
+  x25519_sk: /run/proteus-proxy/keys/server_lt.x25519.sk
+
+client_allowlist:
+  - user_id: bench
+    ed25519_pk: /run/proteus-proxy/keys/client/client.ed25519.pk
+
+outbound_filter:
+  disabled: true

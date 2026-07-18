@@ -54,6 +54,8 @@ wg*.conf
 
 # 抓包檔（很可能含真實 IP / cookie / token）
 *.pcap
+.codex/
+projects/proteus/bench/results/
 *.pcapng
 *.har
 !assets/captures/*.redacted.pcap
