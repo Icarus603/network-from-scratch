@@ -10,10 +10,11 @@
 use core::convert::TryFrom;
 
 use proteus_spec::{
-    ANTI_DOS_SOLUTION_LEN, AUTH_EXT_LEN_V10, AUTH_EXT_TYPE, CLIENT_ID_LEN, CLIENT_NONCE_LEN,
-    COVER_PROFILE_ID_LEN, ED25519_SIG_LEN, EPOCH_BITS, HMAC_TAG_LEN, ML_DSA_65_SIG_TRUNCATED_LEN,
-    ML_KEM_768_CT_LEN, PROFILE_HINT_ALPHA, PROFILE_HINT_BETA, PROFILE_HINT_GAMMA,
-    PROTEUS_VERSION_V10, SEQNUM_BITS, SEQNUM_MAX, SHAPE_SEED_LEN, TIMESTAMP_LEN, X25519_PUB_LEN,
+    AEAD_SUITE_MASK_ALL, ANTI_DOS_SOLUTION_LEN, AUTH_EXT_LEN_V10, AUTH_EXT_TYPE, CLIENT_ID_LEN,
+    CLIENT_NONCE_LEN, COVER_PROFILE_ID_LEN, ED25519_SIG_LEN, EPOCH_BITS, HMAC_TAG_LEN,
+    ML_DSA_65_SIG_TRUNCATED_LEN, ML_KEM_768_CT_LEN, PROFILE_HINT_ALPHA, PROFILE_HINT_BETA,
+    PROFILE_HINT_GAMMA, PROTEUS_VERSION_V10, PROTEUS_VERSION_V11, SEQNUM_BITS, SEQNUM_MAX,
+    SHAPE_SEED_LEN, TIMESTAMP_LEN, X25519_PUB_LEN,
 };
 use thiserror::Error;
 use zeroize::Zeroize as _;
@@ -49,6 +50,10 @@ pub enum WireError {
     /// The `reserved` 16-bit field was non-zero (strict-then-loose per spec §4.1.4).
     #[error("reserved field non-zero: 0x{0:04x}")]
     ReservedNonZero(u16),
+
+    /// The v1.1 AEAD offer was empty or contained unassigned bits.
+    #[error("invalid AEAD suite mask: 0x{0:04x}")]
+    BadAeadSuiteMask(u16),
 
     /// AuthExtension total length did not match `AUTH_EXT_LEN_V10`.
     #[error("auth_ext length mismatch: expected {expected}, got {got}")]
@@ -125,6 +130,8 @@ pub struct AuthExtension {
     pub version: u8,
     /// Requested transport profile.
     pub profile_hint: ProfileHint,
+    /// v1.1 AEAD offer bitmask; must be zero for v1.0.
+    pub aead_suite_mask: u16,
     /// Fresh CSPRNG nonce, doubles as KDF salt.
     pub client_nonce: [u8; CLIENT_NONCE_LEN],
     /// Ephemeral X25519 share (RFC 7748 little-endian Montgomery encoding).
@@ -169,7 +176,7 @@ impl AuthExtension {
         let mut out = Vec::with_capacity(AUTH_EXT_LEN_V10);
         out.push(self.version);
         out.push(self.profile_hint.to_byte());
-        out.extend_from_slice(&[0u8, 0u8]); // reserved
+        out.extend_from_slice(&self.aead_suite_mask.to_be_bytes());
         out.extend_from_slice(&self.client_nonce);
         out.extend_from_slice(&self.client_x25519_pub);
         out.extend_from_slice(&self.client_mlkem768_ct);
@@ -211,13 +218,18 @@ impl AuthExtension {
         let mut cur = Cursor::new(buf);
 
         let version = cur.read_u8()?;
-        if version != PROTEUS_VERSION_V10 {
+        if version != PROTEUS_VERSION_V10 && version != PROTEUS_VERSION_V11 {
             return Err(WireError::BadVersion(version));
         }
         let profile_hint = ProfileHint::from_byte(cur.read_u8()?)?;
-        let reserved = cur.read_u16_be()?;
-        if reserved != 0 {
-            return Err(WireError::ReservedNonZero(reserved));
+        let aead_suite_mask = cur.read_u16_be()?;
+        if version == PROTEUS_VERSION_V10 && aead_suite_mask != 0 {
+            return Err(WireError::ReservedNonZero(aead_suite_mask));
+        }
+        if version == PROTEUS_VERSION_V11
+            && (aead_suite_mask == 0 || aead_suite_mask & !AEAD_SUITE_MASK_ALL != 0)
+        {
+            return Err(WireError::BadAeadSuiteMask(aead_suite_mask));
         }
         let client_nonce = cur.read_array::<CLIENT_NONCE_LEN>()?;
         let client_x25519_pub = cur.read_array::<X25519_PUB_LEN>()?;
@@ -237,6 +249,7 @@ impl AuthExtension {
         Ok(Self {
             version,
             profile_hint,
+            aead_suite_mask,
             client_nonce,
             client_x25519_pub,
             client_mlkem768_ct,
@@ -431,6 +444,7 @@ mod tests {
         AuthExtension {
             version: PROTEUS_VERSION_V10,
             profile_hint: ProfileHint::Gamma,
+            aead_suite_mask: 0,
             client_nonce: [0x11; CLIENT_NONCE_LEN],
             client_x25519_pub: [0x22; X25519_PUB_LEN],
             client_mlkem768_ct: [0x33; ML_KEM_768_CT_LEN],
@@ -454,6 +468,7 @@ mod tests {
         let decoded = AuthExtension::decode_payload(&encoded).expect("decode ok");
         assert_eq!(decoded.version, original.version);
         assert_eq!(decoded.profile_hint, original.profile_hint);
+        assert_eq!(decoded.aead_suite_mask, original.aead_suite_mask);
         assert_eq!(decoded.client_nonce, original.client_nonce);
         assert_eq!(decoded.client_x25519_pub, original.client_x25519_pub);
         assert_eq!(decoded.client_mlkem768_ct, original.client_mlkem768_ct);
@@ -513,6 +528,32 @@ mod tests {
             Err(WireError::ReservedNonZero(1)) => {}
             other => panic!("expected ReservedNonZero, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn auth_ext_v11_round_trip_with_aead_offer() {
+        let mut original = fixture_auth();
+        original.version = PROTEUS_VERSION_V11;
+        original.aead_suite_mask = proteus_spec::AEAD_SUITE_MASK_ALL;
+        let encoded = original.encode_payload();
+        let decoded = AuthExtension::decode_payload(&encoded).expect("v1.1 decode");
+        assert_eq!(decoded.version, PROTEUS_VERSION_V11);
+        assert_eq!(decoded.aead_suite_mask, proteus_spec::AEAD_SUITE_MASK_ALL);
+    }
+
+    #[test]
+    fn auth_ext_v11_rejects_empty_or_unknown_aead_offer() {
+        let mut wire = fixture_auth().encode_payload();
+        wire[0] = PROTEUS_VERSION_V11;
+        assert!(matches!(
+            AuthExtension::decode_payload(&wire),
+            Err(WireError::BadAeadSuiteMask(0))
+        ));
+        wire[2..4].copy_from_slice(&0x8000u16.to_be_bytes());
+        assert!(matches!(
+            AuthExtension::decode_payload(&wire),
+            Err(WireError::BadAeadSuiteMask(0x8000))
+        ));
     }
 
     #[test]

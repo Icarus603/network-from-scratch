@@ -18,6 +18,9 @@
 /// v0.1 used `0x01`; v1.0 uses `0x10`. v1.1+ will increment from here.
 pub const PROTEUS_VERSION_V10: u8 = 0x10;
 
+/// Proteus protocol version 1.1 — authenticated inner-AEAD agility.
+pub const PROTEUS_VERSION_V11: u8 = 0x11;
+
 /// Transport profile γ (MASQUE / H3 / QUIC over UDP/443). spec §3.
 pub const PROFILE_HINT_GAMMA: u8 = 0x03;
 
@@ -33,6 +36,22 @@ pub const PROFILE_HINT_ALPHA: u8 = 0x01;
 
 /// TLS ExtensionType for the Proteus auth extension. spec §4.1.
 pub const AUTH_EXT_TYPE: u16 = 0xfe0d;
+
+/// AEAD suite codepoint for ChaCha20-Poly1305.
+pub const AEAD_SUITE_CHACHA20_POLY1305: u8 = 0x01;
+
+/// AEAD suite codepoint for AES-256-GCM.
+pub const AEAD_SUITE_AES_256_GCM: u8 = 0x02;
+
+/// v1.1 ClientHello offer bit for ChaCha20-Poly1305.
+pub const AEAD_SUITE_MASK_CHACHA20_POLY1305: u16 = 1 << 0;
+
+/// v1.1 ClientHello offer bit for AES-256-GCM.
+pub const AEAD_SUITE_MASK_AES_256_GCM: u16 = 1 << 1;
+
+/// All currently assigned v1.1 AEAD offer bits.
+pub const AEAD_SUITE_MASK_ALL: u16 =
+    AEAD_SUITE_MASK_CHACHA20_POLY1305 | AEAD_SUITE_MASK_AES_256_GCM;
 
 /// Length of the `client_nonce` field. spec §4.1.1.
 pub const CLIENT_NONCE_LEN: usize = 16;
@@ -83,6 +102,10 @@ pub const AUTH_EXT_LEN_V10: usize = 1 + 1 + 2
     + ED25519_SIG_LEN
     + ML_DSA_65_SIG_TRUNCATED_LEN
     + HMAC_TAG_LEN;
+
+/// v1.1 reuses the former two-byte reserved field as `aead_suite_mask`,
+/// so its AuthExtension remains byte-for-byte the same length as v1.0.
+pub const AUTH_EXT_LEN_V11: usize = AUTH_EXT_LEN_V10;
 
 // =============================================================================
 // §3 — cell padding sizes (spec §4.6)
@@ -294,7 +317,7 @@ mod tests {
         // Match spec §4.1.1 by hand-summed total.
         let by_hand: usize = 1   // version
             + 1                   // profile_hint
-            + 2                   // reserved
+            + 2                   // v1.0 reserved / v1.1 aead_suite_mask
             + 16                  // client_nonce
             + 32                  // client_x25519_pub
             + 1088                // client_mlkem768_ct

@@ -151,6 +151,7 @@ fn auth_extension_round_trip_random_payload() {
                 1 => proteus_wire::ProfileHint::Beta,
                 _ => proteus_wire::ProfileHint::Gamma,
             },
+            aead_suite_mask: 0,
             client_nonce: rng.bytes(16).try_into().unwrap(),
             client_x25519_pub: rng.bytes(32).try_into().unwrap(),
             client_mlkem768_ct: rng.bytes(1088).try_into().unwrap(),

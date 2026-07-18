@@ -35,6 +35,10 @@ pub enum CryptoError {
     #[error("AEAD operation produced an invalid-length output")]
     AeadLength,
 
+    /// The peer selected an unknown or unoffered AEAD suite.
+    #[error("unsupported or unoffered AEAD suite")]
+    AeadSuite,
+
     /// X25519 produced an all-zero shared secret (invalid contributory key).
     /// Per RFC 7748 §6.1, this MUST be treated as a peer-supplied failure.
     #[error("X25519 zero-output (low-order point detected)")]

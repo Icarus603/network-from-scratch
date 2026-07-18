@@ -35,6 +35,7 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["rand_c
 ml-kem = { version = "0.2", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 aes-gcm = { version = "0.10", default-features = false, features = ["alloc", "aes"] }
+aws-lc-rs = { version = "1.17.1", default-features = false, features = ["non-fips"] }
 sha2 = { version = "0.10", default-features = false }
 hkdf = "0.12"
 hmac = "0.12"

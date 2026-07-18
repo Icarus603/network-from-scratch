@@ -13,6 +13,7 @@ x25519-dalek.workspace = true
 ed25519-dalek.workspace = true
 ml-kem.workspace = true
 chacha20poly1305.workspace = true
+aws-lc-rs.workspace = true
 sha2.workspace = true
 hkdf.workspace = true
 hmac.workspace = true

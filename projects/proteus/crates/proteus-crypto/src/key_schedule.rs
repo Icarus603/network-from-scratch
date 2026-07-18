@@ -32,6 +32,14 @@ impl DirectionKeys {
     pub fn aead_key(&self) -> crate::aead::AeadKey {
         crate::aead::AeadKey::new(&self.key, &self.iv)
     }
+
+    /// Construct a cached key for an authenticated negotiated suite.
+    pub fn aead_key_with_suite(
+        &self,
+        suite: crate::aead::AeadSuite,
+    ) -> Result<crate::aead::AeadKey, CryptoError> {
+        crate::aead::AeadKey::new_with_suite(suite, &self.key, &self.iv)
+    }
 }
 
 /// All secrets derived from the handshake. Owns its key material with

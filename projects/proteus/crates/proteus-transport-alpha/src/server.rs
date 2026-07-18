@@ -115,10 +115,15 @@ pub fn rejection_log_throttle_prometheus() -> String {
 use ml_kem::kem::DecapsulationKey;
 use ml_kem::{EncodedSizeUser, MlKem768Params};
 use proteus_crypto::{
+    aead::AeadSuite,
     kex,
     key_schedule::{self, Transcript},
 };
 use proteus_handshake::{auth_tag, replay::ReplayWindow, replay::Verdict, state::State};
+use proteus_spec::{
+    AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_CHACHA20_POLY1305, PROTEUS_VERSION_V10,
+    PROTEUS_VERSION_V11,
+};
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use tokio::io::AsyncWriteExt;
 #[allow(unused_imports)]
@@ -130,6 +135,48 @@ use zeroize::Zeroizing;
 
 use crate::error::{AlphaError, AlphaResult};
 use crate::session::AlphaSession;
+
+fn client_signature_input(ext: &AuthExtension) -> Vec<u8> {
+    let mut message = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
+    message.push(ext.version);
+    if ext.version == PROTEUS_VERSION_V11 {
+        message.push(ext.profile_hint.to_byte());
+        message.extend_from_slice(&ext.aead_suite_mask.to_be_bytes());
+    }
+    message.extend_from_slice(&ext.client_nonce);
+    message.extend_from_slice(&ext.client_x25519_pub);
+    message.extend_from_slice(&ext.client_mlkem768_ct);
+    message
+}
+
+fn select_aead_suite(ext: &AuthExtension) -> AlphaResult<AeadSuite> {
+    if ext.version == PROTEUS_VERSION_V10 {
+        return Ok(AeadSuite::ChaCha20Poly1305);
+    }
+    if ext.version != PROTEUS_VERSION_V11 {
+        return Err(AlphaError::Closed);
+    }
+    if ext.aead_suite_mask & AEAD_SUITE_MASK_AES_256_GCM != 0 {
+        return Ok(AeadSuite::Aes256Gcm);
+    }
+    if ext.aead_suite_mask & AEAD_SUITE_MASK_CHACHA20_POLY1305 != 0 {
+        return Ok(AeadSuite::ChaCha20Poly1305);
+    }
+    Err(AlphaError::Closed)
+}
+
+fn server_hello_body(version: u8, server_x25519_eph_pub: &[u8; 32], suite: AeadSuite) -> Vec<u8> {
+    let mut body = Vec::with_capacity(if version == PROTEUS_VERSION_V11 {
+        33
+    } else {
+        32
+    });
+    body.extend_from_slice(server_x25519_eph_pub);
+    if version == PROTEUS_VERSION_V11 {
+        body.push(suite.code());
+    }
+    body
+}
 
 /// Server long-term key material.
 pub struct ServerKeys {
@@ -2067,6 +2114,17 @@ async fn handshake_with_prefix(
         original.extend_from_slice(&tail);
         return Err(HandshakeFailure::new(original, None));
     }
+    let selected_suite = match select_aead_suite(&ext) {
+        Ok(suite) => suite,
+        Err(_) => {
+            let mut original = proteus_wire::alpha::encode_handshake(
+                proteus_wire::alpha::FRAME_CLIENT_HELLO,
+                &ch_frame_body,
+            );
+            original.extend_from_slice(&tail);
+            return Err(HandshakeFailure::new(original, None));
+        }
+    };
 
     let auth_key = auth_tag::derive_auth_key(
         ctx.pq_fingerprint(),
@@ -2178,14 +2236,7 @@ async fn handshake_with_prefix(
     // re-derive every key for that session via the standard
     // Proteus key schedule.
 
-    let sig_msg = {
-        let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
-        m.push(ext.version);
-        m.extend_from_slice(&ext.client_nonce);
-        m.extend_from_slice(&ext.client_x25519_pub);
-        m.extend_from_slice(&ext.client_mlkem768_ct);
-        m
-    };
+    let sig_msg = client_signature_input(&ext);
     // ----- Decrypt client_id → look up exactly one allowlist entry → 1 verify -----
     //
     // The pre-fix code did `for (uid, vk) in allowlist { sig::verify(...) }`
@@ -2275,10 +2326,10 @@ async fn handshake_with_prefix(
     // one. Transcript-hashing it binds the ephemeral into the Finished
     // MAC chain so a MITM cannot swap the pub for a key it controls
     // without invalidating the MAC.
-    let sh_body = &server_x25519_eph_pub;
+    let sh_body = server_hello_body(ext.version, &server_x25519_eph_pub, selected_suite);
     let sh_frame =
-        proteus_wire::alpha::encode_handshake(proteus_wire::alpha::FRAME_SERVER_HELLO, sh_body);
-    transcript.update(sh_body);
+        proteus_wire::alpha::encode_handshake(proteus_wire::alpha::FRAME_SERVER_HELLO, &sh_body);
+    transcript.update(&sh_body);
     let th_ch_sh = transcript.snapshot();
     if write.write_all(&sh_frame).await.is_err() {
         return Err(HandshakeFailure::new(Vec::new(), None));
@@ -2334,7 +2385,7 @@ async fn handshake_with_prefix(
     let th_ch_sf = key_schedule::sha256(&{
         let mut h = Vec::new();
         h.extend_from_slice(&ch_frame_body);
-        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sh_body);
         h.extend_from_slice(&sf_mac);
         h
     });
@@ -2361,7 +2412,7 @@ async fn handshake_with_prefix(
     let th_ch_cf = key_schedule::sha256(&{
         let mut h = Vec::new();
         h.extend_from_slice(&ch_frame_body);
-        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sh_body);
         h.extend_from_slice(&sf_mac);
         h.extend_from_slice(&expected_cf);
         h
@@ -2389,7 +2440,7 @@ async fn handshake_with_prefix(
     // client's announced `client_x25519_pub`. Both halves are known
     // post-handshake, so no extra round-trip is needed to enable PCS-
     // strong ratcheting.
-    let mut session = AlphaSession::with_prefix(
+    let mut session = AlphaSession::with_prefix_and_suite(
         write,
         read,
         s_keys,
@@ -2397,6 +2448,7 @@ async fn handshake_with_prefix(
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
+        selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
     .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
@@ -2607,6 +2659,7 @@ where
             ext.profile_hint.to_byte(),
         )));
     }
+    let selected_suite = select_aead_suite(&ext)?;
 
     // ----- 2. Verify auth_tag -----
     let auth_key = auth_tag::derive_auth_key(
@@ -2694,14 +2747,7 @@ where
     };
 
     // ----- 6. Ed25519 sig verify (exactly one verify, not N) -----
-    let sig_msg = {
-        let mut m = Vec::with_capacity(1 + 16 + 32 + 1088);
-        m.push(ext.version);
-        m.extend_from_slice(&ext.client_nonce);
-        m.extend_from_slice(&ext.client_x25519_pub);
-        m.extend_from_slice(&ext.client_mlkem768_ct);
-        m
-    };
+    let sig_msg = client_signature_input(&ext);
     let mut matched_user_id: Option<[u8; 8]> = None;
     if !ctx.keys.client_allowlist.is_empty() {
         if let Some((uid, vk)) = ctx
@@ -2741,9 +2787,9 @@ where
     }
     transcript.update(&ch.body);
     // SH carries the EPHEMERAL pub (PFS) — see `handshake_with_cover`.
-    let sh_body = &server_x25519_eph_pub;
-    let sh_frame = alpha::encode_handshake(alpha::FRAME_SERVER_HELLO, sh_body);
-    transcript.update(sh_body);
+    let sh_body = server_hello_body(ext.version, &server_x25519_eph_pub, selected_suite);
+    let sh_frame = alpha::encode_handshake(alpha::FRAME_SERVER_HELLO, &sh_body);
+    transcript.update(&sh_body);
     let th_ch_sh = transcript.snapshot();
     write.write_all(&sh_frame).await?;
 
@@ -2790,7 +2836,7 @@ where
     let th_ch_sf = key_schedule::sha256(&{
         let mut h = Vec::new();
         h.extend_from_slice(&ch.body);
-        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sh_body);
         h.extend_from_slice(&sf_mac);
         h
     });
@@ -2821,7 +2867,7 @@ where
     let th_ch_cf = key_schedule::sha256(&{
         let mut h = Vec::new();
         h.extend_from_slice(&ch.body);
-        h.extend_from_slice(sh_body);
+        h.extend_from_slice(&sh_body);
         h.extend_from_slice(&sf_mac);
         h.extend_from_slice(&expected_cf);
         h
@@ -2836,7 +2882,7 @@ where
     let (c_keys, s_keys) = final_secrets.direction_keys()?;
     // Server: sends with s_ap_secret keys, receives with c_ap_secret keys.
     // DH ratchet bootstrap — same comment as in `handshake_with_cover`.
-    let mut session = AlphaSession::with_prefix(
+    let mut session = AlphaSession::with_prefix_and_suite(
         write,
         read,
         s_keys,
@@ -2844,6 +2890,7 @@ where
         final_secrets.s_ap_secret.clone(),
         final_secrets.c_ap_secret.clone(),
         rx_buf,
+        selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
     .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
@@ -2926,6 +2973,88 @@ fn ct_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 // itself. Server-side accept loops still use the local
 // `use crate::socket_opts::is_transient_accept_error;`
 // re-export so call sites are unchanged.
+
+#[cfg(test)]
+mod aead_negotiation_tests {
+    use super::*;
+
+    fn extension(version: u8, mask: u16) -> AuthExtension {
+        AuthExtension {
+            version,
+            profile_hint: ProfileHint::Beta,
+            aead_suite_mask: mask,
+            client_nonce: [0x11; proteus_spec::CLIENT_NONCE_LEN],
+            client_x25519_pub: [0x22; proteus_spec::X25519_PUB_LEN],
+            client_mlkem768_ct: [0x33; proteus_spec::ML_KEM_768_CT_LEN],
+            client_id: [0x44; proteus_spec::CLIENT_ID_LEN],
+            timestamp_unix_seconds: 1,
+            cover_profile_id: proteus_spec::COVER_PROFILE_STREAMING,
+            shape_seed: 2,
+            anti_dos_difficulty: 0,
+            anti_dos_solution: [0; proteus_spec::ANTI_DOS_SOLUTION_LEN],
+            client_kex_sig: [0; proteus_spec::ED25519_SIG_LEN],
+            client_kex_sig_pq: [0; proteus_spec::ML_DSA_65_SIG_TRUNCATED_LEN],
+            auth_tag: [0; proteus_spec::HMAC_TAG_LEN],
+        }
+    }
+
+    #[test]
+    fn v11_prefers_hardware_aes_and_v10_stays_chacha() {
+        let modern = extension(
+            PROTEUS_VERSION_V11,
+            AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
+        );
+        assert_eq!(select_aead_suite(&modern).unwrap(), AeadSuite::Aes256Gcm);
+
+        let chacha_only = extension(PROTEUS_VERSION_V11, AEAD_SUITE_MASK_CHACHA20_POLY1305);
+        assert_eq!(
+            select_aead_suite(&chacha_only).unwrap(),
+            AeadSuite::ChaCha20Poly1305
+        );
+
+        let legacy = extension(PROTEUS_VERSION_V10, 0);
+        assert_eq!(
+            select_aead_suite(&legacy).unwrap(),
+            AeadSuite::ChaCha20Poly1305
+        );
+    }
+
+    #[test]
+    fn changing_v11_offer_invalidates_client_identity_signature() {
+        let mut offered = extension(
+            PROTEUS_VERSION_V11,
+            AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
+        );
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32]);
+        let verifying_key = signing_key.verifying_key();
+        let signature = proteus_crypto::sig::sign(&signing_key, &client_signature_input(&offered));
+
+        offered.aead_suite_mask = AEAD_SUITE_MASK_CHACHA20_POLY1305;
+        assert!(
+            proteus_crypto::sig::verify(
+                &verifying_key,
+                &client_signature_input(&offered),
+                &signature
+            )
+            .is_err(),
+            "an on-path suite-offer downgrade must invalidate client identity authentication"
+        );
+    }
+
+    #[test]
+    fn server_selection_changes_finished_transcript() {
+        let server_pub = [0x77; 32];
+        let aes = server_hello_body(PROTEUS_VERSION_V11, &server_pub, AeadSuite::Aes256Gcm);
+        let chacha = server_hello_body(
+            PROTEUS_VERSION_V11,
+            &server_pub,
+            AeadSuite::ChaCha20Poly1305,
+        );
+        assert_eq!(aes.len(), 33);
+        assert_eq!(chacha.len(), 33);
+        assert_ne!(key_schedule::sha256(&aes), key_schedule::sha256(&chacha));
+    }
+}
 
 #[cfg(test)]
 mod cover_forward_limit_tests {

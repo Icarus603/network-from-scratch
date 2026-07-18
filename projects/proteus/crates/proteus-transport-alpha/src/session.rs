@@ -96,7 +96,7 @@
 //! its own receiving direction.
 
 use proteus_crypto::key_schedule::DirectionKeys;
-use proteus_crypto::{aead, kdf};
+use proteus_crypto::{aead::AeadSuite, kdf};
 use proteus_spec::SEQNUM_MAX;
 use proteus_wire::alpha;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
@@ -187,6 +187,8 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     write: BufWriter<W>,
     /// Current epoch's AEAD key + iv.
     keys: DirectionKeys,
+    /// Authenticated suite selected by the handshake.
+    suite: AeadSuite,
     /// Cached ChaCha20-Poly1305 cipher built from `keys.key` once per
     /// epoch (rebuilt on every ratchet). Avoids paying the per-record
     /// `ChaCha20Poly1305::new(&key)` cost in the hot data path. See
@@ -247,16 +249,30 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
 }
 
 impl<W: AsyncWrite + Unpin> AlphaSender<W> {
+    #[allow(dead_code)]
     pub(crate) fn new(
         write: W,
         keys: DirectionKeys,
         secret: Zeroizing<[u8; 32]>,
         metrics: std::sync::Arc<SessionMetrics>,
     ) -> Self {
-        let cipher = keys.aead_key();
+        Self::new_with_suite(write, keys, secret, metrics, AeadSuite::ChaCha20Poly1305)
+    }
+
+    pub(crate) fn new_with_suite(
+        write: W,
+        keys: DirectionKeys,
+        secret: Zeroizing<[u8; 32]>,
+        metrics: std::sync::Arc<SessionMetrics>,
+        suite: AeadSuite,
+    ) -> Self {
+        let cipher = keys
+            .aead_key_with_suite(suite)
+            .expect("negotiated AEAD suite accepts 32-byte direction keys");
         Self {
             write: BufWriter::with_capacity(TX_BUF_CAPACITY, write),
             keys,
+            suite,
             cipher,
             // 2 KiB covers any quantum we ship today (max 1280 + tag).
             // Capacity sticks across calls so the loop is alloc-free.
@@ -568,7 +584,7 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         // bounded to one ratchet window by symmetric forward secrecy.
         let dh_takes_priority = self.dh_sk.is_some() && self.peer_dh_pub.is_some();
 
-        let (new_secret, body_payload): (Zeroizing<[u8; 32]>, Vec<u8>) = if dh_takes_priority {
+        let (new_secret, mut body_payload): (Zeroizing<[u8; 32]>, Vec<u8>) = if dh_takes_priority {
             let peer_pub = self.peer_dh_pub.expect("checked Some");
             let my_dh_sk_new = StaticSecret::random_from_rng(rand_core::OsRng);
             let my_dh_pub_new = XPublicKey::from(&my_dh_sk_new).to_bytes();
@@ -609,20 +625,20 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         let new_keys = direction_keys_from_secret(&new_secret)?;
 
         // Emit RATCHET frame under the OLD key + sentinel seqnum.
-        // Low-frequency path (one per ratchet), so we keep the
-        // free-function `aead::seal` + `encode_record` form for
-        // readability — no measurable perf cost at sub-Hz rates.
         let sentinel = (u64::from(self.epoch) << 40) | SEQNUM_MAX;
         let aad = sentinel.to_be_bytes();
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, sentinel, &aad, &body_payload)?;
-        let frame = alpha::encode_record(alpha::RECORD_RATCHET, &ct);
+        self.cipher.seal_into(sentinel, &aad, &mut body_payload)?;
+        let frame = alpha::encode_record(alpha::RECORD_RATCHET, &body_payload);
         self.write.write_all(&frame).await?;
 
         // Install the new state — and refresh the cached cipher so
         // subsequent records on this epoch encrypt under the new
         // key, not the old one.
         self.keys = new_keys;
-        self.cipher = self.keys.aead_key();
+        self.cipher = self
+            .keys
+            .aead_key_with_suite(self.suite)
+            .expect("ratcheted 32-byte key remains valid for negotiated suite");
         self.secret = new_secret;
         self.epoch = new_epoch;
         self.seqnum = 0;
@@ -728,8 +744,8 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
 
         let combined = self.combined();
         let aad = combined.to_be_bytes();
-        let ct = aead::seal(&self.keys.key, &self.keys.iv, combined, &aad, &pt)?;
-        let frame = alpha::encode_record(alpha::RECORD_CLOSE, &ct);
+        self.cipher.seal_into(combined, &aad, &mut pt)?;
+        let frame = alpha::encode_record(alpha::RECORD_CLOSE, &pt);
         self.write.write_all(&frame).await?;
         self.write.flush().await?;
         // After CLOSE we MUST NOT send more records on this direction
@@ -769,6 +785,8 @@ impl<W: AsyncWrite + Unpin> Drop for AlphaSender<W> {
 pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> {
     read: R,
     keys: DirectionKeys,
+    /// Authenticated suite selected by the handshake.
+    suite: AeadSuite,
     /// Cached ChaCha20-Poly1305 cipher built from `keys.key` once per
     /// epoch (rebuilt on every ratchet). Mirror of `AlphaSender::cipher`
     /// — eliminates the per-record key-schedule cost on the recv side.
@@ -814,7 +832,14 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         secret: Zeroizing<[u8; 32]>,
         metrics: std::sync::Arc<SessionMetrics>,
     ) -> Self {
-        Self::with_prefix(read, keys, secret, metrics, Vec::with_capacity(8192))
+        Self::with_prefix_and_suite(
+            read,
+            keys,
+            secret,
+            metrics,
+            Vec::with_capacity(8192),
+            AeadSuite::ChaCha20Poly1305,
+        )
     }
 
     /// Mirror of [`AlphaSender::derive_subkey`] for the receive
@@ -831,6 +856,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
 
     /// Like `new`, but seeds the receive buffer with bytes already read
     /// off the wire (e.g. tail bytes from a previous handshake read).
+    #[allow(dead_code)]
     pub(crate) fn with_prefix(
         read: R,
         keys: DirectionKeys,
@@ -838,10 +864,31 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         metrics: std::sync::Arc<SessionMetrics>,
         prefix: Vec<u8>,
     ) -> Self {
-        let cipher = keys.aead_key();
+        Self::with_prefix_and_suite(
+            read,
+            keys,
+            secret,
+            metrics,
+            prefix,
+            AeadSuite::ChaCha20Poly1305,
+        )
+    }
+
+    pub(crate) fn with_prefix_and_suite(
+        read: R,
+        keys: DirectionKeys,
+        secret: Zeroizing<[u8; 32]>,
+        metrics: std::sync::Arc<SessionMetrics>,
+        prefix: Vec<u8>,
+        suite: AeadSuite,
+    ) -> Self {
+        let cipher = keys
+            .aead_key_with_suite(suite)
+            .expect("negotiated AEAD suite accepts 32-byte direction keys");
         Self {
             read,
             keys,
+            suite,
             cipher,
             rx_aead_scratch: Vec::with_capacity(2 * 1024),
             secret,
@@ -1130,12 +1177,12 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                         alpha::RECORD_CLOSE => {
                             let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
                             let aad = combined.to_be_bytes();
-                            // Same low-frequency note as RATCHET above.
-                            let body = &self.rx_aead_scratch;
-                            if let Ok(pt) =
-                                aead::open(&self.keys.key, &self.keys.iv, combined, &aad, body)
+                            if self
+                                .cipher
+                                .open_in_place(combined, &aad, &mut self.rx_aead_scratch)
+                                .is_ok()
                             {
-                                let pt = pt.as_slice();
+                                let pt = self.rx_aead_scratch.as_slice();
                                 if pt.len() >= 2 {
                                     self.last_close_code = Some(pt[0]);
                                     let reason_len = pt[1] as usize;
@@ -1242,7 +1289,9 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         //   36 bytes : new_epoch || peer_dh_pub_new (asymmetric DH ratchet)
         let combined = (u64::from(self.epoch) << 40) | SEQNUM_MAX;
         let aad = combined.to_be_bytes();
-        let pt = aead::open(&self.keys.key, &self.keys.iv, combined, &aad, body)
+        let mut pt = body.to_vec();
+        self.cipher
+            .open_in_place(combined, &aad, &mut pt)
             .map_err(|_| AlphaError::BadServerFinished)?;
         let pt_bytes = pt.as_slice();
         if pt_bytes.len() != 4 && pt_bytes.len() != 36 {
@@ -1308,7 +1357,10 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
         self.keys = new_keys;
         // Refresh cached cipher so subsequent records on this epoch
         // decrypt under the new key (mirror of AlphaSender::send_ratchet_frame).
-        self.cipher = self.keys.aead_key();
+        self.cipher = self
+            .keys
+            .aead_key_with_suite(self.suite)
+            .expect("ratcheted 32-byte key remains valid for negotiated suite");
         self.secret = new_secret;
         self.epoch = new_epoch;
         self.next_seqnum = 0;
@@ -1491,20 +1543,45 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
         recv_secret: Zeroizing<[u8; 32]>,
         rx_prefix: Vec<u8>,
     ) -> Self {
+        Self::with_prefix_and_suite(
+            write,
+            read,
+            send_keys,
+            recv_keys,
+            send_secret,
+            recv_secret,
+            rx_prefix,
+            AeadSuite::ChaCha20Poly1305,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn with_prefix_and_suite(
+        write: W,
+        read: R,
+        send_keys: DirectionKeys,
+        recv_keys: DirectionKeys,
+        send_secret: Zeroizing<[u8; 32]>,
+        recv_secret: Zeroizing<[u8; 32]>,
+        rx_prefix: Vec<u8>,
+        suite: AeadSuite,
+    ) -> Self {
         let metrics = std::sync::Arc::new(SessionMetrics::default());
         Self {
-            sender: AlphaSender::new(
+            sender: AlphaSender::new_with_suite(
                 write,
                 send_keys,
                 send_secret,
                 std::sync::Arc::clone(&metrics),
+                suite,
             ),
-            receiver: AlphaReceiver::with_prefix(
+            receiver: AlphaReceiver::with_prefix_and_suite(
                 read,
                 recv_keys,
                 recv_secret,
                 std::sync::Arc::clone(&metrics),
                 rx_prefix,
+                suite,
             ),
             metrics,
             user_id: None,

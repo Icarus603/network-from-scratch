@@ -10,7 +10,10 @@ use proteus_crypto::{
     sig,
 };
 use proteus_handshake::auth_tag;
-use proteus_spec::{HMAC_TAG_LEN, PROTEUS_VERSION_V10};
+use proteus_spec::{
+    AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_ALL, AEAD_SUITE_MASK_CHACHA20_POLY1305,
+    HMAC_TAG_LEN, PROTEUS_VERSION_V11,
+};
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use rand_core::OsRng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -299,9 +302,14 @@ where
     let mut client_id = [0u8; proteus_spec::CLIENT_ID_LEN];
     client_id.copy_from_slice(&cid_ct);
 
-    // Build the signature over (version || nonce || x25519_pub || mlkem_ct).
-    let mut sig_msg = Vec::with_capacity(1 + 16 + 32 + 1088);
-    sig_msg.push(PROTEUS_VERSION_V10);
+    // v1.1 signs the transport hint and full AEAD offer in addition to
+    // the hybrid KEX shares. HMAC and Finished also cover these bytes,
+    // but direct identity-signature coverage makes the downgrade
+    // invariant local and independently auditable.
+    let mut sig_msg = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
+    sig_msg.push(PROTEUS_VERSION_V11);
+    sig_msg.push(config.profile_hint.to_byte());
+    sig_msg.extend_from_slice(&AEAD_SUITE_MASK_ALL.to_be_bytes());
     sig_msg.extend_from_slice(&client_nonce);
     sig_msg.extend_from_slice(&client_eph.x25519_pub);
     sig_msg.extend_from_slice(&client_eph.mlkem_ct);
@@ -344,8 +352,9 @@ where
     let (shape_seed, cover_profile_id) = fresh_shape_params(&mut rng);
 
     let mut ext = AuthExtension {
-        version: PROTEUS_VERSION_V10,
+        version: PROTEUS_VERSION_V11,
         profile_hint: config.profile_hint,
+        aead_suite_mask: AEAD_SUITE_MASK_ALL,
         client_nonce,
         client_x25519_pub: client_eph.x25519_pub,
         client_mlkem768_ct: client_eph.mlkem_ct,
@@ -411,11 +420,19 @@ where
     if sh_frame.kind != alpha::FRAME_SERVER_HELLO {
         return Err(AlphaError::Closed);
     }
-    if sh_frame.body.len() != 32 {
+    if sh_frame.body.len() != 33 {
         return Err(AlphaError::Closed);
     }
     let mut server_x25519_pub = [0u8; 32];
-    server_x25519_pub.copy_from_slice(&sh_frame.body);
+    server_x25519_pub.copy_from_slice(&sh_frame.body[..32]);
+    let selected_suite = aead::AeadSuite::from_code(sh_frame.body[32])?;
+    let selected_mask = match selected_suite {
+        aead::AeadSuite::ChaCha20Poly1305 => AEAD_SUITE_MASK_CHACHA20_POLY1305,
+        aead::AeadSuite::Aes256Gcm => AEAD_SUITE_MASK_AES_256_GCM,
+    };
+    if ext.aead_suite_mask & selected_mask == 0 {
+        return Err(AlphaError::Closed);
+    }
     transcript.update(&sh_frame.body);
     let th_ch_sh = transcript.snapshot();
 
@@ -542,7 +559,7 @@ where
     // of any one epoch's key material does not unlock subsequent
     // epochs — the chain heals on the next ratchet (~4 MiB / 16 k
     // records).
-    let session = AlphaSession::with_prefix(
+    let session = AlphaSession::with_prefix_and_suite(
         write,
         read,
         c_keys,
@@ -550,6 +567,7 @@ where
         final_secrets.c_ap_secret.clone(),
         final_secrets.s_ap_secret.clone(),
         rx_buf,
+        selected_suite,
     )
     .with_dh_ratchet(client_eph.x25519_sk.clone(), server_x25519_pub);
     Ok(session)

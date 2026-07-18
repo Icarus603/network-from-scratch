@@ -1754,7 +1754,10 @@ Dual-licensed under Apache-2.0 OR MIT. See repository LICENSE files.
 ## Spec & docs
 
 The wire format and handshake state machine are normatively defined in
-[`assets/spec/proteus-v1.0.md`](../../assets/spec/proteus-v1.0.md).
+[`assets/spec/proteus-v1.0.md`](../../assets/spec/proteus-v1.0.md). The
+authenticated inner-AEAD agility candidate is specified separately in
+[`assets/spec/proteus-v1.1-aead-agility.md`](../../assets/spec/proteus-v1.1-aead-agility.md);
+it remains non-normative until every promotion gate in that amendment passes.
 Operator runbook: [`deploy/README.md`](deploy/README.md). Version
 history: [`CHANGELOG.md`](CHANGELOG.md).
 

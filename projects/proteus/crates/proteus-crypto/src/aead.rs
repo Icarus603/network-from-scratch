@@ -5,6 +5,10 @@
 //! This module enforces the XOR construction at the API surface so callers
 //! cannot reuse a nonce by accident.
 
+use aws_lc_rs::aead::{
+    Aad as AwsLcAad, LessSafeKey as AwsLcLessSafeKey, Nonce as AwsLcNonce,
+    UnboundKey as AwsLcUnboundKey, AES_256_GCM as AWS_LC_AES_256_GCM,
+};
 use chacha20poly1305::aead::{Aead, AeadCore, AeadInPlace, KeyInit, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use sha2::digest::typenum::Unsigned;
@@ -20,6 +24,37 @@ pub const NONCE_LEN: usize = 12;
 
 /// AEAD tag length (16 bytes).
 pub const TAG_LEN: usize = 16;
+
+/// Inner-record AEAD selected by the authenticated v1.1 handshake.
+///
+/// The discriminants are protocol codepoints and therefore must never
+/// be renumbered. `ChaCha20Poly1305` remains the only v1.0 choice;
+/// `Aes256Gcm` is the hardware-accelerated v1.1 production choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AeadSuite {
+    /// ChaCha20-Poly1305 (RFC 8439), suite codepoint `0x01`.
+    ChaCha20Poly1305 = 0x01,
+    /// AES-256-GCM (NIST SP 800-38D), suite codepoint `0x02`.
+    Aes256Gcm = 0x02,
+}
+
+impl AeadSuite {
+    /// Decode a negotiated wire codepoint.
+    pub const fn from_code(code: u8) -> Result<Self, CryptoError> {
+        match code {
+            0x01 => Ok(Self::ChaCha20Poly1305),
+            0x02 => Ok(Self::Aes256Gcm),
+            _ => Err(CryptoError::AeadSuite),
+        }
+    }
+
+    /// Encode this suite's stable wire codepoint.
+    #[must_use]
+    pub const fn code(self) -> u8 {
+        self as u8
+    }
+}
 
 /// Construct the AEAD nonce for inner packet `(epoch:24 || seqnum:40)`
 /// per spec §4.5.2.
@@ -149,10 +184,14 @@ pub fn expected_nonce_len() -> usize {
 /// transiently stored the key in a `ChaCha20Poly1305` on the stack
 /// before drop. Operators who need stronger key hygiene should use
 /// the `Zeroizing<[u8;32]>` wrapper at the source.
-#[derive(Clone)]
 pub struct AeadKey {
-    cipher: ChaCha20Poly1305,
+    cipher: CachedCipher,
     iv: [u8; NONCE_LEN],
+}
+
+enum CachedCipher {
+    ChaCha20Poly1305(ChaCha20Poly1305),
+    Aes256Gcm(AwsLcLessSafeKey),
 }
 
 impl AeadKey {
@@ -161,10 +200,32 @@ impl AeadKey {
     /// `open_in_place` is called many times against this instance.
     #[must_use]
     pub fn new(key: &[u8; KEY_LEN], iv: &[u8; NONCE_LEN]) -> Self {
-        Self {
-            cipher: ChaCha20Poly1305::new(Key::from_slice(key)),
-            iv: *iv,
-        }
+        Self::new_with_suite(AeadSuite::ChaCha20Poly1305, key, iv)
+            .expect("ChaCha20-Poly1305 accepts every 32-byte key")
+    }
+
+    /// Build a cached cipher for the authenticated negotiated suite.
+    ///
+    /// AWS-LC is already linked by the outer rustls/quinn stack. Its
+    /// AES-256-GCM path uses the target's hardware implementation when
+    /// available, while retaining the same 96-bit nonce and 128-bit tag
+    /// wire shape as ChaCha20-Poly1305.
+    pub fn new_with_suite(
+        suite: AeadSuite,
+        key: &[u8; KEY_LEN],
+        iv: &[u8; NONCE_LEN],
+    ) -> Result<Self, CryptoError> {
+        let cipher = match suite {
+            AeadSuite::ChaCha20Poly1305 => {
+                CachedCipher::ChaCha20Poly1305(ChaCha20Poly1305::new(Key::from_slice(key)))
+            }
+            AeadSuite::Aes256Gcm => {
+                let unbound = AwsLcUnboundKey::new(&AWS_LC_AES_256_GCM, key)
+                    .map_err(|_| CryptoError::AeadLength)?;
+                CachedCipher::Aes256Gcm(AwsLcLessSafeKey::new(unbound))
+            }
+        };
+        Ok(Self { cipher, iv: *iv })
     }
 
     /// In-place seal. `buf` enters with `plaintext`; on return, `buf`
@@ -182,9 +243,18 @@ impl AeadKey {
         buf: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
         let nonce_bytes = nonce_for(&self.iv, combined);
-        self.cipher
-            .encrypt_in_place(Nonce::from_slice(&nonce_bytes), aad, buf)
-            .map_err(|_| CryptoError::AeadAuth)
+        match &self.cipher {
+            CachedCipher::ChaCha20Poly1305(cipher) => cipher
+                .encrypt_in_place(Nonce::from_slice(&nonce_bytes), aad, buf)
+                .map_err(|_| CryptoError::AeadAuth),
+            CachedCipher::Aes256Gcm(cipher) => cipher
+                .seal_in_place_append_tag(
+                    AwsLcNonce::assume_unique_for_key(nonce_bytes),
+                    AwsLcAad::from(aad),
+                    buf,
+                )
+                .map_err(|_| CryptoError::AeadAuth),
+        }
     }
 
     /// In-place open. `buf` enters with `ciphertext || tag`; on
@@ -198,9 +268,27 @@ impl AeadKey {
         buf: &mut Vec<u8>,
     ) -> Result<(), CryptoError> {
         let nonce_bytes = nonce_for(&self.iv, combined);
-        self.cipher
-            .decrypt_in_place(Nonce::from_slice(&nonce_bytes), aad, buf)
-            .map_err(|_| CryptoError::AeadAuth)
+        match &self.cipher {
+            CachedCipher::ChaCha20Poly1305(cipher) => cipher
+                .decrypt_in_place(Nonce::from_slice(&nonce_bytes), aad, buf)
+                .map_err(|_| CryptoError::AeadAuth),
+            CachedCipher::Aes256Gcm(cipher) => {
+                let opened_len = match cipher.open_in_place(
+                    AwsLcNonce::assume_unique_for_key(nonce_bytes),
+                    AwsLcAad::from(aad),
+                    buf,
+                ) {
+                    Ok(opened) => opened.len(),
+                    Err(_) => {
+                        buf.zeroize();
+                        buf.clear();
+                        return Err(CryptoError::AeadAuth);
+                    }
+                };
+                buf.truncate(opened_len);
+                Ok(())
+            }
+        }
     }
 }
 
@@ -316,6 +404,34 @@ mod tests {
         let mut buf = b"hi".to_vec();
         ak.seal_into(1, b"aad-a", &mut buf).unwrap();
         assert!(ak.open_in_place(1, b"aad-b", &mut buf).is_err());
+    }
+
+    #[test]
+    fn aes256_gcm_in_place_round_trip() {
+        let key = [0x42u8; KEY_LEN];
+        let iv = [0x11u8; NONCE_LEN];
+        let aad = b"proteus v1.1 suite-bound header";
+        let mut buf = b"hardware accelerated inner record".to_vec();
+        let original = buf.clone();
+        let ak = AeadKey::new_with_suite(AeadSuite::Aes256Gcm, &key, &iv).unwrap();
+
+        ak.seal_into(7, aad, &mut buf).unwrap();
+        assert_eq!(buf.len(), original.len() + TAG_LEN);
+        ak.open_in_place(7, aad, &mut buf).unwrap();
+        assert_eq!(buf, original);
+    }
+
+    #[test]
+    fn cross_suite_open_is_rejected() {
+        let key = [0x42u8; KEY_LEN];
+        let iv = [0x11u8; NONCE_LEN];
+        let aad = b"suite binding";
+        let mut buf = b"downgrade attempts must not decrypt".to_vec();
+        let aes = AeadKey::new_with_suite(AeadSuite::Aes256Gcm, &key, &iv).unwrap();
+        let chacha = AeadKey::new(&key, &iv);
+
+        aes.seal_into(9, aad, &mut buf).unwrap();
+        assert!(chacha.open_in_place(9, aad, &mut buf).is_err());
     }
 
     #[test]
