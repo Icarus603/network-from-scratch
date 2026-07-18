@@ -122,6 +122,19 @@ append_proxy_resource() {
         }' >> "$output"
 }
 
+service_log_line_count() {
+    "${COMPOSE[@]}" logs --no-color "$1" 2>&1 | wc -l | tr -d ' '
+}
+
+write_service_log_delta() {
+    service="$1"
+    first_new_line="$2"
+    output="$3"
+    "${COMPOSE[@]}" logs --no-color "$service" 2>&1 \
+        | awk -v first="$first_new_line" 'NR >= first' \
+        > "$output"
+}
+
 reset_and_warm_proxy_clients() {
     cell_dir="$1"
     clients=(proteus-proxy-client hy2-proxy-client)
@@ -305,6 +318,23 @@ run_cell() {
         cell_dir="${RESULTS_DIR}/${cell}"
         mkdir -p "$cell_dir"
 
+        if [ "$WORKLOAD_MODE" = "proxy" ]; then
+            # Servers deliberately survive between cells, so their Docker
+            # logs are cumulative. Pin the first line owned by this cell
+            # before warmup; otherwise later cells silently inherit earlier
+            # recovery rows and invalidate direction-specific attribution.
+            proteus_server_log_first="$(
+                service_log_line_count proteus-proxy-server
+            )"
+            proteus_server_log_first="$((proteus_server_log_first + 1))"
+            hy2_server_log_first="$(service_log_line_count hy2-server)"
+            hy2_server_log_first="$((hy2_server_log_first + 1))"
+            if [ "$INCLUDE_TUIC" = "1" ]; then
+                tuic_server_log_first="$(service_log_line_count tuic-server)"
+                tuic_server_log_first="$((tuic_server_log_first + 1))"
+            fi
+        fi
+
         "${COMPOSE[@]}" exec -T netem \
             /usr/local/bin/netem-control.sh "$@" \
             > "${cell_dir}/qdisc-applied.json"
@@ -438,17 +468,20 @@ run_cell() {
         if [ "$WORKLOAD_MODE" = "proxy" ]; then
             "${COMPOSE[@]}" logs --no-color proteus-proxy-client \
                 > "${cell_dir}/proteus-client-daemon.log" 2>&1
-            "${COMPOSE[@]}" logs --no-color proteus-proxy-server \
-                > "${cell_dir}/proteus-server-daemon.log" 2>&1
+            write_service_log_delta proteus-proxy-server \
+                "$proteus_server_log_first" \
+                "${cell_dir}/proteus-server-daemon.log"
             "${COMPOSE[@]}" logs --no-color hy2-proxy-client \
                 > "${cell_dir}/hy2-client-daemon.log" 2>&1
-            "${COMPOSE[@]}" logs --no-color hy2-server \
-                > "${cell_dir}/hy2-server-daemon.log" 2>&1
+            write_service_log_delta hy2-server \
+                "$hy2_server_log_first" \
+                "${cell_dir}/hy2-server-daemon.log"
             if [ "$INCLUDE_TUIC" = "1" ]; then
                 "${COMPOSE[@]}" logs --no-color tuic-client \
                     > "${cell_dir}/tuic-client-daemon.log" 2>&1
-                "${COMPOSE[@]}" logs --no-color tuic-server \
-                    > "${cell_dir}/tuic-server-daemon.log" 2>&1
+                write_service_log_delta tuic-server \
+                    "$tuic_server_log_first" \
+                    "${cell_dir}/tuic-server-daemon.log"
             fi
             if grep -q 'falling back to α' \
                 "${cell_dir}/proteus-client-daemon.log"; then
