@@ -13,8 +13,8 @@ use proteus_spec::{
     AEAD_SUITE_MASK_ALL, ANTI_DOS_SOLUTION_LEN, AUTH_EXT_LEN_V10, AUTH_EXT_TYPE, CLIENT_ID_LEN,
     CLIENT_NONCE_LEN, COVER_PROFILE_ID_LEN, ED25519_SIG_LEN, EPOCH_BITS, HMAC_TAG_LEN,
     ML_DSA_65_SIG_TRUNCATED_LEN, ML_KEM_768_CT_LEN, PROFILE_HINT_ALPHA, PROFILE_HINT_BETA,
-    PROFILE_HINT_GAMMA, PROTEUS_VERSION_V10, PROTEUS_VERSION_V11, SEQNUM_BITS, SEQNUM_MAX,
-    SHAPE_SEED_LEN, TIMESTAMP_LEN, X25519_PUB_LEN,
+    PROFILE_HINT_GAMMA, PROTEUS_VERSION_V10, PROTEUS_VERSION_V11, PROTEUS_VERSION_V12, SEQNUM_BITS,
+    SEQNUM_MAX, SHAPE_SEED_LEN, TIMESTAMP_LEN, X25519_PUB_LEN,
 };
 use thiserror::Error;
 use zeroize::Zeroize as _;
@@ -218,7 +218,10 @@ impl AuthExtension {
         let mut cur = Cursor::new(buf);
 
         let version = cur.read_u8()?;
-        if version != PROTEUS_VERSION_V10 && version != PROTEUS_VERSION_V11 {
+        if !matches!(
+            version,
+            PROTEUS_VERSION_V10 | PROTEUS_VERSION_V11 | PROTEUS_VERSION_V12
+        ) {
             return Err(WireError::BadVersion(version));
         }
         let profile_hint = ProfileHint::from_byte(cur.read_u8()?)?;
@@ -226,7 +229,7 @@ impl AuthExtension {
         if version == PROTEUS_VERSION_V10 && aead_suite_mask != 0 {
             return Err(WireError::ReservedNonZero(aead_suite_mask));
         }
-        if version == PROTEUS_VERSION_V11
+        if matches!(version, PROTEUS_VERSION_V11 | PROTEUS_VERSION_V12)
             && (aead_suite_mask == 0 || aead_suite_mask & !AEAD_SUITE_MASK_ALL != 0)
         {
             return Err(WireError::BadAeadSuiteMask(aead_suite_mask));
@@ -538,6 +541,17 @@ mod tests {
         let encoded = original.encode_payload();
         let decoded = AuthExtension::decode_payload(&encoded).expect("v1.1 decode");
         assert_eq!(decoded.version, PROTEUS_VERSION_V11);
+        assert_eq!(decoded.aead_suite_mask, proteus_spec::AEAD_SUITE_MASK_ALL);
+    }
+
+    #[test]
+    fn auth_ext_v12_round_trip_with_triple_hybrid_version() {
+        let mut original = fixture_auth();
+        original.version = PROTEUS_VERSION_V12;
+        original.aead_suite_mask = proteus_spec::AEAD_SUITE_MASK_ALL;
+        let encoded = original.encode_payload();
+        let decoded = AuthExtension::decode_payload(&encoded).expect("v1.2 decode");
+        assert_eq!(decoded.version, PROTEUS_VERSION_V12);
         assert_eq!(decoded.aead_suite_mask, proteus_spec::AEAD_SUITE_MASK_ALL);
     }
 

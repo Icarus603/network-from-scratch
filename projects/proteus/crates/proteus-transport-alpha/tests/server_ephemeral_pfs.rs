@@ -4,8 +4,10 @@
 //! Property: two handshakes against the SAME server must NEVER reuse
 //! the same X25519 public-key share in the ServerHello frame. Reuse
 //! is a complete classical-FS failure — an adversary who later seizes
-//! one session's X25519 secret can recover the K_classic of every
-//! captured session, because the same secret was used everywhere.
+//! the long-term X25519 secret can recover the static classical
+//! component of every captured session. The fresh SH share must remain
+//! independent so that component alone is insufficient to reconstruct
+//! the triple-hybrid Handshake Secret.
 //!
 //! This test sniffs the wire by intercepting the server's accept loop
 //! and recording every SH body it emits. We dial twice, then assert
@@ -63,7 +65,7 @@ async fn run_sniff_proxy(
                 while !buf.is_empty() {
                     match alpha::decode_frame(&buf) {
                         Ok((frame, consumed)) => {
-                            // v1.1 appends the transcript-bound selected AEAD
+                            // v1.2 appends the transcript-bound selected AEAD
                             // suite after the 32-byte ephemeral X25519 share.
                             // This regression test compares the key share, not
                             // the negotiated suite byte.
@@ -101,9 +103,8 @@ async fn run_sniff_proxy(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_sessions_yield_distinct_server_x25519_pubs() {
-    // Single server, generate keys once. The static `x25519_pub` on
-    // ServerKeys exists for back-compat of the ClientConfig surface
-    // but should NEVER appear in any SH frame after the PFS fix.
+    // The static key authenticates the v1.2 KDF out of band, but the
+    // server must still send a distinct ephemeral share in every SH.
     let server_keys = ServerKeys::generate();
     let static_server_x25519_pub = server_keys.x25519_pub;
     let mlkem_pk_bytes = server_keys.mlkem_pk_bytes.clone();
@@ -181,7 +182,8 @@ async fn two_sessions_yield_distinct_server_x25519_pubs() {
         sh_a, sh_b,
         "PFS regression: two SH frames carried the SAME X25519 pub. \
          Server is reusing a long-term X25519 key — a future-leak \
-         scenario recovers every captured session's K_classic."
+         scenario recovers the static classical component of every \
+         captured session."
     );
     assert_ne!(
         sh_a, static_server_x25519_pub,

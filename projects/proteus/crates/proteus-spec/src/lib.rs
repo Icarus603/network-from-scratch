@@ -21,6 +21,13 @@ pub const PROTEUS_VERSION_V10: u8 = 0x10;
 /// Proteus protocol version 1.1 — authenticated inner-AEAD agility.
 pub const PROTEUS_VERSION_V11: u8 = 0x11;
 
+/// Proteus protocol version 1.2 — hedge-authenticated triple hybrid.
+///
+/// The key schedule includes independent ephemeral-X25519,
+/// static-X25519, and ML-KEM-768 contributions. The version bump is
+/// mandatory because v1.1 peers derive a different Handshake Secret.
+pub const PROTEUS_VERSION_V12: u8 = 0x12;
+
 /// Transport profile γ (MASQUE / H3 / QUIC over UDP/443). spec §3.
 pub const PROFILE_HINT_GAMMA: u8 = 0x03;
 
@@ -49,7 +56,7 @@ pub const AEAD_SUITE_MASK_CHACHA20_POLY1305: u16 = 1 << 0;
 /// v1.1 ClientHello offer bit for AES-256-GCM.
 pub const AEAD_SUITE_MASK_AES_256_GCM: u16 = 1 << 1;
 
-/// All currently assigned v1.1 AEAD offer bits.
+/// All currently assigned v1.1+ AEAD offer bits.
 pub const AEAD_SUITE_MASK_ALL: u16 =
     AEAD_SUITE_MASK_CHACHA20_POLY1305 | AEAD_SUITE_MASK_AES_256_GCM;
 
@@ -106,6 +113,10 @@ pub const AUTH_EXT_LEN_V10: usize = 1 + 1 + 2
 /// v1.1 reuses the former two-byte reserved field as `aead_suite_mask`,
 /// so its AuthExtension remains byte-for-byte the same length as v1.0.
 pub const AUTH_EXT_LEN_V11: usize = AUTH_EXT_LEN_V10;
+
+/// v1.2 changes only the authenticated key schedule; its wire extension
+/// layout remains byte-for-byte identical to v1.1.
+pub const AUTH_EXT_LEN_V12: usize = AUTH_EXT_LEN_V11;
 
 // =============================================================================
 // §3 — cell padding sizes (spec §4.6)

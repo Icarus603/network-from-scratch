@@ -12,7 +12,7 @@ use proteus_crypto::{
 use proteus_handshake::auth_tag;
 use proteus_spec::{
     AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_ALL, AEAD_SUITE_MASK_CHACHA20_POLY1305,
-    HMAC_TAG_LEN, PROTEUS_VERSION_V11,
+    HMAC_TAG_LEN, PROTEUS_VERSION_V12,
 };
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use rand_core::OsRng;
@@ -225,13 +225,10 @@ where
     let server_mlkem_pk = EncapsulationKey::<MlKem768Params>::from_bytes(&ek_array);
 
     let client_eph = kex::client_ephemeral(&mut rng, &server_mlkem_pk)?;
-    // NB: client_combine is deferred until after we read SH — the server
-    // now sends a per-session EPHEMERAL X25519 pub in SH (PFS hardening),
-    // not its long-term static pub. `config.server_x25519_pub` is kept
-    // for backward-compat of the ClientConfig surface but is no longer
-    // used as DH input. Server identity is gated by ML-KEM-768 decap +
-    // the Finished MAC chain — an MITM cannot swap the SH pubkey
-    // without producing an invalid SF MAC over the transcript.
+    // `client_combine` is deferred until SH supplies the server's
+    // per-session X25519 share. v1.2 also combines the pinned static
+    // server X25519 key: ML-KEM and static X25519 independently
+    // authenticate the server while the ephemeral share supplies PFS.
 
     // shape/cover/identity flags — all zeroes for M1, will be populated in M3.
     let now = SystemTime::now()
@@ -302,12 +299,12 @@ where
     let mut client_id = [0u8; proteus_spec::CLIENT_ID_LEN];
     client_id.copy_from_slice(&cid_ct);
 
-    // v1.1 signs the transport hint and full AEAD offer in addition to
+    // v1.2 signs the transport hint and full AEAD offer in addition to
     // the hybrid KEX shares. HMAC and Finished also cover these bytes,
     // but direct identity-signature coverage makes the downgrade
     // invariant local and independently auditable.
     let mut sig_msg = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
-    sig_msg.push(PROTEUS_VERSION_V11);
+    sig_msg.push(PROTEUS_VERSION_V12);
     sig_msg.push(config.profile_hint.to_byte());
     sig_msg.extend_from_slice(&AEAD_SUITE_MASK_ALL.to_be_bytes());
     sig_msg.extend_from_slice(&client_nonce);
@@ -352,7 +349,7 @@ where
     let (shape_seed, cover_profile_id) = fresh_shape_params(&mut rng);
 
     let mut ext = AuthExtension {
-        version: PROTEUS_VERSION_V11,
+        version: PROTEUS_VERSION_V12,
         profile_hint: config.profile_hint,
         aead_suite_mask: AEAD_SUITE_MASK_ALL,
         client_nonce,
@@ -423,8 +420,8 @@ where
     if sh_frame.body.len() != 33 {
         return Err(AlphaError::Closed);
     }
-    let mut server_x25519_pub = [0u8; 32];
-    server_x25519_pub.copy_from_slice(&sh_frame.body[..32]);
+    let mut server_x25519_eph_pub = [0u8; 32];
+    server_x25519_eph_pub.copy_from_slice(&sh_frame.body[..32]);
     let selected_suite = aead::AeadSuite::from_code(sh_frame.body[32])?;
     let selected_mask = match selected_suite {
         aead::AeadSuite::ChaCha20Poly1305 => AEAD_SUITE_MASK_CHACHA20_POLY1305,
@@ -437,19 +434,17 @@ where
     let th_ch_sh = transcript.snapshot();
 
     // ----- 4. Derive hybrid shared + key schedule -----
-    // NOW run client_combine against the SH-supplied EPHEMERAL pub.
-    // If the server is the rightful one (i.e. owns the ML-KEM secret),
-    // its `server_combine` produced the same `K_classic` because it
-    // used the same X25519 sk for which the pub above is the public
-    // half. A MITM can replace the SH pub but will not be able to
-    // produce a Finished MAC under the right key schedule because
-    // K_pq (ML-KEM half) requires the long-term ML-KEM secret which
-    // the MITM does not have.
-    let combined_dh = kex::client_combine(&client_eph, &server_x25519_pub)?;
-    // Iter-171: pass `&combined_dh` directly (Zeroizing<[u8;64]>
-    // Derefs to &[u8;64]) instead of copying into a bare stack
-    // array. Pre-iter-171 a `let mut hybrid_shared = [0u8; 64]`
-    // copy of the full K_classic || K_pq hybrid shared lingered
+    // Combine the SH-supplied ephemeral share, the out-of-band pinned
+    // static server share, and ML-KEM. An attacker must defeat both
+    // server-authentication components to forge Finished; the separate
+    // ephemeral component keeps captured sessions forward-secret.
+    let combined_dh = kex::client_combine(
+        &client_eph,
+        &server_x25519_eph_pub,
+        &config.server_x25519_pub,
+    )?;
+    // Pass `&combined_dh` directly instead of copying the triple-
+    // hybrid shared into a bare stack array. Such a copy previously lingered
     // in the client's handshake stack frame after the function
     // returned. Same residue fix applied at both server-side
     // call sites in this iteration.
@@ -569,7 +564,7 @@ where
         rx_buf,
         selected_suite,
     )
-    .with_dh_ratchet(client_eph.x25519_sk.clone(), server_x25519_pub);
+    .with_dh_ratchet(client_eph.x25519_sk.clone(), server_x25519_eph_pub);
     Ok(session)
 }
 

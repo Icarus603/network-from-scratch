@@ -369,14 +369,17 @@ mod tests {
         );
     }
 
-    // Note: corrupting `x25519_pub` is a no-op because the
-    // server proves ownership of x25519_sk; the cached public
-    // is only what the client sees. Corrupting x25519_sk is
-    // tricky because the cached public is recomputed implicitly
-    // on different code paths. The mlkem_pk corruption test
-    // above already covers the "production-failure trip-wire"
-    // (mismatched key pair) which is the essential contract.
-    //
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn self_test_handshake_fails_with_mismatched_static_x25519_pair() {
+        let mut keys = ServerKeys::generate();
+        keys.x25519_pub[0] ^= 0x80;
+        let result = run_self_test(keys, Duration::from_secs(10)).await;
+        assert!(
+            result.is_err(),
+            "v1.2 must prove possession of the pinned static X25519 key"
+        );
+    }
+
     // Likewise, a tight-timeout test is intentionally omitted:
     // modern loopback can complete the full self-test in
     // <1ms, and tokio's timer granularity makes sub-ms timeout

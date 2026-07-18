@@ -121,8 +121,8 @@ use proteus_crypto::{
 };
 use proteus_handshake::{auth_tag, replay::ReplayWindow, replay::Verdict, state::State};
 use proteus_spec::{
-    AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_CHACHA20_POLY1305, PROTEUS_VERSION_V10,
-    PROTEUS_VERSION_V11,
+    AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_CHACHA20_POLY1305, PROTEUS_VERSION_V11,
+    PROTEUS_VERSION_V12,
 };
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use tokio::io::AsyncWriteExt;
@@ -139,7 +139,7 @@ use crate::session::AlphaSession;
 fn client_signature_input(ext: &AuthExtension) -> Vec<u8> {
     let mut message = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
     message.push(ext.version);
-    if ext.version == PROTEUS_VERSION_V11 {
+    if matches!(ext.version, PROTEUS_VERSION_V11 | PROTEUS_VERSION_V12) {
         message.push(ext.profile_hint.to_byte());
         message.extend_from_slice(&ext.aead_suite_mask.to_be_bytes());
     }
@@ -150,10 +150,10 @@ fn client_signature_input(ext: &AuthExtension) -> Vec<u8> {
 }
 
 fn select_aead_suite(ext: &AuthExtension) -> AlphaResult<AeadSuite> {
-    if ext.version == PROTEUS_VERSION_V10 {
-        return Ok(AeadSuite::ChaCha20Poly1305);
-    }
-    if ext.version != PROTEUS_VERSION_V11 {
+    // v1.2 changes the Handshake-Secret IKM. Silently accepting v1.0
+    // or v1.1 here would either fail late at Finished or create a
+    // downgrade surface if legacy KDF support were reintroduced.
+    if ext.version != PROTEUS_VERSION_V12 {
         return Err(AlphaError::Closed);
     }
     if ext.aead_suite_mask & AEAD_SUITE_MASK_AES_256_GCM != 0 {
@@ -166,13 +166,13 @@ fn select_aead_suite(ext: &AuthExtension) -> AlphaResult<AeadSuite> {
 }
 
 fn server_hello_body(version: u8, server_x25519_eph_pub: &[u8; 32], suite: AeadSuite) -> Vec<u8> {
-    let mut body = Vec::with_capacity(if version == PROTEUS_VERSION_V11 {
+    let mut body = Vec::with_capacity(if version == PROTEUS_VERSION_V12 {
         33
     } else {
         32
     });
     body.extend_from_slice(server_x25519_eph_pub);
-    if version == PROTEUS_VERSION_V11 {
+    if version == PROTEUS_VERSION_V12 {
         body.push(suite.code());
     }
     body
@@ -2342,26 +2342,18 @@ async fn handshake_with_prefix(
     // is still strong, but a defense-in-depth crypto design must
     // not rely on a single primitive being unbroken.
     //
-    // FIX: generate a fresh X25519 keypair on EVERY incoming session.
-    // The secret half lives in this stack frame and is dropped
-    // (zeroized via Zeroizing/StaticSecret's Drop) as soon as
-    // `combined` is consumed. The public half is shipped in the
-    // SH frame, transcript-hashed, and the client uses it for its
-    // own `client_combine` — same as before, but the server's
-    // identity to the wire never reuses an X25519 key.
-    //
-    // Server IDENTITY is unaffected: it still rests on the
-    // long-term ML-KEM-768 keypair (the client encapsulates to a
-    // pinned `server_pq_fingerprint`, only the rightful server can
-    // decap). Stealing the server's ML-KEM secret would still hurt,
-    // but ML-KEM keys are large + don't sit in process memory
-    // outside of an active session's stack — much harder to exfil
-    // than a 32-byte X25519 file.
+    // v1.2 generates a fresh X25519 keypair on every incoming session
+    // and also mixes the separately pinned static-X25519 DH into the
+    // Handshake Secret. The ephemeral contribution supplies PFS. The
+    // static contribution supplies classical server authentication if
+    // ML-KEM is cryptanalytically broken; ML-KEM independently keeps a
+    // stolen static X25519 key from becoming sufficient for forgery.
     let server_x25519_eph_sk = x25519_dalek::StaticSecret::random_from_rng(rand_core::OsRng);
     let server_x25519_eph_pub = x25519_dalek::PublicKey::from(&server_x25519_eph_sk).to_bytes();
 
     let combined = match kex::server_combine(
         &server_x25519_eph_sk,
+        &ctx.keys.x25519_sk,
         &ctx.keys.mlkem_sk,
         &ext.client_x25519_pub,
         &ext.client_mlkem768_ct,
@@ -2369,15 +2361,15 @@ async fn handshake_with_prefix(
         Ok(c) => c,
         Err(_) => return Err(HandshakeFailure::new(Vec::new(), None)),
     };
-    // Iter-171: `combined` is already a Zeroizing<[u8;64]> from
+    // `combined` is already a Zeroizing triple-hybrid array from
     // `server_combine`. Pre-iter-171 we copied its bytes into a
-    // bare `let mut hybrid_shared = [0u8; 64]` stack array, which
+    // bare stack array, which
     // never gets scrubbed. The Deref<Target = [u8;64]> on
     // Zeroizing lets us pass `&combined` directly to
-    // `key_schedule::derive` (which takes `&[u8; 64]`), eliminating
+    // `key_schedule::derive` without copying, eliminating
     // the residue entirely. Pre-iter-171 a coredump or process-image
     // grab against the handshake-dispatch stack frame could recover
-    // the full hybrid_shared (K_classic || K_pq) — sufficient to
+    // the full triple-hybrid shared — sufficient to
     // re-derive every key for that session via the standard
     // Proteus key schedule.
 
@@ -2894,7 +2886,7 @@ where
         Verdict::Replay => return Err(AlphaError::AuthReplay),
     }
 
-    // ----- 4. Decap ML-KEM-768 + per-session-ephemeral X25519 combine -----
+    // ----- 4. Triple hybrid: ephemeral X25519 + static X25519 + ML-KEM -----
     // Per-session ephemeral X25519: see comment block in
     // `handshake_with_cover` — same PFS hardening, applied identically
     // to the raw-TCP path so neither variant leaks classical-FS.
@@ -2902,6 +2894,7 @@ where
     let server_x25519_eph_pub = x25519_dalek::PublicKey::from(&server_x25519_eph_sk).to_bytes();
     let combined = kex::server_combine(
         &server_x25519_eph_sk,
+        &ctx.keys.x25519_sk,
         &ctx.keys.mlkem_sk,
         &ext.client_x25519_pub,
         &ext.client_mlkem768_ct,
@@ -3189,30 +3182,27 @@ mod aead_negotiation_tests {
     }
 
     #[test]
-    fn v11_prefers_hardware_aes_and_v10_stays_chacha() {
+    fn v12_prefers_hardware_aes_and_rejects_old_key_schedules() {
         let modern = extension(
-            PROTEUS_VERSION_V11,
+            PROTEUS_VERSION_V12,
             AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
         );
         assert_eq!(select_aead_suite(&modern).unwrap(), AeadSuite::Aes256Gcm);
 
-        let chacha_only = extension(PROTEUS_VERSION_V11, AEAD_SUITE_MASK_CHACHA20_POLY1305);
+        let chacha_only = extension(PROTEUS_VERSION_V12, AEAD_SUITE_MASK_CHACHA20_POLY1305);
         assert_eq!(
             select_aead_suite(&chacha_only).unwrap(),
             AeadSuite::ChaCha20Poly1305
         );
 
-        let legacy = extension(PROTEUS_VERSION_V10, 0);
-        assert_eq!(
-            select_aead_suite(&legacy).unwrap(),
-            AeadSuite::ChaCha20Poly1305
-        );
+        let legacy = extension(PROTEUS_VERSION_V11, AEAD_SUITE_MASK_CHACHA20_POLY1305);
+        assert!(select_aead_suite(&legacy).is_err());
     }
 
     #[test]
-    fn changing_v11_offer_invalidates_client_identity_signature() {
+    fn changing_v12_offer_invalidates_client_identity_signature() {
         let mut offered = extension(
-            PROTEUS_VERSION_V11,
+            PROTEUS_VERSION_V12,
             AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
         );
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32]);
@@ -3234,9 +3224,9 @@ mod aead_negotiation_tests {
     #[test]
     fn server_selection_changes_finished_transcript() {
         let server_pub = [0x77; 32];
-        let aes = server_hello_body(PROTEUS_VERSION_V11, &server_pub, AeadSuite::Aes256Gcm);
+        let aes = server_hello_body(PROTEUS_VERSION_V12, &server_pub, AeadSuite::Aes256Gcm);
         let chacha = server_hello_body(
-            PROTEUS_VERSION_V11,
+            PROTEUS_VERSION_V12,
             &server_pub,
             AeadSuite::ChaCha20Poly1305,
         );

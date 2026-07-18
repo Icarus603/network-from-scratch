@@ -1,0 +1,219 @@
+(*
+  Proteus v1.2 inner handshake, symbolic Dolev-Yao model.
+
+  Rust correspondence:
+    crates/proteus-crypto/src/kex.rs
+    crates/proteus-crypto/src/key_schedule.rs
+    crates/proteus-transport-alpha/src/client.rs
+    crates/proteus-transport-alpha/src/server.rs
+
+  The model deliberately runs four independent systems:
+    honest, leaked ephemeral-DH component, leaked static-DH component,
+    and leaked ML-KEM component. A common pair of private test payloads
+    means one broken hedge makes the secrecy query fail.
+*)
+
+set ignoreTypes = false.
+
+free net: channel.
+
+type mode.
+const honest, leak_ephemeral, leak_static, leak_pq: mode [data].
+
+(* X25519 in the symbolic DH group. *)
+type group.
+type exponent.
+const generator: group [data].
+fun exp(group, exponent): group.
+equation forall x: exponent, y: exponent;
+    exp(exp(generator, x), y) = exp(exp(generator, y), x).
+
+(* ML-KEM encapsulation/decapsulation abstraction. *)
+type kem_secret_key.
+type kem_public_key.
+type kem_coins.
+fun kem_public(kem_secret_key): kem_public_key.
+fun kem_ciphertext(kem_public_key, kem_coins): bitstring.
+fun kem_shared(kem_public_key, kem_coins): bitstring.
+reduc forall sk: kem_secret_key, coins: kem_coins;
+    kem_decapsulate(kem_ciphertext(kem_public(sk), coins), sk)
+        = kem_shared(kem_public(sk), coins).
+
+(* Ed25519 client identity abstraction. *)
+type signing_key.
+type verifying_key.
+fun verifying(signing_key): verifying_key.
+fun signed(bitstring, signing_key): bitstring.
+reduc forall message: bitstring, sk: signing_key;
+    verify(signed(message, sk), verifying(sk)) = message.
+
+(* Transcript, triple-hybrid KDF, Finished, and application AEAD. *)
+fun signature_input(bitstring, group, bitstring): bitstring [data].
+fun transcript_ch_sh(bitstring, bitstring, group): bitstring.
+fun transcript_ch_sf(bitstring, group, bitstring): bitstring.
+fun triple_hybrid(group, group, bitstring): bitstring [data].
+fun server_finished_key(bitstring, bitstring): bitstring.
+fun client_finished_key(bitstring, bitstring): bitstring.
+fun application_key(bitstring, bitstring): bitstring.
+fun mac(bitstring, bitstring): bitstring.
+fun encrypt(bitstring, bitstring): bitstring.
+reduc forall message: bitstring, key: bitstring;
+    decrypt(encrypt(message, key), key) = message.
+
+free client_payload, server_payload: bitstring [private].
+
+event client_started(mode, bitstring, group, bitstring).
+event server_started(mode, bitstring, group, bitstring, group, bitstring).
+event client_accepted(mode, bitstring, group, bitstring, group, bitstring).
+event server_accepted(mode, bitstring, group, bitstring, group, bitstring).
+
+query attacker(client_payload).
+query attacker(server_payload).
+
+query m: mode, nonce: bitstring, client_share: group,
+      kem_ct: bitstring, server_share: group, app_key: bitstring;
+    inj-event(client_accepted(m, nonce, client_share, kem_ct, server_share, app_key))
+    ==>
+    inj-event(server_started(m, nonce, client_share, kem_ct, server_share, app_key)).
+
+query m: mode, nonce: bitstring, client_share: group,
+      kem_ct: bitstring, server_share: group, app_key: bitstring;
+    inj-event(server_accepted(m, nonce, client_share, kem_ct, server_share, app_key))
+    ==>
+    inj-event(client_accepted(m, nonce, client_share, kem_ct, server_share, app_key)).
+
+let leak_component(
+    selected_mode: mode,
+    ephemeral_component: group,
+    static_component: group,
+    pq_component: bitstring
+) =
+    if selected_mode = leak_ephemeral then
+        out(net, ephemeral_component)
+    else if selected_mode = leak_static then
+        out(net, static_component)
+    else if selected_mode = leak_pq then
+        out(net, pq_component)
+    else
+        0.
+
+let client(
+    selected_mode: mode,
+    channel_binding: bitstring,
+    server_static_public: group,
+    server_kem_public: kem_public_key,
+    client_signing_key: signing_key
+) =
+    new nonce: bitstring;
+    new client_exponent: exponent;
+    new kem_randomness: kem_coins;
+    let client_share = exp(generator, client_exponent) in
+    let kem_ct = kem_ciphertext(server_kem_public, kem_randomness) in
+    let pq_component = kem_shared(server_kem_public, kem_randomness) in
+    let identity_signature =
+        signed(signature_input(nonce, client_share, kem_ct), client_signing_key) in
+    event client_started(selected_mode, nonce, client_share, kem_ct);
+    out(net, (nonce, client_share, kem_ct, identity_signature));
+    in(net, (server_share: group, server_finished: bitstring));
+    let ephemeral_component = exp(server_share, client_exponent) in
+    let static_component = exp(server_static_public, client_exponent) in
+    let combined =
+        triple_hybrid(ephemeral_component, static_component, pq_component) in
+    let th_ch_sh =
+        transcript_ch_sh(channel_binding, (nonce, client_share, kem_ct), server_share) in
+    let expected_server_finished =
+        mac(server_finished_key(combined, th_ch_sh), th_ch_sh) in
+    (
+        leak_component(
+            selected_mode, ephemeral_component, static_component, pq_component
+        )
+      | if server_finished = expected_server_finished then
+            let th_ch_sf =
+                transcript_ch_sf(
+                    (nonce, client_share, kem_ct), server_share, server_finished
+                ) in
+            let app_key = application_key(combined, th_ch_sf) in
+            event client_accepted(
+                selected_mode, nonce, client_share, kem_ct, server_share, app_key
+            );
+            let client_finished =
+                mac(client_finished_key(combined, th_ch_sh), th_ch_sf) in
+            out(net, client_finished);
+            out(net, encrypt(client_payload, app_key))
+    ).
+
+let server(
+    selected_mode: mode,
+    channel_binding: bitstring,
+    server_static_exponent: exponent,
+    server_kem_secret: kem_secret_key,
+    client_verifying_key: verifying_key
+) =
+    in(net, (
+        nonce: bitstring,
+        client_share: group,
+        kem_ct: bitstring,
+        identity_signature: bitstring
+    ));
+    if verify(identity_signature, client_verifying_key)
+        = signature_input(nonce, client_share, kem_ct) then
+    new server_ephemeral_exponent: exponent;
+    let server_share = exp(generator, server_ephemeral_exponent) in
+    let ephemeral_component = exp(client_share, server_ephemeral_exponent) in
+    let static_component = exp(client_share, server_static_exponent) in
+    let pq_component = kem_decapsulate(kem_ct, server_kem_secret) in
+    let combined =
+        triple_hybrid(ephemeral_component, static_component, pq_component) in
+    let th_ch_sh =
+        transcript_ch_sh(channel_binding, (nonce, client_share, kem_ct), server_share) in
+    let server_finished =
+        mac(server_finished_key(combined, th_ch_sh), th_ch_sh) in
+    let th_ch_sf =
+        transcript_ch_sf((nonce, client_share, kem_ct), server_share, server_finished) in
+    let app_key = application_key(combined, th_ch_sf) in
+    event server_started(
+        selected_mode, nonce, client_share, kem_ct, server_share, app_key
+    );
+    out(net, (server_share, server_finished));
+    in(net, client_finished: bitstring);
+    let expected_client_finished =
+        mac(client_finished_key(combined, th_ch_sh), th_ch_sf) in
+    if client_finished = expected_client_finished then
+        event server_accepted(
+            selected_mode, nonce, client_share, kem_ct, server_share, app_key
+        );
+        out(net, encrypt(server_payload, app_key)).
+
+let system(selected_mode: mode) =
+    new server_static_exponent: exponent;
+    new server_kem_secret: kem_secret_key;
+    new client_signing_key: signing_key;
+    let server_static_public = exp(generator, server_static_exponent) in
+    let server_kem_public = kem_public(server_kem_secret) in
+    let client_verifying_key = verifying(client_signing_key) in
+    out(net, (server_static_public, server_kem_public, client_verifying_key));
+    !(
+        new channel_binding: bitstring;
+        (
+            client(
+                selected_mode,
+                channel_binding,
+                server_static_public,
+                server_kem_public,
+                client_signing_key
+            )
+          | server(
+                selected_mode,
+                channel_binding,
+                server_static_exponent,
+                server_kem_secret,
+                client_verifying_key
+            )
+        )
+    ).
+
+process
+    system(honest)
+  | system(leak_ephemeral)
+  | system(leak_static)
+  | system(leak_pq)

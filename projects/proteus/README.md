@@ -45,8 +45,12 @@ VLESS+REALITY who need:
   every 4 MiB / 16 384 records via `HKDF-Expand-Label`. REALITY uses
   one AEAD key for the entire session — a single key compromise leaks
   the whole conversation.
-- **Post-quantum confidentiality.** The handshake hybridizes X25519
-  with ML-KEM-768 (NIST PQC FIPS-203). REALITY ships classical X25519
+- **Hedge-authenticated post-quantum confidentiality.** Protocol v1.2
+  mixes independent ephemeral-X25519, pinned static-X25519, and
+  ML-KEM-768 (NIST PQC FIPS-203) contributions into the Handshake
+  Secret. One surviving server-authentication component is sufficient
+  to stop key forgery in the symbolic model, while the ephemeral share
+  preserves classical forward secrecy. REALITY ships classical X25519
   only; any session captured today is decryptable by a future CRQC.
 - **Operator-tunable anti-DoS.** A SHA-256 proof-of-work gate sits in
   front of ML-KEM Decap (~50 µs/op). Bump `pow_difficulty` from `0` to
@@ -94,7 +98,7 @@ SNI-based QUIC Censorship of the Great Firewall of China" — applied to β only
 | α browser-profile ClientHello | ✅ opt-in Chrome 150 real-capture fixture + full normalized wire-profile gate | ✅ uTLS | n/a (no TLS handshake on wire) |
 | α Path A knock inside browser session ID | ✅ same HMAC contract on rustls + uTLS paths | ✅ REALITY auth field | n/a |
 | compress_certificate (ext 0x001b) | ✅ rustls `brotli` feature | ❌ | n/a |
-| ML-KEM-768 hybrid handshake (PQ) | ✅ X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
+| ML-KEM-768 hybrid handshake (PQ) | ✅ ephemeral X25519 + pinned static X25519 + ML-KEM-768 | ❌ X25519 only | ❌ X25519 only |
 | QUIC CONNECTION_CLOSE indistinguishability (no wire-visible reject signal, RFC 9000 §19.19) | ✅ all closes are NO_ERROR+empty (3 wire tests + 1 static-source audit) | n/a (TCP) | ❌ distinct close codes leak policy |
 | QUIC spin bit (RFC 9000 §17.4) — wire-visible passive RTT inference | ✅ `allow_spin_bit = false` default + random-fill compensation (wire-test pinned, 30-70% Bernoulli band) | n/a (TCP) | ❌ quinn upstream default = `true` |
 | QUIC ACK frequency (RFC 9802) — bulk-flow ACK overhead | ⚠ knob exposed, **default disabled** — value `10` breaks BBR on sub-ms RTT (measured 107 → 0.5 MiB/s loopback collapse); operators opt in via `beta_ack_eliciting_threshold: 10` for measured long-fat-pipe paths only | n/a | ⚠ Hy2 tunes similarly, TUIC-v5 doesn't |
@@ -1774,7 +1778,10 @@ The wire format and handshake state machine are normatively defined in
 [`assets/spec/proteus-v1.0.md`](../../assets/spec/proteus-v1.0.md). The
 authenticated inner-AEAD agility candidate is specified separately in
 [`assets/spec/proteus-v1.1-aead-agility.md`](../../assets/spec/proteus-v1.1-aead-agility.md);
-it remains non-normative until every promotion gate in that amendment passes.
+the hedge-authenticated v1.2 key schedule is specified in
+[`assets/spec/proteus-v1.2-triple-hybrid.md`](../../assets/spec/proteus-v1.2-triple-hybrid.md).
+Both remain non-normative implementation candidates until their promotion
+gates and independent review pass.
 Operator runbook: [`deploy/README.md`](deploy/README.md). Version
 history: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -1875,8 +1882,13 @@ latest hardening pass:
   removes one stable rustls-vs-browser extension classifier; it
   does not hide SNI, so full ECH remains open.
 - ❌ **γ-profile (MASQUE / H3-over-QUIC)**: not started.
-- ❌ **Formal verification** (ProVerif / Tamarin handshake proof,
-  spec §11.10): placeholder only.
+- 🟡 **Formal verification**: the pinned ProVerif 2.05 model proves
+  bidirectional payload secrecy and injective agreement for v1.2 in
+  the symbolic Dolev–Yao model, including active challenges that reveal
+  any one of the ephemeral-X25519, static-X25519, or ML-KEM shared
+  components before Server Finished authentication. Computational
+  reductions, Tamarin state-machine analysis, side channels, the
+  post-handshake ratchet, and independent review remain open.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2
@@ -1896,5 +1908,7 @@ latest hardening pass:
 **Several cryptographic, traffic-analysis, and production-stability
 components are now stronger in isolation than their VLESS+REALITY or
 Hy2/TUIC-v5 analogues; end-to-end superiority is not yet proven.**
-The remaining work is **adversarial validation
-+ uTLS replay**, not protocol design.
+The remaining work includes computational and independent security
+review, adversarial deployment validation, browser-profile rotation,
+matched reordering/loss recovery, resource accounting, and true
+cross-host performance trials.

@@ -6,13 +6,17 @@
 //! and the Bindel PQCrypto 2019 IND-CCA reduction:
 //!
 //! ```text
-//! K_classic = X25519(c_eph_sk, s_eph_pk)            // 32 bytes
-//! K_pq      = ML-KEM-768.Decaps(s_pq_sk, c_mlkem_ct) // 32 bytes
-//! DH_input  = K_classic || K_pq                      // 64 bytes
+//! K_ephemeral = X25519(c_eph_sk, s_eph_pk)             // 32 bytes
+//! K_static    = X25519(c_eph_sk, s_static_pk)          // 32 bytes
+//! K_pq        = ML-KEM-768.Decaps(s_pq_sk, c_mlkem_ct) // 32 bytes
+//! K_input     = K_ephemeral || K_static || K_pq        // 96 bytes
 //! ```
 //!
 //! The combined `DH_input` is then fed as `IKM` to `HKDF-Extract` to derive
-//! the TLS 1.3-style Handshake Secret.
+//! the TLS 1.3-style Handshake Secret. The independent static-X25519
+//! component prevents an ML-KEM break from also becoming a server-
+//! impersonation break; the per-session ephemeral component preserves
+//! classical forward secrecy.
 
 use ml_kem::kem::{Decapsulate, Encapsulate};
 use ml_kem::{Ciphertext, KemCore, MlKem768};
@@ -23,8 +27,8 @@ use zeroize::Zeroizing;
 
 use crate::CryptoError;
 
-/// Length of the combined `(K_classic || K_pq)` input to HKDF-Extract.
-pub const HYBRID_SHARED_LEN: usize = 32 + 32;
+/// Length of `(K_ephemeral || K_static || K_pq)` fed to HKDF-Extract.
+pub const HYBRID_SHARED_LEN: usize = 32 + 32 + 32;
 
 /// Client-side ephemeral key material produced before the handshake.
 pub struct ClientEphemeral {
@@ -89,10 +93,11 @@ pub fn client_ephemeral<R: RngCore + CryptoRng>(
     })
 }
 
-/// Server-side: given the client's X25519 share and ML-KEM ciphertext,
-/// recover `(K_classic, K_pq)` and concatenate them.
+/// Server-side: combine per-session X25519, static server X25519, and
+/// ML-KEM contributions for one authenticated handshake.
 pub fn server_combine(
-    server_x25519_sk: &StaticSecret,
+    server_x25519_eph_sk: &StaticSecret,
+    server_x25519_static_sk: &StaticSecret,
     server_mlkem_sk: &<MlKem768 as KemCore>::DecapsulationKey,
     client_x25519_pub: &[u8; 32],
     client_mlkem_ct: &[u8; 1088],
@@ -100,11 +105,16 @@ pub fn server_combine(
     use zeroize::Zeroize as _;
 
     let client_pub = XPublicKey::from(*client_x25519_pub);
-    let k_classic = server_x25519_sk.diffie_hellman(&client_pub);
+    let k_ephemeral = server_x25519_eph_sk.diffie_hellman(&client_pub);
+    let k_static = server_x25519_static_sk.diffie_hellman(&client_pub);
 
-    // Reject all-zero shared secret (RFC 7748 §6.1).
+    // Reject all-zero shared secrets (RFC 7748 §6.1). Both operations
+    // share the adversary-controlled client public key, but keep the
+    // checks local so a future split cannot accidentally omit one.
     let zero = [0u8; 32];
-    if bool::from(k_classic.as_bytes().ct_eq(&zero)) {
+    if bool::from(k_ephemeral.as_bytes().ct_eq(&zero))
+        || bool::from(k_static.as_bytes().ct_eq(&zero))
+    {
         return Err(CryptoError::X25519ZeroOutput);
     }
 
@@ -118,8 +128,9 @@ pub fn server_combine(
     // Copy into combined FIRST, then scrub the source stack
     // copies. Order matters: zeroizing before the copy would
     // write all-zero bytes into combined.
-    combined[..32].copy_from_slice(k_classic.as_bytes());
-    combined[32..].copy_from_slice(k_pq.as_ref());
+    combined[..32].copy_from_slice(k_ephemeral.as_bytes());
+    combined[32..64].copy_from_slice(k_static.as_bytes());
+    combined[64..].copy_from_slice(k_pq.as_ref());
 
     // Iter-164: scrub the raw `k_pq` stack copy from ml-kem.
     //
@@ -147,18 +158,17 @@ pub fn server_combine(
         bytes.zeroize();
     }
     //
-    // `k_classic` (x25519_dalek `SharedSecret`) is intentionally
-    // NOT scrubbed inline here. `SharedSecret(MontgomeryPoint)`
+    // `k_ephemeral` and `k_static` (x25519_dalek `SharedSecret`) are
+    // intentionally NOT scrubbed inline here. `SharedSecret(MontgomeryPoint)`
     // does not impl Drop, but the inner `MontgomeryPoint` impls
     // Zeroize — and the type doesn't expose a public `as_mut() ->
     // &mut [u8]` (only `as_bytes() -> &[u8; 32]`). Reaching the
     // inner bytes through unsafe pointer arithmetic just to scrub
     // them is a worse trade than waiting for upstream
     // x25519_dalek to add ZeroizeOnDrop (issue #131 in
-    // dalek-cryptography/curve25519-dalek). The K_classic residue
-    // on its own is half of a hybrid shared — without the
-    // matching K_pq (which iter-163/164 now scrub on both sides)
-    // it doesn't open any session's keys.
+    // dalek-cryptography/curve25519-dalek). Either classical residue
+    // remains insufficient without the other components; K_pq is
+    // explicitly scrubbed on both peers.
     //
     // Filed as a TODO against upstream; meanwhile we've removed
     // the ML-KEM residue, which was the other half of the
@@ -166,23 +176,30 @@ pub fn server_combine(
     Ok(combined)
 }
 
-/// Client-side: combine its stored X25519 secret with the server's
-/// ephemeral X25519 public, then prepend the ML-KEM shared it generated.
+/// Client-side: combine its stored X25519 secret with both the server's
+/// ephemeral and pinned static X25519 public keys, then append the
+/// ML-KEM shared secret it generated.
 pub fn client_combine(
     client_eph: &ClientEphemeral,
-    server_x25519_pub: &[u8; 32],
+    server_x25519_eph_pub: &[u8; 32],
+    server_x25519_static_pub: &[u8; 32],
 ) -> Result<Zeroizing<[u8; HYBRID_SHARED_LEN]>, CryptoError> {
-    let server_pub = XPublicKey::from(*server_x25519_pub);
-    let k_classic = client_eph.x25519_sk.diffie_hellman(&server_pub);
+    let server_eph_pub = XPublicKey::from(*server_x25519_eph_pub);
+    let server_static_pub = XPublicKey::from(*server_x25519_static_pub);
+    let k_ephemeral = client_eph.x25519_sk.diffie_hellman(&server_eph_pub);
+    let k_static = client_eph.x25519_sk.diffie_hellman(&server_static_pub);
 
     let zero = [0u8; 32];
-    if bool::from(k_classic.as_bytes().ct_eq(&zero)) {
+    if bool::from(k_ephemeral.as_bytes().ct_eq(&zero))
+        || bool::from(k_static.as_bytes().ct_eq(&zero))
+    {
         return Err(CryptoError::X25519ZeroOutput);
     }
 
     let mut combined = Zeroizing::new([0u8; HYBRID_SHARED_LEN]);
-    combined[..32].copy_from_slice(k_classic.as_bytes());
-    combined[32..].copy_from_slice(client_eph.mlkem_shared.as_slice());
+    combined[..32].copy_from_slice(k_ephemeral.as_bytes());
+    combined[32..64].copy_from_slice(k_static.as_bytes());
+    combined[64..].copy_from_slice(client_eph.mlkem_shared.as_slice());
     Ok(combined)
 }
 
@@ -196,16 +213,20 @@ mod tests {
         // Server long-term keys.
         let mut rng = OsRng;
         let (server_mlkem_sk, server_mlkem_pk) = MlKem768::generate(&mut rng);
-        let server_x25519_sk = StaticSecret::random_from_rng(rng);
-        let server_x25519_pub = XPublicKey::from(&server_x25519_sk).to_bytes();
+        let server_eph_sk = StaticSecret::random_from_rng(rng);
+        let server_eph_pub = XPublicKey::from(&server_eph_sk).to_bytes();
+        let server_static_sk = StaticSecret::random_from_rng(rng);
+        let server_static_pub = XPublicKey::from(&server_static_sk).to_bytes();
 
         // Client builds the auth-extension material.
         let client_eph = client_ephemeral(&mut rng, &server_mlkem_pk).unwrap();
-        let client_combined = client_combine(&client_eph, &server_x25519_pub).unwrap();
+        let client_combined =
+            client_combine(&client_eph, &server_eph_pub, &server_static_pub).unwrap();
 
         // Server combines using the wire-shipped material.
         let server_combined = server_combine(
-            &server_x25519_sk,
+            &server_eph_sk,
+            &server_static_sk,
             &server_mlkem_sk,
             &client_eph.x25519_pub,
             &client_eph.mlkem_ct,
@@ -258,17 +279,20 @@ mod tests {
     fn iter164_server_combine_preserves_k_pq_in_combined() {
         let mut rng = OsRng;
         let (sk, pk) = MlKem768::generate(&mut rng);
-        let s_x_sk = StaticSecret::random_from_rng(rng);
-        let s_x_pub = XPublicKey::from(&s_x_sk).to_bytes();
+        let s_eph_sk = StaticSecret::random_from_rng(rng);
+        let s_eph_pub = XPublicKey::from(&s_eph_sk).to_bytes();
+        let s_static_sk = StaticSecret::random_from_rng(rng);
+        let s_static_pub = XPublicKey::from(&s_static_sk).to_bytes();
 
         let eph = client_ephemeral(&mut rng, &pk).unwrap();
-        let combined = server_combine(&s_x_sk, &sk, &eph.x25519_pub, &eph.mlkem_ct).unwrap();
-        // Pin: K_pq half (bytes 32..64) must equal the client's
+        let combined =
+            server_combine(&s_eph_sk, &s_static_sk, &sk, &eph.x25519_pub, &eph.mlkem_ct).unwrap();
+        // Pin: K_pq component (bytes 64..96) must equal the client's
         // remembered shared. A sloppy iter-164 that wiped
-        // `combined[32..]` after the copy would surface here as
+        // `combined[64..]` after the copy would surface here as
         // an all-zero PQ half.
         assert_eq!(
-            &combined[32..],
+            &combined[64..],
             eph.mlkem_shared.as_slice(),
             "iter-164: server_combine must preserve K_pq in combined; \
              the post-copy zeroize must scrub the source `k_pq` stack \
@@ -278,12 +302,13 @@ mod tests {
         // unlikely for a real ML-KEM-768 output, but a sloppy
         // fix would land here too).
         assert!(
-            combined[32..].iter().any(|&b| b != 0),
+            combined[64..].iter().any(|&b| b != 0),
             "iter-164: K_pq half must be non-zero — sloppy fix likely \
              wiped the destination buffer"
         );
-        // K_classic half (bytes 0..32) must also be intact.
-        let s_diff_check = client_combine(&eph, &s_x_pub).expect("client_combine for cross-check");
+        // Both classical components must also be intact.
+        let s_diff_check = client_combine(&eph, &s_eph_pub, &s_static_pub)
+            .expect("client_combine for cross-check");
         assert_eq!(
             &combined[..],
             s_diff_check.as_slice(),
@@ -296,11 +321,14 @@ mod tests {
     fn corrupted_ciphertext_yields_diverging_shared() {
         let mut rng = OsRng;
         let (server_mlkem_sk, server_mlkem_pk) = MlKem768::generate(&mut rng);
-        let server_x25519_sk = StaticSecret::random_from_rng(rng);
-        let server_x25519_pub = XPublicKey::from(&server_x25519_sk).to_bytes();
+        let server_eph_sk = StaticSecret::random_from_rng(rng);
+        let server_eph_pub = XPublicKey::from(&server_eph_sk).to_bytes();
+        let server_static_sk = StaticSecret::random_from_rng(rng);
+        let server_static_pub = XPublicKey::from(&server_static_sk).to_bytes();
 
         let client_eph = client_ephemeral(&mut rng, &server_mlkem_pk).unwrap();
-        let client_combined = client_combine(&client_eph, &server_x25519_pub).unwrap();
+        let client_combined =
+            client_combine(&client_eph, &server_eph_pub, &server_static_pub).unwrap();
 
         let mut bad_ct = client_eph.mlkem_ct;
         bad_ct[42] ^= 0xff;
@@ -309,12 +337,50 @@ mod tests {
         // pseudorandom secret, so K_pq diverges but no error is raised.
         // The shared MUST therefore differ — that's the security property.
         let server_combined = server_combine(
-            &server_x25519_sk,
+            &server_eph_sk,
+            &server_static_sk,
             &server_mlkem_sk,
             &client_eph.x25519_pub,
             &bad_ct,
         )
         .unwrap();
         assert_ne!(client_combined.as_slice(), server_combined.as_slice());
+    }
+
+    #[test]
+    fn pinned_static_server_key_is_an_independent_kdf_component() {
+        let mut rng = OsRng;
+        let (_server_mlkem_sk, server_mlkem_pk) = MlKem768::generate(&mut rng);
+        let server_eph_sk = StaticSecret::random_from_rng(rng);
+        let server_eph_pub = XPublicKey::from(&server_eph_sk).to_bytes();
+        let server_static_sk = StaticSecret::random_from_rng(rng);
+        let server_static_pub = XPublicKey::from(&server_static_sk).to_bytes();
+        let wrong_static_sk = StaticSecret::random_from_rng(rng);
+        let wrong_static_pub = XPublicKey::from(&wrong_static_sk).to_bytes();
+        let client_eph = client_ephemeral(&mut rng, &server_mlkem_pk).unwrap();
+
+        let pinned = client_combine(&client_eph, &server_eph_pub, &server_static_pub).unwrap();
+        let substituted = client_combine(&client_eph, &server_eph_pub, &wrong_static_pub).unwrap();
+
+        assert_eq!(
+            &pinned[..32],
+            &substituted[..32],
+            "changing the pinned static key must not alter K_ephemeral"
+        );
+        assert_ne!(
+            &pinned[32..64],
+            &substituted[32..64],
+            "changing the pinned static key must alter K_static"
+        );
+        assert_eq!(
+            &pinned[64..],
+            &substituted[64..],
+            "changing the pinned static key must not alter K_pq"
+        );
+        assert_ne!(
+            pinned.as_slice(),
+            substituted.as_slice(),
+            "a substituted server identity must derive a different KDF input"
+        );
     }
 }

@@ -1,8 +1,9 @@
 //! Hybrid KEX latency baseline. Measures the slowest CPU-bound piece
-//! of the handshake: ML-KEM-768 Encaps + Decaps, X25519 keygen + DH.
+//! of the handshake: ML-KEM-768 Encaps + Decaps, X25519 keygen +
+//! ephemeral and static DH.
 //!
-//! Spec §17.2 budgets ~80 µs of server-side ML-KEM Decap + X25519
-//! per handshake. These benches let us catch regressions there.
+//! These benches pin the v1.2 triple-hybrid cost so later dependency
+//! or implementation changes cannot hide a handshake regression.
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ml_kem::{KemCore, MlKem768};
@@ -27,16 +28,19 @@ fn bench_client_ephemeral(c: &mut Criterion) {
 fn bench_server_combine(c: &mut Criterion) {
     let mut rng = OsRng;
     let (sk, pk) = MlKem768::generate(&mut rng);
-    let server_x_sk = StaticSecret::random_from_rng(rng);
-    let server_x_pub = XPublicKey::from(&server_x_sk).to_bytes();
+    let server_eph_sk = StaticSecret::random_from_rng(rng);
+    let server_eph_pub = XPublicKey::from(&server_eph_sk).to_bytes();
+    let server_static_sk = StaticSecret::random_from_rng(rng);
+    let server_static_pub = XPublicKey::from(&server_static_sk).to_bytes();
 
     let eph = kex::client_ephemeral(&mut rng, &pk).unwrap();
-    let _check = kex::client_combine(&eph, &server_x_pub).unwrap();
+    let _check = kex::client_combine(&eph, &server_eph_pub, &server_static_pub).unwrap();
 
-    c.bench_function("server_combine (X25519 DH + ML-KEM-768 Decaps)", |b| {
+    c.bench_function("server_combine (2x X25519 DH + ML-KEM-768 Decaps)", |b| {
         b.iter(|| {
             let combined = kex::server_combine(
-                black_box(&server_x_sk),
+                black_box(&server_eph_sk),
+                black_box(&server_static_sk),
                 black_box(&sk),
                 black_box(&eph.x25519_pub),
                 black_box(&eph.mlkem_ct),

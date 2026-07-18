@@ -1,8 +1,9 @@
 //! Full TLS 1.3-style key schedule with hybrid PQ extension (spec §5.2).
 //!
-//! Mirrors RFC 8446 §7.1 exactly, with the single modification that
-//! `HKDF-Extract`'s IKM at the Handshake-Secret stage is the concatenation
-//! `K_classic || K_pq` (draft-ietf-tls-hybrid-design-11 concatenation hybrid).
+//! Mirrors RFC 8446 §7.1, with `HKDF-Extract`'s Handshake-Secret IKM
+//! extended to `K_ephemeral || K_static || K_pq`. The two independent
+//! X25519 contributions separate forward secrecy from classical server
+//! authentication while ML-KEM supplies the post-quantum component.
 
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -76,7 +77,7 @@ fn direction_keys_from_secret(secret: &[u8; SECRET_LEN]) -> Result<DirectionKeys
 ///
 /// Inputs:
 /// - `client_nonce`: 16 bytes, drives the Early Secret.
-/// - `hybrid_shared` = `K_classic || K_pq` (64 bytes total).
+/// - `hybrid_shared` = `K_ephemeral || K_static || K_pq` (96 bytes total).
 /// - `transcript_hash_ch_sh`: SHA-256 of `(ClientHello || ServerHello)`-equivalent
 ///   bytes (in Proteus α profile this is the handshake-frame prefix bytes).
 /// - `transcript_hash_ch_sf`: SHA-256 of `(ClientHello || ... || ServerFinished)`.
@@ -85,7 +86,7 @@ fn direction_keys_from_secret(secret: &[u8; SECRET_LEN]) -> Result<DirectionKeys
 /// Output: the four post-handshake secrets.
 pub fn derive(
     client_nonce: &[u8; 16],
-    hybrid_shared: &[u8; 64],
+    hybrid_shared: &[u8; crate::kex::HYBRID_SHARED_LEN],
     transcript_hash_ch_sh: &[u8; 32],
     transcript_hash_ch_sf: &[u8; 32],
     transcript_hash_ch_cf: &[u8; 32],
@@ -100,7 +101,10 @@ pub fn derive(
     let empty_hash = sha256_empty();
     let derived_es = kdf::derive_secret(&es, b"derived", &empty_hash)?;
 
-    // Handshake Secret = HKDF-Extract(salt=derived_es, IKM=K_classic||K_pq).
+    // Handshake Secret = HKDF-Extract(
+    //     salt=derived_es,
+    //     IKM=K_ephemeral || K_static || K_pq,
+    // ).
     let hs = kdf::extract(derived_es.as_ref(), hybrid_shared);
 
     // We do not currently consume the handshake-traffic-secrets in α profile
@@ -188,7 +192,7 @@ mod tests {
     #[test]
     fn schedule_is_deterministic() {
         let nonce = [0x11u8; 16];
-        let shared = [0x22u8; 64];
+        let shared = [0x22u8; crate::kex::HYBRID_SHARED_LEN];
         let th_a = [0x33u8; 32];
         let th_b = [0x44u8; 32];
         let th_c = [0x55u8; 32];
@@ -203,7 +207,14 @@ mod tests {
 
     #[test]
     fn directions_diverge() {
-        let s = derive(&[0u8; 16], &[1u8; 64], &[2u8; 32], &[3u8; 32], &[4u8; 32]).unwrap();
+        let s = derive(
+            &[0u8; 16],
+            &[1u8; crate::kex::HYBRID_SHARED_LEN],
+            &[2u8; 32],
+            &[3u8; 32],
+            &[4u8; 32],
+        )
+        .unwrap();
         assert_ne!(
             s.c_ap_secret.as_slice(),
             s.s_ap_secret.as_slice(),
@@ -218,15 +229,15 @@ mod tests {
     fn different_shared_diverge() {
         let nonce = [0u8; 16];
         let th = [0u8; 32];
-        let s1 = derive(&nonce, &[1u8; 64], &th, &th, &th).unwrap();
-        let s2 = derive(&nonce, &[2u8; 64], &th, &th, &th).unwrap();
+        let s1 = derive(&nonce, &[1u8; crate::kex::HYBRID_SHARED_LEN], &th, &th, &th).unwrap();
+        let s2 = derive(&nonce, &[2u8; crate::kex::HYBRID_SHARED_LEN], &th, &th, &th).unwrap();
         assert_ne!(s1.c_ap_secret.as_slice(), s2.c_ap_secret.as_slice());
     }
 
     #[test]
     fn different_transcript_diverges_ap_traffic() {
         let nonce = [0u8; 16];
-        let shared = [0u8; 64];
+        let shared = [0u8; crate::kex::HYBRID_SHARED_LEN];
         let s1 = derive(&nonce, &shared, &[0u8; 32], &[1u8; 32], &[2u8; 32]).unwrap();
         let s2 = derive(&nonce, &shared, &[0u8; 32], &[9u8; 32], &[2u8; 32]).unwrap();
         // c_ap_secret depends on ch_sf transcript → must differ
