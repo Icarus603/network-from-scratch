@@ -214,6 +214,15 @@ v1.3 handshake and symmetric ratchet while omitting fresh/fresh PCS. Production
 builds have no runtime downgrade switch, and the container build requires a
 second explicit allow flag before it will compile the insecure control.
 
+The 2026-07-19 promoted gate at commit `f05773a` passed with 30 runs per
+mode: enabled throughput was 0.214% higher than control, while client CPU
+time increased 0.342% (95% bootstrap interval +0.040% to +0.859%). The
+production PCS-enabled image retained a +96.51% median throughput margin
+over Hy2 in the same 512 MiB, 100 ms RTT, 0% loss cell. Raw arrays, image
+IDs, qdisc counters, statistical method, and the single-host limitation are
+preserved in
+[`notes/perf/2026-07-19-v13-pcs-overhead.jsonl`](../../notes/perf/2026-07-19-v13-pcs-overhead.jsonl).
+
 ## 9. Required conformance gates
 
 The wire/state implementation remains incomplete until all of these pass:
@@ -247,9 +256,9 @@ The erasure audit also found and fixed a disabled dependency feature:
 `x25519-dalek/zeroize` is mandatory so proposal private keys and DH shared
 results erase on drop; directional roots already use `Zeroizing`.
 
-Promotion still requires sanitizer and fuzz gates, matched
-enabled-versus-disabled performance evidence, and independent review. Until
-those gates close, v1.3 remains an implementation candidate. The README may
-report only the narrower property already proved and tested: passive
-full-session-state recovery after the attacker loses endpoint access and both
-fresh contributions complete.
+The matched enabled-versus-disabled performance gate is now closed. Promotion
+still requires sanitizer and fuzz gates plus independent review. Until those
+gates close, v1.3 remains an implementation candidate. The README may report
+only the narrower property already proved and tested: passive full-session-state
+recovery after the attacker loses endpoint access and both fresh contributions
+complete.

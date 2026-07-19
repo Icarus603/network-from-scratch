@@ -7,6 +7,19 @@ JSON-lines schema is defined in
 (`RunReport`) and is append-only — additions never reorder or
 rename fields, so old baselines stay parseable indefinitely.
 
+## 2026-07-19 — v1.3 fresh/fresh PCS overhead gate
+
+[`2026-07-19-v13-pcs-overhead.jsonl`](./2026-07-19-v13-pcs-overhead.jsonl)
+preserves the matched compile-time-control experiment at commit `f05773a`.
+Both modes used the production proxy workload, 512 MiB payloads, 100 ms RTT,
+zero configured loss, distinct digest-pinned images, and 30 runs. PCS-enabled
+throughput was 0.214% higher than control; client CPU increased 0.342%, with
+a +0.040% to +0.859% bootstrap interval. This passes the 1% throughput and
+3% statistically positive CPU regression vetoes. The production image also
+retained a +96.51% median throughput margin over Hy2 in this cell. This is
+a single-host overhead gate; it does not replace the required physical
+two-host matrix.
+
 ## Why persist these
 
 The bench harness produces reproducible numbers, but
