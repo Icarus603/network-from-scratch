@@ -579,6 +579,9 @@ where
                             }
 
                             stream_authenticated.store(true, std::sync::atomic::Ordering::Release);
+                            stream_conn.set_max_stream_receive_chunks(
+                                crate::AUTHENTICATED_STREAM_CHUNK_MAX,
+                            );
                             stream_conn.enable_adaptive_reordering(
                                 crate::ADAPTIVE_PACKET_THRESHOLD_MAX,
                                 crate::ADAPTIVE_TIME_THRESHOLD_MAX,

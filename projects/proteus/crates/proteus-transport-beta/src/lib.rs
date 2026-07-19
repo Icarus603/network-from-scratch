@@ -63,6 +63,9 @@ pub use brutal::{Brutal, BrutalConfig, DEFAULT_TARGET_BPS};
 /// Maximum packet-number distance accepted by the bounded Quinn replay
 /// window and by confirmed-spurious-loss recovery adaptation.
 pub const ADAPTIVE_PACKET_THRESHOLD_MAX: u32 = 16_384;
+/// Maximum discontiguous receive buffers retained per authenticated stream.
+/// Pre-authentication Quinn traffic keeps its default 1,024-chunk DoS bound.
+pub const AUTHENTICATED_STREAM_CHUNK_MAX: usize = 16_384;
 /// Maximum delay tolerated by confirmed-spurious-loss time adaptation.
 /// Four conservative RTTs bounds genuine-loss recovery latency.
 pub const ADAPTIVE_TIME_THRESHOLD_MAX: f32 = 4.0;

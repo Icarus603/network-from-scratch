@@ -266,6 +266,8 @@ impl BetaClientConnection {
     }
 
     fn enable_adaptive_reordering(&self) {
+        self.connection
+            .set_max_stream_receive_chunks(crate::AUTHENTICATED_STREAM_CHUNK_MAX);
         self.connection.enable_adaptive_reordering(
             crate::ADAPTIVE_PACKET_THRESHOLD_MAX,
             crate::ADAPTIVE_TIME_THRESHOLD_MAX,

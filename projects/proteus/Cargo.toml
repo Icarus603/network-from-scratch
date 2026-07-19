@@ -74,8 +74,8 @@ x509-parser = "0.18"
 # packet/time recovery adaptation; the exact commit is pinned so production
 # builds remain reproducible.
 [patch.crates-io]
-quinn = { git = "https://github.com/Icarus603/quinn", rev = "9fd6f65ebd266f2d70a050099fe0232765dccf6b" }
-quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "9fd6f65ebd266f2d70a050099fe0232765dccf6b" }
+quinn = { git = "https://github.com/Icarus603/quinn", rev = "dd02b67d81fa2121f517717739ecff2fd35afa0b" }
+quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "dd02b67d81fa2121f517717739ecff2fd35afa0b" }
 
 [profile.release]
 opt-level = 3

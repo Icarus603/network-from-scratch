@@ -1505,7 +1505,7 @@ dependencies = [
 [[package]]
 name = "quinn"
 version = "0.11.11"
-source = "git+https://github.com/Icarus603/quinn?rev=9fd6f65ebd266f2d70a050099fe0232765dccf6b#9fd6f65ebd266f2d70a050099fe0232765dccf6b"
+source = "git+https://github.com/Icarus603/quinn?rev=dd02b67d81fa2121f517717739ecff2fd35afa0b#dd02b67d81fa2121f517717739ecff2fd35afa0b"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -1524,7 +1524,7 @@ dependencies = [
 [[package]]
 name = "quinn-proto"
 version = "0.11.16"
-source = "git+https://github.com/Icarus603/quinn?rev=9fd6f65ebd266f2d70a050099fe0232765dccf6b#9fd6f65ebd266f2d70a050099fe0232765dccf6b"
+source = "git+https://github.com/Icarus603/quinn?rev=dd02b67d81fa2121f517717739ecff2fd35afa0b#dd02b67d81fa2121f517717739ecff2fd35afa0b"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -1545,14 +1545,14 @@ dependencies = [
 [[package]]
 name = "quinn-udp"
 version = "0.5.15"
-source = "git+https://github.com/Icarus603/quinn?rev=9fd6f65ebd266f2d70a050099fe0232765dccf6b#9fd6f65ebd266f2d70a050099fe0232765dccf6b"
+source = "git+https://github.com/Icarus603/quinn?rev=dd02b67d81fa2121f517717739ecff2fd35afa0b#dd02b67d81fa2121f517717739ecff2fd35afa0b"
 dependencies = [
  "cfg_aliases",
  "libc",
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
