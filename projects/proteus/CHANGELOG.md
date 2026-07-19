@@ -37,6 +37,12 @@ omitted when default features were disabled, so proposal private keys and DH
 shared results now erase on drop. Sanitizer/fuzz gates, matched performance
 evidence, and independent review remain open.
 
+The RustSec-clean `time 0.3.47` release raises its compiler floor to Rust 1.88.
+The workspace MSRV now states that bound, while the digest-pinned production
+builder moves from Rust 1.85.1 to the current Rust 1.97.1 image. This closes the
+local-versus-container drift that otherwise surfaced only when the benchmark
+image attempted its release build.
+
 ### Security — admin bearer-token control-byte gate (validate + runtime) (iter-154)
 
 Two-layer defense-in-depth on the metrics-endpoint bearer token.

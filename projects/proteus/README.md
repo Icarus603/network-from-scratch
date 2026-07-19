@@ -1194,7 +1194,7 @@ to a non-loopback interface.
 
 ```
 projects/proteus/
-├── Cargo.toml              workspace manifest (rust-toolchain 1.85+)
+├── Cargo.toml              workspace manifest (MSRV 1.88; production Rust 1.97.1)
 ├── Cargo.lock              PINNED for reproducible release builds
 ├── CHANGELOG.md            versioned release notes
 ├── deny.toml               cargo-deny policy: licenses + bans + advisories

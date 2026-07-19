@@ -2,7 +2,7 @@
 # ---- builder ----
 # The official Rust image pins the compiler family.  Install the native
 # C/CMake inputs explicitly because aws-lc-sys cannot build without them.
-FROM rust:1.85-slim-bookworm@sha256:9f841bbe9e7d8e37ceb96ed907265a3a0df7f44e3737d0b100e7907a679acb36 AS builder
+FROM rust:1.97-slim-bookworm@sha256:99e09cb2284e2ddbb73a995deee3e91783fd04d177602ccf6eab326d778ee777 AS builder
 ARG DEBIAN_MIRROR=http://deb.debian.org/debian
 ARG DEBIAN_SECURITY_MIRROR=http://deb.debian.org/debian-security
 RUN sed -i \
@@ -12,7 +12,7 @@ RUN sed -i \
     && apt-get update && apt-get install -y --no-install-recommends \
         build-essential ca-certificates clang cmake git libclang-dev perl pkg-config \
     && rm -rf /var/lib/apt/lists/*
-ENV RUSTUP_TOOLCHAIN=1.85.1
+ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /src
 
 # The lockfile is part of the build input. Omitting it silently resolves a
