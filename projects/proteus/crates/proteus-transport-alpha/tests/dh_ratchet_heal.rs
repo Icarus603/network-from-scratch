@@ -4,11 +4,14 @@
 //! improvement over the M0/M1/M2 pure-symmetric ratchet (which
 //! REALITY also cannot match):
 //!
-//! 1. **DH heal step happens**: the first RATCHET frame emitted on a
+//! 1. **Limited DH heal step happens**: the first RATCHET frame emitted on a
 //!    direction MUST be 36 bytes on the wire (4-byte new_epoch +
 //!    32-byte fresh DH pub), proving the sender actually performed a
-//!    fresh X25519 step that an attacker holding the bootstrap
-//!    handshake key alone cannot replay.
+//!    fresh X25519 step that an attacker holding only the traffic
+//!    secret cannot derive. This does not claim full endpoint-state
+//!    PCS: disclosure of the retained receiver DH private state also
+//!    defeats the one-shot heal, as modeled in
+//!    `formal/proverif/proteus-one-shot-ratchet.pv`.
 //!
 //! 2. **Subsequent ratchets fall back to symmetric**: every later
 //!    RATCHET on the same direction MUST be 4 bytes (legacy form).

@@ -69,7 +69,8 @@ VLESS+REALITY who need:
 | | Proteus | VLESS + REALITY | Hysteria2 / TUIC-v5 |
 |---|---|---|---|
 | Forward secrecy with key rotation | ✅ 4 MiB symmetric ratchet | ❌ session-wide key | ❌ session-wide key |
-| Post-compromise security (PCS heal) | ✅ DH ratchet at first 4 MiB | ❌ | ❌ |
+| Traffic-secret-only compromise healing | ✅ one-shot DH step at first 4 MiB | ❌ | ❌ |
+| Full endpoint-state post-compromise security | ❌ | ❌ | ❌ |
 | Post-quantum confidentiality | ✅ ML-KEM-768 hybrid | ❌ X25519 only | ❌ X25519 only |
 | Per-session ephemeral server X25519 | ✅ | ❌ long-term server key | n/a |
 | Rogue-cert MITM detection (RFC 5705) | ✅ α + β channel binding | ❌ | ❌ |
@@ -1817,8 +1818,11 @@ latest hardening pass:
 - ✅ **Per-session ephemeral server X25519**: defeats long-term
   server-key compromise for past sessions. REALITY uses a long-term
   key.
-- ✅ **Asymmetric DH ratchet** (Signal-style): one PCS heal step at
-  first 4 MiB / 16 k records boundary.
+- 🟡 **One-shot asymmetric DH step**: at the first 4 MiB / 16 k
+  records boundary it heals disclosure of the traffic secret alone,
+  provided the receiver's retained bootstrap DH private state remains
+  private. It is not a Signal Double Ratchet and does not heal full
+  endpoint-state compromise.
 - ✅ **TLS channel binding (RFC 5705 / 9266)**: both α and β. Rogue-
   cert MITM (compromised CA, SSL-bumping middlebox) is detected and
   rejected with `BadServerFinished` — verified by an integration
@@ -1896,13 +1900,18 @@ latest hardening pass:
   removes one stable rustls-vs-browser extension classifier; it
   does not hide SNI, so full ECH remains open.
 - ❌ **γ-profile (MASQUE / H3-over-QUIC)**: not started.
-- 🟡 **Formal verification**: the pinned ProVerif 2.05 model proves
+- 🟡 **Formal verification**: the pinned ProVerif 2.05 handshake model proves
   bidirectional payload secrecy and injective agreement for v1.2 in
   the symbolic Dolev–Yao model, including active challenges that reveal
   any one of the ephemeral-X25519, static-X25519, or ML-KEM shared
   components before Server Finished authentication. Computational
-  reductions, Tamarin state-machine analysis, side channels, the
-  post-handshake ratchet, and independent review remain open.
+  reductions, Tamarin state-machine analysis, side channels, a complete
+  post-handshake ratchet state-machine proof, and independent review
+  remain open. A second
+  pinned ProVerif model proves the current one-shot ratchet's limited
+  traffic-secret-only healing and forward secrecy, while requiring the
+  expected attack witness under full receiver-state compromise. A true
+  full-state PCS ratchet remains open.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2

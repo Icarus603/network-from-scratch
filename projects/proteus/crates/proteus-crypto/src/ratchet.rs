@@ -1,4 +1,4 @@
-//! Asymmetric DH ratchet delivering PCS-strong per spec §5.4.
+//! Asymmetric DH ratchet primitive used by the experimental ratchet API.
 //!
 //! ## Construction
 //!
@@ -30,13 +30,17 @@
 //! peer_last_dh_pk ← peer_new_dh_pk
 //! ```
 //!
-//! Properties (proved in `assets/formal/ProteusRatchet.spthy`):
+//! Security boundary:
 //!
 //! 1. Forward secrecy — leaking `current_secret` at time T does not expose
 //!    pre-T traffic (HKDF is forward-only).
-//! 2. PCS-strong — after one honest ratchet round, leaking the state at
-//!    time T does not expose post-T traffic (the new shared depends on the
-//!    peer's fresh DH share).
+//! 2. A traffic-secret-only leak can heal after a fresh DH step if the
+//!    retained peer DH private state was not compromised.
+//! 3. This is not full endpoint-state PCS: an attacker who learns both the
+//!    current traffic secret and the retained DH private state can combine
+//!    that private share with the next public KEYUPDATE and derive the next
+//!    secret. `formal/proverif/proteus-one-shot-ratchet.pv` proves the
+//!    limited property and produces the expected full-state attack witness.
 
 use rand_core::{CryptoRng, RngCore};
 use subtle::ConstantTimeEq;

@@ -1,0 +1,94 @@
+(*
+  Proteus alpha one-shot DH ratchet, symbolic Dolev-Yao boundary model.
+
+  Rust correspondence:
+    crates/proteus-transport-alpha/src/session.rs
+
+  This model deliberately proves a limited claim and exhibits the
+  boundary where the stronger claim fails:
+
+    1. traffic_secret_only: revealing the current traffic secret does
+       not reveal post-ratchet payloads when the receiver's bootstrap
+       DH secret remains private.
+    2. full_receiver_state: revealing both the traffic secret and the
+       receiver's bootstrap DH secret lets the attacker derive the
+       post-ratchet key from the sender's fresh public share.
+    3. forward_secret: revealing the derived ratchet key does not
+       reveal a payload encrypted under the prior traffic secret.
+
+  The second result is an expected attack witness, not a verifier
+  failure. It prevents us from calling the current one-shot mechanism
+  full endpoint-state post-compromise security.
+*)
+
+set ignoreTypes = false.
+
+free net: channel.
+
+type group.
+type exponent.
+const generator: group [data].
+fun exp(group, exponent): group.
+equation forall x: exponent, y: exponent;
+    exp(exp(generator, x), y) = exp(exp(generator, y), x).
+
+fun ratchet_key(bitstring, group): bitstring.
+fun encrypt(bitstring, bitstring): bitstring.
+reduc forall message: bitstring, key: bitstring;
+    decrypt(encrypt(message, key), key) = message.
+
+free traffic_secret_only_payload: bitstring [private].
+free full_receiver_state_payload: bitstring [private].
+free forward_secret_payload: bitstring [private].
+
+let traffic_secret_only =
+    new old_secret: bitstring;
+    new receiver_bootstrap_sk: exponent;
+    new sender_fresh_sk: exponent;
+    let receiver_bootstrap_pk = exp(generator, receiver_bootstrap_sk) in
+    let sender_fresh_pk = exp(generator, sender_fresh_sk) in
+    let shared = exp(receiver_bootstrap_pk, sender_fresh_sk) in
+    let next_secret = ratchet_key(old_secret, shared) in
+    out(net, (
+        old_secret,
+        receiver_bootstrap_pk,
+        sender_fresh_pk,
+        encrypt(traffic_secret_only_payload, next_secret)
+    )).
+
+let full_receiver_state =
+    new old_secret: bitstring;
+    new receiver_bootstrap_sk: exponent;
+    new sender_fresh_sk: exponent;
+    let receiver_bootstrap_pk = exp(generator, receiver_bootstrap_sk) in
+    let sender_fresh_pk = exp(generator, sender_fresh_sk) in
+    let shared = exp(receiver_bootstrap_pk, sender_fresh_sk) in
+    let next_secret = ratchet_key(old_secret, shared) in
+    out(net, (
+        old_secret,
+        receiver_bootstrap_sk,
+        receiver_bootstrap_pk,
+        sender_fresh_pk,
+        encrypt(full_receiver_state_payload, next_secret)
+    )).
+
+let forward_secret =
+    new old_secret: bitstring;
+    new receiver_bootstrap_sk: exponent;
+    new sender_fresh_sk: exponent;
+    let receiver_bootstrap_pk = exp(generator, receiver_bootstrap_sk) in
+    let shared = exp(receiver_bootstrap_pk, sender_fresh_sk) in
+    let next_secret = ratchet_key(old_secret, shared) in
+    out(net, (
+        next_secret,
+        encrypt(forward_secret_payload, old_secret)
+    )).
+
+query attacker(traffic_secret_only_payload).
+query attacker(full_receiver_state_payload).
+query attacker(forward_secret_payload).
+
+process
+    traffic_secret_only
+  | full_receiver_state
+  | forward_secret

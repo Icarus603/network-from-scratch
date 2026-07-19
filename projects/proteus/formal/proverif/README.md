@@ -10,7 +10,7 @@ Run:
 ./formal/proverif/verify.sh
 ```
 
-The model checks application-payload secrecy plus injective client and
+The handshake model checks application-payload secrecy plus injective client and
 server agreement on the complete session tuple and final application
 key. It runs the honest protocol alongside three hedge challenges that
 reveal, one at a time, the per-session ephemeral-X25519, static-X25519,
@@ -29,6 +29,20 @@ post-handshake ratchet. Those remain separate verification obligations;
 a green ProVerif run is evidence for the stated symbolic properties,
 not an independent security audit.
 
-Raw verifier output is written below `formal/proverif/results/`, which
+The same command also verifies
+`proteus-one-shot-ratchet.pv`. That model pins the exact security
+boundary of alpha's present one-shot DH ratchet. It proves that a
+traffic-secret-only disclosure does not expose post-ratchet payloads
+while the receiver's bootstrap DH secret remains private, and that
+revealing the derived key does not recover prior-epoch payloads. It
+also requires ProVerif to find the expected attack when the old traffic
+secret and receiver bootstrap DH secret are both disclosed: the
+attacker combines the disclosed private share with the sender's fresh
+public share and derives the next key. The negative witness is
+intentional. It means this mechanism is forward-secret and heals a
+limited traffic-secret leak, but is not full endpoint-state PCS.
+
+Raw verifier output for both models is written below
+`formal/proverif/results/`, which
 is ignored because it can be regenerated from the pinned model and
 container.

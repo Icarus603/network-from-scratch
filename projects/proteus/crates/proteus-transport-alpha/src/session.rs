@@ -551,7 +551,7 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// DATA), so the receiver must decrypt with the old key, then
     /// install the new key for everything after.
     ///
-    /// **DH mode (PCS-strong)**: when `self.dh_sk` is set AND a peer
+    /// **DH mode (limited leak healing)**: when `self.dh_sk` is set AND a peer
     /// DH pub is known, the body carries `(new_epoch:u32 || my_dh_pub_new:[u8;32])`
     /// = 36 bytes, and the new secret is derived from a fresh X25519
     /// step. Otherwise we fall back to the legacy 4-byte body — same
@@ -579,9 +579,12 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         // continuous Double Ratchet would face (where the sender
         // emits multiple ratchets faster than the peer responds, and
         // the receiver cannot tell which sk was paired with which
-        // pub). One heal step is sufficient to recover PCS from any
-        // pre-first-ratchet compromise; subsequent compromises are
-        // bounded to one ratchet window by symmetric forward secrecy.
+        // pub). One heal step recovers from disclosure of the traffic
+        // secret alone, provided the retained receiver bootstrap DH
+        // secret was not also compromised. It is not full endpoint-state
+        // PCS: disclosure of both values lets an observer derive this
+        // step from the fresh public share. Subsequent symmetric steps
+        // provide forward secrecy but cannot heal a current-secret leak.
         let dh_takes_priority = self.dh_sk.is_some() && self.peer_dh_pub.is_some();
 
         let (new_secret, mut body_payload): (Zeroizing<[u8; 32]>, Vec<u8>) = if dh_takes_priority {
