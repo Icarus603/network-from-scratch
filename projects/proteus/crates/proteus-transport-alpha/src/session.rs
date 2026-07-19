@@ -49,7 +49,9 @@ use proteus_spec::SEQNUM_MAX;
 use proteus_wire::alpha;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
+use tokio::time::Instant;
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
@@ -90,8 +92,12 @@ use crate::pcs_coordinator::{PcsCommit, PcsCoordinator, PcsOutbound};
 struct PcsShared {
     coordinator: Mutex<PcsCoordinator>,
     outbound_pending: AtomicBool,
+    exchange_pending: AtomicBool,
     notify: tokio::sync::Notify,
+    deadline: Mutex<Option<Instant>>,
 }
+
+const PCS_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl PcsShared {
     fn new(role: PcsRole, old_client_to_server: [u8; 32], old_server_to_client: [u8; 32]) -> Self {
@@ -102,8 +108,42 @@ impl PcsShared {
                 old_server_to_client,
             )),
             outbound_pending: AtomicBool::new(false),
+            exchange_pending: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
+            deadline: Mutex::new(None),
         }
+    }
+
+    fn begin_exchange(&self) -> AlphaResult<()> {
+        let mut deadline = self.deadline.lock().map_err(|_| AlphaError::Closed)?;
+        deadline.get_or_insert_with(|| Instant::now() + PCS_EXCHANGE_TIMEOUT);
+        self.exchange_pending.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    fn exchange_deadline(&self) -> Option<Instant> {
+        self.deadline
+            .lock()
+            .map_or_else(|_| Some(Instant::now()), |deadline| *deadline)
+    }
+
+    fn exchange_expired(&self) -> bool {
+        self.exchange_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+    }
+
+    fn finish_if_stable(&self) -> AlphaResult<()> {
+        let stable = {
+            let coordinator = self.coordinator.lock().map_err(|_| AlphaError::Closed)?;
+            !coordinator.exchange_in_flight()
+        };
+        if stable {
+            *self.deadline.lock().map_err(|_| AlphaError::Closed)? = None;
+            self.exchange_pending.store(false, Ordering::Release);
+            // Release a sender already waiting on the old deadline.
+            self.notify.notify_waiters();
+        }
+        Ok(())
     }
 
     fn wake_sender(&self) {
@@ -330,8 +370,17 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         if pcs.outbound_pending.load(Ordering::Acquire) {
             return true;
         }
-        pcs.notify.notified().await;
-        pcs.outbound_pending.load(Ordering::Acquire)
+        if let Some(deadline) = pcs.exchange_deadline() {
+            tokio::select! {
+                _ = pcs.notify.notified() => {
+                    pcs.outbound_pending.load(Ordering::Acquire)
+                }
+                _ = tokio::time::sleep_until(deadline) => true,
+            }
+        } else {
+            pcs.notify.notified().await;
+            pcs.outbound_pending.load(Ordering::Acquire)
+        }
     }
 
     /// Begin a v1.3 two-party PCS generation and queue the local offer.
@@ -345,6 +394,7 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
                 .initiate(&mut rand_core::OsRng)
                 .map_err(|_| AlphaError::Closed)?;
         }
+        pcs.begin_exchange()?;
         self.pcs_rekey_requested = true;
         // We are already executing on the send half, so a Notify permit
         // would be stale by the time the synchronously-following drive
@@ -361,6 +411,9 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
         let Some(pcs) = self.pcs.as_ref().cloned() else {
             return Ok(());
         };
+        if pcs.exchange_expired() {
+            return Err(AlphaError::Closed);
+        }
 
         loop {
             let outbound = {
@@ -392,6 +445,7 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
                         .await?;
                     self.write.flush().await?;
                     self.install_pcs_send_secret(next_secret)?;
+                    pcs.finish_if_stable()?;
                 }
                 None => return Ok(()),
             }
@@ -643,6 +697,9 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// Ratchet-prep shared between the legacy + cell-mode paths.
     async fn ensure_ratchet(&mut self) -> AlphaResult<()> {
         if let Some(pcs) = self.pcs.as_ref().cloned() {
+            if pcs.exchange_expired() {
+                return Err(AlphaError::Closed);
+            }
             if !self.pcs_rekey_requested && self.should_ratchet() {
                 self.initiate_two_party_pcs()?;
             }
@@ -1098,6 +1155,11 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     pub async fn recv_record_into(&mut self, out: &mut Vec<u8>) -> AlphaResult<Option<()>> {
         out.clear();
         loop {
+            if self.pcs.as_ref().is_some_and(|pcs| {
+                pcs.exchange_pending.load(Ordering::Acquire) && pcs.exchange_expired()
+            }) {
+                return Err(AlphaError::Closed);
+            }
             match alpha::decode_frame(&self.rx_buf[self.rx_offset..]) {
                 Ok((frame, consumed)) => {
                     let kind = frame.kind;
@@ -1411,7 +1473,24 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             // `read_buf` writes into the Vec's spare capacity and
             // returns the byte count. EOF is signalled by `n == 0`.
             let pre_len = self.rx_buf.len();
-            let n = self.read.read_buf(&mut self.rx_buf).await?;
+            let n = if let Some(pcs) = self
+                .pcs
+                .as_ref()
+                .filter(|pcs| pcs.exchange_pending.load(Ordering::Acquire))
+                .cloned()
+            {
+                let Some(deadline) = pcs.exchange_deadline() else {
+                    return Err(AlphaError::Closed);
+                };
+                tokio::select! {
+                    result = self.read.read_buf(&mut self.rx_buf) => result?,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        return Err(AlphaError::Closed);
+                    }
+                }
+            } else {
+                self.read.read_buf(&mut self.rx_buf).await?
+            };
             debug_assert_eq!(self.rx_buf.len(), pre_len + n);
             if n == 0 {
                 return Ok(None);
@@ -1458,6 +1537,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 )
                 .map_err(|_| AlphaError::Closed)?;
         }
+        pcs.begin_exchange()?;
         pcs.wake_sender();
         Ok(())
     }
@@ -1476,7 +1556,8 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                 })
                 .map_err(|_| AlphaError::Closed)?
         };
-        self.install_pcs_receive_secret(next_secret)
+        self.install_pcs_receive_secret(next_secret)?;
+        pcs.finish_if_stable()
     }
 
     fn install_pcs_receive_secret(&mut self, next_secret: Zeroizing<[u8; 32]>) -> AlphaResult<()> {
@@ -1895,6 +1976,20 @@ mod pcs_session_tests {
         client.sender.flush().await.unwrap();
         let new_c2s = server.receiver.recv_record().await.unwrap().unwrap();
         assert_eq!(new_c2s, b"new-c2s");
+        assert!(client
+            .sender
+            .pcs
+            .as_ref()
+            .unwrap()
+            .exchange_deadline()
+            .is_none());
+        assert!(server
+            .sender
+            .pcs
+            .as_ref()
+            .unwrap()
+            .exchange_deadline()
+            .is_none());
     }
 
     #[tokio::test]
@@ -2003,6 +2098,58 @@ mod pcs_session_tests {
             client.receiver.recv_record().await.unwrap().unwrap(),
             b"server-new"
         );
+    }
+
+    #[tokio::test]
+    async fn half_complete_exchange_deadline_fails_closed() {
+        let old_c2s = [0x91; 32];
+        let old_s2c = [0xa2; 32];
+        let (io, _peer) = duplex(64 * 1024);
+        let (read, write) = split(io);
+        let mut session = AlphaSession::new(
+            write,
+            read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        )
+        .with_two_party_pcs(PcsRole::Client, old_c2s, old_s2c);
+
+        session.sender.initiate_two_party_pcs().unwrap();
+        let pcs = session.sender.pcs.as_ref().unwrap();
+        *pcs.deadline.lock().unwrap() = Some(Instant::now());
+
+        assert!(session.sender.wait_for_pcs_control().await);
+        assert!(matches!(
+            session.sender.drive_two_party_pcs().await,
+            Err(AlphaError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn blocked_receiver_wakes_at_exchange_deadline() {
+        let old_c2s = [0xb1; 32];
+        let old_s2c = [0xc2; 32];
+        let (io, _peer) = duplex(64 * 1024);
+        let (read, write) = split(io);
+        let mut session = AlphaSession::new(
+            write,
+            read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        )
+        .with_two_party_pcs(PcsRole::Client, old_c2s, old_s2c);
+        let pcs = session.sender.pcs.as_ref().unwrap();
+        pcs.exchange_pending.store(true, Ordering::Release);
+        *pcs.deadline.lock().unwrap() = Some(Instant::now() + Duration::from_millis(10));
+
+        assert!(matches!(
+            session.receiver.recv_record().await,
+            Err(AlphaError::Closed)
+        ));
     }
 }
 

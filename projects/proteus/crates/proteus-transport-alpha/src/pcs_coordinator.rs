@@ -85,6 +85,15 @@ impl PcsCoordinator {
             || (self.derived.is_some() && !self.local_commit_emitted)
     }
 
+    pub(crate) fn exchange_in_flight(&self) -> bool {
+        self.local_proposal.is_some()
+            || self.local_offer.is_some()
+            || self.peer_offer.is_some()
+            || self.derived.is_some()
+            || self.local_commit_emitted
+            || self.peer_commit_consumed
+    }
+
     pub(crate) fn initiate<R: RngCore + CryptoRng>(
         &mut self,
         rng: &mut R,

@@ -171,6 +171,11 @@ The following conditions close the Proteus session without α fallback:
 7. Negotiated PCS capability followed by legacy one-shot `0x11` behavior.
 8. Timeout while an exchange remains half-complete.
 
+A half-complete exchange has a fixed 30-second deadline beginning with the
+first local or peer offer. The deadline is enforced by both send and receive
+halves; a receiver blocked on carrier input wakes at the deadline and closes
+the session. It is cleared only after both authenticated commits complete.
+
 A peer that does not authenticate `version = 0x13` MUST NOT receive
 `PCS_OFFER` or `PCS_COMMIT`. Production v1.3 endpoints reject v1.2 and older
 before key derivation; operators that need legacy compatibility must run a
@@ -233,9 +238,14 @@ simultaneous-initiation wire path, production v1.3 negotiation, directional
 relay wakeups, and repeated one-way rekeys exist as of 2026-07-19. Production
 v1.3 rejects both older handshake versions and legacy `0x11` ratchet records.
 
-Promotion still requires the remaining erasure/failure-path audit, exchange
-timeout bound, sanitizer and fuzz gates, matched enabled-versus-disabled
-performance evidence, and independent review. Until those gates close, v1.3
-remains an implementation candidate. The README may report only the narrower
-property already proved and tested: passive full-session-state recovery after
-the attacker loses endpoint access and both fresh contributions complete.
+The 30-second half-exchange deadline now wakes blocked send and receive halves.
+The erasure audit also found and fixed a disabled dependency feature:
+`x25519-dalek/zeroize` is mandatory so proposal private keys and DH shared
+results erase on drop; directional roots already use `Zeroizing`.
+
+Promotion still requires sanitizer and fuzz gates, matched
+enabled-versus-disabled performance evidence, and independent review. Until
+those gates close, v1.3 remains an implementation candidate. The README may
+report only the narrower property already proved and tested: passive
+full-session-state recovery after the attacker loses endpoint access and both
+fresh contributions complete.

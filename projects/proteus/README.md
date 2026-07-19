@@ -1917,9 +1917,12 @@ latest hardening pass:
   secrecy. Its expected active-old-auth attack witness remains reachable:
   an attacker that retains the compromised traffic keys and active
   network control can substitute a share. The α wire/state machine and
-  production relay now implement the proved passive boundary; timeout,
-  sanitizer/fuzz, matched overhead, and independent-review promotion
-  gates remain open.
+  production relay now implement the proved passive boundary. A
+  session-internal 30-second half-exchange deadline wakes blocked send
+  and receive halves and fails closed, while explicit
+  `x25519-dalek/zeroize` support erases proposal private keys and DH
+  results on drop. Sanitizer/fuzz, matched overhead, and
+  independent-review promotion gates remain open.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2

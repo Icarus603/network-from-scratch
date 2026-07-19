@@ -30,8 +30,12 @@ The accompanying ProVerif model proves the deliberately bounded claim:
 passive full-session-state recovery after endpoint compromise ends and both
 fresh contributions complete. It also preserves the expected attack when an
 adversary retains old authentication keys and active network control. Promotion
-still requires a bounded exchange timeout, failure-path erasure audit,
-sanitizer/fuzz gates, matched performance evidence, and independent review.
+now includes a session-internal 30-second half-exchange deadline: blocked send
+and receive halves wake and fail closed, while completed exchanges clear the
+deadline. The erasure audit also enables `x25519-dalek/zeroize`, which had been
+omitted when default features were disabled, so proposal private keys and DH
+shared results now erase on drop. Sanitizer/fuzz gates, matched performance
+evidence, and independent review remain open.
 
 ### Security — admin bearer-token control-byte gate (validate + runtime) (iter-154)
 

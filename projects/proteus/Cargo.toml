@@ -31,7 +31,7 @@ bytes = "1.7"
 thiserror = "1.0"
 
 # Crypto primitives (RustCrypto family, audited and pure-Rust)
-x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "reusable_secrets"] }
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets", "reusable_secrets", "zeroize"] }
 ed25519-dalek = { version = "2.1", default-features = false, features = ["rand_core"] }
 ml-kem = { version = "0.2", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
