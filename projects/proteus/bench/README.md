@@ -46,6 +46,13 @@ SOCKS5 CONNECT, stream the same deterministic bytes to the same TCP
 echo server, and verify every echoed byte. `WORKLOAD_MODE=legacy`
 exists only to reproduce older heterogeneous evidence.
 
+Every impairment cell recreates both the long-lived server and client peers
+for all included protocols. The netem router and common TCP echo target remain
+fixed. Resetting only clients leaves orphaned server-side QUIC carriers alive
+until their idle deadline; in a long following cell, that expected timeout can
+otherwise be misattributed to the new active carrier. Server log baselines are
+captured after recreation and before warmup.
+
 Set `INCLUDE_TUIC=1` to add the upstream TUIC v5 1.0.0 client/server
 to this protocol-neutral SOCKS5 workload. The release is checksum
 pinned, uses explicit 64 MiB send/receive windows, and remains the

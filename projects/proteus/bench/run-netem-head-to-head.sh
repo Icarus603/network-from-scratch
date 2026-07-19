@@ -139,21 +139,45 @@ write_service_log_delta() {
         > "$output"
 }
 
-reset_and_warm_proxy_clients() {
+reset_and_warm_proxy_stack() {
     cell_dir="$1"
+    servers=(proteus-proxy-server hy2-server)
     clients=(proteus-proxy-client hy2-proxy-client)
     if [ "$INCLUDE_TUIC" = "1" ]; then
+        servers+=(tuic-server)
         clients+=(tuic-client)
     fi
 
-    # No carrier or congestion-controller state may leak from the
-    # previous impairment cell. Recreate only the long-lived client
-    # daemons; servers and the common echo target remain fixed.
+    # No carrier or congestion-controller state may leak from the previous
+    # impairment cell. Recreating only clients leaves orphaned server-side
+    # QUIC carriers alive until their idle deadline; a long following cell
+    # then misattributes that expected timeout to its own active carrier.
+    # Recreate both peers while preserving only the common echo target and
+    # netem router.
+    "${COMPOSE[@]}" up -d --force-recreate --no-deps "${servers[@]}"
+    wait_for_log_marker proteus-proxy-server 'β-profile (QUIC) listener bound'
+    wait_for_log_marker hy2-server 'server up and running'
+    if [ "$INCLUDE_TUIC" = "1" ]; then
+        wait_for_log_marker tuic-server 'server started, listening'
+    fi
+
     "${COMPOSE[@]}" up -d --force-recreate --no-deps "${clients[@]}"
     wait_for_log_marker proteus-proxy-client 'SOCKS5 inbound bound'
     wait_for_log_marker hy2-proxy-client 'SOCKS5 server listening'
     if [ "$INCLUDE_TUIC" = "1" ]; then
         wait_for_log_marker tuic-client 'server started, listening'
+    fi
+
+    # Docker logs now belong only to freshly recreated servers. Pin the
+    # first warmup line so cell evidence includes warmup recovery while
+    # excluding startup noise.
+    proteus_server_log_first="$(service_log_line_count proteus-proxy-server)"
+    proteus_server_log_first="$((proteus_server_log_first + 1))"
+    hy2_server_log_first="$(service_log_line_count hy2-server)"
+    hy2_server_log_first="$((hy2_server_log_first + 1))"
+    if [ "$INCLUDE_TUIC" = "1" ]; then
+        tuic_server_log_first="$(service_log_line_count tuic-server)"
+        tuic_server_log_first="$((tuic_server_log_first + 1))"
     fi
 
     mkdir -p "${cell_dir}/warmup"
@@ -324,23 +348,6 @@ run_cell() {
         cell_dir="${RESULTS_DIR}/${cell}"
         mkdir -p "$cell_dir"
 
-        if [ "$WORKLOAD_MODE" = "proxy" ]; then
-            # Servers deliberately survive between cells, so their Docker
-            # logs are cumulative. Pin the first line owned by this cell
-            # before warmup; otherwise later cells silently inherit earlier
-            # recovery rows and invalidate direction-specific attribution.
-            proteus_server_log_first="$(
-                service_log_line_count proteus-proxy-server
-            )"
-            proteus_server_log_first="$((proteus_server_log_first + 1))"
-            hy2_server_log_first="$(service_log_line_count hy2-server)"
-            hy2_server_log_first="$((hy2_server_log_first + 1))"
-            if [ "$INCLUDE_TUIC" = "1" ]; then
-                tuic_server_log_first="$(service_log_line_count tuic-server)"
-                tuic_server_log_first="$((tuic_server_log_first + 1))"
-            fi
-        fi
-
         "${COMPOSE[@]}" exec -T netem \
             /usr/local/bin/netem-control.sh "$@" \
             > "${cell_dir}/qdisc-applied.json"
@@ -352,7 +359,7 @@ run_cell() {
             > "${cell_dir}/cell-config.json"
 
         if [ "$WORKLOAD_MODE" = "proxy" ]; then
-            reset_and_warm_proxy_clients "$cell_dir"
+            reset_and_warm_proxy_stack "$cell_dir"
         fi
         "${COMPOSE[@]}" exec -T netem \
             /usr/local/bin/netem-control.sh stats \
