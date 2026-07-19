@@ -105,6 +105,16 @@ fn log_beta_session_stats(
             .path
             .spurious_time_threshold_lost_packets
             .saturating_sub(before.path.spurious_time_threshold_lost_packets),
+        current_packet_threshold = after.path.current_packet_threshold,
+        adaptive_packet_threshold_updates = after.path.adaptive_packet_threshold_updates.saturating_sub(
+            before.path.adaptive_packet_threshold_updates
+        ),
+        max_spurious_packet_reordering = after.path.max_spurious_packet_reordering,
+        current_time_threshold = after.path.current_time_threshold,
+        adaptive_time_threshold_updates = after.path.adaptive_time_threshold_updates.saturating_sub(
+            before.path.adaptive_time_threshold_updates
+        ),
+        max_spurious_time_ratio = after.path.max_spurious_time_ratio,
         congestion_events = after.path.congestion_events.saturating_sub(
             before.path.congestion_events
         ),
@@ -569,6 +579,10 @@ where
                             }
 
                             stream_authenticated.store(true, std::sync::atomic::Ordering::Release);
+                            stream_conn.enable_adaptive_reordering(
+                                crate::ADAPTIVE_PACKET_THRESHOLD_MAX,
+                                crate::ADAPTIVE_TIME_THRESHOLD_MAX,
+                            );
                             stream_authenticated_notify.notify_waiters();
                             stream_handler(session).await;
                             if let Some(before) = stats_before {

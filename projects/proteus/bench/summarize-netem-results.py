@@ -23,7 +23,11 @@ BETA_STATS_FIELD_RE = re.compile(
     r"\b(sent_packets|lost_packets|lost_bytes|packet_threshold_lost_packets|"
     r"time_threshold_lost_packets|spurious_lost_packets|"
     r"spurious_packet_threshold_lost_packets|"
-    r"spurious_time_threshold_lost_packets|congestion_events|rtt_ms)"
+    r"spurious_time_threshold_lost_packets|current_packet_threshold|"
+    r"adaptive_packet_threshold_updates|max_spurious_packet_reordering|"
+    r"current_time_threshold|adaptive_time_threshold_updates|"
+    r"max_spurious_time_ratio|"
+    r"congestion_events|rtt_ms)"
     r"=([0-9.]+)"
 )
 DECIMAL_MULTIPLIER = {
@@ -227,13 +231,26 @@ def beta_recovery_rows(
             "spurious_packet_threshold_lost_packets",
             "spurious_time_threshold_lost_packets",
         }
+        optional_adaptive = {
+            "current_packet_threshold",
+            "adaptive_packet_threshold_updates",
+            "max_spurious_packet_reordering",
+            "current_time_threshold",
+            "adaptive_time_threshold_updates",
+            "max_spurious_time_ratio",
+        }
         present_spurious = set(fields) & optional_spurious
+        present_adaptive = set(fields) & optional_adaptive
         if not required.issubset(fields) or (
             present_spurious and present_spurious != optional_spurious
+        ) or (
+            present_adaptive and present_adaptive != optional_adaptive
         ):
             missing = required - set(fields)
             if present_spurious:
                 missing |= optional_spurious - present_spurious
+            if present_adaptive:
+                missing |= optional_adaptive - present_adaptive
             raise ValueError(
                 f"{path}: incomplete beta recovery row: "
                 f"missing {sorted(missing)}"
@@ -271,6 +288,29 @@ def beta_recovery_rows(
                         spurious_lost_packets / lost_packets
                         if lost_packets
                         else 0.0
+                    ),
+                }
+            )
+        if present_adaptive:
+            row.update(
+                {
+                    "quic_current_packet_threshold": int(
+                        fields["current_packet_threshold"]
+                    ),
+                    "quic_adaptive_packet_threshold_updates": int(
+                        fields["adaptive_packet_threshold_updates"]
+                    ),
+                    "quic_max_spurious_packet_reordering": int(
+                        fields["max_spurious_packet_reordering"]
+                    ),
+                    "quic_current_time_threshold": float(
+                        fields["current_time_threshold"]
+                    ),
+                    "quic_adaptive_time_threshold_updates": int(
+                        fields["adaptive_time_threshold_updates"]
+                    ),
+                    "quic_max_spurious_time_ratio": float(
+                        fields["max_spurious_time_ratio"]
                     ),
                 }
             )
@@ -683,6 +723,35 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                         ),
                     }
                 )
+            if "quic_current_packet_threshold" in proteus_recovery[0]:
+                summary.update(
+                    {
+                        "proteus_quic_current_packet_threshold_max": max(
+                            int(row["quic_current_packet_threshold"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_adaptive_packet_threshold_updates_total": sum(
+                            int(row["quic_adaptive_packet_threshold_updates"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_max_spurious_packet_reordering": max(
+                            int(row["quic_max_spurious_packet_reordering"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_current_time_threshold_max": max(
+                            float(row["quic_current_time_threshold"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_adaptive_time_threshold_updates_total": sum(
+                            int(row["quic_adaptive_time_threshold_updates"])
+                            for row in proteus_recovery
+                        ),
+                        "proteus_quic_max_spurious_time_ratio": max(
+                            float(row["quic_max_spurious_time_ratio"])
+                            for row in proteus_recovery
+                        ),
+                    }
+                )
         if server_recovery:
             server_sent_packets = sum(
                 int(row["quic_sent_packets"]) for row in server_recovery
@@ -751,6 +820,35 @@ def summarize(results_dir: Path) -> list[dict[str, Any]]:
                             server_spurious_packets / server_lost_packets
                             if server_lost_packets
                             else 0.0
+                        ),
+                    }
+                )
+            if "quic_current_packet_threshold" in server_recovery[0]:
+                summary.update(
+                    {
+                        "proteus_server_quic_current_packet_threshold_max": max(
+                            int(row["quic_current_packet_threshold"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_adaptive_packet_threshold_updates_total": sum(
+                            int(row["quic_adaptive_packet_threshold_updates"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_max_spurious_packet_reordering": max(
+                            int(row["quic_max_spurious_packet_reordering"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_current_time_threshold_max": max(
+                            float(row["quic_current_time_threshold"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_adaptive_time_threshold_updates_total": sum(
+                            int(row["quic_adaptive_time_threshold_updates"])
+                            for row in server_recovery
+                        ),
+                        "proteus_server_quic_max_spurious_time_ratio": max(
+                            float(row["quic_max_spurious_time_ratio"])
+                            for row in server_recovery
                         ),
                     }
                 )

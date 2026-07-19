@@ -87,6 +87,12 @@ fn log_beta_session_stats(
     let spurious_time_threshold_lost_packets = after
         .spurious_time_threshold_lost_packets
         .saturating_sub(before.spurious_time_threshold_lost_packets);
+    let adaptive_packet_threshold_updates = after
+        .adaptive_packet_threshold_updates
+        .saturating_sub(before.adaptive_packet_threshold_updates);
+    let adaptive_time_threshold_updates = after
+        .adaptive_time_threshold_updates
+        .saturating_sub(before.adaptive_time_threshold_updates);
     let congestion_events = after
         .congestion_events
         .saturating_sub(before.congestion_events);
@@ -109,6 +115,12 @@ fn log_beta_session_stats(
         spurious_lost_packets,
         spurious_packet_threshold_lost_packets,
         spurious_time_threshold_lost_packets,
+        current_packet_threshold = after.current_packet_threshold,
+        adaptive_packet_threshold_updates,
+        max_spurious_packet_reordering = after.max_spurious_packet_reordering,
+        current_time_threshold = after.current_time_threshold,
+        adaptive_time_threshold_updates,
+        max_spurious_time_ratio = after.max_spurious_time_ratio,
         congestion_events,
         stream_data_blocked,
         data_blocked,

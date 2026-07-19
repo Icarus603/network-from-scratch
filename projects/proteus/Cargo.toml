@@ -70,11 +70,12 @@ x509-parser = "0.18"
 # Quinn does not expose whether a packet declared lost was later
 # acknowledged, so an adaptive recovery controller cannot distinguish
 # genuine loss from severe reordering. This focused 0.11.16 fork adds
-# bounded packet/time-threshold spurious-loss counters; the exact commit
-# is pinned so production builds remain reproducible.
+# bounded severe-reordering replay protection plus confirmed-spurious-loss
+# packet/time recovery adaptation; the exact commit is pinned so production
+# builds remain reproducible.
 [patch.crates-io]
-quinn = { git = "https://github.com/Icarus603/quinn", rev = "1945574e35cb8bc8612c776d89afba9aacb7ab9f" }
-quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "1945574e35cb8bc8612c776d89afba9aacb7ab9f" }
+quinn = { git = "https://github.com/Icarus603/quinn", rev = "9fd6f65ebd266f2d70a050099fe0232765dccf6b" }
+quinn-proto = { git = "https://github.com/Icarus603/quinn", rev = "9fd6f65ebd266f2d70a050099fe0232765dccf6b" }
 
 [profile.release]
 opt-level = 3

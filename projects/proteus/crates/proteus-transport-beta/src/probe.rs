@@ -165,6 +165,10 @@ pub(crate) async fn handle_control_stream(
     if payload_bytes == 0 {
         connection
             .set_loss_detection_thresholds(thresholds.packet_threshold, thresholds.time_threshold);
+        connection.enable_adaptive_reordering(
+            crate::ADAPTIVE_PACKET_THRESHOLD_MAX,
+            crate::ADAPTIVE_TIME_THRESHOLD_MAX,
+        );
         send.write_all(&encode_response(RecoveryCounters::default()))
             .await?;
         send.finish()?;
@@ -190,6 +194,7 @@ pub(crate) async fn handle_control_stream(
                 .await?;
         }
         RecoveryDirection::ServerToClient => {
+            connection.disable_adaptive_packet_reordering();
             connection.set_loss_detection_thresholds(
                 thresholds.packet_threshold,
                 thresholds.time_threshold,
@@ -248,6 +253,7 @@ pub(crate) async fn run_client_probe(
         ));
     }
     if matches!(direction, RecoveryDirection::ClientToServer) {
+        connection.disable_adaptive_packet_reordering();
         connection
             .set_loss_detection_thresholds(thresholds.packet_threshold, thresholds.time_threshold);
         tokio::time::sleep(

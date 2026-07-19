@@ -185,6 +185,12 @@ pub struct BetaConnectionStats {
     pub spurious_lost_packets: u64,
     pub spurious_packet_threshold_lost_packets: u64,
     pub spurious_time_threshold_lost_packets: u64,
+    pub current_packet_threshold: u32,
+    pub adaptive_packet_threshold_updates: u64,
+    pub max_spurious_packet_reordering: u64,
+    pub current_time_threshold: f32,
+    pub adaptive_time_threshold_updates: u64,
+    pub max_spurious_time_ratio: f32,
     pub congestion_events: u64,
     pub stream_data_blocked: u64,
     pub data_blocked: u64,
@@ -236,6 +242,12 @@ impl BetaClientConnection {
                 .path
                 .spurious_packet_threshold_lost_packets,
             spurious_time_threshold_lost_packets: stats.path.spurious_time_threshold_lost_packets,
+            current_packet_threshold: stats.path.current_packet_threshold,
+            adaptive_packet_threshold_updates: stats.path.adaptive_packet_threshold_updates,
+            max_spurious_packet_reordering: stats.path.max_spurious_packet_reordering,
+            current_time_threshold: stats.path.current_time_threshold,
+            adaptive_time_threshold_updates: stats.path.adaptive_time_threshold_updates,
+            max_spurious_time_ratio: stats.path.max_spurious_time_ratio,
             congestion_events: stats.path.congestion_events,
             stream_data_blocked: stats.frame_tx.stream_data_blocked,
             data_blocked: stats.frame_tx.data_blocked,
@@ -251,6 +263,13 @@ impl BetaClientConnection {
     pub fn set_loss_detection_thresholds(&self, packet_threshold: u32, time_threshold: f32) {
         self.connection
             .set_loss_detection_thresholds(packet_threshold.max(3), time_threshold.max(1.125));
+    }
+
+    fn enable_adaptive_reordering(&self) {
+        self.connection.enable_adaptive_reordering(
+            crate::ADAPTIVE_PACKET_THRESHOLD_MAX,
+            crate::ADAPTIVE_TIME_THRESHOLD_MAX,
+        );
     }
 
     /// Run one bounded matched probe on this already-authenticated carrier.
@@ -382,6 +401,7 @@ impl BetaClientConnection {
                     thresholds.packet_threshold,
                     thresholds.time_threshold,
                 );
+                self.enable_adaptive_reordering();
             }
             crate::recovery::RecoveryDirection::ServerToClient => {
                 let thresholds = selector.thresholds_for(selected);
@@ -455,6 +475,7 @@ impl BetaClientConnection {
         .map_err(BetaError::from)?;
         self.authenticated
             .store(true, std::sync::atomic::Ordering::Release);
+        self.enable_adaptive_reordering();
         Ok(session)
     }
 
