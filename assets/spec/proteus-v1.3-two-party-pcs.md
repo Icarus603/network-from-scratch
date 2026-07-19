@@ -256,9 +256,13 @@ The erasure audit also found and fixed a disabled dependency feature:
 `x25519-dalek/zeroize` is mandatory so proposal private keys and DH shared
 results erase on drop; directional roots already use `Zeroizing`.
 
-The matched enabled-versus-disabled performance gate is now closed. Promotion
-still requires sanitizer and fuzz gates plus independent review. Until those
-gates close, v1.3 remains an implementation candidate. The README may report
-only the narrower property already proved and tested: passive full-session-state
-recovery after the attacker loses endpoint access and both fresh contributions
-complete.
+The matched enabled-versus-disabled performance gate is now closed. Nightly
+AddressSanitizer passed all seven focused state-machine and repeated-ratchet
+tests, while AddressSanitizer-backed libFuzzer completed 66,710,063 wire/PCS
+executions without a finding. Both are recurring CI gates; full provenance and
+limitations are preserved in
+[`notes/security/2026-07-19-v13-sanitizer-fuzz.md`](../../notes/security/2026-07-19-v13-sanitizer-fuzz.md).
+Promotion still requires independent review. Until that gate closes, v1.3
+remains an implementation candidate. The README may report only the narrower
+property already proved and tested: passive full-session-state recovery after
+the attacker loses endpoint access and both fresh contributions complete.

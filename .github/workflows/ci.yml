@@ -47,6 +47,45 @@ jobs:
           workspaces: projects/proteus
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  v13-sanitizer:
+    name: v1.3 PCS (AddressSanitizer)
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings -Zsanitizer=address"
+      RUSTDOCFLAGS: "-D warnings -Zsanitizer=address"
+      ASAN_OPTIONS: "detect_leaks=1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: >-
+          cargo test
+          --target x86_64-unknown-linux-gnu
+          -p proteus-transport-alpha
+          --lib pcs_session_tests
+      - run: >-
+          cargo test
+          --target x86_64-unknown-linux-gnu
+          -p proteus-transport-alpha
+          --test pcs_two_party_ratchet
+
+  fuzz:
+    name: wire + v1.3 PCS fuzz
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install --locked cargo-fuzz
+      - run: >-
+          cargo fuzz run
+          --fuzz-dir fuzz
+          wire_decoders
+          --
+          -max_total_time=60
+          -max_len=65536
+          -print_final_stats=1
+
   test:
     name: cargo test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

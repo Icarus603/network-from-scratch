@@ -1921,8 +1921,11 @@ latest hardening pass:
   session-internal 30-second half-exchange deadline wakes blocked send
   and receive halves and fails closed, while explicit
   `x25519-dalek/zeroize` support erases proposal private keys and DH
-  results on drop. Sanitizer/fuzz, matched overhead, and
-  independent-review promotion gates remain open.
+  results on drop. Nightly AddressSanitizer passed the seven focused v1.3
+  state-machine and repeated-ratchet tests, while AddressSanitizer-backed
+  libFuzzer completed 66,710,063 wire/PCS executions without a finding.
+  Both are now recurring CI gates. Matched overhead is closed; independent
+  review remains open.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2

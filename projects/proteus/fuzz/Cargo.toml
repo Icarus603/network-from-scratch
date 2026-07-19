@@ -1,0 +1,22 @@
+[package]
+name = "proteus-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.13"
+proteus-wire = { path = "../crates/proteus-wire" }
+
+[[bin]]
+name = "wire_decoders"
+path = "fuzz_targets/wire_decoders.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]
