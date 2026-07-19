@@ -504,3 +504,40 @@ cell 為 +12.61%（+8.08%, +26.84%）；更強 cell 只有 +1.18%，interval
 一個 severe-reorder cell 的顯著優勢與真實 loss 的 fail-closed 行為；
 多種 reorder depth/correlation、跨 RTT、cross-host 與 independent
 reproduction 仍未完成，不能寫成 universal cap。
+
+## 2026-07-19 300 ms RTT severe reordering 與 warm-carrier 修正
+
+第一輪 `reorder 5%, correlation 25%, one-way delay 150ms` screen
+雖然顯示極大優勢，卻不是有效證據。Hy2 每次傳輸需 85–97 秒，
+AB/BA 排程等待期間超過 Proteus 雙端寫死的 60 秒 QUIC idle timeout；
+carrier 因 `TimedOut` 關閉後重新撥號，破壞了 per-cell-reset-then-warm
+的共同生命週期。該結果保留為失敗證據，不進入性能結論。
+
+Commit `2411637` 將 handshake deadline 與 reusable-carrier idle
+deadline 拆開。Production 預設仍為 60 秒；benchmark 雙端明確使用
+600 秒，metadata 會記錄該值。Runner 同時把任何 cell 內的
+`β carrier closed` 或 α fallback 升格成硬失敗，防止日後再次把
+重撥結果誤認為 warm-carrier throughput。
+
+在 clean commit、重建 release image、相同 64 MiB payload／warmup
+與相同 netem cell 下重跑七輪，結果如下：
+
+| impairment | runs | Proteus | Hy2 | uplift (95% bootstrap) | client CPU / run | client RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| reorder 5%, correlation 25%, 300 ms RTT | 7 | 44.33 | 0.676 | **+6454.16%** (**+4372.32%, +6722.46%**) | 0.465 / 71.094 s | 30.25 / 222.96 MiB |
+
+雙方都是 7/7，exact two-sided permutation p-value 為
+0.00058275，49 個跨樣本 pair 的 superiority probability 為 1.0。
+兩端 qdisc drop 都是 0；cell 內 carrier close、stream-gap overflow
+與 α fallback 都是 0。這次結果因此可以作為同機 severe-reordering
+證據，而先前的 +4607% screen 不再引用。
+
+仍須保留 recovery 反證。Proteus client/server aggregate
+QUIC-declared loss ratio 是 45.53%／26.11%；它已能在深重排中維持
+liveness 與 throughput，但 recovery classifier 仍把大量晚到 packet
+先判成 loss。這不推翻 completion-time 優勢，卻表示下一輪研究應
+降低 needless retransmission，而非繼續放大固定 window。精簡持久
+證據位於
+`notes/perf/2026-07-19-reorder-delay150-warm-carrier.jsonl`，完整 raw
+logs 位於 ignored
+`bench/results/reorder-delay150-warm-carrier-7run-20260719/`。

@@ -1398,9 +1398,13 @@ This proves sustained-bulk superiority in three local impairment
 regimes. A fourth promoted 64 MiB severe-reordering cell now leads
 Hysteria2 by +333.39% with a +232.47% 95% bootstrap lower bound over
 30/30 successful runs; paired IID guards show no adaptive threshold
-increase at 15% or 30% true loss. These are still same-host cells, not
-a universal cap claim. More reordering regimes, 0% TUIC-v5 promotion
-and true cross-host reproduction remain required.
+increase at 15% or 30% true loss. A separate 300 ms RTT,
+5%-reorder/25%-correlation cell leads by +6454.16% with a +4372.32%
+bootstrap lower bound over 7/7 runs; its corrected harness preserves
+one warmed carrier for the whole cell and rejects any carrier close or
+α fallback. These are still same-host cells, not a universal cap
+claim. More reordering regimes, 0% TUIC-v5 promotion and true
+cross-host reproduction remain required.
 The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
 48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
 but remains a seven-run directional result.
@@ -1910,6 +1914,9 @@ latest hardening pass:
   success; its 0% cell is still a seven-run screen. The promoted
   64 MiB severe-reordering cell leads Hy2 by +333.39% (+232.47% to
   +569.07%) over 30/30 runs while using less client CPU and RSS.
+  A 300 ms RTT severe-reordering cell independently leads by
+  +6454.16% (+4372.32% to +6722.46%) over 7/7 runs with zero
+  carrier close, α fallback, stream-gap overflow, or qdisc drop.
   True-loss guards preserve RFC packet/time thresholds at 15% and
   30% IID loss, but broader reorder depth/correlation and cross-host
   reproduction remain open.
