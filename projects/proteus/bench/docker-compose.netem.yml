@@ -118,6 +118,8 @@ services:
       args:
         DEBIAN_MIRROR: https://mirror.twds.com.tw/debian
         DEBIAN_SECURITY_MIRROR: https://mirror.twds.com.tw/debian-security
+        PROTEUS_CARGO_FEATURES: "${PROTEUS_CARGO_FEATURES:-}"
+        PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL: "${PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL:-0}"
     image: proteus/bench:local
     container_name: proteus-netem-proteus-server
     depends_on:
@@ -169,6 +171,8 @@ services:
       args:
         DEBIAN_MIRROR: https://mirror.twds.com.tw/debian
         DEBIAN_SECURITY_MIRROR: https://mirror.twds.com.tw/debian-security
+        PROTEUS_CARGO_FEATURES: "${PROTEUS_CARGO_FEATURES:-}"
+        PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL: "${PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL:-0}"
     image: proteus/proxy-bench:local
     entrypoint:
       - /usr/bin/dumb-init

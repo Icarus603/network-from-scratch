@@ -14,6 +14,8 @@ RUN sed -i \
     && rm -rf /var/lib/apt/lists/*
 ENV RUSTUP_TOOLCHAIN=1.97.1
 WORKDIR /src
+ARG PROTEUS_CARGO_FEATURES=""
+ARG PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL=0
 
 # The lockfile is part of the build input. Omitting it silently resolves a
 # different dependency graph and can raise the effective Rust MSRV.
@@ -22,7 +24,21 @@ COPY crates ./crates
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release --bin proteus-server --bin proteus-client --bin proteus-bench && \
+    if [ -n "${PROTEUS_CARGO_FEATURES}" ]; then \
+        case "${PROTEUS_CARGO_FEATURES}" in \
+            *insecure-pcs-benchmark-control*) \
+                if [ "${PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL}" != "1" ]; then \
+                    echo "refusing insecure PCS benchmark control without explicit allow flag" >&2; \
+                    exit 64; \
+                fi ;; \
+        esac; \
+        cargo build --release \
+            --features "${PROTEUS_CARGO_FEATURES}" \
+            --bin proteus-server --bin proteus-client --bin proteus-bench; \
+    else \
+        cargo build --release \
+            --bin proteus-server --bin proteus-client --bin proteus-bench; \
+    fi && \
     cp /src/target/release/proteus-server /usr/local/bin/proteus-server && \
     cp /src/target/release/proteus-client /usr/local/bin/proteus-client && \
     cp /src/target/release/proteus-bench /usr/local/bin/proteus-bench

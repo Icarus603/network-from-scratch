@@ -90,6 +90,23 @@ runs, unequal sample counts, traffic that missed either egress qdisc, and
 non-zero configured loss that produced no kernel drop. Valid runs also
 produce `summary.jsonl`, where both protocols use the same round-trip
 equivalent MiB/s definition.
+
+The v1.3 PCS overhead gate uses the same production proxy matrix twice.
+The enabled image is the default build. Its matched control must be built
+explicitly with the compile-time-only
+`insecure-pcs-benchmark-control` feature:
+
+```bash
+PROTEUS_CARGO_FEATURES=insecure-pcs-benchmark-control \
+PROTEUS_ALLOW_INSECURE_BENCHMARK_CONTROL=1 \
+docker compose -f bench/docker-compose.netem.yml build proteus-proxy-setup
+```
+
+The Docker build refuses that feature unless the separate allow flag is `1`.
+There is no runtime downgrade switch. The runner records
+`proteus_cargo_features` in `metadata.jsonl`; control evidence without that
+field, a clean worktree, and a distinct image ID is invalid.
+
 Legacy mode samples client CPU time and peak RSS inside each one-shot
 container. Proxy mode records per-request cgroup CPU deltas and
 after-run daemon RSS for every long-lived Proteus, Hy2, and TUIC client.

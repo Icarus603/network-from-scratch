@@ -43,6 +43,12 @@ builder moves from Rust 1.85.1 to the current Rust 1.97.1 image. This closes the
 local-versus-container drift that otherwise surfaced only when the benchmark
 image attempted its release build.
 
+The matched PCS overhead harness now has an explicit compile-time control. The
+`insecure-pcs-benchmark-control` feature preserves the same v1.3 build graph
+and symmetric ratchet while omitting fresh/fresh PCS; Docker refuses to build
+it without a separate allow flag, production has no runtime toggle, and
+benchmark metadata records the selected feature string.
+
 ### Security — admin bearer-token control-byte gate (validate + runtime) (iter-154)
 
 Two-layer defense-in-depth on the metrics-endpoint bearer token.

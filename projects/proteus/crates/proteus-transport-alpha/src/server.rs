@@ -2591,7 +2591,7 @@ async fn handshake_with_prefix(
         selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
-    .with_two_party_pcs(
+    .with_v13_record_security(
         PcsRole::Server,
         *final_secrets.c_ap_secret,
         *final_secrets.s_ap_secret,
@@ -3084,7 +3084,7 @@ where
         selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
-    .with_two_party_pcs(
+    .with_v13_record_security(
         PcsRole::Server,
         *final_secrets.c_ap_secret,
         *final_secrets.s_ap_secret,

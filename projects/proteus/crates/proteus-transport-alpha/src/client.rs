@@ -562,7 +562,7 @@ where
         rx_buf,
         selected_suite,
     )
-    .with_two_party_pcs(
+    .with_v13_record_security(
         PcsRole::Client,
         *final_secrets.c_ap_secret,
         *final_secrets.s_ap_secret,

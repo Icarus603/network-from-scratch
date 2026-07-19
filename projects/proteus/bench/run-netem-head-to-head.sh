@@ -28,6 +28,7 @@ PROTEUS_SEND_WINDOW_MIB="${PROTEUS_SEND_WINDOW_MIB:-64}"
 PROTEUS_BETA_FIRST_TIMEOUT_SECS="${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
 PROTEUS_CARRIER_IDLE_TIMEOUT_SECS="${PROTEUS_CARRIER_IDLE_TIMEOUT_SECS:-600}"
 PROTEUS_MIMALLOC_PURGE_DELAY="${PROTEUS_MIMALLOC_PURGE_DELAY:-0}"
+PROTEUS_CARGO_FEATURES="${PROTEUS_CARGO_FEATURES:-}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
         WARMUP_MIB=64
@@ -60,6 +61,7 @@ export PROTEUS_SEND_WINDOW_MIB
 export PROTEUS_BETA_FIRST_TIMEOUT_SECS
 export PROTEUS_CARRIER_IDLE_TIMEOUT_SECS
 export PROTEUS_MIMALLOC_PURGE_DELAY
+export PROTEUS_CARGO_FEATURES
 
 wait_for_log_marker() {
     service="$1"
@@ -305,6 +307,7 @@ done
     printf '"proteus_beta_first_timeout_secs":%s,' "$PROTEUS_BETA_FIRST_TIMEOUT_SECS"
     printf '"proteus_carrier_idle_timeout_secs":%s,' "$PROTEUS_CARRIER_IDLE_TIMEOUT_SECS"
     printf '"proteus_mimalloc_purge_delay_ms":%s,' "$PROTEUS_MIMALLOC_PURGE_DELAY"
+    printf '"proteus_cargo_features":"%s",' "$PROTEUS_CARGO_FEATURES"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \
         "$WARMUP_MIB"

@@ -209,6 +209,10 @@ Hy2 head-to-head throughput margin.
 The benchmark promotion gate compares v1.3 enabled versus disabled under the
 same 512 MiB workload. Median throughput regression greater than 1% or a
 statistically positive CPU-time regression greater than 3% blocks promotion.
+The disabled control is a compile-time-only benchmark feature that retains the
+v1.3 handshake and symmetric ratchet while omitting fresh/fresh PCS. Production
+builds have no runtime downgrade switch, and the container build requires a
+second explicit allow flag before it will compile the insecure control.
 
 ## 9. Required conformance gates
 

@@ -1827,6 +1827,31 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
         self.receiver.pcs = Some(shared);
         self
     }
+
+    /// Install the production v1.3 record-security mode.
+    ///
+    /// The compile-time control exists solely to measure fresh/fresh PCS
+    /// overhead against the same v1.3 binary graph and symmetric ratchet.
+    /// It has no runtime switch and is disabled in every production build.
+    pub(crate) fn with_v13_record_security(
+        self,
+        role: PcsRole,
+        old_client_to_server: [u8; 32],
+        old_server_to_client: [u8; 32],
+    ) -> Self {
+        #[cfg(feature = "insecure-pcs-benchmark-control")]
+        {
+            tracing::warn!(
+                "INSECURE BENCHMARK CONTROL: v1.3 fresh/fresh PCS is compile-time disabled"
+            );
+            let _ = (role, old_client_to_server, old_server_to_client);
+            self
+        }
+        #[cfg(not(feature = "insecure-pcs-benchmark-control"))]
+        {
+            self.with_two_party_pcs(role, old_client_to_server, old_server_to_client)
+        }
+    }
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
@@ -1917,6 +1942,29 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
 mod pcs_session_tests {
     use super::*;
     use tokio::io::{duplex, split};
+
+    #[tokio::test]
+    async fn v13_record_security_matches_the_compile_time_build_mode() {
+        let old_c2s = [0x31; 32];
+        let old_s2c = [0x42; 32];
+        let (client_io, _peer_io) = duplex(4096);
+        let (client_read, client_write) = split(client_io);
+
+        let session = AlphaSession::new(
+            client_write,
+            client_read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        )
+        .with_v13_record_security(PcsRole::Client, old_c2s, old_s2c);
+
+        assert_eq!(
+            session.sender.two_party_pcs_enabled(),
+            !cfg!(feature = "insecure-pcs-benchmark-control")
+        );
+    }
 
     /// Exercise the complete offer/commit/key-install path while
     /// application data continues in both old-key and new-key epochs.

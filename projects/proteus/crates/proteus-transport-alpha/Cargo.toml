@@ -7,6 +7,13 @@ license.workspace = true
 authors.workspace = true
 description = "Proteus profile-α (TLS 1.3 over TCP) transport — M1 reference: raw-TCP carrier with full Proteus handshake + AEAD records"
 
+[features]
+default = []
+# Deliberately insecure compile-time control used only by the matched PCS
+# overhead benchmark. It keeps v1.3 handshakes and the symmetric record
+# ratchet but omits fresh/fresh PCS. Production Docker builds leave this off.
+insecure-pcs-benchmark-control = []
+
 [dependencies]
 proteus-spec = { path = "../proteus-spec" }
 proteus-wire = { path = "../proteus-wire" }
