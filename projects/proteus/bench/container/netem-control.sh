@@ -61,6 +61,10 @@ case "$command" in
     reorder)
         reorder_pct="${2:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
         correlation_pct="${3:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
+        # Match GEMODEL_CELLS ergonomics: accept either `5` or `5%`
+        # without ever emitting the invalid `5%%` tc syntax.
+        reorder_pct="${reorder_pct%\%}"
+        correlation_pct="${correlation_pct%\%}"
         delay_ms="${4:?usage: netem-control.sh reorder REORDER_PCT CORRELATION_PCT ONE_WAY_DELAY_MS}"
         clear_qdiscs
         for iface in "$CLIENT_IFACE" "$SERVER_IFACE"; do
