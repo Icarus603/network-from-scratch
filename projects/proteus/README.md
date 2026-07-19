@@ -1402,8 +1402,11 @@ increase at 15% or 30% true loss. A separate 300 ms RTT,
 5%-reorder/25%-correlation cell leads by +6454.16% with a +4372.32%
 bootstrap lower bound over 7/7 runs; its corrected harness preserves
 one warmed carrier for the whole cell and rejects any carrier close or
-α fallback. These are still same-host cells, not a universal cap
-claim. More reordering regimes, 0% TUIC-v5 promotion and true
+α fallback. A six-cell broad screen then covered 1–10% reorder,
+0–75% correlation and 20–100 ms RTT; all six 95% bootstrap intervals
+were positive, with the narrowest uplift +86.76% (+70.23% to +97.50%).
+These are still seven-run same-host screens, not a universal cap
+claim. A 30-run boundary promotion, 0% TUIC-v5 promotion and true
 cross-host reproduction remain required.
 The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
 48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
@@ -1917,6 +1920,8 @@ latest hardening pass:
   A 300 ms RTT severe-reordering cell independently leads by
   +6454.16% (+4372.32% to +6722.46%) over 7/7 runs with zero
   carrier close, α fallback, stream-gap overflow, or qdisc drop.
+  Six additional seven-run reordering cells all have positive 95%
+  intervals; the narrowest leads by +86.76% (+70.23% to +97.50%).
   True-loss guards preserve RFC packet/time thresholds at 15% and
   30% IID loss, but broader reorder depth/correlation and cross-host
   reproduction remain open.

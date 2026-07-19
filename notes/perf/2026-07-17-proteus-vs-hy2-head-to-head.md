@@ -541,3 +541,32 @@ liveness 與 throughput，但 recovery classifier 仍把大量晚到 packet
 `notes/perf/2026-07-19-reorder-delay150-warm-carrier.jsonl`，完整 raw
 logs 位於 ignored
 `bench/results/reorder-delay150-warm-carrier-7run-20260719/`。
+
+## 2026-07-19 broad reordering screen
+
+修正 warm-carrier lifecycle 後，同一 clean harness 又掃過六個
+reordering cells，交叉覆蓋 1%／5%／10% reorder、0%／25%／75%
+correlation 與 20／100 ms RTT。每格七輪，每個 cell 都重建 client、
+warmup 一次，再用固定 AB/BA 次序量測：
+
+| reorder / correlation / RTT | Proteus | Hy2 | uplift (95% bootstrap) |
+|---|---:|---:|---:|
+| 1% / 0% / 20 ms | 149.11 | 9.06 | +1545.77% (+1378.85%, +1679.55%) |
+| 1% / 25% / 100 ms | 163.27 | 79.41 | +105.59% (+83.85%, +114.20%) |
+| 5% / 0% / 100 ms | 36.35 | 5.51 | +560.09% (+524.81%, +1010.41%) |
+| 5% / 75% / 100 ms | 161.28 | 81.05 | +99.00% (+87.85%, +113.37%) |
+| 10% / 25% / 100 ms | 51.55 | 2.73 | +1785.21% (+1528.24%, +2566.28%) |
+| 5% / 25% / 20 ms | 183.56 | 98.29 | +86.76% (+70.23%, +97.50%) |
+
+每格雙方都是 7/7；所有格的 exact two-sided permutation p-value 都
+是 0.00058275，superiority probability 是 1.0。所有 client/server
+qdisc drop、carrier close、α fallback 與 stream-gap overflow 都是
+0。這批 screen 沒有吞吐反例；最低 uplift 的 5%／25%／20 ms 格
+因此成為下一個 30-run promotion 對象，避免事後挑選最大勝幅。
+
+持久摘要位於
+`notes/perf/2026-07-19-reorder-broad-screen.jsonl`，完整 raw logs
+位於 ignored
+`bench/results/reorder-broad-warm-carrier-7run-20260719/`。這擴張了
+同機 reordering 的證據面，仍不取代 physical cross-host 與
+independent reproduction。
