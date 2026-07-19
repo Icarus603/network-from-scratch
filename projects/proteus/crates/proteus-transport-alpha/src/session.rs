@@ -1,108 +1,54 @@
-//! Post-handshake AEAD record session with **per-direction ratchet**.
+//! Post-handshake AEAD record session with **two-party PCS ratcheting**.
 //!
 //! After both sides reach the `Connected` state (spec §5.1), all traffic
 //! is exchanged as length-prefixed records (spec §4.2) whose payload is
 //! AEAD-protected. The `aad` is the 8-byte big-endian `(epoch:24 || seqnum:40)`
 //! header; the nonce is `iv XOR (epoch||seqnum)` (spec §4.5.2).
 //!
-//! ## Hybrid ratchet (one-shot limited DH heal + continuous symmetric)
+//! ## v1.3 fresh/fresh PCS exchange
 //!
-//! On the FIRST [`RATCHET_BYTES`] boundary of a direction, the sender
-//! performs a fresh asymmetric Diffie-Hellman ratchet step. It heals a
-//! traffic-secret-only disclosure when the receiver's retained bootstrap
-//! DH private state remains secret; it is not a Signal Double Ratchet and
-//! does not recover from full endpoint-state compromise.
-//! Every subsequent ratchet event on the same direction is a pure
-//! symmetric HKDF step. The split happens because a continuous
-//! Double Ratchet requires strict request/response synchronization
-//! that pipelined ratchets (256 chunks in flight before the peer
-//! responds) cannot maintain without an extra round of state-sync —
-//! the one-shot step is a narrow tradeoff that improves on the prior
-//! symmetric-only build without introducing pipelining races.
+//! Production v1.3 sessions share a [`PcsCoordinator`] between the
+//! directional sender and receiver halves. Either peer may start a
+//! generation at a [`RATCHET_BYTES`] or [`RATCHET_RECORDS`] boundary.
+//! Both peers contribute a fresh X25519 share through
+//! [`alpha::RECORD_PCS_OFFER`], derive canonical client-to-server and
+//! server-to-client secrets from both old traffic secrets plus the fresh
+//! DH result, and confirm the same transcript with
+//! [`alpha::RECORD_PCS_COMMIT`].
 //!
-//! ### Sender state machine (per direction)
+//! Each direction changes keys only after its sender emits the local
+//! commit. Ordered carriers therefore place every old-key record before
+//! that commit and every new-key record after it. The receiver installs
+//! the corresponding receive key only after authenticating the peer
+//! commit under the old key. Offer/commit mismatch, generation conflict,
+//! or a legacy [`alpha::RECORD_RATCHET`] inside a v1.3 session closes the
+//! connection.
 //!
-//! ```text
-//! ratchet_event:
-//!   if has bootstrap (dh_sk, peer_dh_pub):
-//!       my_dh_sk_new ← fresh ephemeral X25519
-//!       dh_ikm ← X25519(my_dh_sk_new, peer_dh_pub)
-//!       new_secret ← HKDF-Expand-Label(current_secret,
-//!                                       "proteus dh-ratchet v1",
-//!                                       dh_ikm, 32)
-//!       body ← (new_epoch:u32_be || my_dh_pub_new:[u8;32])   # 36 B
-//!       burn bootstrap
-//!   else:
-//!       new_secret ← HKDF-Expand-Label(current_secret,
-//!                                       "proteus ratchet v1",
-//!                                       "", 32)
-//!       body ← (new_epoch:u32_be)                             # 4 B
-//!   emit RATCHET_RECORD(body)
-//!   key, iv ← direction_keys_from(new_secret)
-//!   epoch ← new_epoch; seqnum ← 0
-//! ```
-//!
-//! ### Receiver
-//!
-//! Decodes 4-byte or 36-byte body. 4-byte → pure symmetric step.
-//! 36-byte → consumes bootstrap dh_sk, computes
-//! `DH(my_dh_sk, peer_dh_pub_new)`, derives new secret. Burns
-//! bootstrap.
-//!
-//! ### Initial DH state at handshake completion
-//!
-//! - Client: `my_dh_sk = client_x25519_sk`,
-//!   `peer_dh_pub = server_x25519_eph_pub` (the per-session ephemeral
-//!   from SH).
-//! - Server: `my_dh_sk = server_x25519_eph_sk`,
-//!   `peer_dh_pub = client_x25519_pub` (from AuthExtension).
-//!
-//! No extra handshake round-trip is needed.
-//!
-//! ### Properties
+//! ### Security boundary
 //!
 //! - **Forward secrecy (FS)**: HKDF is forward-only, so a compromised
-//!   `current_secret` at epoch N cannot recover `secret_(N-k)`. The
-//!   asymmetric heal step doesn't weaken this — `dh_ikm` is one-way
-//!   blended in.
-//! - **Limited compromise healing**:
-//!     - Traffic-secret-only disclosure before the first ratchet heals
-//!       if the retained receiver bootstrap DH secret remains private.
-//!     - Full endpoint-state compromise also reveals that DH secret, so
-//!       the attacker can derive the first ratcheted key from the fresh
-//!       public share. Later symmetric steps cannot heal a current-key
-//!       disclosure; they provide forward secrecy only.
-//! - **Replay across ratchet boundaries**: distinct epochs use distinct
-//!   keys and reset seqnum to 0, so replay across boundaries fails AEAD.
+//!   generation cannot recover earlier traffic secrets.
+//! - **Passive post-compromise healing**: after an attacker loses endpoint
+//!   access, a generation in which both peers contribute fresh private
+//!   shares heals disclosure of the complete prior session state.
+//! - **Active-compromise exclusion**: the old traffic keys authenticate
+//!   the control records. An attacker that still possesses those keys and
+//!   remains active can substitute offers. Active full-state PCS needs a
+//!   protected authentication root and is outside this state machine.
 //!
-//! Compared to VLESS+REALITY (no rotation, no DH ratchet): a single key
-//! leak exposes the entire conversation. Proteus adds forward key
-//! rotation and a narrowly scoped traffic-secret-only heal; it does not
-//! yet provide full-state PCS.
+//! ## Legacy one-shot ratchet
 //!
-//! ### Backward compatibility
-//!
-//! The M0/M1/M2 builds emitted 4-byte ratchet bodies (new epoch only).
-//! Receivers handle both 4-byte and 36-byte; a legacy 4-byte arriving
-//! when we still hold a bootstrap dh_sk falls through to symmetric (the
-//! DH state is retained but never used — slight memory waste, zero
-//! security loss). A 36-byte arriving after the bootstrap was burned
-//! is a fatal protocol error.
-//!
-//! ## Ratchet trigger
-//!
-//! Trigger conditions, in priority order:
-//! 1. Sender has sent ≥ [`RATCHET_BYTES`] bytes since the last ratchet.
-//! 2. Sender has sent ≥ [`RATCHET_RECORDS`] records since the last ratchet.
-//!
-//! Either trigger emits a [`alpha::RECORD_RATCHET`] frame containing the
-//! new epoch number; the receiver, on seeing the matching epoch, advances
-//! its own receiving direction.
+//! The 4-byte symmetric and 36-byte bootstrap-DH record paths remain for
+//! pre-v1.3 fixtures and compatibility tests. Production v1.3 handshakes
+//! never install that state and reject those records to prevent downgrade.
 
 use proteus_crypto::key_schedule::DirectionKeys;
+use proteus_crypto::pcs_ratchet::{PcsOffer, PcsRole};
 use proteus_crypto::{aead::AeadSuite, kdf};
 use proteus_spec::SEQNUM_MAX;
 use proteus_wire::alpha;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufWriter};
 use x25519_dalek::{PublicKey as XPublicKey, StaticSecret};
 use zeroize::Zeroizing;
@@ -139,6 +85,32 @@ const HEARTBEAT_SENTINEL: u32 = 0xffff_fffe;
 
 use crate::error::{AlphaError, AlphaResult};
 use crate::metrics::SessionMetrics;
+use crate::pcs_coordinator::{PcsCommit, PcsCoordinator, PcsOutbound};
+
+struct PcsShared {
+    coordinator: Mutex<PcsCoordinator>,
+    outbound_pending: AtomicBool,
+    notify: tokio::sync::Notify,
+}
+
+impl PcsShared {
+    fn new(role: PcsRole, old_client_to_server: [u8; 32], old_server_to_client: [u8; 32]) -> Self {
+        Self {
+            coordinator: Mutex::new(PcsCoordinator::new(
+                role,
+                old_client_to_server,
+                old_server_to_client,
+            )),
+            outbound_pending: AtomicBool::new(false),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn wake_sender(&self) {
+        self.outbound_pending.store(true, Ordering::Release);
+        self.notify.notify_one();
+    }
+}
 
 /// Number of application bytes per direction between ratchets.
 ///
@@ -250,6 +222,12 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     /// updated thereafter (we use the symmetric chain for subsequent
     /// ratchets, so this only needs to be valid for the first one).
     peer_dh_pub: Option<[u8; 32]>,
+    /// Shared v1.3 two-party PCS coordinator. Absent until the
+    /// capability is explicitly installed on the bidirectional session.
+    pcs: Option<Arc<PcsShared>>,
+    /// Avoid coordinator locking on every record after the threshold
+    /// while an offer is already in flight.
+    pcs_rekey_requested: bool,
 }
 
 impl<W: AsyncWrite + Unpin> AlphaSender<W> {
@@ -292,6 +270,8 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
             pad_quantum: 0,
             dh_sk: None,
             peer_dh_pub: None,
+            pcs: None,
+            pcs_rekey_requested: false,
         }
     }
 
@@ -324,6 +304,137 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     #[must_use]
     pub fn pad_quantum(&self) -> u16 {
         self.pad_quantum
+    }
+
+    /// Whether the v1.3 two-party PCS capability is installed.
+    #[must_use]
+    pub fn two_party_pcs_enabled(&self) -> bool {
+        self.pcs.is_some()
+    }
+
+    /// Whether receive-side processing queued a control response.
+    #[must_use]
+    pub fn pcs_control_pending(&self) -> bool {
+        self.pcs
+            .as_ref()
+            .is_some_and(|pcs| pcs.outbound_pending.load(Ordering::Acquire))
+    }
+
+    /// Wait until receive-side processing queues a PCS control response.
+    ///
+    /// Returns `false` immediately when the capability is disabled.
+    pub async fn wait_for_pcs_control(&self) -> bool {
+        let Some(pcs) = &self.pcs else {
+            return false;
+        };
+        if pcs.outbound_pending.load(Ordering::Acquire) {
+            return true;
+        }
+        pcs.notify.notified().await;
+        pcs.outbound_pending.load(Ordering::Acquire)
+    }
+
+    /// Begin a v1.3 two-party PCS generation and queue the local offer.
+    pub fn initiate_two_party_pcs(&mut self) -> AlphaResult<()> {
+        let Some(pcs) = self.pcs.as_ref().cloned() else {
+            return Err(AlphaError::Closed);
+        };
+        {
+            let mut coordinator = pcs.coordinator.lock().map_err(|_| AlphaError::Closed)?;
+            coordinator
+                .initiate(&mut rand_core::OsRng)
+                .map_err(|_| AlphaError::Closed)?;
+        }
+        self.pcs_rekey_requested = true;
+        // We are already executing on the send half, so a Notify permit
+        // would be stale by the time the synchronously-following drive
+        // consumes this offer. Only receive-side events wake the sender.
+        pcs.outbound_pending.store(true, Ordering::Release);
+        Ok(())
+    }
+
+    /// Write every currently available PCS offer/commit before returning.
+    ///
+    /// Control records are flushed immediately because an offer waiting
+    /// in `BufWriter` would deadlock an otherwise-idle reverse direction.
+    pub async fn drive_two_party_pcs(&mut self) -> AlphaResult<()> {
+        let Some(pcs) = self.pcs.as_ref().cloned() else {
+            return Ok(());
+        };
+
+        loop {
+            let outbound = {
+                let mut coordinator = pcs.coordinator.lock().map_err(|_| AlphaError::Closed)?;
+                let next = coordinator
+                    .next_outbound()
+                    .map_err(|_| AlphaError::Closed)?;
+                pcs.outbound_pending
+                    .store(coordinator.has_outbound(), Ordering::Release);
+                next
+            };
+
+            match outbound {
+                Some(PcsOutbound::Offer(offer)) => {
+                    let plaintext = alpha::encode_pcs_control(alpha::PcsControl {
+                        generation: offer.generation,
+                        value: offer.public_key,
+                    });
+                    self.send_pcs_control(alpha::RECORD_PCS_OFFER, &plaintext)
+                        .await?;
+                    self.write.flush().await?;
+                }
+                Some(PcsOutbound::Commit(commit, next_secret)) => {
+                    let plaintext = alpha::encode_pcs_control(alpha::PcsControl {
+                        generation: commit.generation,
+                        value: commit.transcript_hash,
+                    });
+                    self.send_pcs_control(alpha::RECORD_PCS_COMMIT, &plaintext)
+                        .await?;
+                    self.write.flush().await?;
+                    self.install_pcs_send_secret(next_secret)?;
+                }
+                None => return Ok(()),
+            }
+        }
+    }
+
+    async fn send_pcs_control(&mut self, kind: u8, plaintext: &[u8]) -> AlphaResult<()> {
+        if self.seqnum > SEQNUM_MAX {
+            return Err(AlphaError::SeqnumExhausted);
+        }
+        let combined = self.combined();
+        let aad = combined.to_be_bytes();
+        self.tx_aead_scratch.clear();
+        self.tx_aead_scratch.extend_from_slice(plaintext);
+        self.cipher
+            .seal_into(combined, &aad, &mut self.tx_aead_scratch)?;
+        self.tx_hdr_scratch.clear();
+        alpha::write_record_header_to(&mut self.tx_hdr_scratch, kind, self.tx_aead_scratch.len());
+        self.write.write_all(&self.tx_hdr_scratch).await?;
+        self.write.write_all(&self.tx_aead_scratch).await?;
+        self.seqnum = self.seqnum.saturating_add(1);
+        self.records_in_epoch = self.records_in_epoch.saturating_add(1);
+        Ok(())
+    }
+
+    fn install_pcs_send_secret(&mut self, next_secret: Zeroizing<[u8; 32]>) -> AlphaResult<()> {
+        let next_epoch = self.epoch.saturating_add(1);
+        if u64::from(next_epoch) >= (1u64 << proteus_spec::EPOCH_BITS) {
+            return Err(AlphaError::Closed);
+        }
+        self.keys = direction_keys_from_secret(&next_secret)?;
+        self.cipher = self
+            .keys
+            .aead_key_with_suite(self.suite)
+            .expect("PCS-ratcheted 32-byte key remains valid");
+        self.secret = next_secret;
+        self.epoch = next_epoch;
+        self.seqnum = 0;
+        self.bytes_in_epoch = 0;
+        self.records_in_epoch = 0;
+        self.pcs_rekey_requested = false;
+        self.metrics.record_ratchet();
+        Ok(())
     }
 
     /// Derive an `out_len`-byte subkey from the sender's current
@@ -531,6 +642,18 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
 
     /// Ratchet-prep shared between the legacy + cell-mode paths.
     async fn ensure_ratchet(&mut self) -> AlphaResult<()> {
+        if let Some(pcs) = self.pcs.as_ref().cloned() {
+            if !self.pcs_rekey_requested && self.should_ratchet() {
+                self.initiate_two_party_pcs()?;
+            }
+            if pcs.outbound_pending.load(Ordering::Acquire) {
+                self.drive_two_party_pcs().await?;
+            }
+            if self.seqnum > SEQNUM_MAX {
+                return Err(AlphaError::SeqnumExhausted);
+            }
+            return Ok(());
+        }
         if self.should_ratchet() {
             self.send_ratchet_frame().await?;
         }
@@ -829,6 +952,9 @@ pub struct AlphaReceiver<R: AsyncRead + Unpin = tokio::net::tcp::OwnedReadHalf> 
     /// cell (with a real length prefix) arrives and we can return the
     /// reassembled logical record.
     pending: Vec<u8>,
+    /// Same v1.3 coordinator as the send half. Receive-side control
+    /// processing wakes the sender only when work is pending.
+    pcs: Option<Arc<PcsShared>>,
 }
 
 impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
@@ -908,6 +1034,7 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
             last_close_reason: None,
             dh_sk: None,
             pending: Vec::new(),
+            pcs: None,
         }
     }
 
@@ -1172,6 +1299,13 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                             }
                         }
                         alpha::RECORD_RATCHET => {
+                            // v1.3 negotiates the fresh/fresh PCS state
+                            // machine as a mandatory capability. Accepting
+                            // the legacy one-shot ratchet here would create
+                            // an authenticated post-handshake downgrade.
+                            if self.pcs.is_some() {
+                                return Err(AlphaError::Closed);
+                            }
                             // Low-frequency path — keep using the
                             // free-function aead::open. rx_aead_scratch
                             // still holds the (untouched) body bytes
@@ -1179,6 +1313,14 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
                             // mutate it under their own match arms.
                             let body = self.rx_aead_scratch.clone();
                             self.apply_ratchet(&body)?;
+                            continue;
+                        }
+                        alpha::RECORD_PCS_OFFER => {
+                            self.apply_pcs_offer()?;
+                            continue;
+                        }
+                        alpha::RECORD_PCS_COMMIT => {
+                            self.apply_pcs_commit()?;
                             continue;
                         }
                         alpha::RECORD_CLOSE => {
@@ -1287,6 +1429,71 @@ impl<R: AsyncRead + Unpin> AlphaReceiver<R> {
     #[must_use]
     pub fn last_close_reason(&self) -> Option<&[u8]> {
         self.last_close_reason.as_deref()
+    }
+
+    fn open_pcs_control(&mut self) -> AlphaResult<alpha::PcsControl> {
+        let combined = (u64::from(self.epoch) << 40) | self.next_seqnum;
+        let aad = combined.to_be_bytes();
+        self.cipher
+            .open_in_place(combined, &aad, &mut self.rx_aead_scratch)
+            .map_err(|_| AlphaError::Closed)?;
+        self.next_seqnum = self.next_seqnum.saturating_add(1);
+        alpha::decode_pcs_control(&self.rx_aead_scratch).map_err(Into::into)
+    }
+
+    fn apply_pcs_offer(&mut self) -> AlphaResult<()> {
+        let control = self.open_pcs_control()?;
+        let Some(pcs) = self.pcs.as_ref().cloned() else {
+            return Err(AlphaError::Closed);
+        };
+        {
+            let mut coordinator = pcs.coordinator.lock().map_err(|_| AlphaError::Closed)?;
+            coordinator
+                .receive_offer(
+                    PcsOffer {
+                        generation: control.generation,
+                        public_key: control.value,
+                    },
+                    &mut rand_core::OsRng,
+                )
+                .map_err(|_| AlphaError::Closed)?;
+        }
+        pcs.wake_sender();
+        Ok(())
+    }
+
+    fn apply_pcs_commit(&mut self) -> AlphaResult<()> {
+        let control = self.open_pcs_control()?;
+        let Some(pcs) = self.pcs.as_ref().cloned() else {
+            return Err(AlphaError::Closed);
+        };
+        let next_secret = {
+            let mut coordinator = pcs.coordinator.lock().map_err(|_| AlphaError::Closed)?;
+            coordinator
+                .receive_peer_commit(PcsCommit {
+                    generation: control.generation,
+                    transcript_hash: control.value,
+                })
+                .map_err(|_| AlphaError::Closed)?
+        };
+        self.install_pcs_receive_secret(next_secret)
+    }
+
+    fn install_pcs_receive_secret(&mut self, next_secret: Zeroizing<[u8; 32]>) -> AlphaResult<()> {
+        let next_epoch = self.epoch.saturating_add(1);
+        if u64::from(next_epoch) >= (1u64 << proteus_spec::EPOCH_BITS) {
+            return Err(AlphaError::Closed);
+        }
+        self.keys = direction_keys_from_secret(&next_secret)?;
+        self.cipher = self
+            .keys
+            .aead_key_with_suite(self.suite)
+            .expect("PCS-ratcheted 32-byte key remains valid");
+        self.secret = next_secret;
+        self.epoch = next_epoch;
+        self.next_seqnum = 0;
+        self.metrics.record_ratchet();
+        Ok(())
     }
 
     fn apply_ratchet(&mut self, body: &[u8]) -> AlphaResult<()> {
@@ -1514,6 +1721,31 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
         self.receiver.install_dh_ratchet(my_dh_sk);
         self
     }
+
+    /// Install the v1.3 fresh/fresh two-party PCS coordinator.
+    ///
+    /// The old secrets use canonical wire direction on both peers.
+    /// Enabling this capability disables the legacy one-shot bootstrap
+    /// ratchet so only one mechanism owns epoch transitions.
+    #[must_use]
+    pub fn with_two_party_pcs(
+        mut self,
+        role: PcsRole,
+        old_client_to_server: [u8; 32],
+        old_server_to_client: [u8; 32],
+    ) -> Self {
+        let shared = Arc::new(PcsShared::new(
+            role,
+            old_client_to_server,
+            old_server_to_client,
+        ));
+        self.sender.dh_sk = None;
+        self.sender.peer_dh_pub = None;
+        self.receiver.dh_sk = None;
+        self.sender.pcs = Some(Arc::clone(&shared));
+        self.receiver.pcs = Some(shared);
+        self
+    }
 }
 
 impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
@@ -1597,6 +1829,180 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
             cover_profile_id: None,
             handshake_duration: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod pcs_session_tests {
+    use super::*;
+    use tokio::io::{duplex, split};
+
+    /// Exercise the complete offer/commit/key-install path while
+    /// application data continues in both old-key and new-key epochs.
+    #[tokio::test]
+    async fn fresh_fresh_rekey_crosses_commit_boundary_in_both_directions() {
+        let old_c2s = [0x31; 32];
+        let old_s2c = [0x42; 32];
+        let (client_io, server_io) = duplex(256 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+
+        let mut client = AlphaSession::new(
+            client_write,
+            client_read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        )
+        .with_two_party_pcs(PcsRole::Client, old_c2s, old_s2c);
+
+        let mut server = AlphaSession::new(
+            server_write,
+            server_read,
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            Zeroizing::new(old_s2c),
+            Zeroizing::new(old_c2s),
+        )
+        .with_two_party_pcs(PcsRole::Server, old_c2s, old_s2c);
+
+        client.sender.initiate_two_party_pcs().unwrap();
+        client.sender.drive_two_party_pcs().await.unwrap();
+
+        // Old-key application data may follow OFFER while the peer
+        // contribution is still in flight.
+        client.sender.send_record(b"old-c2s").await.unwrap();
+        client.sender.flush().await.unwrap();
+        let old = server.receiver.recv_record().await.unwrap().unwrap();
+        assert_eq!(old, b"old-c2s");
+        assert!(server.sender.pcs_control_pending());
+
+        // The server was peer-initiated, so one drive emits its own
+        // OFFER then COMMIT, installs new s2c, and can immediately send
+        // new-key application data in wire order.
+        server.sender.drive_two_party_pcs().await.unwrap();
+        server.sender.send_record(b"new-s2c").await.unwrap();
+        server.sender.flush().await.unwrap();
+        let new_s2c = client.receiver.recv_record().await.unwrap().unwrap();
+        assert_eq!(new_s2c, b"new-s2c");
+        assert!(client.sender.pcs_control_pending());
+
+        // Client commit advances c2s. Server consumes it before the
+        // following data record and installs the matching receive key.
+        client.sender.drive_two_party_pcs().await.unwrap();
+        client.sender.send_record(b"new-c2s").await.unwrap();
+        client.sender.flush().await.unwrap();
+        let new_c2s = server.receiver.recv_record().await.unwrap().unwrap();
+        assert_eq!(new_c2s, b"new-c2s");
+    }
+
+    #[tokio::test]
+    async fn v13_receiver_rejects_legacy_ratchet_record() {
+        let old_c2s = [0x51; 32];
+        let old_s2c = [0x62; 32];
+        let (client_io, server_io) = duplex(64 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+
+        // Deliberately leave the sender on the legacy path so it emits
+        // RECORD_RATCHET at the next threshold.
+        let mut legacy_client = AlphaSession::new(
+            client_write,
+            client_read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        );
+        let mut v13_server = AlphaSession::new(
+            server_write,
+            server_read,
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            Zeroizing::new(old_s2c),
+            Zeroizing::new(old_c2s),
+        )
+        .with_two_party_pcs(PcsRole::Server, old_c2s, old_s2c);
+
+        legacy_client.sender.bytes_in_epoch = RATCHET_BYTES;
+        legacy_client
+            .sender
+            .send_record(b"downgrade")
+            .await
+            .unwrap();
+        legacy_client.sender.flush().await.unwrap();
+
+        assert!(matches!(
+            v13_server.receiver.recv_record().await,
+            Err(AlphaError::Closed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn simultaneous_wire_offers_converge_on_one_generation() {
+        let old_c2s = [0x71; 32];
+        let old_s2c = [0x82; 32];
+        let (client_io, server_io) = duplex(256 * 1024);
+        let (client_read, client_write) = split(client_io);
+        let (server_read, server_write) = split(server_io);
+
+        let mut client = AlphaSession::new(
+            client_write,
+            client_read,
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            Zeroizing::new(old_c2s),
+            Zeroizing::new(old_s2c),
+        )
+        .with_two_party_pcs(PcsRole::Client, old_c2s, old_s2c);
+        let mut server = AlphaSession::new(
+            server_write,
+            server_read,
+            direction_keys_from_secret(&old_s2c).unwrap(),
+            direction_keys_from_secret(&old_c2s).unwrap(),
+            Zeroizing::new(old_s2c),
+            Zeroizing::new(old_c2s),
+        )
+        .with_two_party_pcs(PcsRole::Server, old_c2s, old_s2c);
+
+        client.sender.initiate_two_party_pcs().unwrap();
+        server.sender.initiate_two_party_pcs().unwrap();
+        client.sender.drive_two_party_pcs().await.unwrap();
+        server.sender.drive_two_party_pcs().await.unwrap();
+
+        // Old-key data lets both receive halves consume the peer offer
+        // without waiting for application traffic from only one side.
+        client.sender.send_record(b"client-old").await.unwrap();
+        server.sender.send_record(b"server-old").await.unwrap();
+        client.sender.flush().await.unwrap();
+        server.sender.flush().await.unwrap();
+        assert_eq!(
+            server.receiver.recv_record().await.unwrap().unwrap(),
+            b"client-old"
+        );
+        assert_eq!(
+            client.receiver.recv_record().await.unwrap().unwrap(),
+            b"server-old"
+        );
+
+        assert!(client.sender.pcs_control_pending());
+        assert!(server.sender.pcs_control_pending());
+        client.sender.drive_two_party_pcs().await.unwrap();
+        server.sender.drive_two_party_pcs().await.unwrap();
+        client.sender.send_record(b"client-new").await.unwrap();
+        server.sender.send_record(b"server-new").await.unwrap();
+        client.sender.flush().await.unwrap();
+        server.sender.flush().await.unwrap();
+
+        assert_eq!(
+            server.receiver.recv_record().await.unwrap().unwrap(),
+            b"client-new"
+        );
+        assert_eq!(
+            client.receiver.recv_record().await.unwrap().unwrap(),
+            b"server-new"
+        );
     }
 }
 

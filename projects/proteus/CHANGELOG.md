@@ -15,6 +15,24 @@ correspond to the Ralph Loop iteration counter; they are
 implementation-internal, not user-visible. The user-visible groupings
 below are organised by concern.
 
+### Added — v1.3 two-party fresh/fresh PCS candidate
+
+Protocol v1.3 authenticates a mandatory two-party PCS capability and rejects
+older handshakes in production. Both endpoints contribute fresh X25519 shares
+through fixed-size encrypted `PCS_OFFER` and `PCS_COMMIT` controls; a shared
+coordinator derives canonical client-to-server and server-to-client secrets,
+switches each direction at its ordered commit boundary, and wakes an otherwise
+idle reverse relay during one-way transfers. Repeated 13 MiB one-way rekeying,
+simultaneous/peer-first coordinator paths, generation conflicts, transcript
+mismatch, and legacy-ratchet downgrade rejection are covered by tests.
+
+The accompanying ProVerif model proves the deliberately bounded claim:
+passive full-session-state recovery after endpoint compromise ends and both
+fresh contributions complete. It also preserves the expected attack when an
+adversary retains old authentication keys and active network control. Promotion
+still requires a bounded exchange timeout, failure-path erasure audit,
+sanitizer/fuzz gates, matched performance evidence, and independent review.
+
 ### Security — admin bearer-token control-byte gate (validate + runtime) (iter-154)
 
 Two-layer defense-in-depth on the metrics-endpoint bearer token.

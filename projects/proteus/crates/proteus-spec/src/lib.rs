@@ -28,6 +28,10 @@ pub const PROTEUS_VERSION_V11: u8 = 0x11;
 /// mandatory because v1.1 peers derive a different Handshake Secret.
 pub const PROTEUS_VERSION_V12: u8 = 0x12;
 
+/// Proteus protocol version 1.3 — mandatory two-party fresh/fresh PCS
+/// record ratchet on top of the v1.2 triple-hybrid handshake.
+pub const PROTEUS_VERSION_V13: u8 = 0x13;
+
 /// Transport profile γ (MASQUE / H3 / QUIC over UDP/443). spec §3.
 pub const PROFILE_HINT_GAMMA: u8 = 0x03;
 
@@ -117,6 +121,9 @@ pub const AUTH_EXT_LEN_V11: usize = AUTH_EXT_LEN_V10;
 /// v1.2 changes only the authenticated key schedule; its wire extension
 /// layout remains byte-for-byte identical to v1.1.
 pub const AUTH_EXT_LEN_V12: usize = AUTH_EXT_LEN_V11;
+
+/// v1.3 changes authenticated behavior but not AuthExtension length.
+pub const AUTH_EXT_LEN_V13: usize = AUTH_EXT_LEN_V12;
 
 // =============================================================================
 // §3 — cell padding sizes (spec §4.6)

@@ -686,7 +686,27 @@ where
         }
         let mut buf = ScrubOnDrop(vec![0u8; 64 * 1024]);
         loop {
-            let read_fut = up_r.read(&mut buf);
+            let read_fut = async {
+                loop {
+                    if sender.two_party_pcs_enabled() {
+                        tokio::select! {
+                            biased;
+                            pending = sender.wait_for_pcs_control() => {
+                                if pending {
+                                    sender.drive_two_party_pcs().await.map_err(|e| {
+                                        std::io::Error::other(format!(
+                                            "PCS control send failed: {e}"
+                                        ))
+                                    })?;
+                                }
+                            }
+                            result = up_r.read(&mut buf) => return result,
+                        }
+                    } else {
+                        return up_r.read(&mut buf).await;
+                    }
+                }
+            };
             let n = match idle {
                 Some(d) => match tokio::time::timeout(d, read_fut).await {
                     Ok(Ok(0)) => {

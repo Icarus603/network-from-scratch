@@ -1552,7 +1552,21 @@ async fn pump<R, W>(
         }
         let mut buf = ScrubOnDrop(vec![0u8; 64 * 1024]);
         loop {
-            match sock_r.read(&mut buf).await {
+            let read_result = if sender.two_party_pcs_enabled() {
+                tokio::select! {
+                    biased;
+                    pending = sender.wait_for_pcs_control() => {
+                        if pending && sender.drive_two_party_pcs().await.is_err() {
+                            break;
+                        }
+                        continue;
+                    }
+                    result = sock_r.read(&mut buf) => result,
+                }
+            } else {
+                sock_r.read(&mut buf).await
+            };
+            match read_result {
                 Ok(0) => {
                     // Best-effort drain of anything still buffered
                     // before signaling EOF — the select! arm below

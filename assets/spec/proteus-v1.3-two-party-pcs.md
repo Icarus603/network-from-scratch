@@ -1,10 +1,11 @@
 # Proteus v1.3 amendment — two-party fresh/fresh PCS ratchet
 
-**Status:** cryptographic core implemented; α wire/state integration pending
+**Status:** α wire/state and production relay integration implemented;
+promotion gates still open
 
-**Handshake version byte:** unchanged (`0x12`)
+**Handshake version byte:** `0x13`
 
-**Record-layer capability:** negotiated post-handshake; no silent downgrade
+**Record-layer capability:** mandatory for `0x13`; no silent downgrade
 
 **Supersedes:** the one-shot bootstrap-DH healing claim, not the v1.2
 triple-hybrid handshake
@@ -170,10 +171,10 @@ The following conditions close the Proteus session without α fallback:
 7. Negotiated PCS capability followed by legacy one-shot `0x11` behavior.
 8. Timeout while an exchange remains half-complete.
 
-A peer that did not negotiate the v1.3 record capability MUST NOT receive
-`PCS_OFFER` or `PCS_COMMIT`. Production configuration must expose whether
-legacy compatibility is allowed; benchmark and formal-evidence profiles require
-fail-closed v1.3-only operation.
+A peer that does not authenticate `version = 0x13` MUST NOT receive
+`PCS_OFFER` or `PCS_COMMIT`. Production v1.3 endpoints reject v1.2 and older
+before key derivation; operators that need legacy compatibility must run a
+separate explicit listener rather than silently downgrading one session.
 
 ## 7. Erasure requirements
 
@@ -227,8 +228,14 @@ The wire/state implementation remains incomplete until all of these pass:
 
 ## 10. Promotion status
 
-The cryptographic core and symbolic boundary model exist as of 2026-07-19.
-Wire records, coordinator wakeups, production negotiation, erasure audit, and
-matched performance promotion remain open. Until those gates close, v1.3 is an
-implementation candidate and the README must continue to report full-state PCS
-as unavailable.
+The cryptographic core, symbolic boundary model, exact wire records,
+simultaneous-initiation wire path, production v1.3 negotiation, directional
+relay wakeups, and repeated one-way rekeys exist as of 2026-07-19. Production
+v1.3 rejects both older handshake versions and legacy `0x11` ratchet records.
+
+Promotion still requires the remaining erasure/failure-path audit, exchange
+timeout bound, sanitizer and fuzz gates, matched enabled-versus-disabled
+performance evidence, and independent review. Until those gates close, v1.3
+remains an implementation candidate. The README may report only the narrower
+property already proved and tested: passive full-session-state recovery after
+the attacker loses endpoint access and both fresh contributions complete.

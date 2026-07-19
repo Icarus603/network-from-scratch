@@ -47,10 +47,6 @@ pub mod log_throttle;
 pub mod metrics;
 pub mod metrics_http;
 pub mod outbound_filter;
-// The pure v1.3 state machine lands before its session/relay wiring so
-// review can isolate transition invariants. Remove this allowance when
-// the next integration stage calls it from `session`.
-#[allow(dead_code)]
 mod pcs_coordinator;
 pub mod per_user_bandwidth;
 pub mod per_user_bandwidth_rate_detector;

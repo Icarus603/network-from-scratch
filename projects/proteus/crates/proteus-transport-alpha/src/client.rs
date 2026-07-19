@@ -7,12 +7,13 @@ use ml_kem::{EncodedSizeUser, MlKem768Params};
 use proteus_crypto::{
     aead, kex,
     key_schedule::{self, Transcript},
+    pcs_ratchet::PcsRole,
     sig,
 };
 use proteus_handshake::auth_tag;
 use proteus_spec::{
     AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_ALL, AEAD_SUITE_MASK_CHACHA20_POLY1305,
-    HMAC_TAG_LEN, PROTEUS_VERSION_V12,
+    HMAC_TAG_LEN, PROTEUS_VERSION_V13,
 };
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use rand_core::OsRng;
@@ -304,7 +305,7 @@ where
     // but direct identity-signature coverage makes the downgrade
     // invariant local and independently auditable.
     let mut sig_msg = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
-    sig_msg.push(PROTEUS_VERSION_V12);
+    sig_msg.push(PROTEUS_VERSION_V13);
     sig_msg.push(config.profile_hint.to_byte());
     sig_msg.extend_from_slice(&AEAD_SUITE_MASK_ALL.to_be_bytes());
     sig_msg.extend_from_slice(&client_nonce);
@@ -349,7 +350,7 @@ where
     let (shape_seed, cover_profile_id) = fresh_shape_params(&mut rng);
 
     let mut ext = AuthExtension {
-        version: PROTEUS_VERSION_V12,
+        version: PROTEUS_VERSION_V13,
         profile_hint: config.profile_hint,
         aead_suite_mask: AEAD_SUITE_MASK_ALL,
         client_nonce,
@@ -548,11 +549,9 @@ where
     // Any tail bytes left over in rx_buf are post-handshake DATA records
     // that arrived coalesced with SF — pass them to the receiver.
     //
-    // Install the one-shot DH ratchet bootstrap from the handshake
-    // X25519 keys. The first RATCHET event heals disclosure of the
-    // traffic secret alone only while the retained peer-side bootstrap
-    // private key remains secret. Later RATCHET events are symmetric
-    // forward-only steps; this is not full endpoint-state PCS.
+    // v1.3 installs the mandatory fresh/fresh PCS coordinator. The
+    // authenticated 0x13 version prevents silent fallback to v1.2's
+    // one-shot bootstrap-DH behavior.
     let session = AlphaSession::with_prefix_and_suite(
         write,
         read,
@@ -563,7 +562,11 @@ where
         rx_buf,
         selected_suite,
     )
-    .with_dh_ratchet(client_eph.x25519_sk.clone(), server_x25519_eph_pub);
+    .with_two_party_pcs(
+        PcsRole::Client,
+        *final_secrets.c_ap_secret,
+        *final_secrets.s_ap_secret,
+    );
     Ok(session)
 }
 

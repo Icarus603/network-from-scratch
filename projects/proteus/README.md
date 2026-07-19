@@ -69,8 +69,8 @@ VLESS+REALITY who need:
 | | Proteus | VLESS + REALITY | Hysteria2 / TUIC-v5 |
 |---|---|---|---|
 | Forward secrecy with key rotation | ✅ 4 MiB symmetric ratchet | ❌ session-wide key | ❌ session-wide key |
-| Traffic-secret-only compromise healing | ✅ one-shot DH step at first 4 MiB | ❌ | ❌ |
-| Full endpoint-state post-compromise security | ❌ | ❌ | ❌ |
+| Passive full-session-state recovery after fresh/fresh rekey | 🟡 v1.3 candidate; proved + integrated, promotion gates open | ❌ | ❌ |
+| Active full endpoint-state post-compromise security | ❌ requires protected auth root | ❌ | ❌ |
 | Post-quantum confidentiality | ✅ ML-KEM-768 hybrid | ❌ X25519 only | ❌ X25519 only |
 | Per-session ephemeral server X25519 | ✅ | ❌ long-term server key | n/a |
 | Rogue-cert MITM detection (RFC 5705) | ✅ α + β channel binding | ❌ | ❌ |
@@ -1794,9 +1794,11 @@ The wire format and handshake state machine are normatively defined in
 authenticated inner-AEAD agility candidate is specified separately in
 [`assets/spec/proteus-v1.1-aead-agility.md`](../../assets/spec/proteus-v1.1-aead-agility.md);
 the hedge-authenticated v1.2 key schedule is specified in
-[`assets/spec/proteus-v1.2-triple-hybrid.md`](../../assets/spec/proteus-v1.2-triple-hybrid.md).
-Both remain non-normative implementation candidates until their promotion
-gates and independent review pass.
+[`assets/spec/proteus-v1.2-triple-hybrid.md`](../../assets/spec/proteus-v1.2-triple-hybrid.md);
+the fresh/fresh post-compromise recovery state machine is specified in
+[`assets/spec/proteus-v1.3-two-party-pcs.md`](../../assets/spec/proteus-v1.3-two-party-pcs.md).
+All remain non-normative implementation candidates until their promotion gates
+and independent review pass.
 Operator runbook: [`deploy/README.md`](deploy/README.md). Version
 history: [`CHANGELOG.md`](CHANGELOG.md).
 
@@ -1908,10 +1910,16 @@ latest hardening pass:
   reductions, Tamarin state-machine analysis, side channels, a complete
   post-handshake ratchet state-machine proof, and independent review
   remain open. A second
-  pinned ProVerif model proves the current one-shot ratchet's limited
-  traffic-secret-only healing and forward secrecy, while requiring the
-  expected attack witness under full receiver-state compromise. A true
-  full-state PCS ratchet remains open.
+  pinned ProVerif model preserves the retired one-shot ratchet's narrow
+  traffic-secret-only boundary. The v1.3 fresh/fresh model additionally
+  proves passive full-session-state recovery after endpoint compromise
+  ends and both new contributions complete, plus pre-compromise forward
+  secrecy. Its expected active-old-auth attack witness remains reachable:
+  an attacker that retains the compromised traffic keys and active
+  network control can substitute a share. The α wire/state machine and
+  production relay now implement the proved passive boundary; timeout,
+  sanitizer/fuzz, matched overhead, and independent-review promotion
+  gates remain open.
 - ❌ **GFW closed-beta**: no real-world adversarial testing.
 - ❌ **Independent security audit**: none.
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2

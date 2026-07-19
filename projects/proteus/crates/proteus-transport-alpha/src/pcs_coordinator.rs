@@ -15,6 +15,11 @@ pub(crate) struct PcsCommit {
     pub(crate) transcript_hash: [u8; 32],
 }
 
+pub(crate) enum PcsOutbound {
+    Offer(PcsOffer),
+    Commit(PcsCommit, Zeroizing<[u8; 32]>),
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PcsCoordinatorError {
     #[error("PCS generation exhausted")]
@@ -44,6 +49,7 @@ pub(crate) struct PcsCoordinator {
     local_offer: Option<PcsOffer>,
     peer_offer: Option<PcsOffer>,
     derived: Option<PcsTrafficSecrets>,
+    local_offer_emitted: bool,
     local_commit_emitted: bool,
     peer_commit_consumed: bool,
 }
@@ -63,13 +69,20 @@ impl PcsCoordinator {
             local_offer: None,
             peer_offer: None,
             derived: None,
+            local_offer_emitted: false,
             local_commit_emitted: false,
             peer_commit_consumed: false,
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn current_generation(&self) -> u64 {
         self.current_generation
+    }
+
+    pub(crate) fn has_outbound(&self) -> bool {
+        (self.local_offer.is_some() && !self.local_offer_emitted)
+            || (self.derived.is_some() && !self.local_commit_emitted)
     }
 
     pub(crate) fn initiate<R: RngCore + CryptoRng>(
@@ -119,6 +132,20 @@ impl PcsCoordinator {
         let local = self.initiate(rng)?;
         self.derive_if_ready()?;
         Ok(local)
+    }
+
+    pub(crate) fn next_outbound(&mut self) -> Result<Option<PcsOutbound>, PcsCoordinatorError> {
+        if let Some(offer) = self.local_offer {
+            if !self.local_offer_emitted {
+                self.local_offer_emitted = true;
+                return Ok(Some(PcsOutbound::Offer(offer)));
+            }
+        }
+        if self.derived.is_some() && !self.local_commit_emitted {
+            let (commit, secret) = self.emit_local_commit()?;
+            return Ok(Some(PcsOutbound::Commit(commit, secret)));
+        }
+        Ok(None)
     }
 
     /// Emit the local commit and return the replacement local send secret.
@@ -217,6 +244,7 @@ impl PcsCoordinator {
         self.local_proposal = None;
         self.local_offer = None;
         self.peer_offer = None;
+        self.local_offer_emitted = false;
         self.local_commit_emitted = false;
         self.peer_commit_consumed = false;
     }

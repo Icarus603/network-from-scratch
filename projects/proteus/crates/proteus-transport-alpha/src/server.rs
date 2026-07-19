@@ -118,11 +118,12 @@ use proteus_crypto::{
     aead::AeadSuite,
     kex,
     key_schedule::{self, Transcript},
+    pcs_ratchet::PcsRole,
 };
 use proteus_handshake::{auth_tag, replay::ReplayWindow, replay::Verdict, state::State};
 use proteus_spec::{
     AEAD_SUITE_MASK_AES_256_GCM, AEAD_SUITE_MASK_CHACHA20_POLY1305, PROTEUS_VERSION_V11,
-    PROTEUS_VERSION_V12,
+    PROTEUS_VERSION_V12, PROTEUS_VERSION_V13,
 };
 use proteus_wire::{alpha, AuthExtension, ProfileHint};
 use tokio::io::AsyncWriteExt;
@@ -139,7 +140,10 @@ use crate::session::AlphaSession;
 fn client_signature_input(ext: &AuthExtension) -> Vec<u8> {
     let mut message = Vec::with_capacity(1 + 1 + 2 + 16 + 32 + 1088);
     message.push(ext.version);
-    if matches!(ext.version, PROTEUS_VERSION_V11 | PROTEUS_VERSION_V12) {
+    if matches!(
+        ext.version,
+        PROTEUS_VERSION_V11 | PROTEUS_VERSION_V12 | PROTEUS_VERSION_V13
+    ) {
         message.push(ext.profile_hint.to_byte());
         message.extend_from_slice(&ext.aead_suite_mask.to_be_bytes());
     }
@@ -150,10 +154,9 @@ fn client_signature_input(ext: &AuthExtension) -> Vec<u8> {
 }
 
 fn select_aead_suite(ext: &AuthExtension) -> AlphaResult<AeadSuite> {
-    // v1.2 changes the Handshake-Secret IKM. Silently accepting v1.0
-    // or v1.1 here would either fail late at Finished or create a
-    // downgrade surface if legacy KDF support were reintroduced.
-    if ext.version != PROTEUS_VERSION_V12 {
+    // v1.3 requires the two-party PCS record state machine. Accepting
+    // v1.2 here would silently downgrade to the one-shot ratchet.
+    if ext.version != PROTEUS_VERSION_V13 {
         return Err(AlphaError::Closed);
     }
     if ext.aead_suite_mask & AEAD_SUITE_MASK_AES_256_GCM != 0 {
@@ -166,13 +169,15 @@ fn select_aead_suite(ext: &AuthExtension) -> AlphaResult<AeadSuite> {
 }
 
 fn server_hello_body(version: u8, server_x25519_eph_pub: &[u8; 32], suite: AeadSuite) -> Vec<u8> {
-    let mut body = Vec::with_capacity(if version == PROTEUS_VERSION_V12 {
-        33
-    } else {
-        32
-    });
+    let mut body = Vec::with_capacity(
+        if matches!(version, PROTEUS_VERSION_V12 | PROTEUS_VERSION_V13) {
+            33
+        } else {
+            32
+        },
+    );
     body.extend_from_slice(server_x25519_eph_pub);
-    if version == PROTEUS_VERSION_V12 {
+    if matches!(version, PROTEUS_VERSION_V12 | PROTEUS_VERSION_V13) {
         body.push(suite.code());
     }
     body
@@ -2572,12 +2577,9 @@ async fn handshake_with_prefix(
     // Pass any post-CF tail bytes (coalesced DATA records) to the session
     // receiver so we don't lose them.
     //
-    // Install asymmetric DH ratchet bootstrap: server holds
-    // `server_x25519_eph_sk` (the fresh per-session ephemeral) and the
-    // client's announced `client_x25519_pub`. Both halves are known
-    // post-handshake, so no extra round-trip is needed for the limited
-    // traffic-secret-only heal. Full endpoint-state compromise reveals
-    // the retained private half and defeats this one-shot step.
+    // v1.3 installs the mandatory fresh/fresh PCS coordinator. The
+    // authenticated version rejects v1.2 before this point, so there is
+    // no silent fallback to the one-shot bootstrap-DH behavior.
     let mut session = AlphaSession::with_prefix_and_suite(
         write,
         read,
@@ -2589,7 +2591,11 @@ async fn handshake_with_prefix(
         selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
-    .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
+    .with_two_party_pcs(
+        PcsRole::Server,
+        *final_secrets.c_ap_secret,
+        *final_secrets.s_ap_secret,
+    );
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
@@ -3065,7 +3071,8 @@ where
     )?;
     let (c_keys, s_keys) = final_secrets.direction_keys()?;
     // Server: sends with s_ap_secret keys, receives with c_ap_secret keys.
-    // DH ratchet bootstrap — same comment as in `handshake_with_cover`.
+    // Mandatory v1.3 PCS coordinator — same contract as
+    // `handshake_with_cover`.
     let mut session = AlphaSession::with_prefix_and_suite(
         write,
         read,
@@ -3077,7 +3084,11 @@ where
         selected_suite,
     )
     .with_shape(ext.shape_seed, ext.cover_profile_id)
-    .with_dh_ratchet(server_x25519_eph_sk, ext.client_x25519_pub);
+    .with_two_party_pcs(
+        PcsRole::Server,
+        *final_secrets.c_ap_secret,
+        *final_secrets.s_ap_secret,
+    );
     if let Some(uid) = matched_user_id {
         session = session.with_user_id(uid);
     }
@@ -3183,27 +3194,27 @@ mod aead_negotiation_tests {
     }
 
     #[test]
-    fn v12_prefers_hardware_aes_and_rejects_old_key_schedules() {
+    fn v13_prefers_hardware_aes_and_rejects_old_record_schedules() {
         let modern = extension(
-            PROTEUS_VERSION_V12,
+            PROTEUS_VERSION_V13,
             AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
         );
         assert_eq!(select_aead_suite(&modern).unwrap(), AeadSuite::Aes256Gcm);
 
-        let chacha_only = extension(PROTEUS_VERSION_V12, AEAD_SUITE_MASK_CHACHA20_POLY1305);
+        let chacha_only = extension(PROTEUS_VERSION_V13, AEAD_SUITE_MASK_CHACHA20_POLY1305);
         assert_eq!(
             select_aead_suite(&chacha_only).unwrap(),
             AeadSuite::ChaCha20Poly1305
         );
 
-        let legacy = extension(PROTEUS_VERSION_V11, AEAD_SUITE_MASK_CHACHA20_POLY1305);
+        let legacy = extension(PROTEUS_VERSION_V12, AEAD_SUITE_MASK_CHACHA20_POLY1305);
         assert!(select_aead_suite(&legacy).is_err());
     }
 
     #[test]
-    fn changing_v12_offer_invalidates_client_identity_signature() {
+    fn changing_v13_offer_invalidates_client_identity_signature() {
         let mut offered = extension(
-            PROTEUS_VERSION_V12,
+            PROTEUS_VERSION_V13,
             AEAD_SUITE_MASK_AES_256_GCM | AEAD_SUITE_MASK_CHACHA20_POLY1305,
         );
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&[0x5a; 32]);
@@ -3225,9 +3236,9 @@ mod aead_negotiation_tests {
     #[test]
     fn server_selection_changes_finished_transcript() {
         let server_pub = [0x77; 32];
-        let aes = server_hello_body(PROTEUS_VERSION_V12, &server_pub, AeadSuite::Aes256Gcm);
+        let aes = server_hello_body(PROTEUS_VERSION_V13, &server_pub, AeadSuite::Aes256Gcm);
         let chacha = server_hello_body(
-            PROTEUS_VERSION_V12,
+            PROTEUS_VERSION_V13,
             &server_pub,
             AeadSuite::ChaCha20Poly1305,
         );
