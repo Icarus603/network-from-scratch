@@ -56,6 +56,7 @@ wg*.conf
 *.pcap
 .codex/
 projects/proteus/bench/results/
+projects/proteus/bench/cross-host-state/
 *.pcapng
 *.har
 !assets/captures/*.redacted.pcap

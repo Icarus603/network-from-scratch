@@ -1,7 +1,9 @@
 #!/bin/sh
 set -eu
 
-ip route replace 10.77.2.0/24 via 10.77.1.2
+if [ "${SKIP_STATIC_ROUTE:-0}" != "1" ]; then
+    ip route replace 10.77.2.0/24 via 10.77.1.2
+fi
 test -e /run/proteus-proxy/ready
 
 config=/tmp/proteus-proxy-client.yaml

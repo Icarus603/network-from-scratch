@@ -193,3 +193,76 @@ Only image builds can access the Internet; protocol processes cannot
 reach public addresses during a run. The benchmark password and
 self-signed certificates are disposable test fixtures, never
 production credentials.
+
+## Physical two-host production workload
+
+The local netem matrix and the physical runner share the same
+`proteus/proxy-bench:local`, `proteus/bench:local`, and pinned
+`proteus/hysteria-bench:f2ad1de` images. The physical runner keeps the
+same byte-verified SOCKS5 round trip and deterministic AB/BA order; it
+removes the in-path netem router so the measured path is the real link
+between two machines.
+
+On the server host, build or load the three images, open the selected
+UDP/TCP ports, and start the server role:
+
+```bash
+cd projects/proteus
+SERVER_ADVERTISE_HOST=server.example.com \
+./bench/run-cross-host-server.sh start
+```
+
+The command prints a `client-bundle` directory. Transfer that directory
+to the client host over an authenticated channel. It intentionally
+contains the server public keys, TLS certificate, and disposable client
+private key, but the export gate refuses to include either server
+private key or the TLS private key.
+
+On the client host, build or load the same image revisions and run:
+
+```bash
+cd projects/proteus
+SERVER_HOST=server.example.com \
+CLIENT_BUNDLE_DIR=/secure/path/client-bundle \
+PAYLOAD_MIB=64 \
+WARMUP_MIB=64 \
+RUNS=30 \
+./bench/run-cross-host-client.sh
+```
+
+Defaults expose Proteus β on UDP 39444, Proteus α on TCP 39444,
+Hysteria2 on UDP 38443, and the common echo target on TCP 38080.
+Override the matching `*_PORT` variables on both hosts when a firewall
+or provider requires different ports. The client rejects unequal source
+commits, incomplete observations, missing resource rows, β→α fallback,
+carrier closure, and stream-gap overflow. It records both hosts'
+kernels, image IDs, source commit, warmup, workload, raw observations,
+daemon logs, CPU/RSS deltas, bootstrap interval, permutation p-value,
+and superiority probability. Both competitors use a 120-second QUIC
+idle timeout, the maximum accepted by the pinned Hysteria2 build; if
+either warmed carrier cannot survive the AB/BA gaps, the run is
+evidence of a lifecycle failure rather than a throughput sample.
+
+Stop the server role and remove its ephemeral containers after copying
+the results. Before stopping, snapshot the direction-complete server
+logs, copy them into the client result directory, and rerun the
+summarizer:
+
+```bash
+./bench/run-cross-host-server.sh snapshot
+# Copy client-bundle/proteus-server-daemon.log into the client result dir.
+# Then, on the client:
+python3 bench/summarize-cross-host-results.py bench/results/<run>
+
+# Finally, on the server:
+./bench/run-cross-host-server.sh stop
+```
+
+The ignored `bench/cross-host-state/` directory contains disposable
+benchmark identities. Delete it after the client bundle has been
+transferred and the run is complete. Physical results still need
+server-side daemon logs for direction-complete recovery analysis; the
+current summary marks that field unavailable instead of inferring it.
+The `cell_summary.formal_eligible` flag remains false until both
+worktrees were clean and the server recovery log is present with exactly
+one warmup row plus one row per formal observation.
