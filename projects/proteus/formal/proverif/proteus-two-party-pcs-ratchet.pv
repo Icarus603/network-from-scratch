@@ -1,0 +1,106 @@
+(*
+  Candidate two-party post-compromise ratchet boundary model.
+
+  This is a design model, not a claim about the current Rust wire path.
+  It establishes the minimum construction the implementation must
+  preserve:
+
+    1. Both endpoints generate fresh DH exponents after compromise.
+    2. The next traffic secret mixes the old secret, the fresh/fresh
+       DH result, and an ordered transcript of both public shares.
+    3. Under passive-after-compromise observation, disclosure of all
+       old session state does not expose the post-ratchet payload.
+    4. If the attacker remains active and the only authentication key
+       was part of the compromised session state, the attacker can
+       replace a fresh share and recover the responder's next key.
+
+  Result 4 is an expected attack witness. Full active PCS requires an
+  authentication root outside the compromised session state (or an
+  external re-authentication ceremony); a two-message in-band exchange
+  protected only by the old traffic key cannot provide it.
+*)
+
+set ignoreTypes = false.
+
+free net: channel.
+
+type group.
+type exponent.
+const generator: group [data].
+fun exp(group, exponent): group.
+equation forall x: exponent, y: exponent;
+    exp(exp(generator, x), y) = exp(exp(generator, y), x).
+
+fun transcript(group, group): bitstring.
+fun pcs_key(bitstring, group, bitstring): bitstring.
+fun encrypt(bitstring, bitstring): bitstring.
+reduc forall message: bitstring, key: bitstring;
+    decrypt(encrypt(message, key), key) = message.
+
+free passive_full_state_payload: bitstring [private].
+free active_old_auth_payload: bitstring [private].
+free pre_compromise_payload: bitstring [private].
+
+let passive_after_full_state_compromise =
+    new old_secret: bitstring;
+    new old_client_state: bitstring;
+    new old_server_state: bitstring;
+    out(net, (old_secret, old_client_state, old_server_state));
+
+    new client_fresh_sk: exponent;
+    new server_fresh_sk: exponent;
+    let client_fresh_pk = exp(generator, client_fresh_sk) in
+    let server_fresh_pk = exp(generator, server_fresh_sk) in
+    let fresh_shared = exp(server_fresh_pk, client_fresh_sk) in
+    let th = transcript(client_fresh_pk, server_fresh_pk) in
+    let next_secret = pcs_key(old_secret, fresh_shared, th) in
+    out(net, (
+        client_fresh_pk,
+        server_fresh_pk,
+        encrypt(passive_full_state_payload, next_secret)
+    )).
+
+let active_after_old_auth_compromise =
+    new old_secret: bitstring;
+    out(net, old_secret);
+
+    new honest_client_fresh_sk: exponent;
+    let honest_client_fresh_pk = exp(generator, honest_client_fresh_sk) in
+    out(net, honest_client_fresh_pk);
+
+    (* The active attacker chooses the share delivered to the server. *)
+    in(net, delivered_client_pk: group);
+    new server_fresh_sk: exponent;
+    let server_fresh_pk = exp(generator, server_fresh_sk) in
+    let server_shared = exp(delivered_client_pk, server_fresh_sk) in
+    let server_th = transcript(delivered_client_pk, server_fresh_pk) in
+    let server_next_secret = pcs_key(old_secret, server_shared, server_th) in
+    out(net, (
+        server_fresh_pk,
+        encrypt(active_old_auth_payload, server_next_secret)
+    )).
+
+let forward_secrecy_after_two_party_ratchet =
+    new old_secret: bitstring;
+    new client_fresh_sk: exponent;
+    new server_fresh_sk: exponent;
+    let client_fresh_pk = exp(generator, client_fresh_sk) in
+    let server_fresh_pk = exp(generator, server_fresh_sk) in
+    let fresh_shared = exp(server_fresh_pk, client_fresh_sk) in
+    let th = transcript(client_fresh_pk, server_fresh_pk) in
+    let next_secret = pcs_key(old_secret, fresh_shared, th) in
+    out(net, (
+        next_secret,
+        client_fresh_pk,
+        server_fresh_pk,
+        encrypt(pre_compromise_payload, old_secret)
+    )).
+
+query attacker(passive_full_state_payload).
+query attacker(active_old_auth_payload).
+query attacker(pre_compromise_payload).
+
+process
+    passive_after_full_state_compromise
+  | active_after_old_auth_compromise
+  | forward_secrecy_after_two_party_ratchet

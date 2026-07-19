@@ -8,6 +8,8 @@
 //! - [`aead`] — ChaCha20-Poly1305 wrapper with Proteus AAD discipline.
 //! - [`kdf`] — HKDF-SHA-256 helpers using the Proteus label space
 //!   (`proteus_spec::hkdf_label::*`).
+//! - [`pcs_ratchet`] — fresh/fresh two-party DH ratchet core for
+//!   passive full-session-state recovery.
 //! - [`ratchet`] — asymmetric DH ratchet primitive with an explicitly
 //!   bounded traffic-secret-only healing claim.
 //!
@@ -21,6 +23,7 @@ pub mod aead;
 pub mod kdf;
 pub mod kex;
 pub mod key_schedule;
+pub mod pcs_ratchet;
 pub mod ratchet;
 pub mod sig;
 
@@ -56,4 +59,8 @@ pub enum CryptoError {
     /// HKDF expansion failed (typically zero-length output requested).
     #[error("HKDF operation failed")]
     Hkdf,
+
+    /// Two-party PCS offers named different generations.
+    #[error("two-party PCS generation mismatch")]
+    PcsGeneration,
 }

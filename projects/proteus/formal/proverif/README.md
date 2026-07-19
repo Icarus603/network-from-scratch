@@ -42,6 +42,19 @@ public share and derives the next key. The negative witness is
 intentional. It means this mechanism is forward-secret and heals a
 limited traffic-secret leak, but is not full endpoint-state PCS.
 
+`proteus-two-party-pcs-ratchet.pv` is the design gate for the
+replacement protocol. It discloses all old session state, then requires
+both endpoints to contribute fresh DH entropy. ProVerif proves
+post-ratchet payload secrecy under passive-after-compromise observation
+and forward secrecy after the new key is disclosed. The model also
+requires the expected active attack witness when the adversary keeps
+controlling the network and the only message-authentication state was
+compromised: the adversary substitutes its own DH share and derives the
+responder's next key. Consequently the implementation may claim passive
+full-session-state recovery after a fresh/fresh exchange; active PCS
+requires a separately protected authentication root or external
+re-authentication.
+
 Raw verifier output for both models is written below
 `formal/proverif/results/`, which
 is ignored because it can be regenerated from the pinned model and
