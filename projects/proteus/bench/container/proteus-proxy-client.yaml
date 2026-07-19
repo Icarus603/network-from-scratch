@@ -2,6 +2,7 @@ server_endpoint: "10.77.2.14:8444"
 server_endpoint_beta: "10.77.2.14:9444"
 beta_server_name: proteus.example.com
 beta_first_timeout_secs: 10
+beta_carrier_idle_timeout_secs: 600
 beta_congestion: brutal
 beta_brutal_target_mbps: 1000
 beta_initial_mtu: 1350

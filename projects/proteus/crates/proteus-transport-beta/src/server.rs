@@ -197,9 +197,9 @@ pub fn make_endpoint_with_perf(
     let mut transport = quinn::TransportConfig::default();
     transport
         .max_concurrent_bidi_streams(quinn::VarInt::from_u32(64))
-        // 60s idle is the spec default; operators override via
-        // server.yaml.
-        .max_idle_timeout(Some(std::time::Duration::from_secs(60).try_into().unwrap()));
+        .max_idle_timeout(Some(perf.carrier_idle_timeout.try_into().unwrap_or_else(
+            |_| std::time::Duration::from_secs(86_400).try_into().unwrap(),
+        )));
     crate::apply_perf_tuning_with(&mut transport, perf);
     server_cfg.transport_config(Arc::new(transport));
 

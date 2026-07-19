@@ -727,17 +727,16 @@ pub async fn connect_carrier_with_timeout_perf_cached_crypto(
     let mut client_cfg = quinn::ClientConfig::new(crypto);
     let mut transport = quinn::TransportConfig::default();
     // Handshake and carrier-idle deadlines have different semantics.
-    // A production caller commonly asks for a 3–10 s fast-fail dial,
-    // but a reusable carrier must survive longer recovery gaps and
-    // quiet periods between SOCKS requests. Negotiating the short dial
-    // deadline as max_idle_timeout killed healthy pooled carriers under
-    // loss. Keep at least the server's 60 s idle lifetime and enforce
-    // the caller's dial deadline explicitly around `Connecting` below.
-    let carrier_idle_timeout = connect_timeout.max(std::time::Duration::from_secs(60));
-    transport.max_idle_timeout(Some(carrier_idle_timeout.try_into().unwrap_or_else(|_| {
-        // Saturate to ~10 min if the caller supplied something insane.
-        std::time::Duration::from_secs(600).try_into().unwrap()
-    })));
+    // The explicit dial deadline still wraps `Connecting` below;
+    // `PerfProfile` independently controls how long a pooled carrier
+    // may stay quiet between logical SOCKS sessions.
+    transport.max_idle_timeout(Some(perf.carrier_idle_timeout.try_into().unwrap_or_else(
+        |_| {
+            // Config validation caps this at one day. Keep the library API
+            // bounded too if a direct caller supplies a larger Duration.
+            std::time::Duration::from_secs(86_400).try_into().unwrap()
+        },
+    )));
     crate::apply_perf_tuning_with(&mut transport, perf);
     client_cfg.transport_config(Arc::new(transport));
 

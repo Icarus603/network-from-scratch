@@ -3306,6 +3306,9 @@ fn build_beta_endpoint(
     // padding) — operators flip on `beta_pad_quic_to_mtu: true` in
     // production anti-censorship deployments.
     let mut perf = proteus_transport_beta::PerfProfile::default();
+    if let Some(v) = cfg.beta_carrier_idle_timeout_secs {
+        perf.carrier_idle_timeout = std::time::Duration::from_secs(v);
+    }
     if let Some(v) = cfg.beta_initial_mtu {
         perf.initial_mtu = v;
     }

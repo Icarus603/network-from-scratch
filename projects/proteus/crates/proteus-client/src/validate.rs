@@ -993,6 +993,19 @@ pub async fn run(path: &Path) -> PreflightReport {
             ));
         }
     }
+    if let Some(t) = cfg.beta_carrier_idle_timeout_secs {
+        if t == 0 {
+            r.push_fail(
+                "beta_carrier_idle_timeout_secs = 0 would expire every quiet β carrier instantly",
+            );
+        } else if t > 86_400 {
+            r.push_fail(format!(
+                "beta_carrier_idle_timeout_secs = {t} exceeds the one-day operational bound"
+            ));
+        } else {
+            r.push_pass(format!("beta_carrier_idle_timeout_secs = {t}s"));
+        }
+    }
     if let Some(d) = cfg.drain_secs {
         if d == 0 {
             // Iter-94: client drain_secs = 0 → WARN. SIGTERM tears

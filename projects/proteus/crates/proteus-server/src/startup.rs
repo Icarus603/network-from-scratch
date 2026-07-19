@@ -323,6 +323,7 @@ mod tests {
             listen_beta: None,
             beta_cert_chain: None,
             beta_private_key: None,
+            beta_carrier_idle_timeout_secs: None,
             beta_initial_mtu: None,
             beta_minimum_mtu: None,
             beta_pad_quic_to_mtu: None,

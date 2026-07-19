@@ -1,5 +1,6 @@
 listen_alpha: "0.0.0.0:8444"
 listen_beta: "0.0.0.0:9444"
+beta_carrier_idle_timeout_secs: 600
 beta_congestion: brutal
 beta_brutal_target_mbps: 1000
 beta_initial_mtu: 1350

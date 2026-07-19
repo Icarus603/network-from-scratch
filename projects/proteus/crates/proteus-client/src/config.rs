@@ -86,6 +86,11 @@ pub struct ClientConfig {
     /// a slow QUIC handshake on a marginal path still wins.
     #[serde(default)]
     pub beta_first_timeout_secs: Option<u64>,
+    /// Maximum quiet period for a reusable β QUIC carrier. This is
+    /// independent of `beta_first_timeout_secs`, which only bounds
+    /// the initial dial. Default 60 seconds.
+    #[serde(default)]
+    pub beta_carrier_idle_timeout_secs: Option<u64>,
     /// β QUIC `initial_mtu` (bytes). Default 1350. Bump to 1452
     /// for max-throughput Ethernet-MTU paths matching Hy2 / TUIC-v5.
     #[serde(default)]

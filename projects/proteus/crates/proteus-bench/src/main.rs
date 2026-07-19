@@ -967,6 +967,7 @@ async fn run_soak_cmd(args: SoakArgs) -> Result<(), Box<dyn std::error::Error>> 
 
 async fn run_beta(args: BetaArgs) -> Result<(), Box<dyn std::error::Error>> {
     let perf = PerfProfile {
+        carrier_idle_timeout: Duration::from_secs(60),
         initial_mtu: args.initial_mtu,
         minimum_mtu: 1200,
         pad_quic_datagrams_to_mtu: args.pad_mtu,
@@ -1070,6 +1071,7 @@ async fn run_beta_client(args: BetaClientArgs) -> Result<(), Box<dyn std::error:
     })?;
 
     let perf = PerfProfile {
+        carrier_idle_timeout: Duration::from_secs(60),
         initial_mtu: args.initial_mtu,
         minimum_mtu: 1200,
         pad_quic_datagrams_to_mtu: args.pad_mtu,

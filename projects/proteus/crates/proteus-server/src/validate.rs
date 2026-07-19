@@ -1041,6 +1041,19 @@ pub fn preflight(cfg: &ServerConfig) -> PreflightReport {
     }
     // Iter-93: server-side β-QUIC tuning knobs sanity.
     // Symmetric with client iter-92.
+    if let Some(t) = cfg.beta_carrier_idle_timeout_secs {
+        if t == 0 {
+            r.push_fail(
+                "beta_carrier_idle_timeout_secs = 0 would expire every quiet β carrier instantly",
+            );
+        } else if t > 86_400 {
+            r.push_fail(format!(
+                "beta_carrier_idle_timeout_secs = {t} exceeds the one-day operational bound"
+            ));
+        } else {
+            r.push_pass(format!("beta_carrier_idle_timeout_secs = {t}s"));
+        }
+    }
     if let Some(mtu) = cfg.beta_initial_mtu {
         if !(1200..=1500).contains(&mtu) {
             r.push_fail(format!(
@@ -2503,6 +2516,7 @@ mod tests {
             listen_beta: None,
             beta_cert_chain: None,
             beta_private_key: None,
+            beta_carrier_idle_timeout_secs: None,
             beta_initial_mtu: None,
             beta_minimum_mtu: None,
             beta_pad_quic_to_mtu: None,

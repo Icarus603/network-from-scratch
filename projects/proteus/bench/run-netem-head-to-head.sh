@@ -26,6 +26,7 @@ PROTEUS_STREAM_RECEIVE_WINDOW_MIB="${PROTEUS_STREAM_RECEIVE_WINDOW_MIB:-64}"
 PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB="${PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB:-256}"
 PROTEUS_SEND_WINDOW_MIB="${PROTEUS_SEND_WINDOW_MIB:-64}"
 PROTEUS_BETA_FIRST_TIMEOUT_SECS="${PROTEUS_BETA_FIRST_TIMEOUT_SECS:-60}"
+PROTEUS_CARRIER_IDLE_TIMEOUT_SECS="${PROTEUS_CARRIER_IDLE_TIMEOUT_SECS:-600}"
 PROTEUS_MIMALLOC_PURGE_DELAY="${PROTEUS_MIMALLOC_PURGE_DELAY:-0}"
 if [ -z "${WARMUP_MIB+x}" ]; then
     if (( PAYLOAD_MIB > 64 )); then
@@ -57,6 +58,7 @@ export PROTEUS_STREAM_RECEIVE_WINDOW_MIB
 export PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB
 export PROTEUS_SEND_WINDOW_MIB
 export PROTEUS_BETA_FIRST_TIMEOUT_SECS
+export PROTEUS_CARRIER_IDLE_TIMEOUT_SECS
 export PROTEUS_MIMALLOC_PURGE_DELAY
 
 wait_for_log_marker() {
@@ -301,6 +303,7 @@ done
     printf '"proteus_connection_receive_window_mib":%s,' "$PROTEUS_CONNECTION_RECEIVE_WINDOW_MIB"
     printf '"proteus_send_window_mib":%s,' "$PROTEUS_SEND_WINDOW_MIB"
     printf '"proteus_beta_first_timeout_secs":%s,' "$PROTEUS_BETA_FIRST_TIMEOUT_SECS"
+    printf '"proteus_carrier_idle_timeout_secs":%s,' "$PROTEUS_CARRIER_IDLE_TIMEOUT_SECS"
     printf '"proteus_mimalloc_purge_delay_ms":%s,' "$PROTEUS_MIMALLOC_PURGE_DELAY"
     printf '"connection_lifecycle":"%s","warmup_mib":%s,' \
         "$([[ "$WORKLOAD_MODE" = "proxy" ]] && echo "per-cell-reset-then-warm" || echo "one-shot")" \
@@ -486,6 +489,12 @@ run_cell() {
             if grep -q 'falling back to α' \
                 "${cell_dir}/proteus-client-daemon.log"; then
                 echo "benchmark invalid: Proteus β fell back to α in ${cell}" >&2
+                return 1
+            fi
+            if grep -Eq 'β (QUIC )?carrier closed' \
+                "${cell_dir}/proteus-client-daemon.log" \
+                "${cell_dir}/proteus-server-daemon.log"; then
+                echo "benchmark invalid: warm Proteus β carrier closed within ${cell}" >&2
                 return 1
             fi
         fi

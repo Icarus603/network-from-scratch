@@ -43,6 +43,11 @@ pub struct ServerConfig {
     /// `beta_cert_chain` — defaults to `tls.private_key` if unset.
     #[serde(default)]
     pub beta_private_key: Option<PathBuf>,
+    /// Maximum quiet period for a reusable β QUIC carrier. This is
+    /// separate from the per-stream relay idle timeout. Default 60
+    /// seconds; both peers should use the same value.
+    #[serde(default)]
+    pub beta_carrier_idle_timeout_secs: Option<u64>,
     /// β QUIC `initial_mtu` (bytes). Default 1350 (`PerfProfile::default()`).
     /// Bump to 1452 for max-throughput Ethernet-MTU paths matching
     /// Hy2 / TUIC-v5; lower for VPN/mobile paths with smaller MTUs.

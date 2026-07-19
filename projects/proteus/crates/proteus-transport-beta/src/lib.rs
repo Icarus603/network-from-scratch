@@ -141,6 +141,15 @@ pub fn apply_perf_tuning(transport: &mut quinn::TransportConfig) {
 /// raw throughput can flip `pad_quic_datagrams_to_mtu = true`.
 #[derive(Debug, Clone, Copy)]
 pub struct PerfProfile {
+    /// Maximum quiet period for the reusable QUIC carrier.
+    ///
+    /// This is deliberately independent from the handshake deadline:
+    /// a fast-fail 3–10 s dial and a warm carrier that survives long
+    /// application pauses are different operational promises. The
+    /// production default remains 60 s; controlled benchmarks may
+    /// raise it so a slow competitor run cannot expire Proteus while
+    /// the AB/BA harness is waiting.
+    pub carrier_idle_timeout: std::time::Duration,
     /// Initial UDP payload size assumed before MTU discovery
     /// negotiates a better value. `1200` is the QUIC v1 safe min;
     /// `1350` is our conservative bump covering most modern paths;
@@ -289,6 +298,7 @@ pub enum CongestionKind {
 impl Default for PerfProfile {
     fn default() -> Self {
         Self {
+            carrier_idle_timeout: std::time::Duration::from_secs(60),
             initial_mtu: 1350,
             minimum_mtu: 1200,
             pad_quic_datagrams_to_mtu: false,

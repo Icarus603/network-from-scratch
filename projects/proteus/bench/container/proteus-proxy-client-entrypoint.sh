@@ -57,6 +57,16 @@ case "${BETA_FIRST_TIMEOUT_SECS:-60}" in
         exit 2
         ;;
 esac
+case "${CARRIER_IDLE_TIMEOUT_SECS:-600}" in
+    *[!0-9]*|"")
+        echo "CARRIER_IDLE_TIMEOUT_SECS must be a positive integer" >&2
+        exit 2
+        ;;
+    0)
+        echo "CARRIER_IDLE_TIMEOUT_SECS must be greater than zero" >&2
+        exit 2
+        ;;
+esac
 for window in \
     "${STREAM_RECEIVE_WINDOW_MIB:-64}" \
     "${CONNECTION_RECEIVE_WINDOW_MIB:-256}" \
@@ -75,6 +85,9 @@ do
 done
 sed -i \
     "s/^beta_first_timeout_secs:.*/beta_first_timeout_secs: ${BETA_FIRST_TIMEOUT_SECS:-60}/" \
+    "$config"
+sed -i \
+    "s/^beta_carrier_idle_timeout_secs:.*/beta_carrier_idle_timeout_secs: ${CARRIER_IDLE_TIMEOUT_SECS:-600}/" \
     "$config"
 sed -i \
     "s/^beta_brutal_target_mbps:.*/beta_brutal_target_mbps: ${BRUTAL_TARGET_MBPS:-1000}/" \
