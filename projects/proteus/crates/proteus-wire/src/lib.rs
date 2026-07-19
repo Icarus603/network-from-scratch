@@ -79,6 +79,10 @@ pub enum WireError {
     /// QUIC varint encoding rejected (e.g., out-of-range or undecodable).
     #[error("varint decode error")]
     Varint,
+
+    /// A v1.3 PCS control plaintext was not exactly 40 bytes.
+    #[error("PCS control length mismatch: expected 40, got {0}")]
+    PcsControlLengthMismatch(usize),
 }
 
 // =============================================================================

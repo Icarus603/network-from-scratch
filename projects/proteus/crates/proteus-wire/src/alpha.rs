@@ -81,6 +81,48 @@ pub const RECORD_CLOSE: u8 = 0x12;
 /// exceed the AEAD-decrypted plaintext size; the parser validates this.
 pub const RECORD_DATA_PADDED: u8 = 0x13;
 
+/// v1.3 two-party PCS public-share offer.
+pub const RECORD_PCS_OFFER: u8 = 0x14;
+
+/// v1.3 two-party PCS transcript commit.
+pub const RECORD_PCS_COMMIT: u8 = 0x15;
+
+/// Plaintext length shared by `PCS_OFFER` and `PCS_COMMIT`.
+pub const PCS_CONTROL_PLAINTEXT_LEN: usize = 40;
+
+/// Decoded v1.3 PCS control plaintext.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PcsControl {
+    /// Monotonic bidirectional rekey generation.
+    pub generation: u64,
+    /// X25519 public share for an offer, transcript hash for a commit.
+    pub value: [u8; 32],
+}
+
+/// Encode a v1.3 PCS offer/commit plaintext.
+#[must_use]
+pub fn encode_pcs_control(control: PcsControl) -> [u8; PCS_CONTROL_PLAINTEXT_LEN] {
+    let mut out = [0u8; PCS_CONTROL_PLAINTEXT_LEN];
+    out[..8].copy_from_slice(&control.generation.to_be_bytes());
+    out[8..].copy_from_slice(&control.value);
+    out
+}
+
+/// Decode a v1.3 PCS offer/commit plaintext, requiring its exact length.
+pub fn decode_pcs_control(input: &[u8]) -> Result<PcsControl, WireError> {
+    if input.len() != PCS_CONTROL_PLAINTEXT_LEN {
+        return Err(WireError::PcsControlLengthMismatch(input.len()));
+    }
+    let generation = u64::from_be_bytes(
+        input[..8]
+            .try_into()
+            .expect("exact PCS control length guarantees 8-byte generation"),
+    );
+    let mut value = [0u8; 32];
+    value.copy_from_slice(&input[8..]);
+    Ok(PcsControl { generation, value })
+}
+
 /// Encode a handshake frame.
 pub fn encode_handshake(frame_type: u8, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(1 + 8 + body.len());
@@ -199,6 +241,30 @@ mod tests {
         assert_eq!(consumed, wire.len());
         assert_eq!(frame.kind, RECORD_DATA);
         assert_eq!(frame.body, ct.as_slice());
+    }
+
+    #[test]
+    fn pcs_control_round_trip() {
+        let control = PcsControl {
+            generation: 0x0102_0304_0506_0708,
+            value: [0xa5; 32],
+        };
+        let encoded = encode_pcs_control(control);
+        assert_eq!(encoded.len(), PCS_CONTROL_PLAINTEXT_LEN);
+        assert_eq!(&encoded[..8], &control.generation.to_be_bytes());
+        assert_eq!(decode_pcs_control(&encoded).unwrap(), control);
+    }
+
+    #[test]
+    fn pcs_control_rejects_short_and_trailing_bytes() {
+        for len in [0usize, 39, 41, 128] {
+            let input = vec![0u8; len];
+            let err = decode_pcs_control(&input).unwrap_err();
+            assert!(matches!(
+                err,
+                WireError::PcsControlLengthMismatch(got) if got == len
+            ));
+        }
     }
 
     /// `write_record_header_to(&mut hdr, type, ct.len())` followed by
