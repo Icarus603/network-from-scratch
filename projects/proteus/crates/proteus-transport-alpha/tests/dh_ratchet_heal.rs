@@ -16,7 +16,7 @@
 //! 2. **Subsequent ratchets fall back to symmetric**: every later
 //!    RATCHET on the same direction MUST be 4 bytes (legacy form).
 //!    This is what keeps pipelined ratcheting working without an
-//!    expensive Signal-style state-sync — and it's why the 16-MiB
+//!    additional bidirectional state-sync — and it's why the 16-MiB
 //!    throughput stress test passes alongside this one.
 //!
 //! Both ends are independent: this test sniffs the client→server

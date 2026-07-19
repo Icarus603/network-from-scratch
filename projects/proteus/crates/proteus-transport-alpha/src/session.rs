@@ -5,18 +5,20 @@
 //! AEAD-protected. The `aad` is the 8-byte big-endian `(epoch:24 || seqnum:40)`
 //! header; the nonce is `iv XOR (epoch||seqnum)` (spec §4.5.2).
 //!
-//! ## Hybrid ratchet (one-shot asymmetric DH heal + continuous symmetric)
+//! ## Hybrid ratchet (one-shot limited DH heal + continuous symmetric)
 //!
 //! On the FIRST [`RATCHET_BYTES`] boundary of a direction, the sender
-//! performs a fresh asymmetric Diffie-Hellman ratchet step — a Signal-
-//! style heal that recovers from any pre-first-ratchet compromise.
+//! performs a fresh asymmetric Diffie-Hellman ratchet step. It heals a
+//! traffic-secret-only disclosure when the receiver's retained bootstrap
+//! DH private state remains secret; it is not a Signal Double Ratchet and
+//! does not recover from full endpoint-state compromise.
 //! Every subsequent ratchet event on the same direction is a pure
 //! symmetric HKDF step. The split happens because a continuous
 //! Double Ratchet requires strict request/response synchronization
 //! that pipelined ratchets (256 chunks in flight before the peer
 //! responds) cannot maintain without an extra round of state-sync —
-//! one heal is a clean tradeoff that delivers strict-improvement
-//! security over the prior build with zero risk of pipelining races.
+//! the one-shot step is a narrow tradeoff that improves on the prior
+//! symmetric-only build without introducing pipelining races.
 //!
 //! ### Sender state machine (per direction)
 //!
@@ -63,18 +65,20 @@
 //!   `current_secret` at epoch N cannot recover `secret_(N-k)`. The
 //!   asymmetric heal step doesn't weaken this — `dh_ikm` is one-way
 //!   blended in.
-//! - **Post-compromise security (PCS)**:
-//!     - Compromise before first ratchet: heals at first ratchet (fresh
-//!       DH the attacker can't replicate). PCS-strong heal step.
-//!     - Compromise after first ratchet: traffic up to next symmetric
-//!       step leaks; later epochs are forward-secret only. Same as
-//!       prior build.
+//! - **Limited compromise healing**:
+//!     - Traffic-secret-only disclosure before the first ratchet heals
+//!       if the retained receiver bootstrap DH secret remains private.
+//!     - Full endpoint-state compromise also reveals that DH secret, so
+//!       the attacker can derive the first ratcheted key from the fresh
+//!       public share. Later symmetric steps cannot heal a current-key
+//!       disclosure; they provide forward secrecy only.
 //! - **Replay across ratchet boundaries**: distinct epochs use distinct
 //!   keys and reset seqnum to 0, so replay across boundaries fails AEAD.
 //!
 //! Compared to VLESS+REALITY (no rotation, no DH ratchet): a single key
-//! leak exposes the entire conversation. Proteus achieves FS always and
-//! PCS heal at the first ratchet — REALITY achieves neither.
+//! leak exposes the entire conversation. Proteus adds forward key
+//! rotation and a narrowly scoped traffic-secret-only heal; it does not
+//! yet provide full-state PCS.
 //!
 //! ### Backward compatibility
 //!
@@ -229,7 +233,7 @@ pub struct AlphaSender<W: AsyncWrite + Unpin = tokio::net::tcp::OwnedWriteHalf> 
     /// Our local X25519 secret seeded from the handshake (client's
     /// `client_x25519_sk`, server's `server_x25519_eph_sk`). Consumed
     /// EXACTLY ONCE by the first outgoing ratchet event to provide
-    /// one PCS-strong heal step. Subsequent ratchets are pure
+    /// one traffic-secret-only heal step. Subsequent ratchets are pure
     /// symmetric — which preserves forward secrecy and is robust to
     /// pipelined ratchets that would otherwise race a full Signal-
     /// style Double Ratchet.
@@ -294,7 +298,7 @@ impl<W: AsyncWrite + Unpin> AlphaSender<W> {
     /// Install one-shot DH-bootstrap state. The first outgoing ratchet
     /// will emit a fresh DH pub and derive the new secret from
     /// `DH(my_dh_sk_new, peer_dh_pub)`; subsequent ratchets fall back
-    /// to pure symmetric. Provides one PCS-strong heal step at the
+    /// to pure symmetric. Provides one limited leak-healing step at the
     /// first ratchet boundary.
     pub(crate) fn install_dh_ratchet(&mut self, my_dh_sk: StaticSecret, peer_dh_pub: [u8; 32]) {
         self.dh_sk = Some(my_dh_sk);
@@ -1491,7 +1495,7 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> AlphaSession<R, W> {
 
     /// Install one-shot asymmetric DH ratchet state derived from the
     /// handshake. The sender will perform a fresh DH on its first
-    /// outgoing RATCHET event (PCS heal step); subsequent ratchets
+    /// outgoing RATCHET event (traffic-secret-only heal step); subsequent ratchets
     /// are pure symmetric.
     ///
     /// `my_dh_sk` is THIS endpoint's X25519 secret half of the

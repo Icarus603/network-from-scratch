@@ -2575,8 +2575,9 @@ async fn handshake_with_prefix(
     // Install asymmetric DH ratchet bootstrap: server holds
     // `server_x25519_eph_sk` (the fresh per-session ephemeral) and the
     // client's announced `client_x25519_pub`. Both halves are known
-    // post-handshake, so no extra round-trip is needed to enable PCS-
-    // strong ratcheting.
+    // post-handshake, so no extra round-trip is needed for the limited
+    // traffic-secret-only heal. Full endpoint-state compromise reveals
+    // the retained private half and defeats this one-shot step.
     let mut session = AlphaSession::with_prefix_and_suite(
         write,
         read,

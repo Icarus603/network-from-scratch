@@ -8,7 +8,8 @@
 //! - [`aead`] — ChaCha20-Poly1305 wrapper with Proteus AAD discipline.
 //! - [`kdf`] — HKDF-SHA-256 helpers using the Proteus label space
 //!   (`proteus_spec::hkdf_label::*`).
-//! - [`ratchet`] — asymmetric DH ratchet delivering PCS-strong per spec §5.4.
+//! - [`ratchet`] — asymmetric DH ratchet primitive with an explicitly
+//!   bounded traffic-secret-only healing claim.
 //!
 //! All symmetric key material is wrapped in [`zeroize::Zeroizing`] containers.
 

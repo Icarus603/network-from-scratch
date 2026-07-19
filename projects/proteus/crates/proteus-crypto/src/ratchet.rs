@@ -158,11 +158,11 @@ mod tests {
     use super::*;
     use rand_core::OsRng;
 
-    /// End-to-end PCS-strong simulation: both sides start from the same
-    /// post-handshake secret and the same initial DH material; after a
-    /// ratchet round they MUST still agree on the new secret, AND the
-    /// previous secret must no longer be derivable from the new one
-    /// without the fresh DH input.
+    /// End-to-end agreement simulation: both sides start from the same
+    /// post-handshake secret and matching initial DH material; after a
+    /// ratchet round they MUST still agree on the new secret. The
+    /// security boundary is checked by the ProVerif model, not by this
+    /// functional unit test.
     #[test]
     fn ratchet_round_agreement() {
         let mut rng = OsRng;

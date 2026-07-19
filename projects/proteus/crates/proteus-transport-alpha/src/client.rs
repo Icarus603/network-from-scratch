@@ -548,12 +548,11 @@ where
     // Any tail bytes left over in rx_buf are post-handshake DATA records
     // that arrived coalesced with SF — pass them to the receiver.
     //
-    // Install asymmetric DH ratchet state (Signal-style, PCS-strong)
-    // bootstrapped from the handshake X25519 keys. After this, every
-    // RATCHET event uses a fresh ephemeral DH step so a future leak
-    // of any one epoch's key material does not unlock subsequent
-    // epochs — the chain heals on the next ratchet (~4 MiB / 16 k
-    // records).
+    // Install the one-shot DH ratchet bootstrap from the handshake
+    // X25519 keys. The first RATCHET event heals disclosure of the
+    // traffic secret alone only while the retained peer-side bootstrap
+    // private key remains secret. Later RATCHET events are symmetric
+    // forward-only steps; this is not full endpoint-state PCS.
     let session = AlphaSession::with_prefix_and_suite(
         write,
         read,
