@@ -1384,13 +1384,14 @@ ahead by 8–24% in six normalized same-host cells. That matrix compared
 different application workloads and is retained only as exploratory
 controller evidence. The corrected production SOCKS workload reuses
 the β carrier across requests. After fixing a 64 KiB exact-boundary
-flush stall, the 30-run 512 MiB / 100 ms RTT matrix measured Proteus
-at +24.45% (95% CI +22.88% to +25.62%) with no loss and +7.92%
-(+6.03% to +9.89%) at 5% IID loss. The 64 MiB / 5% cell remains
+flush stall and isolating both long-lived peers at every cell boundary,
+the v1.3 PCS production image's 30-run 512 MiB / 100 ms RTT matrix
+measured Proteus at +98.30% (95% CI +97.53% to +99.98%) with no loss
+and +28.34% (+26.97% to +31.06%) at 5% IID loss. The 64 MiB / 5% cell remains
 statistically unresolved at −0.64% (−4.92% to +3.32%), so the
 promoted claim is limited to sustained bulk throughput.
 Under severe Gilbert-Elliott burst loss, the promoted 512 MiB
-30-run cell adds +6.09% (+3.90% to +8.59%) with 30/30 success and
+30-run v1.3 cell adds +17.67% (+14.98% to +23.04%) with 30/30 success and
 zero β-to-α fallback; the earlier 64 MiB severe-burst cell remains
 statistically unresolved and is retained as a short-flow counterexample.
 The method, commit and raw evidence live in
@@ -1410,11 +1411,11 @@ These are still seven-run same-host screens, not a universal cap
 claim. The narrowest screen cell was then preselected and promoted
 to 30 runs: Proteus leads by +79.44% (+69.09% to +83.44%), with
 30/30 success, lower client CPU/RSS, and zero qdisc drop, carrier
-close or fallback. A 0% TUIC-v5 promotion and true cross-host
-reproduction remain required.
-The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
-48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
-but remains a seven-run directional result.
+close or fallback. The v1.3 production matrix also promotes upstream
+TUIC v5 1.0.0 at 0%, 5% IID, and severe burst: Proteus leads by
++193.53% (+182.06% to +209.98%), +79.20% (+72.84% to +84.65%), and
++65.83% (+58.37% to +74.61%), respectively, with 30/30 success in
+every cell. True cross-host reproduction remains required.
 
 ---
 
@@ -1931,16 +1932,16 @@ latest hardening pass:
 - 🟡 **head-to-head benchmark vs Hy2/TUIC-v5**: official Hysteria2
   commit `f2ad1de5` is version-pinned, and all protocols use the same
   byte-verified SOCKS workload through the isolated Linux netem
-  router. Warm pooled Proteus now leads two promoted 512 MiB,
-  30-run cells: +24.45% at 0% loss and +7.92% at 5% IID loss, both
-  with positive 95% bootstrap intervals and 30/30 success. A third
-  promoted 512 MiB severe Gilbert-Elliott cell leads by +6.09%
-  (+3.90% to +8.59%) with 30/30 success and no α fallback. The
+  router. The v1.3 production image now leads two promoted 512 MiB,
+  30-run cells: +98.30% at 0% loss and +28.34% at 5% IID loss, with
+  95% bootstrap lower bounds of +97.53% and +26.97%. A third
+  promoted 512 MiB severe Gilbert-Elliott cell leads by +17.67%
+  (+14.98% to +23.04%) with 30/30 success and no α fallback. The
   64 MiB / 5% cell remains parity rather than a win. More loss
-  regimes, CPU/memory, 0% TUIC-v5 promotion and true cross-host
-  validation remain open. The promoted upstream TUIC v5 1.0.0
-  5% IID cell leads by +48.86% (+40.82% to +52.85%) with 30/30
-  success; its 0% cell is still a seven-run screen. The promoted
+  regimes and true cross-host validation remain open. Against
+  upstream TUIC v5 1.0.0, the same promoted cells lead by +193.53%
+  at 0%, +79.20% at 5% IID, and +65.83% under severe burst, with
+  positive 95% intervals and 30/30 success throughout. The promoted
   64 MiB severe-reordering cell leads Hy2 by +333.39% (+232.47% to
   +569.07%) over 30/30 runs while using less client CPU and RSS.
   A 300 ms RTT severe-reordering cell independently leads by

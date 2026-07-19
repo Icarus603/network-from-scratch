@@ -590,3 +590,34 @@ logs 位於 ignored
 `bench/results/reorder-p5-c25-delay10-promoted-30run-20260719/`。
 這把 broad screen 的最窄邊界升格為 promoted same-host 證據；
 physical cross-host 與 independent reproduction 仍是外推前的硬門檻。
+
+## 2026-07-19 v1.3 PCS production promoted matrix
+
+Runner `3f7404c` 修正了跨 cell 的 server carrier 隔離：每格開始前，
+Proteus、Hy2 與官方 TUIC 都同時重建 server/client peers，再 warmup；
+netem router 與共用 TCP echo target 才跨格保留。修正前的矩陣在 5%
+cell 尾端看見上一格孤兒 carrier 的 600 秒 idle timeout，已明確標成
+無效證據，沒有任何吞吐結果被晉升。
+
+乾淨 commit、production v1.3 PCS image、512 MiB payload、100 ms RTT
+與每協議每格 30 次的重跑結果如下：
+
+| impairment | Proteus | Hy2 | official TUIC v5 | vs Hy2 uplift (95% bootstrap) | vs TUIC uplift (95% bootstrap) |
+|---|---:|---:|---:|---:|---:|
+| 0% IID | 215.64 | 108.74 | 73.47 | **+98.30%** (**+97.53%, +99.98%**) | **+193.53%** (**+182.06%, +209.98%**) |
+| 5% IID | 123.35 | 96.11 | 68.84 | **+28.34%** (**+26.97%, +31.06%**) | **+79.20%** (**+72.84%, +84.65%**) |
+| Gilbert-Elliott p2/r10/h75/k0.1 | 102.51 | 87.12 | 61.82 | **+17.67%** (**+14.98%, +23.04%**) | **+65.83%** (**+58.37%, +74.61%**) |
+
+九個 protocol/cell 組合都是 30/30 success；所有 comparison 的
+100,000-draw two-sided permutation p-value 經 add-one correction 皆為
+1/100,001。0% cell 的雙向 qdisc drop 都是 0，5% 與 burst cell 的
+雙向 qdisc 都留下實際 drops。全程沒有 carrier close、α fallback 或
+非零 exit status。Proteus 每格的 client CPU 低於 Hy2，最終 RSS 也
+低於 Hy2；TUIC 的 RSS 最低，但吞吐與 CPU 都落後。
+
+精簡 raw arrays 與 provenance 位於
+`notes/perf/2026-07-19-v13-promoted-matrix.jsonl`，完整逐次 resource
+rows、qdisc snapshots 與 protocol logs 保留於 ignored
+`bench/results/pcs-v13-promoted-3f7404c-n30/`。這關閉同機 0%／5%／
+burst promoted matrix，仍不能代替 physical two-host reproduction、
+independent benchmark 或 adversarial deployment。

@@ -20,6 +20,24 @@ retained a +96.51% median throughput margin over Hy2 in this cell. This is
 a single-host overhead gate; it does not replace the required physical
 two-host matrix.
 
+## 2026-07-19 — v1.3 promoted Hy2 / TUIC matrix
+
+[`2026-07-19-v13-promoted-matrix.jsonl`](./2026-07-19-v13-promoted-matrix.jsonl)
+preserves the clean-commit, production-proxy matrix after the runner began
+recreating both server and client peers at every cell boundary. All three
+protocols completed 30/30 byte-verified 512 MiB transfers in each 100 ms RTT
+cell. Proteus led Hysteria2 by 98.30% at 0% IID loss, 28.34% at 5% IID loss,
+and 17.67% under the promoted Gilbert-Elliott burst model; the corresponding
+95% bootstrap lower bounds were 97.53%, 26.97%, and 14.98%. It led upstream
+TUIC v5 1.0.0 by 193.53%, 79.20%, and 65.83%. Every two-sided permutation
+test used 100,000 draws with add-one correction and returned 1/100,001.
+
+The persisted file includes all 270 throughput observations, image and commit
+identities, resource summaries, and both-direction qdisc packet/drop deltas.
+The ignored raw directory retains per-run resource rows and protocol logs.
+This closes the promoted same-host 0% / 5% / burst matrix; physical two-host
+reproduction and independent benchmarking remain open.
+
 ## Why persist these
 
 The bench harness produces reproducible numbers, but
@@ -213,16 +231,15 @@ same-host cells, Proteus led the normalized round-trip calculation by
 Because that matrix used different application workloads, it is now
 classified as exploratory controller evidence. The corrected
 production SOCKS workload reuses daemon carriers. Its promoted
-512 MiB / 100 ms RTT / 30-run cells lead Hy2 by 24.45% at 0% loss
-and 7.92% at 5% IID loss, both with positive 95% bootstrap intervals.
-The promoted 30-run severe Gilbert-Elliott cell also leads by 6.09%
-(95% bootstrap interval +3.90% to +8.59%), with 30/30 successes and
-no β-to-α fallback.
+v1.3 512 MiB / 100 ms RTT / 30-run cells lead Hy2 by 98.30% at 0%
+loss and 28.34% at 5% IID loss. The promoted 30-run severe
+Gilbert-Elliott cell leads by 17.67% (95% bootstrap interval +14.98%
+to +23.04%). All three cells have 30/30 successes and no β-to-α
+fallback.
 Against the upstream TUIC v5 1.0.0 reference with matched 64 MiB
-flow-control windows, the promoted 30-run 512 MiB / 5% IID cell leads
-by 48.86% (95% bootstrap interval +40.82% to +52.85%), with 30/30
-success. The 0% TUIC cell leads by 102.92% but remains a seven-run
-directional result.
+flow-control windows, the same promoted cells lead by 193.53% at 0%,
+79.20% at 5% IID, and 65.83% under severe burst, each with 30/30
+success and a positive 95% bootstrap interval.
 The 64 MiB / 5% cell remains statistically unresolved at −0.64%, so
 the supported claim is sustained-bulk superiority in these same-host
 cells, not universal performance dominance.
