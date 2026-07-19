@@ -570,3 +570,23 @@ qdisc drop、carrier close、α fallback 與 stream-gap overflow 都是
 `bench/results/reorder-broad-warm-carrier-7run-20260719/`。這擴張了
 同機 reordering 的證據面，仍不取代 physical cross-host 與
 independent reproduction。
+
+最低 uplift 的 5% reorder／25% correlation／20 ms RTT cell 隨後依照
+預先宣告的選擇升格為 30-run，而非從結果中另挑更漂亮的格子：
+
+| impairment | runs | Proteus | Hy2 | uplift (95% bootstrap) | client CPU / run | client RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| reorder 5%, correlation 25%, 20 ms RTT | 30 | 182.29 | 101.59 | **+79.44%** (**+69.09%, +83.44%**) | 0.255 / 0.286 s | 36.96 / 44.04 MiB |
+
+雙方都是 30/30；Monte Carlo two-sided permutation p-value 經
+add-one correction 為 1/100,001，900 個跨樣本 pair 的 superiority
+probability 為 1.0。兩端 qdisc drop、carrier close、α fallback 與
+stream-gap overflow 仍全部為 0。Proteus 的 CPU 與 RSS 也低於 Hy2，
+所以此格的 throughput 優勢沒有以更高 client resource cost 換取。
+
+持久摘要位於
+`notes/perf/2026-07-19-reorder-p5-c25-delay10-30run.jsonl`，完整 raw
+logs 位於 ignored
+`bench/results/reorder-p5-c25-delay10-promoted-30run-20260719/`。
+這把 broad screen 的最窄邊界升格為 promoted same-host 證據；
+physical cross-host 與 independent reproduction 仍是外推前的硬門檻。

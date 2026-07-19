@@ -1406,8 +1406,11 @@ one warmed carrier for the whole cell and rejects any carrier close or
 0–75% correlation and 20–100 ms RTT; all six 95% bootstrap intervals
 were positive, with the narrowest uplift +86.76% (+70.23% to +97.50%).
 These are still seven-run same-host screens, not a universal cap
-claim. A 30-run boundary promotion, 0% TUIC-v5 promotion and true
-cross-host reproduction remain required.
+claim. The narrowest screen cell was then preselected and promoted
+to 30 runs: Proteus leads by +79.44% (+69.09% to +83.44%), with
+30/30 success, lower client CPU/RSS, and zero qdisc drop, carrier
+close or fallback. A 0% TUIC-v5 promotion and true cross-host
+reproduction remain required.
 The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
 48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
 but remains a seven-run directional result.
@@ -1922,6 +1925,8 @@ latest hardening pass:
   carrier close, α fallback, stream-gap overflow, or qdisc drop.
   Six additional seven-run reordering cells all have positive 95%
   intervals; the narrowest leads by +86.76% (+70.23% to +97.50%).
+  Promoting that narrowest cell to 30 runs retained +79.44%
+  (+69.09% to +83.44%) with 30/30 success and lower client CPU/RSS.
   True-loss guards preserve RFC packet/time thresholds at 15% and
   30% IID loss, but broader reorder depth/correlation and cross-host
   reproduction remain open.
