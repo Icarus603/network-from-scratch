@@ -2,9 +2,10 @@
 
 **Date**: 2026-07-17
 **Status**: same-host, isolated Linux kernel-netem, burst-loss, and
-client-resource evidence; 512 MiB sustained bulk now wins promoted IID
-and severe-burst cells, while short-flow and physical cross-host
-dominance remain unproven
+client-resource evidence; 512 MiB sustained bulk wins promoted IID and
+severe-burst cells, and authenticated adaptive recovery now wins one
+promoted 64 MiB severe-reordering cell. Broader reordering and physical
+cross-host dominance remain unproven.
 
 ## Implementations
 
@@ -455,3 +456,51 @@ client 只改善 1.27 個百分點，server 反而惡化 2.81 個百分點，
 解釋了 round-trip 吞吐為何沒有隨 client 指標同步改善。selector
 必須逐方向評分，且 declared loss 只能觸發 probe，最後仍由 matched
 completion time 與 real-loss veto 決策。
+
+## 2026-07-19 confirmed-spurious adaptive recovery 與 severe reordering
+
+固定 packet threshold 的實驗無法解決 severe reordering：Linux
+`netem reorder 5% 25% delay 50ms` 會讓提早送出的 packet 越過數千個
+仍在 delay queue 的 packet。Quinn 原本只有 128-bit packet-number
+duplicate window，較晚抵達的合法 packet 因而在 loss recovery 之前
+就被丟棄；把靜態 loss threshold 一路加大，只會把問題從 packet
+threshold 移到 time threshold。
+
+Quinn fork `9fd6f65e` 將 duplicate window 改為固定 16,384 packet
+numbers、2 KiB/packet space 的 bounded ring bitmap，並只從遲到 ACK
+證實的 spurious loss 學習 packet 與 time threshold。Packet threshold
+上限為 16,384；time threshold 上限為 4 RTT。未出現遲到 ACK 的真實
+loss 無法觸發調整，path migration 又會把門檻重設。Proteus commit
+`5a8b8a9` 只在 inner triple-hybrid handshake 認證後啟用此機制；
+matched probe 期間會暫停 adaptation，避免 A/B 自我污染。
+
+同一 production SOCKS5 round-trip workload、64 MiB payload、64 MiB
+warmup、100 ms RTT、1 Gbit/s target 的 promoted 30-run cell 結果如下：
+
+| impairment | runs | Proteus | Hy2 | uplift (95% bootstrap) | client CPU / run | client RSS |
+|---|---:|---:|---:|---:|---:|---:|
+| reorder 5%, correlation 25% | 30 | 103.25 | 23.82 | **+333.39%** (**+232.47%, +569.07%**) | 0.285 / 1.429 s | 26.96 / 78.41 MiB |
+
+兩方都是 30/30；Monte Carlo two-sided permutation p-value 經 add-one
+correction 為 1/100,001，900 個跨樣本 pair 的 superiority probability
+為 1.0。
+兩端 qdisc drop 都是 0，證明差異來自指定 reordering 而非 queue
+overflow。Proteus client/server 最終 packet threshold 都到 16,384，
+time threshold 都到 2 RTT；量測期間 aggregate declared-loss ratio
+分別只有 0.320% 與 0.263%。
+
+真實 loss guard 沒有被越過。7-run IID screen 在 15% 與 30% loss 下，
+兩端 packet threshold 均保持 3、time threshold 保持 1.125，adaptive
+update 為 0；Proteus median 分別為 44.64 對 Hy2 37.65 MiB/s，以及
+31.48 對 27.17 MiB/s。前者 95% interval 下界為 +1.72%，後者 interval
+跨零，仍只是方向領先。兩個 Gilbert-Elliott 7-run cell 中，較溫和
+cell 為 +12.61%（+8.08%, +26.84%）；更強 cell 只有 +1.18%，interval
+−20.60% 到 +22.38%，必須保留為未解反例。
+
+完整同機原始檔保留於 ignored evidence directories：
+`bench/results/reorder5-adaptive-packet-time-30run-20260719/`、
+`bench/results/iid-adaptive-regression-screen-20260719/` 與
+`bench/results/burst-adaptive-regression-screen-20260719/`。這一輪證明
+一個 severe-reorder cell 的顯著優勢與真實 loss 的 fail-closed 行為；
+多種 reorder depth/correlation、跨 RTT、cross-host 與 independent
+reproduction 仍未完成，不能寫成 universal cap。

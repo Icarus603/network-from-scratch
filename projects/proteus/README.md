@@ -1395,8 +1395,12 @@ statistically unresolved and is retained as a short-flow counterexample.
 The method, commit and raw evidence live in
 [`notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md`](../../notes/perf/2026-07-17-proteus-vs-hy2-head-to-head.md).
 This proves sustained-bulk superiority in three local impairment
-regimes, not a universal cap claim. More loss regimes, resource cost,
-0% TUIC-v5 promotion and true cross-host reproduction remain required.
+regimes. A fourth promoted 64 MiB severe-reordering cell now leads
+Hysteria2 by +333.39% with a +232.47% 95% bootstrap lower bound over
+30/30 successful runs; paired IID guards show no adaptive threshold
+increase at 15% or 30% true loss. These are still same-host cells, not
+a universal cap claim. More reordering regimes, 0% TUIC-v5 promotion
+and true cross-host reproduction remain required.
 The promoted 30-run upstream TUIC v5 1.0.0 cell at 5% IID leads by
 48.86% (95% CI +40.82% to +52.85%); the 0% screen leads by 102.92%
 but remains a seven-run directional result.
@@ -1903,7 +1907,12 @@ latest hardening pass:
   regimes, CPU/memory, 0% TUIC-v5 promotion and true cross-host
   validation remain open. The promoted upstream TUIC v5 1.0.0
   5% IID cell leads by +48.86% (+40.82% to +52.85%) with 30/30
-  success; its 0% cell is still a seven-run screen.
+  success; its 0% cell is still a seven-run screen. The promoted
+  64 MiB severe-reordering cell leads Hy2 by +333.39% (+232.47% to
+  +569.07%) over 30/30 runs while using less client CPU and RSS.
+  True-loss guards preserve RFC packet/time thresholds at 15% and
+  30% IID loss, but broader reorder depth/correlation and cross-host
+  reproduction remain open.
 
 **Several cryptographic, traffic-analysis, and production-stability
 components are now stronger in isolation than their VLESS+REALITY or

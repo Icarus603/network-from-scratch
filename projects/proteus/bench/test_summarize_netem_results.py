@@ -255,6 +255,15 @@ class ReorderValidationTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "did not apply"):
                 MODULE.summarize(Path(directory))
 
+    def test_monte_carlo_permutation_never_reports_zero(self) -> None:
+        proteus = [float(value + 100) for value in range(30)]
+        hy2 = [float(value) for value in range(30)]
+        p_value, method = MODULE.permutation_p_value(
+            proteus, hy2, "separated-cell"
+        )
+        self.assertEqual(method, "monte_carlo_100000")
+        self.assertEqual(p_value, 1 / 100_001)
+
 
 if __name__ == "__main__":
     unittest.main()

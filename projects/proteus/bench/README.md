@@ -145,8 +145,14 @@ The first 30-run 5% reordering experiment found threshold `10`
 statistically tied with Hysteria2 (+1.14% median, 95% bootstrap
 interval −26.07% to +49.71%, p=0.936). It is therefore an experimental
 diagnostic, not a production default or a superiority claim. Further
-work must instrument spurious loss and adapt to measured reordering
-instead of sweeping larger static thresholds.
+work instrumented spurious loss and replaced the static sweep with
+bounded adaptation driven only by confirmed late ACKs. In the promoted
+30-run 5% reordering / 25% correlation / 100 ms RTT cell, Proteus
+measured 103.25 MiB/s versus Hysteria2's 23.82 MiB/s: +333.39% median
+uplift with a +232.47% bootstrap lower bound. The paired IID regression
+kept packet/time thresholds at RFC defaults under 15% and 30% true
+loss. This promotes that exact reordering cell, not arbitrary paths;
+the stronger burst-loss screen remains statistically unresolved.
 `PROTEUS_TIME_THRESHOLD` controls the companion time-based loss
 threshold and defaults to RFC 9002's `1.125` RTT. Any raised value is
 subject to the same reordering A/B and real-loss guard; it is not a

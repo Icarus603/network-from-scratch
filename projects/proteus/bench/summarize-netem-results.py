@@ -383,6 +383,10 @@ def permutation_p_value(
         if difference >= observed - 1e-12:
             extreme += 1
         total += 1
+    if method.startswith("monte_carlo_"):
+        # A finite random sample cannot establish a zero p-value. The
+        # add-one correction gives a valid conservative Monte Carlo estimate.
+        return (extreme + 1) / (total + 1), method
     return extreme / total, method
 
 
